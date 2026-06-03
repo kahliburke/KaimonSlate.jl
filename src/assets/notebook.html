@@ -12,6 +12,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"/>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 <style>
 :root {
   --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40; --text:#d4d8e8;
@@ -60,6 +63,11 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .echart { height:340px; width:100%; }
 .disp.img img { max-width:100%; height:auto; border-radius:4px; display:block; }
 .disp.html table { border-collapse:collapse; } .disp.html td,.disp.html th { border:1px solid var(--border); padding:3px 8px; }
+.disp.latex { overflow-x:auto; padding:6px 2px; } .disp.latex .katex-display { margin:.3em 0; }
+.disp.latex .katex { font-size:1.3em; }                 /* output equations: match markdown display math */
+.md .katex { font-size:1.12em; }                        /* markdown math: a touch above body text */
+.md .katex-display { overflow-x:auto; overflow-y:hidden; }
+.md .katex-display .katex { font-size:1.3em; }
 .md { padding:14px 16px; }
 .md h1 { font-size:1.7rem; border-bottom:1px solid var(--border); padding-bottom:.2em; }
 .md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
@@ -220,6 +228,44 @@ function renderCharts(c) {
   specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
 }
 window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
+
+// Typeset any LaTeX ($…$ / $$…$$ / \(…\) / \[…\]) inside `el` with KaTeX. Safe to
+// call before KaTeX has loaded (no-op) and re-call (auto-render skips done spans).
+// CodeMirror source lives in <pre>/<textarea>, both in KaTeX's default ignore list,
+// so editor `$` is never touched.
+function typeset(el) {
+  if (!el) return;
+  // Output `text/latex` blocks render in DISPLAY mode so they match markdown
+  // `$$…$$` sizing (a LaTeXString arrives as inline `$…$`, which KaTeX would
+  // otherwise typeset cramped). Render them explicitly first; cache the raw TeX
+  // on the node so re-typeset (every /state poll) stays idempotent.
+  if (typeof katex !== 'undefined' && el.querySelectorAll) {
+    const blocks = el.matches && el.matches('.disp.latex') ? [el] : [...el.querySelectorAll('.disp.latex')];
+    blocks.forEach(d => {
+      if (d.dataset.tex === undefined) d.dataset.tex = d.textContent;
+      let t = d.dataset.tex.trim();
+      if (t.startsWith('$$') && t.endsWith('$$')) t = t.slice(2, -2);
+      else if (t.startsWith('$') && t.endsWith('$')) t = t.slice(1, -1);
+      else if (t.startsWith('\\[') && t.endsWith('\\]')) t = t.slice(2, -2);
+      else if (t.startsWith('\\(') && t.endsWith('\\)')) t = t.slice(2, -2);
+      try { katex.render(t, d, { displayMode: true, throwOnError: false }); } catch (e) {}
+    });
+  }
+  if (typeof renderMathInElement !== 'function') return;
+  try {
+    renderMathInElement(el, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '$', right: '$', display: false },
+        { left: '\\(', right: '\\)', display: false },
+      ],
+      throwOnError: false,
+    });
+  } catch (e) {}
+}
+// KaTeX may finish loading after the first render; typeset everything once it's in.
+window.addEventListener('load', () => typeset(document.getElementById('nb')));
 
 // Context-aware completion via the live session (Julia REPLCompletions).
 function juliaHint(cm, callback) {
@@ -507,6 +553,7 @@ function renderAll(state) {
   state.cells.forEach(mountEditor);
   state.cells.forEach(mountControls);
   state.cells.forEach(renderCharts);
+  typeset(nb);
   renderPalette();
   // Restore scroll now, next frame, and after each figure decodes (base64 images
   // change height late — Safari otherwise clamps scrollTop and the view jumps).
@@ -611,8 +658,8 @@ function updateStates(state) {
     el.className = 'cell ' + (hasBinds(c) ? 'bind' : c.kind) + ' state-' + c.state;
     const b = el.querySelector('.badge'); if (b) b.textContent = c.state;
     const dur = el.querySelector('.cdur'); if (dur) dur.textContent = c.duration != null ? c.duration + ' ms' : '';
-    const out = el.querySelector('.output'); if (out) _swapOutput(out, c.output);
-    const md = el.querySelector('.md'); if (md) md.innerHTML = mdHtml(c);
+    const out = el.querySelector('.output'); if (out) { _swapOutput(out, c.output); typeset(out); }
+    const md = el.querySelector('.md'); if (md) { md.innerHTML = mdHtml(c); typeset(md); }
     renderCharts(c);   // setOption in place — animates data changes
   });
   se.scrollTop = top;                          // hold scroll across the patch …

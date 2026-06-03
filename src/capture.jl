@@ -13,7 +13,7 @@
 # the same way. What a captured object can `show` as (e.g. a CairoMakie figure →
 # image/png) is orthogonal — that lives in the worker's own project env.
 
-const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html")
+const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
 
 struct _CaptureDisplay <: AbstractDisplay
     chunks::Vector{Tuple{String,Vector{UInt8}}}
@@ -26,10 +26,16 @@ function _mime_bytes(m::MIME, x)
 end
 
 # Capture the richest available representation of `x`; true if anything captured.
+#
+# `showable`/`show` go through `invokelatest`: a cell can `using SomePkg` (or define
+# a method) and then return a value rendered by a method that package just added —
+# all in one eval. Those methods land in a world newer than this frame, so a direct
+# `showable`/`show` would miss them and yield an empty chunk (notably on a cell's
+# first run). `invokelatest` pins the dispatch to the latest world.
 function _capture_rich!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     for m in _RICH_MIMES
-        if showable(m, x)
-            push!(chunks, (m, _mime_bytes(MIME(m), x)))
+        if Base.invokelatest(showable, m, x)
+            push!(chunks, (m, Base.invokelatest(_mime_bytes, MIME(m), x)))
             return true
         end
     end

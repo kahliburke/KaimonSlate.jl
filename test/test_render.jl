@@ -61,5 +61,39 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         h = render_html(r2)
         @test occursin("data:image/png;base64,", h)            # image embedded
         @test occursin("<table><tr><td>x</td></tr></table>", h) # trusted html injected
+        # Render AGAIN: chunk bytes must survive (String(copy) not String steal).
+        h_again = render_html(r2)
+        @test occursin("data:image/png;base64,", h_again)
+        @test occursin("<table><tr><td>x</td></tr></table>", h_again)
+    end
+
+    @testset "LaTeX math: preserved through markdown for KaTeX" begin
+        # Inline + display math survives CommonMark byte-for-byte (backslash-escapes
+        # like \, are NOT eaten), and emphasis chars inside math stay literal.
+        m = markdown_html(raw"Euler $e^{i\pi}+1=0$ and $$\int_0^1 x^2\,dx$$ and **bold**.")
+        @test occursin(raw"$e^{i\pi}+1=0$", m)        # inline kept verbatim
+        @test occursin(raw"$$\int_0^1 x^2\,dx$$", m)  # \, preserved (CommonMark would drop it)
+        @test occursin("<strong>bold</strong>", m)    # ordinary markdown still works
+        @test !occursin("xslatemathx", m)             # no leftover placeholders
+        @test occursin("<em>", markdown_html(raw"$a_i+b$ then _real emphasis_")) &&
+              occursin(raw"$a_i+b$", markdown_html(raw"$a_i+b$ then _real emphasis_"))
+    end
+
+    @testset "text/latex output chunk → KaTeX div" begin
+        r3 = parse_report(raw"""
+        #%% code id=tex
+        struct L end
+        Base.show(io::IO, ::MIME"text/latex", ::L) = print(io, "\$\\sqrt{x}\$")
+        L()
+        """)
+        eval_report!(r3)
+        h = render_html(r3)
+        @test occursin("class=\"disp latex\"", h)
+        @test occursin(raw"\sqrt{x}", h)
+        # Re-render must not blank the latex (the String-steal regression that
+        # made every cell go empty on the 2nd /state poll).
+        h_again = render_html(r3)
+        @test occursin(raw"\sqrt{x}", h_again)
+        @test occursin(raw"\sqrt{x}", output_html(r3.cells[1]))   # output_html path too
     end
 end

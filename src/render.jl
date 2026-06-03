@@ -46,20 +46,53 @@ function output_html(cell::Cell)
     return String(take!(io))
 end
 
-# CommonMark parser with the table extension (GFM-style tables in narrative).
+# Markdown → HTML with the table extension (GFM tables) and LaTeX math.
+#
+# Math is handled OUTSIDE CommonMark: `$…$` / `$$…$$` spans are stashed behind
+# plain-text placeholders before parsing and restored (HTML-escaped) afterward,
+# then typeset client-side by KaTeX. CommonMark's own math rule mangles LaTeX (it
+# eats backslash-escapes like `\,`), so we keep the TeX byte-for-byte and let the
+# browser render it. Placeholders are bare alphanumerics so markdown leaves them
+# untouched; the restored span keeps its `$`/`$$` delimiters for KaTeX.
+const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
+const _MATH_INLINE = r"\$([^\$\n]+?)\$"
+_math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
+
 function _md_html(src::AbstractString)
+    math = String[]
+    stash(m) = (push!(math, String(m)); _math_token(length(math)))
+    s = replace(String(src), _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
+    s = replace(s, _MATH_INLINE => stash)
     p = CommonMark.Parser()
     enable!(p, CommonMark.TableRule())
-    return CommonMark.html(p(String(src)))
+    html = CommonMark.html(p(s))
+    for (i, m) in enumerate(math)
+        html = replace(html, _math_token(i) => _esc(m))   # raw TeX, HTML-escaped; KaTeX reads the text node
+    end
+    return html
 end
 
 # Render captured MIME chunks to trusted HTML: images → base64 data-URI <img>,
 # text/html injected as-is. (Returned via the template's `|> safe` filter.)
+#
+# NOTE: read text bytes with `String(copy(ch.data))`, never `String(ch.data)` —
+# the latter *steals* the byte vector (empties it), so a cell rendered twice (every
+# `/state` poll) would come back blank on the second render. Images/base64encode
+# read non-destructively, which is why only text/html + text/latex were affected.
 function _render_chunks(chunks)
     io = IOBuffer()
     for ch in chunks
         if ch.mime == "text/html"
-            print(io, "<div class=\"disp html\">", String(ch.data), "</div>")
+            print(io, "<div class=\"disp html\">", String(copy(ch.data)), "</div>")
+        elseif ch.mime == "text/latex"
+            # Emit the raw TeX (with its delimiters) inside a marked div; the SPA
+            # typesets it in DISPLAY mode via KaTeX so block output matches markdown
+            # `$$…$$` sizing. Bare TeX (no delimiters) is wrapped so it still renders.
+            # HTML-escape so the browser hands KaTeX the raw text node verbatim.
+            tex = String(copy(ch.data))
+            wrapped = (occursin('$', tex) || occursin("\\(", tex) || occursin("\\[", tex)) ?
+                      tex : "\\[" * tex * "\\]"
+            print(io, "<div class=\"disp latex\">", _esc(wrapped), "</div>")
         elseif startswith(ch.mime, "image/")
             b64 = Base64.base64encode(ch.data)
             print(io, "<div class=\"disp img\"><img alt=\"output\" src=\"data:",

@@ -15,6 +15,27 @@ using .ReportEngine
         @test r.cells[2].output.value_repr == "6"
     end
 
+    @testset "rich capture of an in-notebook-defined show method (world age)" begin
+        # A cell defines a type + its text/latex `show`; a later cell returns an
+        # instance. The capture must see the just-defined method on FIRST eval and
+        # on RE-EVAL in the same warm module (the "empty until Rebuild" regression).
+        src = "#%% code id=def\nstruct TXW; s::String; end\n" *
+              "Base.show(io::IO, ::MIME\"text/latex\", t::TXW) = print(io, t.s)\n" *
+              "#%% code id=val\nTXW(\"HELLO\")\n"
+        r = parse_report(src); build_dependencies!(r)
+        k = InProcessKernel()
+        eval_stale!(r, k)
+        o1 = r.cells[2].output
+        @test !isempty(o1.display)
+        @test o1.display[1].mime == "text/latex"
+        @test String(copy(o1.display[1].data)) == "HELLO"
+        # re-eval the value cell in the SAME (warm) module
+        r.cells[2].state = STALE
+        eval_stale!(r, k)
+        o2 = r.cells[2].output
+        @test !isempty(o2.display) && String(copy(o2.display[1].data)) == "HELLO"
+    end
+
     @testset "value repr of a trailing assignment" begin
         r = parse_report("#%% code id=a\nx = 5")
         eval_report!(r)
