@@ -56,7 +56,7 @@ a text/plain repr fallback, eval duration, and any thrown error + backtrace.
 
 Returns the wire form:
 `(stdout::String, mime::Vector{Tuple{String,Vector{UInt8}}}, echarts::Vector{Any},
-  value_repr::String, exception::Union{String,Nothing},
+  tables::Vector{Any}, value_repr::String, exception::Union{String,Nothing},
   backtrace::Union{String,Nothing}, duration_ms::Float64)`.
 """
 function run_capture(mod::Module, source::AbstractString)
@@ -84,12 +84,18 @@ function run_capture(mod::Module, source::AbstractString)
     stdout_str = fetch(reader)
     dur_ms = (time_ns() - t0) / 1e6
 
-    # Capture the return value: an ECharts spec is kept raw (encoded server-side
-    # to dodge JSON world-age in the eval frame); otherwise the richest MIME.
+    # Capture the return value: an ECharts spec / a table are kept raw (reduced to
+    # JSON-safe primitives here but JSON-*encoded* server-side, dodging JSON
+    # world-age in the eval frame); otherwise the richest MIME. The table check
+    # precedes rich MIME so a DataFrame renders as our interactive table rather
+    # than its own `text/html` show method.
     echarts = Any[]
+    tables = Any[]
     if err === nothing && value !== nothing
         if value isa EChart
             push!(echarts, value.option)
+        elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
+            push!(tables, _table_wire(st))
         else
             try
                 Base.invokelatest(_capture_rich!, chunks, value)
@@ -101,7 +107,7 @@ function run_capture(mod::Module, source::AbstractString)
     # text/plain repr — skipped when richer output exists (the renderer suppresses
     # it anyway), and `invokelatest`-guarded for the world-age reason.
     value_repr = ""
-    if err === nothing && value !== nothing && isempty(chunks) && isempty(echarts)
+    if err === nothing && value !== nothing && isempty(chunks) && isempty(echarts) && isempty(tables)
         try
             value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
                                            context = :limit => true)
@@ -112,6 +118,6 @@ function run_capture(mod::Module, source::AbstractString)
     bt = btrace === nothing ? nothing :
         sprint((io, t) -> Base.show_backtrace(io, t), btrace)
 
-    return (stdout = stdout_str, mime = chunks, echarts = echarts,
+    return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             value_repr = value_repr, exception = exc, backtrace = bt, duration_ms = dur_ms)
 end

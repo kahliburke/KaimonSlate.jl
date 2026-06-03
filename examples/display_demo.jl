@@ -30,3 +30,30 @@ L"\frac{\partial \mathcal{L}}{\partial q} - \frac{d}{dt}\frac{\partial \mathcal{
 a, b, c = 1, -3, 2
 disc = b^2 - 4a*c
 L"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a} = \frac{%$(-b) \pm \sqrt{%$disc}}{%$(2a)}"
+
+#%% md id=tablesmd
+## Interactive tables
+
+A returned **DataFrame** (or any Tables.jl source) auto-renders as a sortable,
+filterable, paged table — click a header to sort, type in the filter box, page
+through with the controls. `slate_table(data)` does the same for a `Vector` of
+`NamedTuple`s, a `Dict`/`NamedTuple` of column vectors, or explicit `columns, rows`.
+
+#%% code id=tableimports
+# Imports in their own cell (as above) — keep value cells method-introduction-free.
+using Random, DataFrames
+
+#%% code id=tabledata
+# `slate_table` on a vector of NamedTuple rows. Numbers sort numerically; the
+# `metal` booleans and strings sort lexically.
+Random.seed!(42)
+elements = ["H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne"]
+slate_table([(symbol = e, Z = i, mass = round(2.0i + randn(), digits = 3), metal = i in (3, 4))
+             for (i, e) in enumerate(elements)])
+
+#%% code id=3837ae
+elements
+
+#%% code id=tabledf
+# A bare DataFrame auto-renders (no slate_table call). 30 rows ⇒ pagination kicks in.
+DataFrame(x = 1:30, square = (1:30) .^ 2, parity = ifelse.(iseven.(1:30), "even", "odd"))

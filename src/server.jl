@@ -130,6 +130,7 @@ function sync_from_file!(nb::LiveNotebook)
 end
 
 _echarts_specs(c::Cell) = c.output === nothing ? Any[] : c.output.echarts
+_table_specs(c::Cell) = c.output === nothing ? Any[] : c.output.tables
 
 # A bound control resolved for the frontend: enough to render the widget *and*
 # POST value changes to `/api/bind/<id>` (the *defining* cell's id) keyed by
@@ -153,6 +154,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "state"   => lowercase(string(c.state)),
         "output"  => c.kind == MARKDOWN ? markdown_html(c.source) : output_html(c),
         "echarts" => c.kind == MARKDOWN ? String[] : _echarts_specs(c),
+        "tables" => c.kind == MARKDOWN ? Any[] : _table_specs(c),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
     )

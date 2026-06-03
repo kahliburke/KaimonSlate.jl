@@ -39,6 +39,8 @@ function _new_module(report::Report)
     m = Module(Symbol(:Report_, report.id))
     Core.eval(m, :(const echart = $(echart)))
     Core.eval(m, :(const EChart = $(EChart)))
+    Core.eval(m, :(const slate_table = $(slate_table)))
+    Core.eval(m, :(const SlateTable = $(SlateTable)))
     Core.eval(m, :(const __slate_bind_default = $(_bind_default)))
     Core.eval(m, :(macro bind(name, widget)
         esc(Expr(:(=), name, __slate_bind_default(widget)))
@@ -78,7 +80,7 @@ end
 function _eval_capture(mod::Module, source::AbstractString)
     r = run_capture(mod, source)
     chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
-    return CellOutput(r.stdout, chunks, r.echarts, r.value_repr, r.exception,
+    return CellOutput(r.stdout, chunks, r.echarts, r.tables, r.value_repr, r.exception,
                       r.backtrace, r.duration_ms)
 end
 

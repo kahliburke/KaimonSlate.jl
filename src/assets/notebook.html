@@ -61,6 +61,26 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .dispwrap { padding:10px 12px; border-top:1px solid var(--border); }
 .echarts:not(:empty) { padding:8px 6px; border-top:1px solid var(--border); }
 .echart { height:340px; width:100%; }
+/* Interactive data table (slate_table / DataFrame auto-render) */
+.tables:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
+.slatetable { margin:4px 0 8px; }
+.slatetable .st-bar { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.slatetable .st-filter { background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:3px 8px; font-size:.8rem; min-width:160px; }
+.slatetable .st-filter:focus { outline:none; border-color:var(--accent); }
+.slatetable .st-info { color:var(--dim); font-size:.74rem; margin-left:auto; }
+.slatetable .st-table { border-collapse:collapse; width:100%; font-size:.8rem; }
+.slatetable th, .slatetable td { border:1px solid var(--border); padding:3px 9px; text-align:left;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:340px; }
+.slatetable th { background:var(--bg3); color:var(--dim); cursor:pointer; user-select:none;
+  position:sticky; top:0; font-weight:600; }
+.slatetable th:hover { color:var(--accent); }
+.slatetable tbody tr:nth-child(even) { background:rgba(255,255,255,.02); }
+.slatetable tbody tr:hover { background:rgba(86,156,214,.08); }
+.slatetable td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--green); }
+.slatetable .st-pag { display:flex; align-items:center; gap:8px; margin-top:6px; }
+.slatetable .st-pag button { padding:2px 9px; font-size:.76rem; }
+.slatetable .st-page { color:var(--dim); font-size:.74rem; }
 .disp.img img { max-width:100%; height:auto; border-radius:4px; display:block; }
 .disp.html table { border-collapse:collapse; } .disp.html td,.disp.html th { border:1px solid var(--border); padding:3px 8px; }
 .disp.latex { overflow-x:auto; padding:6px 2px; } .disp.latex .katex-display { margin:.3em 0; }
@@ -202,6 +222,7 @@ const _apipath = p => p.replace(/^\/api\//, '/api/' + NB_ID + '/');
 
 const editors = {};
 const charts = {};            // cell id -> [echarts instances]
+const tableState = {};        // cell id -> [{sort,filter,page,pageSize} per table] (view prefs, sticky)
 const srcMap = {};            // cell id -> raw source (for markdown editing)
 let nbState = null;           // latest notebook state (drives the controls palette)
 // Min delay (ms) between live recomputes while dragging a control. Persisted.
@@ -228,6 +249,115 @@ function renderCharts(c) {
   specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
 }
 window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
+
+// ── Interactive data tables (hand-rolled; no CDN dep) ────────────────────────
+// A cell's `c.tables` is a list of {columns, rows, opts}; rows hold JSON-safe
+// scalars (numbers stay numeric → numeric sort). Sort / filter / page are pure
+// client state kept per (cell id, table index) in `tableState`, so they survive
+// reactive recomputes — only the row data is re-filled when data changes.
+function _cmp(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return -1; if (b == null) return 1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true });
+}
+function renderTables(c) {
+  const host = document.querySelector('#cell-' + c.id + ' .tables');
+  if (!host) return;
+  const specs = c.tables || [];
+  if (!specs.length) { host.innerHTML = ''; delete tableState[c.id]; return; }
+  const states = tableState[c.id] || (tableState[c.id] = []);
+  states.length = specs.length;                 // drop view-state for removed tables
+  while (host.children.length > specs.length) host.removeChild(host.lastChild);
+  specs.forEach((spec, i) => {
+    if (!states[i]) states[i] = { sort: null, filter: '', page: 0, pageSize: 25 };
+    let wrap = host.children[i];
+    if (!wrap) { wrap = document.createElement('div'); wrap.className = 'slatetable'; host.appendChild(wrap); }
+    drawTable(wrap, spec, states[i]);
+  });
+}
+// Build the persistent shell once per column-signature; refresh fills the body.
+function drawTable(wrap, spec, st) {
+  const cols = spec.columns || [];
+  const sig = cols.join('');
+  if (wrap._sig !== sig) { _buildShell(wrap, cols, spec, st); wrap._sig = sig; }
+  _refreshTable(wrap, spec, st);
+}
+function _buildShell(wrap, cols, spec, st) {
+  wrap.innerHTML = '';
+  const bar = document.createElement('div'); bar.className = 'st-bar';
+  const fi = document.createElement('input');
+  fi.type = 'text'; fi.className = 'st-filter'; fi.placeholder = 'filter…'; fi.value = st.filter;
+  fi.oninput = () => { st.filter = fi.value; st.page = 0; _refreshTable(wrap, spec, st); };
+  const info = document.createElement('span'); info.className = 'st-info';
+  bar.appendChild(fi); bar.appendChild(info); wrap.appendChild(bar);
+  const tbl = document.createElement('table'); tbl.className = 'st-table';
+  const thead = document.createElement('thead'); const htr = document.createElement('tr');
+  const ths = cols.map((name, ci) => {
+    const th = document.createElement('th'); th.dataset.label = name;
+    th.onclick = () => {
+      if (st.sort && st.sort.col === ci) st.sort.dir = st.sort.dir === 'asc' ? 'desc' : 'asc';
+      else st.sort = { col: ci, dir: 'asc' };
+      _refreshTable(wrap, spec, st);
+    };
+    htr.appendChild(th); return th;
+  });
+  thead.appendChild(htr); tbl.appendChild(thead);
+  const tbody = document.createElement('tbody'); tbl.appendChild(tbody); wrap.appendChild(tbl);
+  const pag = document.createElement('div'); pag.className = 'st-pag'; wrap.appendChild(pag);
+  wrap._refs = { fi, info, ths, tbody, pag };
+}
+function _refreshTable(wrap, spec, st) {
+  const { info, ths, tbody, pag } = wrap._refs;
+  const allRows = spec.rows || [], opts = spec.opts || {};
+  const f = st.filter.trim().toLowerCase();
+  let rows = !f ? allRows
+    : allRows.filter(r => r.some(v => v != null && String(v).toLowerCase().includes(f)));
+  if (st.sort) {
+    const col = st.sort.col, mul = st.sort.dir === 'desc' ? -1 : 1;
+    rows = rows.slice().sort((a, b) => _cmp(a[col], b[col]) * mul);
+  }
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / st.pageSize));
+  st.page = Math.min(Math.max(0, st.page), pages - 1);
+  const start = st.page * st.pageSize;
+  const pageRows = rows.slice(start, start + st.pageSize);
+  // header sort arrows
+  ths.forEach((th, ci) => {
+    const arr = st.sort && st.sort.col === ci ? (st.sort.dir === 'desc' ? ' ▾' : ' ▴') : '';
+    th.textContent = th.dataset.label + arr;
+  });
+  // body
+  tbody.innerHTML = '';
+  pageRows.forEach(r => {
+    const tr = document.createElement('tr');
+    r.forEach(v => {
+      const td = document.createElement('td');
+      if (typeof v === 'number') td.className = 'num';
+      td.textContent = v == null ? '' : v;
+      td.title = td.textContent;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  // info
+  let txt = `${total ? start + 1 : 0}–${Math.min(start + st.pageSize, total)} of ${total}`;
+  if (f) txt += ` (filtered from ${allRows.length})`;
+  if (opts.truncated) txt += ` · capped at ${allRows.length} of ${opts.nrows}`;
+  info.textContent = txt;
+  // pagination
+  pag.innerHTML = '';
+  if (pages > 1) {
+    const mk = (label, to, disabled) => {
+      const b = document.createElement('button'); b.textContent = label; b.disabled = disabled;
+      b.onclick = () => { st.page = to; _refreshTable(wrap, spec, st); }; return b;
+    };
+    pag.appendChild(mk('‹ prev', st.page - 1, st.page <= 0));
+    const lbl = document.createElement('span'); lbl.className = 'st-page';
+    lbl.textContent = `page ${st.page + 1} / ${pages}`; pag.appendChild(lbl);
+    pag.appendChild(mk('next ›', st.page + 1, st.page >= pages - 1));
+  }
+}
 
 // Typeset any LaTeX ($…$ / $$…$$ / \(…\) / \[…\]) inside `el` with KaTeX. Safe to
 // call before KaTeX has loaded (no-op) and re-call (auto-render skips done spans).
@@ -407,6 +537,7 @@ function cellEl(c) {
       '<textarea></textarea>' +
       controlStrip(c) +
       '<div class="output">' + c.output + '</div>' +
+      '<div class="tables"></div>' +
       '<div class="echarts"></div>';
   }
   return div;
@@ -553,6 +684,7 @@ function renderAll(state) {
   state.cells.forEach(mountEditor);
   state.cells.forEach(mountControls);
   state.cells.forEach(renderCharts);
+  state.cells.forEach(renderTables);
   typeset(nb);
   renderPalette();
   // Restore scroll now, next frame, and after each figure decodes (base64 images
@@ -661,6 +793,7 @@ function updateStates(state) {
     const out = el.querySelector('.output'); if (out) { _swapOutput(out, c.output); typeset(out); }
     const md = el.querySelector('.md'); if (md) { md.innerHTML = mdHtml(c); typeset(md); }
     renderCharts(c);   // setOption in place — animates data changes
+    renderTables(c);   // refill rows in place — keeps sort/filter/page
   });
   se.scrollTop = top;                          // hold scroll across the patch …
   requestAnimationFrame(() => { se.scrollTop = top; });   // … and after Safari's deferred reflow

@@ -170,10 +170,10 @@ end
 # (`run_capture`'s output), the same mapping as the in-process `_eval_capture`.
 function _wire_to_output(wire)
     wire === nothing &&
-        return CellOutput("", MimeChunk[], Any[], "", "gate returned no value", nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], "", "gate returned no value", nothing, 0.0)
     chunks = MimeChunk[MimeChunk(String(m), Vector{UInt8}(bytes)) for (m, bytes) in wire.mime]
-    return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), String(wire.value_repr),
-                      wire.exception, wire.backtrace, Float64(wire.duration_ms))
+    return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
+                      String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms))
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString)
@@ -181,7 +181,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString)
     wire = try
         _tool(k, "__slate_eval", Dict("source" => String(source)))
     catch e
-        return CellOutput("", MimeChunk[], Any[], "", sprint(showerror, e), nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], "", sprint(showerror, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
 end

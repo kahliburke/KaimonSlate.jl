@@ -20,7 +20,8 @@ struct EChart
 end
 echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v) in option))
 
-include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart above
+include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table — uses no deps; soft-detects Tables.jl
+include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 
 # Per-notebook execution namespace (warm; reset by replacing the module). `echart`
 # is injected so cells can call it without importing anything.
@@ -28,6 +29,8 @@ function _new_ns()
     m = Module(:NB)
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
+    Core.eval(m, :(const slate_table = $slate_table))
+    Core.eval(m, :(const SlateTable = $SlateTable))
     # Async reactivity over the gate: a cell's background task calls
     # `slate_refresh(:data)`, which PUBs on the gate stream. The KaimonSlate server
     # (subscribed) recomputes the readers of those vars and pushes a live update.

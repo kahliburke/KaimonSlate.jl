@@ -13,6 +13,7 @@ evaluation yet — so it is testable with `Base` alone.
 module ReportEngine
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
+export SlateTable, slate_table
 export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
 export parse_report, serialize_report, source_text
 
@@ -32,6 +33,7 @@ struct CellOutput
     stdout::String
     display::Vector{MimeChunk}    # richest first
     echarts::Vector{Any}          # raw ECharts option dicts (JSON-encoded server-side)
+    tables::Vector{Any}           # raw interactive-table specs (JSON-encoded server-side)
     value_repr::String            # text/plain fallback of the return value
     exception::Union{String,Nothing}
     backtrace::Union{String,Nothing}
@@ -277,6 +279,7 @@ serialize_report(report::Report) =
 source_text(cell::Cell) = cell.source
 
 include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
+include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table (used by capture.jl)
 include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
 include(joinpath(@__DIR__, "eval.jl"))
 include(joinpath(@__DIR__, "deps.jl"))

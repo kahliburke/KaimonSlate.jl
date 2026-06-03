@@ -168,6 +168,7 @@ using .ReportEngine
         @test r.value_repr == "42"
         @test r.mime isa Vector{Tuple{String,Vector{UInt8}}} && isempty(r.mime)
         @test r.echarts isa Vector && isempty(r.echarts)
+        @test r.tables isa Vector && isempty(r.tables)
         @test r.exception === nothing && r.backtrace === nothing
         @test r.duration_ms isa Float64
 
