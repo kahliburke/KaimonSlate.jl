@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Kaimon Notebook</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/julia/julia.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+:root {
+  --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40; --text:#d4d8e8;
+  --dim:#6a7090; --accent:#569cd6; --green:#56d364; --red:#e57575; --gold:#ffd700;
+  --orange:#ce9178; --purple:#c586c0;
+}
+* { box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif;
+       margin:0; line-height:1.6; }
+.topbar { position:sticky; top:0; z-index:10; background:var(--bg2); border-bottom:1px solid var(--border);
+          padding:10px 20px; display:flex; align-items:center; gap:12px; }
+.topbar h1 { font-size:1.1rem; margin:0; color:#fff; flex:1; }
+button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
+         padding:4px 12px; cursor:pointer; font-size:.82rem; }
+button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid var(--border);
+         border-radius:6px; padding:4px 12px; cursor:pointer; font-size:.82rem;
+         text-decoration:none; display:inline-block; }
+button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
+.page { max-width:980px; margin:0 auto; padding:20px; }
+.cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
+        margin:14px 0; background:var(--bg2); overflow:hidden; }
+.cell.state-fresh   { border-left-color:var(--accent); }
+.cell.state-stale   { border-left-color:var(--gold); }
+.cell.state-edited  { border-left-color:var(--orange); }
+.cell.state-running { border-left-color:var(--green); animation:pulse 1s infinite; }
+.cell.state-errored { border-left-color:var(--red); }
+@keyframes pulse { 50% { border-left-color:var(--bg2); } }
+.cellhead { display:flex; align-items:center; gap:10px; padding:6px 12px; background:var(--bg3);
+            border-bottom:1px solid var(--border); font-size:.76rem; }
+.badge { text-transform:uppercase; letter-spacing:.04em; color:var(--dim); min-width:62px; }
+.cell.state-stale  .badge { color:var(--gold); }
+.cell.state-edited .badge { color:var(--orange); }
+.cell.state-errored .badge { color:var(--red); }
+.cid { margin-left:auto; color:var(--dim); font-family:monospace; }
+.CodeMirror { height:auto; font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
+.output { font-size:.84rem; }
+.output .out, .output .val, .output .err { padding:8px 12px; border-top:1px solid var(--border); }
+.output pre { margin:0; white-space:pre-wrap; overflow-x:auto; }
+.output .out { color:var(--dim); } .output .val { color:var(--green); }
+.output .err { color:var(--red); background:rgba(229,117,117,.06); }
+.dispwrap { padding:10px 12px; border-top:1px solid var(--border); }
+.echarts:not(:empty) { padding:8px 6px; border-top:1px solid var(--border); }
+.echart { height:340px; width:100%; }
+.disp.img img { max-width:100%; height:auto; border-radius:4px; display:block; }
+.disp.html table { border-collapse:collapse; } .disp.html td,.disp.html th { border:1px solid var(--border); padding:3px 8px; }
+.md { padding:14px 16px; }
+.md h1 { font-size:1.7rem; border-bottom:1px solid var(--border); padding-bottom:.2em; }
+.md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
+.md code { background:var(--bg3); padding:1px 5px; border-radius:4px; }
+.md .phantom { color:var(--dim); }
+.srcedit { padding:4px 6px; }
+.mdhint { color:var(--dim); font-size:.7rem; padding:3px 4px 0; }
+.cdur { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.7rem; }
+.hint { color:var(--dim); font-size:.72rem; }
+.cellbar { display:flex; gap:4px; align-items:center; padding:3px 8px; opacity:0; transition:opacity .12s;
+           background:var(--bg3); border-bottom:1px solid var(--border); }
+.cell:hover .cellbar { opacity:1; }
+.cellbar button { padding:0 6px; font-size:.7rem; }
+.cellbar .drag { cursor:grab; color:var(--dim); padding:0 4px; user-select:none; }
+.cellbar .del { margin-left:auto; }
+.cell.drop-before { box-shadow: inset 0 3px 0 0 var(--accent); }
+.cell.drop-after  { box-shadow: inset 0 -3px 0 0 var(--accent); }
+.cell.bind { border-left-color:var(--purple); }
+.widget { display:flex; align-items:center; gap:12px; padding:12px 14px; }
+.wname { font-family:'Cascadia Code',monospace; color:var(--accent); min-width:64px; }
+.widget input[type=range] { flex:1; accent-color:var(--purple); }
+.widget input[type=text], .widget input[type=number], .widget select {
+  background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
+.wval { font-family:'Cascadia Code',monospace; color:var(--green); min-width:48px; text-align:right; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1 id="title">Notebook</h1>
+  <span class="hint">⇧⏎ run · ⇥ complete</span>
+  <a id="vscode" class="btnlink" href="#" title="Open the .jl in VS Code">⧉ VS Code</a>
+  <button onclick="undoNb()" title="undo (⌘Z)">↶</button>
+  <button onclick="redoNb()" title="redo (⌘⇧Z)">↷</button>
+  <button onclick="addCell('','code')">＋ cell</button>
+  <button onclick="runAll()">▶ Run stale</button>
+  <button onclick="resetAll()">↻ Rebuild</button>
+  <button onclick="reload()">⟳ Reload</button>
+</div>
+<div class="page"><div id="nb"></div></div>
+
+<script>
+const editors = {};
+const charts = {};            // cell id -> [echarts instances]
+const srcMap = {};            // cell id -> raw source (for markdown editing)
+let lastVersion = -1;
+
+const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
+const srcEditHTML = () => '<div class="srcedit" style="display:none"><textarea></textarea>' +
+  '<div class="mdhint">⇧⏎ commit · esc cancel</div></div>';
+
+// Render/refresh a cell's ECharts. Instances persist across reactive updates, so
+// data changes animate in place (setOption) instead of swapping an image.
+function renderCharts(c) {
+  const host = document.querySelector('#cell-' + c.id + ' .echarts');
+  if (!host) return;
+  const specs = c.echarts || [];
+  if (!charts[c.id]) charts[c.id] = [];
+  const insts = charts[c.id];
+  while (host.children.length < specs.length) {
+    const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
+    insts.push(echarts.init(d, 'dark'));
+  }
+  while (host.children.length > specs.length) { host.removeChild(host.lastChild); insts.pop().dispose(); }
+  specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
+}
+window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
+
+// Context-aware completion via the live session (Julia REPLCompletions).
+function juliaHint(cm, callback) {
+  const code = cm.getValue();
+  const pos = cm.indexFromPos(cm.getCursor());
+  fetch('/api/complete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ code, pos })
+  }).then(r => r.json()).then(d => {
+    callback({
+      list: d.completions || [],
+      from: cm.posFromIndex(d.from),
+      to: cm.posFromIndex(d.to)
+    });
+  }).catch(() => callback({ list: [], from: cm.getCursor(), to: cm.getCursor() }));
+}
+juliaHint.async = true;
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method, headers: {'Content-Type': 'application/json'},
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return r.json();
+}
+
+function widgetHTML(c) {
+  const b = c.bind, p = b.params || {};
+  let ctrl = '';
+  if (b.widget === 'slider')
+    ctrl = `<input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${b.value}" data-bind="${c.id}"/>`;
+  else if (b.widget === 'number')
+    ctrl = `<input type="number" value="${b.value}" data-bind="${c.id}"/>`;
+  else if (b.widget === 'checkbox')
+    ctrl = `<input type="checkbox" ${b.value ? 'checked' : ''} data-bind="${c.id}"/>`;
+  else if (b.widget === 'text')
+    ctrl = `<input type="text" value="${b.value}" data-bind="${c.id}"/>`;
+  else if (b.widget === 'select')
+    ctrl = `<select data-bind="${c.id}">` +
+      (p.options || []).map(o => `<option ${o == b.value ? 'selected' : ''}>${o}</option>`).join('') + '</select>';
+  return `<div class="widget"><span class="wname">${b.name}</span>${ctrl}` +
+    `<span class="wval" id="wval-${c.id}">${b.value}</span></div>`;
+}
+
+function cellBar(c) {
+  const other = c.kind === 'md' ? 'code' : 'md';
+  const editSrc = (c.kind === 'md' || c.bind)
+    ? `<button onclick="editSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
+  return '<div class="cellbar">' +
+    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
+    editSrc +
+    `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
+    `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
+    `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
+    `<button onclick="addCell('${c.id}','code')" title="add code below">＋code</button>` +
+    `<button onclick="addCell('${c.id}','md')" title="add markdown below">＋md</button>` +
+    `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
+    '</div>';
+}
+
+function cellEl(c) {
+  const div = document.createElement('div');
+  div.id = 'cell-' + c.id;
+  div.dataset.cid = c.id;
+  srcMap[c.id] = c.source;
+  if (c.kind === 'md') {
+    div.className = 'cell md state-' + c.state;
+    div.innerHTML = cellBar(c) +
+      `<div class="md" ondblclick="editSource('${c.id}','markdown')" title="double-click to edit">${mdHtml(c)}</div>` +
+      srcEditHTML();
+  } else if (c.bind) {
+    div.className = 'cell bind state-' + c.state;
+    div.innerHTML = cellBar(c) + widgetHTML(c) + srcEditHTML();
+  } else {
+    div.className = 'cell code state-' + c.state;
+    div.innerHTML = cellBar(c) +
+      '<div class="cellhead"><span class="badge">' + c.state + '</span>' +
+      '<button data-run="' + c.id + '">▶ run</button>' +
+      '<span class="cdur">' + (c.duration != null ? c.duration + ' ms' : '') + '</span>' +
+      '<span class="cid">' + c.id + '</span></div>' +
+      '<textarea></textarea>' +
+      '<div class="output">' + c.output + '</div>' +
+      '<div class="echarts"></div>';
+  }
+  return div;
+}
+
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+function mountWidget(c) {
+  if (!c.bind) return;
+  const el = document.querySelector('#cell-' + c.id + ' [data-bind]');
+  if (!el) return;
+  const send = debounce(v => setBind(c.id, v), 120);
+  const onInput = () => {
+    let v;
+    if (c.bind.widget === 'checkbox') v = el.checked;
+    else if (c.bind.widget === 'slider' || c.bind.widget === 'number') v = parseFloat(el.value);
+    else v = el.value;
+    const wv = document.getElementById('wval-' + c.id); if (wv) wv.textContent = v;
+    send(v);
+  };
+  el.oninput = onInput;
+  el.onchange = onInput;
+}
+
+function mountEditor(c) {
+  if (c.kind !== 'code' || c.bind) return;
+  const ta = document.querySelector('#cell-' + c.id + ' textarea');
+  const ed = CodeMirror.fromTextArea(ta, {
+    mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity
+  });
+  ed.setValue(c.source);
+  let primed = false;
+  ed.on('change', () => { if (primed) setState(c.id, 'edited'); });
+  setTimeout(() => primed = true, 0);
+  const complete = cm => cm.showHint({ hint: juliaHint, completeSingle: false });
+  const tabComplete = cm => {                  // complete after a word/`.`, else indent
+    const cur = cm.getCursor();
+    const before = cm.getRange({ line: cur.line, ch: Math.max(0, cur.ch - 1) }, cur);
+    if (cm.somethingSelected() || !/[\w.]/.test(before)) return CodeMirror.Pass;
+    complete(cm);
+  };
+  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete });
+  ed.on('inputRead', (cm, ev) => { if (ev.text[0] === '.') complete(cm); });   // auto on field access
+  document.querySelector('#cell-' + c.id + ' [data-run]').onclick = () => runCell(c.id);
+  editors[c.id] = ed;
+}
+
+// Source editing for non-code cells (markdown + @bind widgets): reveal a raw
+// source editor; ⇧⏎ commits (re-parsing/re-rendering the cell), esc cancels.
+const _disp = cell => cell.querySelector('.md') || cell.querySelector('.widget');
+
+function editSource(id, mode) {
+  const cell = document.getElementById('cell-' + id);
+  if (!cell) return;
+  const d = _disp(cell); if (d) d.style.display = 'none';
+  cell.querySelector('.srcedit').style.display = '';
+  if (!editors[id]) {
+    const ta = cell.querySelector('.srcedit textarea');
+    const cm = CodeMirror.fromTextArea(ta, {
+      mode, theme: 'material-darker', lineNumbers: false,
+      viewportMargin: Infinity, lineWrapping: mode === 'markdown'
+    });
+    cm.setValue(srcMap[id] || '');
+    cm.setOption('extraKeys', { 'Shift-Enter': () => commitSource(id), 'Esc': () => cancelSource(id) });
+    editors[id] = cm;
+  }
+  editors[id].refresh(); editors[id].focus();
+}
+async function commitSource(id) {
+  const cm = editors[id], src = cm ? cm.getValue() : srcMap[id];
+  if (cm) { cm.toTextArea(); delete editors[id]; }
+  srcMap[id] = src;
+  renderAll(await api('POST', '/api/cell/' + id, { source: src }));   // re-render in its new form
+}
+function cancelSource(id) {
+  const cm = editors[id]; if (cm) { cm.toTextArea(); delete editors[id]; }
+  const cell = document.getElementById('cell-' + id); if (!cell) return;
+  cell.querySelector('.srcedit').style.display = 'none';
+  const d = _disp(cell); if (d) d.style.display = '';
+}
+
+function renderAll(state) {
+  document.getElementById('title').textContent = state.title || 'Notebook';
+  if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
+  const nb = document.getElementById('nb');
+  nb.innerHTML = '';
+  for (const k of Object.keys(editors)) delete editors[k];
+  Object.keys(charts).forEach(k => { charts[k].forEach(i => i.dispose()); delete charts[k]; });
+  state.cells.forEach(c => nb.appendChild(cellEl(c)));
+  state.cells.forEach(mountEditor);
+  state.cells.forEach(mountWidget);
+  state.cells.forEach(renderCharts);
+}
+
+function setState(id, s) {
+  const el = document.getElementById('cell-' + id);
+  if (!el) return;
+  el.className = 'cell code state-' + s;
+  const b = el.querySelector('.badge'); if (b) b.textContent = s;
+}
+
+// Update outputs + states in place (preserves editor instances/cursors).
+function updateStates(state) {
+  state.cells.forEach(c => {
+    const el = document.getElementById('cell-' + c.id);
+    if (!el) return;
+    srcMap[c.id] = c.source;
+    el.className = 'cell ' + (c.bind ? 'bind' : c.kind) + ' state-' + c.state;
+    const b = el.querySelector('.badge'); if (b) b.textContent = c.state;
+    const dur = el.querySelector('.cdur'); if (dur) dur.textContent = c.duration != null ? c.duration + ' ms' : '';
+    const out = el.querySelector('.output'); if (out) out.innerHTML = c.output;
+    const md = el.querySelector('.md'); if (md) md.innerHTML = mdHtml(c);
+    renderCharts(c);   // setOption in place — animates data changes
+  });
+}
+
+async function runCell(id) {
+  const ed = editors[id];
+  setState(id, 'running');
+  updateStates(await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' }));
+}
+async function setBind(id, value) { updateStates(await api('POST', '/api/bind/' + id, { value })); }
+async function addCell(after, kind)  { renderAll(await api('POST', '/api/cell-add', { after, kind })); }
+async function delCell(id)           { renderAll(await api('POST', '/api/cell-delete/' + id)); }
+async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
+async function moveCellRel(id, target, before) { renderAll(await api('POST', '/api/cell-move/' + id, { target, before })); }
+async function toggleType(id, kind)  { renderAll(await api('POST', '/api/cell-type/' + id, { kind })); }
+async function undoNb() { renderAll(await api('POST', '/api/undo')); }
+async function redoNb() { renderAll(await api('POST', '/api/redo')); }
+async function runAll()  { updateStates(await api('POST', '/api/run')); }
+async function resetAll(){ updateStates(await api('POST', '/api/reset')); }
+async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); }
+
+// Instant push: the server streams the version over SSE and bumps it only on
+// external (file) changes, so the browser's own edits never trigger a re-render.
+function connectLive() {
+  const es = new EventSource('/api/events');
+  es.onmessage = async (e) => {
+    const v = parseInt(e.data, 10);
+    if (!isNaN(v) && v !== lastVersion) { lastVersion = v; renderAll(await api('GET', '/api/state')); }
+  };
+  // EventSource auto-reconnects on error.
+}
+
+// Drag-to-reorder — only the ⠿ handle initiates a drag, so editor text stays
+// selectable. A line above/below the hovered cell shows exactly where it lands.
+let dragId = null, dropTarget = null;
+const nbEl = document.getElementById('nb');
+function clearDrop() { nbEl.querySelectorAll('.drop-before,.drop-after').forEach(x => x.classList.remove('drop-before', 'drop-after')); }
+nbEl.addEventListener('dragstart', e => {
+  const h = e.target.closest('.drag');
+  if (!h) { e.preventDefault(); return; }
+  dragId = h.closest('.cell').dataset.cid;
+  e.dataTransfer.effectAllowed = 'move';
+});
+nbEl.addEventListener('dragover', e => {
+  e.preventDefault();
+  clearDrop();
+  dropTarget = null;
+  const t = e.target.closest('.cell');
+  if (!t || !dragId || t.dataset.cid === dragId) return;
+  const r = t.getBoundingClientRect();
+  const before = (e.clientY - r.top) < r.height / 2;
+  t.classList.add(before ? 'drop-before' : 'drop-after');
+  dropTarget = { id: t.dataset.cid, before };
+});
+nbEl.addEventListener('drop', e => {
+  e.preventDefault();
+  clearDrop();
+  const dt = dropTarget, id = dragId;
+  dragId = dropTarget = null;
+  if (dt && id) moveCellRel(id, dt.id, dt.before);
+});
+nbEl.addEventListener('dragend', () => { clearDrop(); dragId = dropTarget = null; });
+
+// ⌘Z / ⌘⇧Z notebook undo/redo — but defer to CodeMirror's text undo when an editor is focused.
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    if (document.activeElement && document.activeElement.closest('.CodeMirror')) return;
+    e.preventDefault();
+    e.shiftKey ? redoNb() : undoNb();
+  }
+});
+
+reload();
+connectLive();
+</script>
+</body>
+</html>

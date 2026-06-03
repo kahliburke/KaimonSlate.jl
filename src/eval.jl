@@ -1,0 +1,127 @@
+# Isolated-module evaluation (engine, §6/D2). Included into `module ReportEngine`.
+#
+# Code cells execute in document order inside a per-report `Module()`. The process
+# stays warm (all JIT-compiled methods kept); only the namespace is fresh, so the
+# report is reproducible without losing the warm benefit. This slice captures
+# stdout + a text/plain value repr + errors; MIME/figure capture (§7) and the
+# dependency model (§6) layer on later without changing this loop.
+
+export eval_report!, eval_cell!, report_module, reset_module!
+export Kernel, InProcessKernel, run_capture
+
+# A fresh report namespace with the report-builder helpers (e.g. `echart`)
+# injected, so cells can call them without importing anything.
+function _new_module(report::Report)
+    m = Module(Symbol(:Report_, report.id))
+    Core.eval(m, :(const echart = $(echart)))
+    Core.eval(m, :(const EChart = $(EChart)))
+    return m
+end
+
+"Get (creating if needed) the report's execution namespace."
+function report_module(report::Report)
+    report.mod === nothing && (report.mod = _new_module(report))
+    return report.mod
+end
+
+"""
+    reset_module!(report) -> Module
+
+Discard the report's namespace and mark every cell stale — the basis of a full
+rebuild (ground truth, §6). Returns the fresh module.
+"""
+function reset_module!(report::Report)
+    report.mod = _new_module(report)
+    for c in report.cells
+        c.state = STALE
+        c.output = nothing
+    end
+    return report.mod
+end
+
+# Run a cell and capture its output. The capture machinery lives in `capture.jl`
+# (shared with the gate worker) and returns a wire-form NamedTuple; here we wrap
+# it into the engine's `CellOutput` (mapping mime tuples → `MimeChunk`).
+function _eval_capture(mod::Module, source::AbstractString)
+    r = run_capture(mod, source)
+    chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
+    return CellOutput(r.stdout, chunks, r.echarts, r.value_repr, r.exception,
+                      r.backtrace, r.duration_ms)
+end
+
+# ── Kernel: the execution backend ─────────────────────────────────────────────
+#
+# A `Kernel` is *where* and *how* cells run. The whole engine touches the live
+# execution environment through this one seam: prepare a namespace, reset it,
+# evaluate-and-capture a cell, and assign a `@bind` value. The reactive layer
+# (parse, dep graph, staleness, ordering, render) is kernel-agnostic.
+#
+# `InProcessKernel` (the default, and the standalone backend) runs cells in the
+# report's own in-process `Module` (`report.mod`). A `GateKernel` (added with the
+# Kaimon extension) dispatches the same four operations to a per-notebook gate
+# worker over ZMQ, so capture happens where the live value lives.
+
+abstract type Kernel end
+
+"""
+    InProcessKernel <: Kernel
+
+Evaluate cells in the report's own in-process `Module`. Stateless — the namespace
+lives on `report.mod`, managed by [`report_module`](@ref) / [`reset_module!`](@ref).
+"""
+struct InProcessKernel <: Kernel end
+
+"Ensure the kernel's namespace exists and is ready to evaluate into."
+prepare!(::InProcessKernel, report::Report) = report_module(report)
+
+"Discard the kernel's namespace (full rebuild); cells are marked stale by the caller."
+reset!(::InProcessKernel, report::Report) = reset_module!(report)
+
+"Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`."
+eval_capture(::InProcessKernel, report::Report, source::AbstractString) =
+    _eval_capture(report_module(report), source)
+
+"Assign `name = value` (a `@bind` widget value) into the kernel's namespace."
+assign!(::InProcessKernel, report::Report, name::Symbol, value) =
+    Core.eval(report_module(report), Expr(:(=), name, value))
+
+"""
+    eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell
+
+Evaluate one cell through `kernel`. Markdown cells are inert (marked `FRESH`). A
+code cell becomes `FRESH` on success or `ERRORED` if it threw; the error is
+captured, never propagated, so one bad cell doesn't abort the report.
+"""
+function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel())
+    if cell.kind == MARKDOWN
+        cell.state = FRESH
+        return cell
+    end
+    cell.bind === nothing && (cell.bind = parse_bind(cell.source))   # lazily detect
+    if cell.bind !== nothing
+        # bind cells aren't run as code — they assign the widget value into the kernel
+        assign!(kernel, report, cell.bind.name, cell.bind.value)
+        cell.state = FRESH
+        return cell
+    end
+    cell.state = RUNNING
+    cell.output = eval_capture(kernel, report, cell.source)
+    cell.state = cell.output.exception === nothing ? FRESH : ERRORED
+    return cell
+end
+
+"""
+    eval_report!(report; reset=false, kernel=InProcessKernel()) -> Report
+
+Evaluate all code cells in document order through `kernel`. `reset=true` does a
+full rebuild in a fresh namespace first. (No dependency pruning here — that's
+[`eval_stale!`](@ref); this runs every code cell.)
+"""
+function eval_report!(report::Report; reset::Bool = false, kernel::Kernel = InProcessKernel())
+    reset && reset!(kernel, report)
+    prepare!(kernel, report)
+    for cell in report.cells
+        eval_cell!(report, cell, kernel)
+    end
+    return report
+end

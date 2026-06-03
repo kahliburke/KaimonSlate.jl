@@ -1,0 +1,236 @@
+"""
+    ReportEngine
+
+Session-side engine for the notebook-like report builder (see
+`PLAN-report-builder.md`). This is the **engine** half of the engine/renderer
+split (§15.1): it owns the cell/document model, parsing the Literate-style `.jl`
+source, and (later) isolated-module evaluation + dependency inference. It runs
+*inside the warm gate session* and depends only on light, session-safe packages.
+
+This first slice implements just the model + parse/serialize round-trip — no
+evaluation yet — so it is testable with `Base` alone.
+"""
+module ReportEngine
+
+export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
+export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
+export parse_report, serialize_report, source_text
+
+# ── Model ────────────────────────────────────────────────────────────────────
+
+@enum CellKind MARKDOWN CODE
+@enum CellState FRESH STALE RUNNING ERRORED   # never-run ≡ STALE
+
+"One representation of a cell's output (MIME-generic display bundle, §7)."
+struct MimeChunk
+    mime::String                  # "text/html" | "image/png" | "image/svg+xml" | "text/plain"
+    data::Vector{UInt8}           # text encoded UTF-8
+end
+
+"Captured result of evaluating a code cell."
+struct CellOutput
+    stdout::String
+    display::Vector{MimeChunk}    # richest first
+    echarts::Vector{Any}          # raw ECharts option dicts (JSON-encoded server-side)
+    value_repr::String            # text/plain fallback of the return value
+    exception::Union{String,Nothing}
+    backtrace::Union{String,Nothing}
+    duration_ms::Float64          # wall-clock eval time
+end
+
+"A reactive input widget bound to a variable (`@bind name Slider(0:100)`, §Layer 3)."
+mutable struct BindSpec
+    name::Symbol                  # the bound variable
+    widget::String                # "slider" | "number" | "checkbox" | "text" | "select"
+    params::Dict{String,Any}      # min/max/step/options …
+    value::Any                    # current value (assigned into the module)
+end
+
+"""
+A single report cell. `id` is the persistent identity (survives edits/moves);
+`src_hash` answers "did the source change". Inference/eval fields are populated
+later by the dependency + eval passes.
+"""
+mutable struct Cell
+    id::String
+    kind::CellKind
+    source::String
+    src_hash::UInt64
+    reads::Set{Symbol}
+    writes::Set{Symbol}
+    deps::Set{String}             # upstream cell ids (most-recent-writer, §6)
+    inputs::Vector{String}        # external-input fingerprints (files)
+    state::CellState
+    output::Union{CellOutput,Nothing}
+    flags::Set{Symbol}            # :volatile :pinned :track :opaque …
+    bind::Union{BindSpec,Nothing} # set if this is an `@bind` widget cell
+end
+
+"Construct a fresh cell, hashing its source and marking it stale (never-run)."
+function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
+    src = String(source)
+    return Cell(String(id), kind, src, hash(src),
+                Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
+                STALE, nothing, Set{Symbol}(), nothing)
+end
+
+mutable struct Report
+    id::String
+    title::String
+    cells::Vector{Cell}
+    meta::Dict{String,Any}
+    mod::Union{Module,Nothing}    # per-report execution namespace (created on eval)
+end
+
+Report(id::AbstractString, title::AbstractString) =
+    Report(String(id), String(title), Cell[], Dict{String,Any}(), nothing)
+
+# ── Source format ────────────────────────────────────────────────────────────
+#
+# Literate-inspired "percent cells". Each cell is introduced by a header line:
+#
+#     #%% code id=load        ← a code cell with persistent id `load`
+#     using Statistics
+#     data = [1, 2, 3]
+#
+#     #%% md id=intro         ← a markdown cell
+#     # My Report
+#     Narrative **markdown** here.
+#
+# Header grammar:  `#%%` [ `code` | `md` | `markdown` ] [ `id=<id>` ]
+# - kind defaults to `code` when omitted
+# - id is optional; auto-assigned (deterministically, from content) when absent
+# - the cell body is every line until the next header (or EOF)
+# - any non-blank content before the first header becomes a leading markdown cell
+
+const _HEADER = r"^#%%(.*)$"
+
+"Parse a header line's trailing tokens into (kind, id-or-nothing)."
+function _parse_header(rest::AbstractString)
+    kind = CODE
+    id = nothing
+    for tok in split(strip(rest))
+        if startswith(tok, "id=")
+            id = tok[4:end]
+        elseif tok == "md" || tok == "markdown"
+            kind = MARKDOWN
+        elseif tok == "code"
+            kind = CODE
+        end
+    end
+    return kind, id
+end
+
+"Deterministic short id from a cell's content + position (used when none given)."
+_auto_id(kind::CellKind, source::AbstractString, idx::Integer) =
+    string(hash((kind, source, idx)) % 0xffffff; base = 16, pad = 6)
+
+"Trim a leading and trailing run of blank lines, preserving interior blanks."
+function _strip_blank_edges(lines::Vector{<:AbstractString})
+    lo = firstindex(lines)
+    hi = lastindex(lines)
+    while lo <= hi && isempty(strip(lines[lo])); lo += 1; end
+    while hi >= lo && isempty(strip(lines[hi])); hi -= 1; end
+    return lines[lo:hi]
+end
+
+"True for a Literate-style markdown line: `#` alone or `# …` (hash + space)."
+_is_md_line(l::AbstractString) = l == "#" || startswith(l, "# ")
+
+"Strip the `# ` / `#` prefix from a Literate markdown line."
+_strip_md(l::AbstractString) = l == "#" ? "" : String(l[3:end])
+
+"""
+    parse_report(text; id="r", title="") -> Report
+
+Parse hybrid source into a `Report`. Two interchangeable conventions are
+accepted — liberal in, canonical out (`serialize_report` always emits the
+explicit `#%%` form):
+
+- **Explicit percent cells:** a `#%% [code|md] [id=…]` header introduces a cell
+  whose body runs verbatim until the next header.
+- **Literate-style (implicit):** before any header, `#`-prefixed lines form a
+  markdown cell and bare lines form a code cell; a boundary falls wherever the
+  line kind changes.
+
+Pure-Literate files, pure-percent files, and Literate-then-percent mixes all
+parse. (Once a `#%%` header appears, subsequent cells should also use headers —
+implicit content after a header is taken as that explicit cell's verbatim body.)
+"""
+function parse_report(text::AbstractString; id::AbstractString = "r", title::AbstractString = "")
+    report = Report(id, title)
+    lines = split(text, '\n')
+
+    explicit = false                      # inside an explicit #%% cell?
+    kind::CellKind = CODE                 # implicit default is code (Literate)
+    cid::Union{String,Nothing} = nothing
+    had_header = false                    # current cell came from an explicit header
+    body = String[]
+
+    function flush!()
+        trimmed = _strip_blank_edges(body)
+        if !isempty(trimmed) || had_header   # keep explicit cells even when empty
+            idx = length(report.cells) + 1
+            src = join(trimmed, "\n")
+            id_ = cid === nothing ? _auto_id(kind, src, idx) : cid
+            push!(report.cells, Cell(id_, kind, src))
+        end
+        empty!(body)
+        had_header = false
+    end
+
+    for line in lines
+        m = match(_HEADER, line)
+        if m !== nothing                  # explicit header → start a new explicit cell
+            flush!()
+            kind, cid = _parse_header(m.captures[1])
+            explicit = true
+            had_header = true
+        elseif explicit                   # verbatim body of an explicit cell
+            push!(body, line)
+        elseif isempty(strip(line))       # implicit: blanks ride along (edge-trimmed)
+            push!(body, line)
+        else                              # implicit: classify; boundary on kind change
+            linekind = _is_md_line(line) ? MARKDOWN : CODE
+            if !isempty(body) && linekind != kind
+                flush!()
+                cid = nothing
+            end
+            kind = linekind
+            push!(body, linekind == MARKDOWN ? _strip_md(line) : line)
+        end
+    end
+    flush!()                              # close the final cell
+    return report
+end
+
+# ── Serialization ────────────────────────────────────────────────────────────
+
+_kind_token(k::CellKind) = k === MARKDOWN ? "md" : "code"
+
+"Emit one cell as a header line plus its body."
+function _cell_source(cell::Cell)
+    header = "#%% $(_kind_token(cell.kind)) id=$(cell.id)"
+    return isempty(cell.source) ? header : "$header\n$(cell.source)"
+end
+
+"""
+    serialize_report(report) -> String
+
+Render a `Report` back to percent-cell source. Round-trips with `parse_report`:
+`parse_report(serialize_report(r))` preserves each cell's id, kind, and source.
+Cell *outputs* are deliberately not serialized (regenerated by eval) — clean diffs.
+"""
+serialize_report(report::Report) =
+    join((_cell_source(c) for c in report.cells), "\n\n") * "\n"
+
+"Alias kept for callers that think in terms of a cell's raw text."
+source_text(cell::Cell) = cell.source
+
+include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
+include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
+include(joinpath(@__DIR__, "eval.jl"))
+include(joinpath(@__DIR__, "deps.jl"))
+include(joinpath(@__DIR__, "bind.jl"))
+
+end # module ReportEngine

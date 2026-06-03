@@ -1,0 +1,135 @@
+# Standalone tests for the report engine model + parser (no project deps).
+# Run:  julia --startup-file=no test/report/test_engine.jl
+using Test
+
+include(joinpath(@__DIR__, "..", "src", "engine.jl"))
+using .ReportEngine
+
+const SAMPLE = """
+#%% md id=intro
+# My Report
+Narrative **markdown** here.
+
+#%% code id=load
+using Statistics
+data = [1, 2, 3]
+
+#%% code id=calc
+mean(data)
+"""
+
+@testset "ReportEngine" begin
+
+    @testset "parse: kinds, ids, sources" begin
+        r = parse_report(SAMPLE; title = "My Report")
+        @test length(r.cells) == 3
+
+        @test r.cells[1].kind == MARKDOWN
+        @test r.cells[1].id == "intro"
+        @test r.cells[1].source == "# My Report\nNarrative **markdown** here."
+
+        @test r.cells[2].kind == CODE
+        @test r.cells[2].id == "load"
+        @test r.cells[2].source == "using Statistics\ndata = [1, 2, 3]"
+
+        @test r.cells[3].kind == CODE
+        @test r.cells[3].id == "calc"
+        @test r.cells[3].source == "mean(data)"
+    end
+
+    @testset "parse: defaults (kind=code, auto id)" begin
+        r = parse_report("#%%\nx = 1")
+        @test length(r.cells) == 1
+        @test r.cells[1].kind == CODE            # kind defaults to code
+        @test !isempty(r.cells[1].id)            # auto-assigned
+        @test r.cells[1].source == "x = 1"
+    end
+
+    @testset "hybrid: pure-Literate input (# = md, bare = code)" begin
+        literate = """
+        # # Title
+        # Some prose.
+
+        x = 1
+        y = 2
+
+        # Another note.
+
+        z = 3
+        """
+        r = parse_report(literate)
+        @test length(r.cells) == 4
+        @test r.cells[1].kind == MARKDOWN
+        @test r.cells[1].source == "# Title\nSome prose."   # `# ` stripped, md heading kept
+        @test r.cells[2].kind == CODE
+        @test r.cells[2].source == "x = 1\ny = 2"
+        @test r.cells[3].kind == MARKDOWN
+        @test r.cells[3].source == "Another note."
+        @test r.cells[4].kind == CODE
+        @test r.cells[4].source == "z = 3"
+    end
+
+    @testset "hybrid: bare leading text is code, # lines are markdown" begin
+        r = parse_report("# a note\n\nbare_code()\n\n#%% code id=a\ny = 2")
+        @test length(r.cells) == 3
+        @test r.cells[1].kind == MARKDOWN
+        @test r.cells[1].source == "a note"
+        @test r.cells[2].kind == CODE
+        @test r.cells[2].source == "bare_code()"
+        @test r.cells[3].id == "a"
+        @test r.cells[3].source == "y = 2"
+    end
+
+    @testset "hybrid: ## is code (comment), not a markdown heading" begin
+        r = parse_report("## not markdown\nval = 1")
+        @test length(r.cells) == 1
+        @test r.cells[1].kind == CODE
+        @test r.cells[1].source == "## not markdown\nval = 1"
+    end
+
+    @testset "explicit md cell body is raw (not # -prefixed)" begin
+        r = parse_report("#%% md id=m\n## A heading\nplain prose")
+        @test r.cells[1].kind == MARKDOWN
+        @test r.cells[1].source == "## A heading\nplain prose"
+    end
+
+    @testset "parse: blank-only input yields no cells" begin
+        @test isempty(parse_report("\n\n   \n").cells)
+    end
+
+    @testset "blank edges trimmed, interior preserved" begin
+        r = parse_report("#%% code id=a\n\nline1\n\nline2\n\n")
+        @test r.cells[1].source == "line1\n\nline2"
+    end
+
+    @testset "src_hash tracks content" begin
+        a = Cell("a", CODE, "x = 1")
+        b = Cell("a", CODE, "x = 1")
+        c = Cell("a", CODE, "x = 2")
+        @test a.src_hash == b.src_hash
+        @test a.src_hash != c.src_hash
+    end
+
+    @testset "round-trip: parse ∘ serialize is stable" begin
+        r1 = parse_report(SAMPLE)
+        s1 = serialize_report(r1)
+        r2 = parse_report(s1)
+        s2 = serialize_report(r2)
+
+        @test s1 == s2                            # serialization is a fixed point
+        @test length(r1.cells) == length(r2.cells)
+        for (c1, c2) in zip(r1.cells, r2.cells)
+            @test c1.id == c2.id
+            @test c1.kind == c2.kind
+            @test c1.source == c2.source
+        end
+    end
+
+    @testset "auto ids survive a round-trip" begin
+        r1 = parse_report("#%% code\nz = 3")     # no explicit id
+        id1 = r1.cells[1].id
+        r2 = parse_report(serialize_report(r1))   # id now written explicitly
+        @test r2.cells[1].id == id1
+    end
+
+end

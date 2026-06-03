@@ -1,0 +1,8 @@
+# Kaimon extension manifest. Register the project path in
+# ~/.config/kaimon/extensions.json (or via the Extensions tab) to load it.
+[extension]
+namespace = "slate"
+module = "KaimonSlate"
+tools_function = "create_tools"
+shutdown_function = "on_shutdown"
+description = "KaimonSlate — a warm-session reactive notebook with a live browser UI."
