@@ -63,7 +63,8 @@ mutable struct Cell
     state::CellState
     output::Union{CellOutput,Nothing}
     flags::Set{Symbol}            # :volatile :pinned :track :opaque …
-    bind::Union{BindSpec,Nothing} # set if this is an `@bind` widget cell
+    binds::Vector{BindSpec}       # the `@bind` widgets this cell defines (a *control group* if >1)
+    controls::Vector{Vector{String}}  # control strip as columns of stacked var names (§Layer 3 UX)
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -71,7 +72,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), nothing)
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[])
 end
 
 mutable struct Report
@@ -97,28 +98,67 @@ Report(id::AbstractString, title::AbstractString) =
 #     # My Report
 #     Narrative **markdown** here.
 #
-# Header grammar:  `#%%` [ `code` | `md` | `markdown` ] [ `id=<id>` ]
+# Header grammar:  `#%%` [ `code` | `md` | `markdown` ] [ `id=<id>` ] [ `controls=<layout>` ]
 # - kind defaults to `code` when omitted
 # - id is optional; auto-assigned (deterministically, from content) when absent
+# - controls is optional and lays out a code cell's control strip as COLUMNS of
+#   stacked bound-variable widgets (presentation only). Grammar: top-level commas
+#   separate columns (left→right); a `[a,b,…]` group stacks those controls in one
+#   column (top→bottom); a bare name is a single-control column. So
+#   `controls=[freq,amp],phase` ⇒ col1 stacks freq/amp, col2 is phase. A plain
+#   `controls=a,b,c` (no brackets) is three single-control columns — i.e. a row.
 # - the cell body is every line until the next header (or EOF)
 # - any non-blank content before the first header becomes a leading markdown cell
 
 const _HEADER = r"^#%%(.*)$"
 
-"Parse a header line's trailing tokens into (kind, id-or-nothing)."
+# Parse a `controls=` value into columns of names, respecting `[ ]` groups.
+function _parse_controls(s::AbstractString)
+    cols = Vector{String}[]
+    depth = 0
+    buf = IOBuffer()
+    toks = String[]
+    for ch in s                            # split top-level commas, keeping bracket groups intact
+        if ch == '['
+            depth += 1
+        elseif ch == ']'
+            depth -= 1
+        elseif ch == ',' && depth == 0
+            push!(toks, String(take!(buf))); continue
+        end
+        print(buf, ch)
+    end
+    push!(toks, String(take!(buf)))
+    for t in toks
+        t = strip(t)
+        isempty(t) && continue
+        if startswith(t, "[") && endswith(t, "]")
+            names = String[String(strip(n)) for n in split(t[2:end-1], ',') if !isempty(strip(n))]
+            isempty(names) || push!(cols, names)
+        else
+            push!(cols, String[t])
+        end
+    end
+    return cols
+end
+
+"Parse a header line's trailing tokens into (kind, id-or-nothing, controls-columns)."
 function _parse_header(rest::AbstractString)
     kind = CODE
     id = nothing
+    controls = Vector{String}[]
     for tok in split(strip(rest))
         if startswith(tok, "id=")
             id = tok[4:end]
+        elseif startswith(tok, "controls=")
+            controls = _parse_controls(tok[10:end])
         elseif tok == "md" || tok == "markdown"
             kind = MARKDOWN
         elseif tok == "code"
             kind = CODE
         end
     end
-    return kind, id
+    return kind, id, controls
 end
 
 "Deterministic short id from a cell's content + position (used when none given)."
@@ -164,6 +204,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     explicit = false                      # inside an explicit #%% cell?
     kind::CellKind = CODE                 # implicit default is code (Literate)
     cid::Union{String,Nothing} = nothing
+    ctrls = Vector{String}[]              # `controls=` columns of the current explicit cell
     had_header = false                    # current cell came from an explicit header
     body = String[]
 
@@ -173,17 +214,20 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             idx = length(report.cells) + 1
             src = join(trimmed, "\n")
             id_ = cid === nothing ? _auto_id(kind, src, idx) : cid
-            push!(report.cells, Cell(id_, kind, src))
+            cell = Cell(id_, kind, src)
+            cell.controls = ctrls
+            push!(report.cells, cell)
         end
         empty!(body)
         had_header = false
+        ctrls = Vector{String}[]
     end
 
     for line in lines
         m = match(_HEADER, line)
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
-            kind, cid = _parse_header(m.captures[1])
+            kind, cid, ctrls = _parse_header(m.captures[1])
             explicit = true
             had_header = true
         elseif explicit                   # verbatim body of an explicit cell
@@ -208,9 +252,14 @@ end
 
 _kind_token(k::CellKind) = k === MARKDOWN ? "md" : "code"
 
+# Serialize control-strip columns back to the header grammar: single-control
+# columns as bare names, multi-control columns as `[a,b,…]`, columns joined by `,`.
+_controls_str(cols) = join((length(col) == 1 ? col[1] : "[" * join(col, ",") * "]" for col in cols), ",")
+
 "Emit one cell as a header line plus its body."
 function _cell_source(cell::Cell)
     header = "#%% $(_kind_token(cell.kind)) id=$(cell.id)"
+    isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
     return isempty(cell.source) ? header : "$header\n$(cell.source)"
 end
 
@@ -232,5 +281,6 @@ include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worke
 include(joinpath(@__DIR__, "eval.jl"))
 include(joinpath(@__DIR__, "deps.jl"))
 include(joinpath(@__DIR__, "bind.jl"))
+include(joinpath(@__DIR__, "gate_kernel.jl"))   # GateKernel (used when Main.Kaimon present)
 
 end # module ReportEngine

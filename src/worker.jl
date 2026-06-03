@@ -28,6 +28,11 @@ function _new_ns()
     m = Module(:NB)
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
+    # Async reactivity over the gate: a cell's background task calls
+    # `slate_refresh(:data)`, which PUBs on the gate stream. The KaimonSlate server
+    # (subscribed) recomputes the readers of those vars and pushes a live update.
+    Core.eval(m, :(const slate_refresh =
+        $((vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")))))
     return m
 end
 const _NS = Ref{Module}(_new_ns())
@@ -67,6 +72,15 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int)
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate")
+    # `serve` runs the message loop on a spawned thread and returns — but this is
+    # a non-interactive `-e` process, so we must block to keep it alive until a
+    # remote `:shutdown` (which calls `exit(0)` from the gate task). Flush each
+    # tick so stdout/stderr (block-buffered when piped, not a TTY) reaches the
+    # parent's log reader live rather than only on exit/crash.
+    while true
+        flush(stdout); flush(stderr)
+        sleep(1)
+    end
 end
 
 end # module SlateWorker

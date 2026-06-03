@@ -7,14 +7,47 @@
 # dependency model (§6) layer on later without changing this loop.
 
 export eval_report!, eval_cell!, report_module, reset_module!
-export Kernel, InProcessKernel, run_capture
+export Kernel, InProcessKernel, run_capture, shutdown!
+export register_refresh!, unregister_refresh!
+
+# ── Async reactivity hook ─────────────────────────────────────────────────────
+#
+# A cell's background task can call `slate_refresh(:data, …)` to announce that
+# some globals changed; the server (which registers a callback per report id)
+# then recomputes the cells that *read* those names and pushes a live update.
+# The callback is registered out-of-band so the dependency-light engine needn't
+# know about the HTTP/SSE layer.
+const _REFRESH_REGISTRY = Dict{String,Any}()
+register_refresh!(report_id::AbstractString, cb) = (_REFRESH_REGISTRY[String(report_id)] = cb; nothing)
+unregister_refresh!(report_id::AbstractString) = (delete!(_REFRESH_REGISTRY, String(report_id)); nothing)
+function _do_refresh(report_id::AbstractString, vars)
+    cb = get(_REFRESH_REGISTRY, report_id, nothing)
+    cb === nothing || cb(Symbol[Symbol(v) for v in vars])
+    return nothing
+end
 
 # A fresh report namespace with the report-builder helpers (e.g. `echart`)
 # injected, so cells can call them without importing anything.
+#
+# `@bind` is injected as a real (no-op-ish) macro: recognized bind/group cells are
+# intercepted by the engine and never run as code, but a cell that *contains*
+# `@bind` yet isn't recognized as a pure bind cell (e.g. mixed code) would
+# otherwise hit `UndefVarError: @bind`. Here it expands to assigning the variable
+# its widget's default (extracted syntactically — no need for `Slider` et al. to
+# exist), so such cells evaluate harmlessly instead of erroring.
 function _new_module(report::Report)
     m = Module(Symbol(:Report_, report.id))
     Core.eval(m, :(const echart = $(echart)))
     Core.eval(m, :(const EChart = $(EChart)))
+    Core.eval(m, :(const __slate_bind_default = $(_bind_default)))
+    Core.eval(m, :(macro bind(name, widget)
+        esc(Expr(:(=), name, __slate_bind_default(widget)))
+    end))
+    # `slate_refresh(:a, :b)` — from a cell's async task, announce that globals
+    # a/b changed so the server recomputes their readers and pushes a live update.
+    let rid = report.id
+        Core.eval(m, :(const slate_refresh = $((vars...) -> _do_refresh(rid, vars))))
+    end
     return m
 end
 
@@ -63,6 +96,9 @@ end
 
 abstract type Kernel end
 
+"Release a kernel's resources (e.g. kill a gate worker). No-op for in-process."
+shutdown!(::Kernel) = nothing
+
 """
     InProcessKernel <: Kernel
 
@@ -97,10 +133,12 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
         cell.state = FRESH
         return cell
     end
-    cell.bind === nothing && (cell.bind = parse_bind(cell.source))   # lazily detect
-    if cell.bind !== nothing
-        # bind cells aren't run as code — they assign the widget value into the kernel
-        assign!(kernel, report, cell.bind.name, cell.bind.value)
+    isempty(cell.binds) && (cell.binds = parse_binds(cell.source))   # lazily detect
+    if !isempty(cell.binds)
+        # bind/group cells aren't run as code — each widget value is assigned directly
+        for b in cell.binds
+            assign!(kernel, report, b.name, b.value)
+        end
         cell.state = FRESH
         return cell
     end

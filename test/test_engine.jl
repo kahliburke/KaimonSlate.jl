@@ -125,6 +125,36 @@ mean(data)
         end
     end
 
+    @testset "controls= layout: columns, groups, round-trip" begin
+        # bare list ⇒ one single-control column each (a row); back-compatible
+        r = parse_report("#%% code id=plot controls=freq,amp,phase\nplot(freq, amp)")
+        @test r.cells[1].id == "plot"
+        @test r.cells[1].controls == [["freq"], ["amp"], ["phase"]]
+        @test r.cells[1].source == "plot(freq, amp)"
+
+        # `[a,b]` groups stack vertically in one column
+        rg = parse_report("#%% code id=p controls=[freq,amp],phase,[gain,q]\nf()")
+        g = rg.cells[1]
+        @test g.controls == [["freq", "amp"], ["phase"], ["gain", "q"]]
+
+        # absent by default; header token order is flexible
+        @test isempty(parse_report("#%% code id=a\nx = 1").cells[1].controls)
+        @test parse_report("#%% code controls=[a,b],c id=z\nf()").cells[1].controls == [["a", "b"], ["c"]]
+
+        # empty entries dropped (stray/trailing commas, empty groups)
+        @test parse_report("#%% code id=a controls=x,,[y,],\nf()").cells[1].controls == [["x"], ["y"]]
+
+        # serialize emits the grammar (bare singles, [..] groups) and round-trips
+        s = serialize_report(rg)
+        @test occursin("controls=[freq,amp],phase,[gain,q]", s)
+        r2 = parse_report(s)
+        @test r2.cells[1].controls == [["freq", "amp"], ["phase"], ["gain", "q"]]
+        @test serialize_report(r2) == s              # fixed point
+
+        # cells without controls emit no `controls=` token
+        @test !occursin("controls=", serialize_report(parse_report("#%% code id=a\nx = 1")))
+    end
+
     @testset "auto ids survive a round-trip" begin
         r1 = parse_report("#%% code\nz = 3")     # no explicit id
         id1 = r1.cells[1].id

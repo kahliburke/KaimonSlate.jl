@@ -1,4 +1,5 @@
 /Manifest.toml
+/examples/Manifest.toml
 /docs/build/
 *.cov
 .DS_Store

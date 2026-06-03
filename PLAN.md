@@ -119,26 +119,50 @@ Default: `GateKernel` when `Main.Kaimon` is available, else `InProcessKernel`.
       `slate.open/list/close` exposed; `slate.open` starts the **HTTP 2.0** server *inside the
       extension process* and serves SPA + SSE. HTTP isolation confirmed (stacked-env gives
       KaimonSlate 2.0; Kaimon loaded but HTTP-dormant; `Main.Kaimon` available).
-- [ ] **GateKernel** — the per-notebook gate worker. Currently eval is **in-process
-      (`InProcessKernel`) + multi-port** (works, but not the target). Remaining:
-  1. `GateKernel <: Kernel`: `prepare!` → `Base.current_project(dir)` (error if none) →
-     spawn `SlateWorker` (`julia --project=<proj>`, KaimonGate on LOAD_PATH, fixed TCP port)
-     → `Main.Kaimon.connect_tcp!(mgr, "127.0.0.1", port; stream_port)`.
-  2. `eval_capture` → `Main.Kaimon._req_send_recv(conn, (type=:tool_call, name="__slate_eval",
-     args=Dict("source"=>src)))` → rebuild `CellOutput` from `r.response.value` (wire form).
-     `assign!`/`reset!` → `__slate_assign`/`__slate_reset`. Lifecycle: kill worker on close.
-  3. `LiveNotebook` picks `GateKernel` when `Main.Kaimon` present, else `InProcessKernel`.
-- [ ] **Single-server hub** — one server, one port, many notebooks: `id → (LiveNotebook,
-      kernel)`, routes `/n/<id>` + `/api/<id>/*` (per-notebook SSE + watcher), `/` index/switcher.
-      SPA derives `<id>` from the URL and prefixes API/EventSource calls. (Replaces multi-port.)
-- [ ] **Lean core deps** — once eval is gate-side, drop CairoMakie/plotting from KaimonSlate
-      (they live in each notebook's project); worker needs only Base64.
+- [x] **GateKernel** (`src/gate_kernel.jl`) — per-notebook gate worker. `prepare!` spawns a
+      `SlateWorker` (`julia --project=<proj>`, KaimonGate on LOAD_PATH, own `ConnectionManager`)
+      and `connect_tcp!`s it; `eval_capture`/`assign!`/`reset!` drive `__slate_*` tools over
+      `:tool_call` and rebuild `CellOutput` from the wire-form `value`. Worker blocks after
+      `serve` to stay alive. Async reactivity rides the gate stream (`slate_refresh` PUB → poller
+      → recompute), coalesced to ≈one refresh / 50 ms per notebook. `_select_kernel` picks it when
+      `Main.Kaimon` is present, else `InProcessKernel`. Validated end-to-end in the extension.
+- [x] **Single-server hub** — one server, one port (8765), many notebooks: `Hub` holds
+      `id → LiveNotebook` (each with its own `Kernel` + listeners), routes `/n/<id>` +
+      `/api/<id>/*` (per-notebook SSE + watcher), `/` index/switcher. SPA derives `<id>` from the
+      URL and prefixes API/EventSource calls. (Replaced multi-port.)
+- [x] **Lean core deps** — eval is gate-side, so KaimonSlate drops CairoMakie *and* Statistics
+      (unused in core). Plotting now lives in each notebook's project; the bundled demos get
+      `examples/Project.toml` (CairoMakie/Random/Statistics). Worker log streams live via a pipe.
 
 ---
 
-## Backlog — UX round (user feedback 2026-06-02; next session)
+## Next — AI interactivity + display (direction set 2026-06-03)
 
-Extension is working well; next round is mostly **presentation/UX + two reactivity bugs**.
+The core IO loop works (hub + GateKernel + reactive controls + async). Next arc: turn the
+notebook into a **shared agent/human workspace**. The enabler is already here — the agent (in
+Kaimon) and the browser drive the *same* live warm session over the *same* gate, so an agent
+edit broadcasts to the human via SSE and a human control move is readable by the agent.
+
+**Interaction model (decided):** *shared live notebook* — agent and human drive the same
+notebook; every edit/eval broadcasts both ways. (Not agent-scratch-then-promote.)
+
+**Milestone 1 — display upgrades (in progress, chosen first):**
+- **DataTables** — detect Tables.jl / DataFrame / vector-of-NamedTuples / matrix values in
+  capture → render an interactive HTML table (sort/page/filter). Also gives the agent structured
+  data to reason over.
+- **LaTeX** — KaTeX in markdown cells (`$…$` / `$$…$$`) **and** a `text/latex` MIME path in
+  output (LaTeXStrings / Latexify / symbolic results).
+
+**Milestone 2 — agent tool surface:** expand `slate_*` beyond open/list/close → `cells(id)`,
+`get(id,cell)`, `add/set/delete`, `eval`, `bind(name,value)`; expose captured PNG/MIME so the
+agent can *see* plots and iterate; provenance (human vs agent authorship) + iteration primitives
+("try N variants, compare, keep best").
+
+## Backlog — UX round (user feedback 2026-06-02) — largely delivered
+
+Delivered this session: **P1 controls-with-output** (control strips, palette, column layout,
+drag-to-host, 14 widget types), **P1 file-switcher / single-server hub** (with GateKernel),
+**P2 scroll-reset** (scroll preserved across `renderAll`). Remaining items below.
 Prioritized:
 
 ### P1 — Controls laid out *with* the output (the headline)

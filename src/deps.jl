@@ -72,16 +72,17 @@ function infer_bindings!(cell::Cell)
     delete!(cell.flags, :opaque)
     cell.kind == CODE || return cell
 
-    spec = parse_bind(cell.source)            # @bind widget cell?
-    if spec !== nothing
-        if cell.bind !== nothing && cell.bind.name == spec.name
-            spec.value = cell.bind.value      # preserve the current widget value
+    specs = parse_binds(cell.source)          # @bind widget / control-group cell?
+    if !isempty(specs)
+        prev = Dict(b.name => b.value for b in cell.binds)
+        for s in specs
+            haskey(prev, s.name) && (s.value = prev[s.name])  # preserve live widget values
+            push!(cell.writes, s.name)        # each bind writes its variable
         end
-        cell.bind = spec
-        push!(cell.writes, spec.name)         # the bind cell writes its variable
+        cell.binds = specs
         return cell
     end
-    cell.bind = nothing
+    cell.binds = BindSpec[]
 
     top = try
         Meta.parseall(cell.source)
@@ -183,7 +184,7 @@ function update_source!(report::Report, new_source::AbstractString)
             nc.output = oc.output         # carry cached result forward
             nc.state = oc.state
             nc.deps = oc.deps
-            nc.bind = oc.bind             # preserve live widget value
+            nc.binds = oc.binds           # preserve live widget values
         else
             nc.state = STALE
             push!(changed, nc.id)         # new or edited

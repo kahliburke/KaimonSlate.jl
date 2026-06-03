@@ -14,26 +14,74 @@ import REPL
 using ..ReportEngine
 using ..ReportRender
 
-export serve_notebook, start_server, LiveNotebook
+export serve_notebook, start_server, stop_server, LiveNotebook
+export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 
 mutable struct LiveNotebook
+    id::String                           # hub id (unique; used in /n/<id> + /api/<id>/…)
     path::String
     report::Report
+    kernel::Kernel                       # where cells eval (in-process or per-notebook gate worker)
     version::Int                         # bumps on external (file) changes
     undo::Vector{String}                 # source snapshots (most recent last)
     redo::Vector{String}
+    lock::ReentrantLock                  # serializes eval (UI actions vs. async refresh)
+    listeners::Vector{Channel{String}}   # this notebook's live SSE connections
+    llock::ReentrantLock                 # protects `listeners`
 end
 
-function load_notebook(path::AbstractString)
+# GateKernel when running as the Kaimon extension AND the notebook is inside a
+# Julia project (cells eval in a per-notebook worker); else in-process.
+function _select_kernel(path::AbstractString)
+    if ReportEngine.gate_available()
+        proj = Base.current_project(dirname(abspath(path)))
+        proj === nothing ?
+            (@warn "KaimonSlate: no enclosing project for $path — using in-process kernel") :
+            return GateKernel(dirname(proj))
+    end
+    return InProcessKernel()
+end
+
+function load_notebook(path::AbstractString; id::AbstractString = "")
     src = read(path, String)
     base = splitext(basename(path))[1]
-    id = replace(base, r"[^A-Za-z0-9]" => "_")
-    r = parse_report(src; id = id, title = base)
+    rid = replace(base, r"[^A-Za-z0-9]" => "_")
+    nbid = isempty(id) ? rid : String(id)
+    r = parse_report(src; id = rid, title = base)
     build_dependencies!(r)
-    eval_stale!(r)                       # initial full run
-    return LiveNotebook(String(path), r, 0, String[], String[])
+    kernel = _select_kernel(path)
+    eval_stale!(r, kernel)               # initial full run
+    nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
+                      ReentrantLock(), Channel{String}[], ReentrantLock())
+    # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
+    register_refresh!(r.id, vars -> server_refresh(nb, vars))
+    return nb
+end
+
+# Reactive push triggered by a cell's async task (`slate_refresh(:data, …)`):
+# restale the cells that READ those vars (but not the producers that WRITE them,
+# so we don't re-trigger the task), recompute, and push a lightweight live update.
+function server_refresh(nb::LiveNotebook, vars)
+    syms = Set{Symbol}(vars)
+    lock(nb.lock) do
+        seed = String[]
+        for c in nb.report.cells
+            c.kind == CODE || continue
+            (!isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms)) || continue
+            c.state = STALE
+            push!(seed, c.id)
+        end
+        isempty(seed) && return
+        for id in dependents_of(nb.report, Set(seed))
+            i = _index_of(nb.report.cells, id)
+            i === nothing || (nb.report.cells[i].state = STALE)
+        end
+        eval_stale!(nb.report, nb.kernel)
+    end
+    _broadcast(nb, "refresh")
+    return nothing
 end
 
 # Undo/redo over source snapshots. Call _snapshot! *before* a mutating op.
@@ -45,7 +93,7 @@ end
 
 function _restore!(nb::LiveNotebook, src::AbstractString)
     update_source!(nb.report, src)
-    eval_stale!(nb.report)
+    eval_stale!(nb.report, nb.kernel)
     write(nb.path, serialize_report(nb.report))
 end
 
@@ -76,14 +124,28 @@ function sync_from_file!(nb::LiveNotebook)
     end
     norm == serialize_report(nb.report) && return false
     update_source!(nb.report, disk)
-    eval_stale!(nb.report)
+    eval_stale!(nb.report, nb.kernel)
     nb.version += 1
     return true
 end
 
 _echarts_specs(c::Cell) = c.output === nothing ? Any[] : c.output.echarts
 
-function cell_json(c::Cell)
+# A bound control resolved for the frontend: enough to render the widget *and*
+# POST value changes to `/api/bind/<id>` (the *defining* cell's id) keyed by
+# variable name, regardless of which cell surfaces it.
+_control_spec(cell::Cell, spec::BindSpec) =
+    Dict{String,Any}("id" => cell.id, "name" => String(spec.name),
+                     "widget" => spec.widget, "params" => spec.params, "value" => spec.value)
+
+_bind_json(spec::BindSpec, hosted::Bool) =
+    Dict{String,Any}("name" => String(spec.name), "widget" => spec.widget,
+                     "params" => spec.params, "value" => spec.value, "hosted" => hosted)
+
+# `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable
+# names surfaced via some cell's `controls=` (so each collapses to a chip).
+function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
+                   hostednames::Set{String} = Set{String}())
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
@@ -94,33 +156,60 @@ function cell_json(c::Cell)
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
     )
-    if c.bind !== nothing
-        d["bind"] = Dict("name" => String(c.bind.name), "widget" => c.bind.widget,
-                         "params" => c.bind.params, "value" => c.bind.value)
+    if !isempty(c.controls)
+        # resolve each column's names to (defining cell, spec); drop unknown names + empty columns
+        cols = [[_control_spec(bindref[n]...) for n in col if haskey(bindref, n)] for col in c.controls]
+        cols = filter(!isempty, cols)
+        isempty(cols) || (d["controls"] = cols)
+    end
+    if !isempty(c.binds)
+        d["binds"] = [_bind_json(b, String(b.name) in hostednames) for b in c.binds]
     end
     return d
 end
 
-# Set a widget's value → recompute its dependents (the reactive heart of @bind).
-function set_bind!(nb::LiveNotebook, id::AbstractString, value)
+# Set widget `name` (defined by cell `id`) → recompute its dependents (the
+# reactive heart of @bind). A group cell's blast radius is by cell id, which is
+# conservative (touches readers of any of its vars) but never under-invalidates.
+function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, value)
     idx = findfirst(c -> c.id == id, nb.report.cells)
     idx === nothing && return nb
     cell = nb.report.cells[idx]
-    cell.bind === nothing && return nb
-    set_bind_value!(nb.report, cell, value)
-    for did in dependents_of(nb.report, Set([id]))
-        did == id && continue
-        j = findfirst(c -> c.id == did, nb.report.cells)
-        j === nothing || (nb.report.cells[j].state = STALE)
+    isempty(cell.binds) && return nb
+    lock(nb.lock) do
+        set_bind_value!(nb.report, cell, Symbol(name), value, nb.kernel)
+        for did in dependents_of(nb.report, Set([id]))
+            did == id && continue
+            j = findfirst(c -> c.id == did, nb.report.cells)
+            j === nothing || (nb.report.cells[j].state = STALE)
+        end
+        eval_stale!(nb.report, nb.kernel)
     end
-    eval_stale!(nb.report)
     return nb
 end
-state_json(nb::LiveNotebook) =
-    Dict("title"   => nb.report.title,
-         "path"    => abspath(nb.path),
-         "version" => nb.version,
-         "cells"   => [cell_json(c) for c in nb.report.cells])
+
+# Index every bound variable by name → (defining cell, spec), and the set of
+# variable names surfaced in some cell's control strip.
+function _bind_index(report::Report)
+    bindref = Dict{String,Tuple{Cell,BindSpec}}()
+    for c in report.cells, b in c.binds
+        bindref[String(b.name)] = (c, b)
+    end
+    hostednames = Set{String}()
+    for c in report.cells, col in c.controls, n in col
+        haskey(bindref, n) && push!(hostednames, n)
+    end
+    return bindref, hostednames
+end
+
+function state_json(nb::LiveNotebook)
+    bindref, hostednames = _bind_index(nb.report)
+    return Dict("id"      => nb.id,
+                "title"   => nb.report.title,
+                "path"    => abspath(nb.path),
+                "version" => nb.version,
+                "cells"   => [cell_json(c, bindref, hostednames) for c in nb.report.cells])
+end
 
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →
 # persist back to the `.jl`.
@@ -137,7 +226,7 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
     new_full = serialize_report(nb.report)
     cells[idx].source = saved
     update_source!(nb.report, new_full)
-    eval_stale!(nb.report)
+    eval_stale!(nb.report, nb.kernel)
     write(nb.path, serialize_report(nb.report))
     return nb
 end
@@ -159,7 +248,7 @@ function _commit_structure!(nb::LiveNotebook, idx::Int)
     for (i, c) in enumerate(nb.report.cells)
         i >= idx && (c.state = STALE)
     end
-    eval_stale!(nb.report)
+    eval_stale!(nb.report, nb.kernel)
     write(nb.path, serialize_report(nb.report))
     return nb
 end
@@ -205,6 +294,22 @@ function move_cell_rel!(nb::LiveNotebook, id::AbstractString, target_id::Abstrac
     _commit_structure!(nb, min(i, p))
 end
 
+# Set the `controls=` layout of one or more cells (drag-to-host: add / move /
+# reorder / remove / re-column). Presentation only — no re-eval; just rewrite the
+# `.jl`. The caller sends each affected cell's *full desired* layout as columns of
+# names (`[[a,b],[c]]`); empty columns are dropped.
+function set_controls_map!(nb::LiveNotebook, map)
+    isempty(map) && return nb
+    _snapshot!(nb)
+    for (id, cols) in map
+        i = _index_of(nb.report.cells, id); i === nothing && continue
+        cleaned = Vector{String}[String[String(n) for n in col] for col in cols]
+        nb.report.cells[i].controls = filter(!isempty, cleaned)
+    end
+    write(nb.path, serialize_report(nb.report))
+    return nb
+end
+
 function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString)
     cells = nb.report.cells
     i = _index_of(cells, id); i === nothing && return nb
@@ -222,18 +327,27 @@ function _body(req)
     return isempty(s) ? Dict{String,Any}() : JSON.parse(s)
 end
 
-# ── Live push over SSE ───────────────────────────────────────────────────────
-const _LISTENERS = Channel{String}[]
-const _LLOCK = ReentrantLock()
-
-function _broadcast(msg::AbstractString)
-    lock(_LLOCK) do
-        for ch in _LISTENERS
+# ── Live push over SSE (per notebook) ────────────────────────────────────────
+function _broadcast(nb::LiveNotebook, msg::AbstractString)
+    lock(nb.llock) do
+        for ch in nb.listeners
             try
                 isopen(ch) && Base.n_avail(ch) < 32 && put!(ch, String(msg))
             catch
             end
         end
+    end
+end
+
+# Close this notebook's live SSE channels so each `_sse` loop's `take!` throws and
+# returns, ending its long-lived connection. Without this, `close(server)` blocks
+# waiting for those streams to drain (a browser tab left open hangs the close).
+function _close_listeners(nb::LiveNotebook)
+    lock(nb.llock) do
+        for ch in nb.listeners
+            try; close(ch); catch; end
+        end
+        empty!(nb.listeners)
     end
 end
 
@@ -250,7 +364,7 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
     ch = Channel{String}(32)
-    lock(_LLOCK) do; push!(_LISTENERS, ch); end
+    lock(nb.llock) do; push!(nb.listeners, ch); end
     try
         write(stream, "data: $(nb.version)\n\n")
         while true
@@ -259,7 +373,7 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
         end
     catch
     finally
-        lock(_LLOCK) do; filter!(c -> c !== ch, _LISTENERS); end
+        lock(nb.llock) do; filter!(c -> c !== ch, nb.listeners); end
         close(ch)
     end
     return nothing
@@ -273,29 +387,87 @@ function _start_watcher!(nb::LiveNotebook)
     @async while true
         try
             FileWatching.watch_file(nb.path, 2.0)
-            sync_from_file!(nb) && _broadcast(string(nb.version))
+            sync_from_file!(nb) && _broadcast(nb, string(nb.version))
         catch
             sleep(0.5)
         end
     end
     @async while true
         sleep(15)
-        _broadcast("hb")
+        _broadcast(nb, "hb")
     end
 end
 
-function _make_router(nb::LiveNotebook)
+# ── Hub: one server, one port, many notebooks ────────────────────────────────
+#
+# Notebooks live in a registry keyed by a unique hub `id`. Routes are
+# notebook-scoped (`/n/<id>` SPA, `/api/<id>/…`, `/api/<id>/events` SSE); `/` is
+# an index/switcher page. One HTTP 2.0 server replaces the old one-port-per-file.
+mutable struct Hub
+    notebooks::Dict{String,LiveNotebook}
+    server::Any
+    host::String
+    port::Int
+    lock::ReentrantLock
+end
+
+_hub_url(h::Hub) = "http://$(h.host):$(h.port)"
+_esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;")
+
+# A unique id from the filename (deduped against the registry).
+function _unique_id(h::Hub, path::AbstractString)
+    base = replace(splitext(basename(path))[1], r"[^A-Za-z0-9]" => "_")
+    isempty(base) && (base = "nb")
+    id = base; i = 1
+    while haskey(h.notebooks, id); i += 1; id = "$(base)_$i"; end
+    return id
+end
+
+_notebooks_json(h::Hub) = lock(h.lock) do
+    [Dict("id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
+          "cells" => length(nb.report.cells)) for nb in values(h.notebooks)]
+end
+
+# The index / switcher page: a Pluto-style list of open notebooks.
+function _index_html(h::Hub)
+    rows = lock(h.lock) do
+        isempty(h.notebooks) ?
+            "<p class=\"empty\">No notebooks open. Open one with the <code>slate.open</code> tool.</p>" :
+            join(("<a class=\"nb\" href=\"/n/$(nb.id)\"><span class=\"t\">$(_esc(nb.report.title))</span>" *
+                  "<span class=\"p\">$(_esc(abspath(nb.path)))</span>" *
+                  "<span class=\"c\">$(length(nb.report.cells)) cells</span></a>"
+                  for nb in values(h.notebooks)))
+    end
+    return """<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Kaimon Slate</title>
+    <style>body{background:#0d1120;color:#d4d8e8;font-family:system-ui,sans-serif;margin:0;padding:40px;}
+    h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
+    .nb{display:flex;flex-direction:column;gap:2px;padding:12px 16px;margin:8px 0;background:#141828;
+        border:1px solid #2a2e40;border-left:3px solid #569cd6;border-radius:8px;text-decoration:none;color:inherit;max-width:760px;}
+    .nb:hover{border-color:#569cd6;} .nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:monospace;font-size:.8rem;}
+    .nb .c{color:#56d364;font-size:.75rem;}</style></head>
+    <body><h1>📓 Kaimon Slate — notebooks</h1>$rows</body></html>"""
+end
+
+_html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store"], body)
+
+# Run `f(nb)` for the notebook named by the request's `id` path param, else 404.
+function _withnb(h::Hub, req, f)
+    id = HTTP.getparam(req, "id")
+    nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+    nb === nothing && return HTTP.Response(404, "no such notebook: $id")
+    return f(nb)
+end
+
+function _make_router(h::Hub)
     router = HTTP.Router()
-    HTTP.register!(router, "GET", "/",
-        _ -> HTTP.Response(200, ["Content-Type" => "text/html"], read(_ASSET, String)))
-    HTTP.register!(router, "GET", "/api/state", _ -> (sync_from_file!(nb); _json(state_json(nb))))
-    HTTP.register!(router, "POST", "/api/cell/{id}", req -> begin
-        id = HTTP.getparam(req, "id")
-        body = _body(req)
-        edit_cell!(nb, id, get(body, "source", ""))
-        _json(state_json(nb))
-    end)
-    HTTP.register!(router, "POST", "/api/complete", req -> begin
+    HTTP.register!(router, "GET", "/", _ -> _html(_index_html(h)))
+    HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
+    HTTP.register!(router, "GET", "/n/{id}", _ -> _html(read(_ASSET, String)))
+    HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/cell/{cid}", req -> _withnb(h, req, nb -> begin
+        edit_cell!(nb, HTTP.getparam(req, "cid"), get(_body(req), "source", "")); _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/complete", req -> _withnb(h, req, nb -> begin
         body = _body(req)
         code = String(get(body, "code", ""))
         pos = clamp(Int(get(body, "pos", ncodeunits(code))), 0, ncodeunits(code))
@@ -307,70 +479,137 @@ function _make_router(nb::LiveNotebook)
             (String[], pos, pos)
         end
         _json(Dict("completions" => texts, "from" => from, "to" => to))
-    end)
-    HTTP.register!(router, "POST", "/api/cell-add", req -> begin
-        b = _body(req)
-        add_cell!(nb, get(b, "after", ""), get(b, "kind", "code"))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/cell-add", req -> _withnb(h, req, nb -> begin
+        b = _body(req); add_cell!(nb, get(b, "after", ""), get(b, "kind", "code")); _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/cell-delete/{cid}", req -> _withnb(h, req, nb ->
+        (delete_cell!(nb, HTTP.getparam(req, "cid")); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/cell-move/{cid}", req -> _withnb(h, req, nb -> begin
+        b = _body(req); cid = HTTP.getparam(req, "cid")
+        haskey(b, "target") ? move_cell_rel!(nb, cid, b["target"], get(b, "before", true) === true) :
+                              move_cell!(nb, cid, get(b, "dir", "up"))
         _json(state_json(nb))
-    end)
-    HTTP.register!(router, "POST", "/api/cell-delete/{id}", req ->
-        (delete_cell!(nb, HTTP.getparam(req, "id")); _json(state_json(nb))))
-    HTTP.register!(router, "POST", "/api/cell-move/{id}", req -> begin
-        b = _body(req)
-        id = HTTP.getparam(req, "id")
-        haskey(b, "target") ? move_cell_rel!(nb, id, b["target"], get(b, "before", true) === true) :
-                              move_cell!(nb, id, get(b, "dir", "up"))
-        _json(state_json(nb))
-    end)
-    HTTP.register!(router, "POST", "/api/cell-type/{id}", req -> begin
-        b = _body(req)
-        set_kind!(nb, HTTP.getparam(req, "id"), get(b, "kind", "code"))
-        _json(state_json(nb))
-    end)
-    HTTP.register!(router, "POST", "/api/bind/{id}", req -> begin
-        id = HTTP.getparam(req, "id")
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/cell-type/{cid}", req -> _withnb(h, req, nb -> begin
+        set_kind!(nb, HTTP.getparam(req, "cid"), get(_body(req), "kind", "code")); _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/controls", req -> _withnb(h, req, nb -> begin
+        set_controls_map!(nb, get(_body(req), "map", Dict{String,Any}())); _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/bind/{cid}", req -> _withnb(h, req, nb -> begin
         body = _body(req)
-        set_bind!(nb, id, get(body, "value", nothing))
+        set_bind!(nb, HTTP.getparam(req, "cid"), get(body, "name", ""), get(body, "value", nothing))
         _json(state_json(nb))
-    end)
-    HTTP.register!(router, "POST", "/api/undo", _ -> (undo!(nb); _json(state_json(nb))))
-    HTTP.register!(router, "POST", "/api/redo", _ -> (redo!(nb); _json(state_json(nb))))
-    HTTP.register!(router, "POST", "/api/run", _ -> (eval_stale!(nb.report); _json(state_json(nb))))
-    HTTP.register!(router, "POST", "/api/reset", _ -> begin
-        reset_module!(nb.report); build_dependencies!(nb.report); eval_stale!(nb.report)
-        _json(state_json(nb))
-    end)
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/undo", req -> _withnb(h, req, nb -> (undo!(nb); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> (redo!(nb); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (eval_stale!(nb.report, nb.kernel); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
+        ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))
+    end))
     return router
 end
 
-"""
-    start_server(path; host="127.0.0.1", port=8765) -> HTTP.Server
+const _EVENTS_RE = r"^/api/([^/]+)/events$"
 
-Load the notebook at `path` and start serving its interactive browser UI.
-**Non-blocking** — returns the running `HTTP.Server` immediately (call `close`
-on it to stop). Use this when managing notebook servers programmatically (e.g.
-the Kaimon extension). For a blocking launcher, use [`serve_notebook`](@ref).
 """
-function start_server(path::AbstractString; host = "127.0.0.1", port = 8765)
-    nb = load_notebook(path)
-    handle = HTTP.streamhandler(_make_router(nb))   # normal routes as a stream handler
-    _start_watcher!(nb)
-    @info "Notebook server" url = "http://$host:$port" file = abspath(path) cells = length(nb.report.cells)
-    return HTTP.listen!(host, port) do stream::HTTP.Stream
-        stream.message.target == "/api/events" ? _sse(stream, nb) : handle(stream)
+    start_hub(; host="127.0.0.1", port=8765) -> Hub
+
+Start the single notebook server with an empty registry. Add notebooks with
+[`open_notebook!`](@ref). Non-blocking.
+"""
+function start_hub(; host = "127.0.0.1", port = 8765)
+    h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock())
+    handle = HTTP.streamhandler(_make_router(h))
+    server = HTTP.listen!(host, port) do stream::HTTP.Stream
+        m = match(_EVENTS_RE, stream.message.target)
+        if m !== nothing
+            nb = lock(h.lock) do; get(h.notebooks, m.captures[1], nothing); end
+            nb === nothing ? (HTTP.setstatus(stream, 404); HTTP.startwrite(stream)) : _sse(stream, nb)
+        else
+            handle(stream)
+        end
+    end
+    h.server = server
+    @info "Kaimon Slate hub" url = _hub_url(h)
+    return h
+end
+
+"""
+    open_notebook!(hub, path) -> id
+
+Load the notebook at `path` into the hub (reusing the existing entry if already
+open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
+"""
+function open_notebook!(h::Hub, path::AbstractString)
+    file = abspath(path)
+    lock(h.lock) do
+        for nb in values(h.notebooks)
+            abspath(nb.path) == file && return nb.id
+        end
+        id = _unique_id(h, file)
+        nb = load_notebook(file; id = id)
+        h.notebooks[id] = nb
+        _start_watcher!(nb)
+        return id
     end
 end
+
+"Remove a notebook from the hub: drain its SSE connections and drop it."
+function close_notebook!(h::Hub, id::AbstractString)
+    lock(h.lock) do
+        nb = get(h.notebooks, id, nothing)
+        nb === nothing && return false
+        _close_listeners(nb)
+        unregister_refresh!(nb.report.id)
+        try; shutdown!(nb.kernel); catch; end
+        delete!(h.notebooks, id)
+        return true
+    end
+end
+
+"Stop the hub: drain every notebook's SSE connections, then close the server."
+function stop_hub(h::Hub)
+    lock(h.lock) do
+        for nb in values(h.notebooks)
+            _close_listeners(nb); unregister_refresh!(nb.report.id)
+            try; shutdown!(nb.kernel); catch; end
+        end
+        empty!(h.notebooks)
+    end
+    h.server === nothing || close(h.server)
+    return nothing
+end
+
+# ── Standalone convenience (one notebook) ─────────────────────────────────────
+
+"""
+    start_server(path; host="127.0.0.1", port=8765) -> Hub
+
+Start a hub and open the single notebook at `path`. Non-blocking; returns the
+`Hub` (stop it with [`stop_hub`](@ref)). The notebook is served at `/n/<id>`
+(printed); `/` is the index. For a blocking launcher use [`serve_notebook`](@ref).
+"""
+function start_server(path::AbstractString; host = "127.0.0.1", port = 8765)
+    h = start_hub(; host = host, port = port)
+    id = open_notebook!(h, path)
+    @info "Notebook" url = "$(_hub_url(h))/n/$id" file = abspath(path)
+    return h
+end
+
+"Stop a hub started by [`start_server`](@ref) (drains SSE, frees the port)."
+stop_server(h::Hub) = stop_hub(h)
 
 """
     serve_notebook(path; host="127.0.0.1", port=8765)
 
-Load the notebook at `path` and serve the interactive browser UI. **Blocks** until
-the server stops (wraps [`start_server`](@ref)).
+Open the notebook at `path` in a hub and serve it. **Blocks** until stopped.
 """
 function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765)
-    server = start_server(path; host = host, port = port)
-    wait(server)
-    return server
+    h = start_server(path; host = host, port = port)
+    wait(h.server)
+    return h
 end
 
 end # module NotebookServer

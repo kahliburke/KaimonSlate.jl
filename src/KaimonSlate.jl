@@ -30,48 +30,27 @@ include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRe
 
 using .ReportEngine
 using .ReportRender
-using .NotebookServer: serve_notebook, start_server, LiveNotebook
+using .NotebookServer: serve_notebook, start_server, LiveNotebook,
+                      Hub, start_hub, open_notebook!, close_notebook!, stop_hub
 
 export serve_notebook, LiveNotebook
 
-# ── Notebook server registry ──────────────────────────────────────────────────
-# The extension manages several notebooks at once — one live server per file,
-# each on its own port (answering "can it load more than one file?"). Servers run
-# in the extension subprocess alongside the Gate loop.
+# ── Single-server hub ─────────────────────────────────────────────────────────
+# The extension serves *all* notebooks from one HTTP 2.0 server on one port,
+# routing per-notebook by id (`/n/<id>`, `/api/<id>/…`); `/` is a switcher index.
+# The hub runs in the extension subprocess alongside the Gate loop.
 
-const _BASE_PORT = 8765
-const _SERVERS = Dict{String,@NamedTuple{server::Any, port::Int}}()
+const _PORT = 8765
+const _HUB = Ref{Union{Hub,Nothing}}(nothing)
 const _LOCK = ReentrantLock()
 
-_url(port::Int) = "http://127.0.0.1:$port"
+_base() = "http://127.0.0.1:$_PORT"
 
-# Start (or return the existing) live server for `path`, returning its URL.
-function _ensure_server(path::AbstractString)
-    file = abspath(path)
+# The running hub (started lazily on first open).
+function _hub()
     lock(_LOCK) do
-        haskey(_SERVERS, file) && return _url(_SERVERS[file].port)
-        # First free port at/above _BASE_PORT not already taken by us.
-        taken = Set(s.port for s in values(_SERVERS))
-        port = _BASE_PORT
-        while port in taken
-            port += 1
-        end
-        server = start_server(file; port = port)
-        _SERVERS[file] = (server = server, port = port)
-        return _url(port)
-    end
-end
-
-function _stop_server(path::AbstractString)
-    file = abspath(path)
-    lock(_LOCK) do
-        haskey(_SERVERS, file) || return false
-        try
-            close(_SERVERS[file].server)
-        catch
-        end
-        delete!(_SERVERS, file)
-        return true
+        _HUB[] === nothing && (_HUB[] = start_hub(; port = _PORT))
+        return _HUB[]::Hub
     end
 end
 
@@ -95,29 +74,43 @@ function create_tools(GateTool::Type)
     """
     function nb_open(path::String)::String
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
-        url = _ensure_server(path)
-        return "Serving $(abspath(path)) at $url"
+        h = _hub()
+        id = open_notebook!(h, path)
+        return "Serving $(abspath(path)) at $(_base())/n/$id"
     end
 
     """
         list() -> String
 
-    List the notebooks currently being served and their URLs.
+    List the notebooks currently being served and their URLs (index: the base URL).
     """
     function nb_list()::String
-        lock(_LOCK) do
-            isempty(_SERVERS) && return "No notebooks open."
-            return join(("$(_url(s.port))  ←  $file" for (file, s) in _SERVERS), "\n")
+        h = _HUB[]
+        (h === nothing || isempty(h.notebooks)) && return "No notebooks open."
+        lines = lock(h.lock) do
+            ["$(_base())/n/$(nb.id)  ←  $(abspath(nb.path))" for nb in values(h.notebooks)]
         end
+        return join(["Index: $(_base())"; lines], "\n")
     end
 
     """
         close(path::String) -> String
 
-    Stop the live server for the notebook at `path`.
+    Stop serving the notebook at `path` (the hub stays up for the others).
     """
     function nb_close(path::String)::String
-        return _stop_server(path) ? "Closed $(abspath(path))" : "Not open: $(abspath(path))"
+        h = _HUB[]
+        h === nothing && return "Not open: $(abspath(path))"
+        file = abspath(path)
+        id = lock(h.lock) do
+            for nb in values(h.notebooks)
+                abspath(nb.path) == file && return nb.id
+            end
+            return nothing
+        end
+        id === nothing && return "Not open: $file"
+        close_notebook!(h, id)
+        return "Closed $file"
     end
 
     return [
@@ -134,13 +127,7 @@ Stop every running notebook server before the extension subprocess exits.
 """
 function on_shutdown()
     lock(_LOCK) do
-        for (_, s) in _SERVERS
-            try
-                close(s.server)
-            catch
-            end
-        end
-        empty!(_SERVERS)
+        _HUB[] === nothing || (try; stop_hub(_HUB[]); catch; end; _HUB[] = nothing)
     end
     @info "KaimonSlate shut down"
 end

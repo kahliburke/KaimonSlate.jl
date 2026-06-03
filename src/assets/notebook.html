@@ -24,6 +24,9 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .topbar { position:sticky; top:0; z-index:10; background:var(--bg2); border-bottom:1px solid var(--border);
           padding:10px 20px; display:flex; align-items:center; gap:12px; }
 .topbar h1 { font-size:1.1rem; margin:0; color:#fff; flex:1; }
+.nbswitch { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
+            padding:4px 8px; font-size:.82rem; max-width:220px; }
+.nbswitch:hover { border-color:var(--accent); }
 button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
          padding:4px 12px; cursor:pointer; font-size:.82rem; }
 button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid var(--border);
@@ -81,12 +84,92 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .widget input[type=text], .widget input[type=number], .widget select {
   background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
 .wval { font-family:'Cascadia Code',monospace; color:var(--green); min-width:48px; text-align:right; }
+/* Control strip: bound widgets surfaced *with* a cell's output (presentation layer). */
+.controls { display:flex; flex-wrap:wrap; align-items:stretch; gap:8px; padding:10px 14px;
+            border-top:1px solid var(--border); background:linear-gradient(var(--bg3),var(--bg2)); }
+.ccol { display:flex; flex-direction:column; gap:8px; flex:0 1 auto; min-width:220px; }
+/* Thin drop zones between/around columns — collapsed until a control drag starts. */
+.coldrop { flex:0 0 0; align-self:stretch; border-radius:6px; }
+body.cdnd .coldrop { flex:0 0 16px; outline:2px dashed var(--border); outline-offset:-4px; }
+.coldrop.cdrop { background:rgba(86,156,214,.22); outline-color:var(--accent); }
+.ccol.cdrop { outline:2px dashed var(--accent); outline-offset:-4px; border-radius:6px; }
+/* The dragged control is already in this cell → its existing instance will just move. */
+.control.cdup { outline:2px solid var(--gold); outline-offset:2px; border-radius:6px; }
+/* Empty strips are hidden, except while dragging a control (then a dropzone). */
+.controls.empty { display:none; }
+body.cdnd .controls.empty { display:flex; }
+body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--dim); font-size:.74rem;
+  padding:8px; align-self:center; }
+.control { display:flex; align-items:center; gap:8px; }
+.control .wname { min-width:auto; }
+.cgrip { cursor:grab; color:var(--dim); user-select:none; font-size:.9rem; padding:3px 6px;
+         border-radius:4px; display:flex; align-items:center; }
+.cgrip:hover { background:var(--bg); color:var(--accent); }
+.cgrip:active { cursor:grabbing; }
+/* Expanded widget types (shared by standalone .widget rows and .control strips). */
+.widget textarea, .control textarea { flex:1; min-width:0; background:var(--bg3); color:var(--text);
+  border:1px solid var(--border); border-radius:5px; padding:4px 8px; font-family:inherit; resize:vertical; }
+.control textarea { background:var(--bg); }
+.widget input[type=color], .control input[type=color] { width:42px; height:26px; padding:0; cursor:pointer;
+  border:1px solid var(--border); border-radius:5px; background:transparent; }
+.widget input[type=date], .widget input[type=time],
+.control input[type=date], .control input[type=time] { background:var(--bg3); color:var(--text);
+  border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
+.control input[type=date], .control input[type=time] { background:var(--bg); }
+.widget select[multiple], .control select[multiple] { flex:1; min-width:0; min-height:64px; }
+.radiogroup { display:flex; gap:12px; flex-wrap:wrap; flex:1; }
+.radiogroup label { display:flex; align-items:center; gap:4px; cursor:pointer; }
+.actionbtn { background:var(--accent); color:#fff; border:none; border-radius:5px; padding:4px 14px; cursor:pointer; }
+.actionbtn:hover { filter:brightness(1.12); }
+input.toggle { appearance:none; -webkit-appearance:none; width:34px; height:18px; border-radius:10px;
+  background:var(--border); position:relative; cursor:pointer; transition:background .15s; }
+input.toggle:checked { background:var(--purple); }
+input.toggle::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px;
+  border-radius:50%; background:#fff; transition:left .15s; }
+input.toggle:checked::after { left:18px; }
+.cdel { padding:0 5px; font-size:.7rem; line-height:1; color:var(--dim); border-color:transparent; background:transparent; }
+.cdel:hover { color:var(--red); border-color:var(--red); }
+.control input[type=range] { flex:1; accent-color:var(--purple); }
+.control input[type=text], .control input[type=number], .control select {
+  background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
+.control .wval { min-width:40px; }
+/* A bind/control-group cell stacks one row per bound variable. */
+.binds > .widget + .widget, .binds > .widget + .hostedph, .binds > .hostedph + .widget,
+.binds > .hostedph + .hostedph { border-top:1px solid var(--border); }
+/* A bound control surfaced in a strip elsewhere collapses to this slim chip. */
+.hostedph { display:flex; align-items:center; gap:8px; padding:6px 14px; color:var(--dim); font-size:.78rem; }
+.hostedph .wname { min-width:auto; }
+/* Controls palette — a side drawer listing every declared @bind across the notebook. */
+.palette { position:fixed; top:0; right:0; height:100vh; width:300px; background:var(--bg2);
+  border-left:1px solid var(--border); transform:translateX(100%); transition:transform .18s ease;
+  z-index:20; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.3); }
+.palette.open { transform:none; }
+.phead { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); }
+.phead strong { color:#fff; } .pclose { margin-left:auto; }
+.plist { flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:6px; }
+.plist.premove { outline:2px dashed var(--red); outline-offset:-6px; background:rgba(229,117,117,.08); }
+body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-size:.72rem; text-align:center; padding:6px; }
+.phint { color:var(--dim); font-size:.8rem; padding:10px; }
+.pfoot { padding:10px 14px; border-top:1px solid var(--border); font-size:.72rem; }
+.chip { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg3);
+  border:1px solid var(--border); border-left:3px solid var(--purple); border-radius:6px;
+  cursor:pointer; font-size:.82rem; }
+.chip:hover { border-color:var(--accent); }
+.chip .cname { font-family:'Cascadia Code',monospace; color:var(--accent); }
+.chip .ctype { color:var(--dim); font-size:.72rem; }
+.chip .cright { margin-left:auto; display:flex; align-items:center; gap:8px; }
+.chip .chost { color:var(--gold); font-size:.72rem; }
+.chip .pval { color:var(--green); font-family:'Cascadia Code',monospace; }
+.chip.hosted { opacity:.7; }
 </style>
 </head>
 <body>
 <div class="topbar">
+  <a class="btnlink" href="/" title="all notebooks">📓</a>
+  <select id="nbswitch" class="nbswitch" title="switch notebook"></select>
   <h1 id="title">Notebook</h1>
   <span class="hint">⇧⏎ run · ⇥ complete</span>
+  <label class="hint" title="minimum delay between live recomputes while dragging a control (the final value is always sent on release)">⏱ <input id="rateMs" type="number" min="0" max="2000" step="25" style="width:56px"/> ms</label>
   <a id="vscode" class="btnlink" href="#" title="Open the .jl in VS Code">⧉ VS Code</a>
   <button onclick="undoNb()" title="undo (⌘Z)">↶</button>
   <button onclick="redoNb()" title="redo (⌘⇧Z)">↷</button>
@@ -94,13 +177,27 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
   <button onclick="runAll()">▶ Run stale</button>
   <button onclick="resetAll()">↻ Rebuild</button>
   <button onclick="reload()">⟳ Reload</button>
+  <button onclick="togglePalette()" title="controls palette">🎛 Controls</button>
 </div>
 <div class="page"><div id="nb"></div></div>
+<aside id="palette" class="palette">
+  <div class="phead"><strong>Controls</strong><span id="palette-count" class="hint"></span>
+    <button class="pclose" onclick="togglePalette()" title="close">✕</button></div>
+  <div id="palette-list" class="plist"></div>
+  <div class="pfoot hint">Click a chip to jump to its cell. Drag a chip into a cell's control strip to surface it.</div>
+</aside>
 
 <script>
+// This notebook's hub id, from the /n/<id> URL; all API/SSE paths are scoped to it.
+const NB_ID = decodeURIComponent((location.pathname.match(/^\/n\/([^\/]+)/) || ['', ''])[1]);
+const _apipath = p => p.replace(/^\/api\//, '/api/' + NB_ID + '/');
+
 const editors = {};
 const charts = {};            // cell id -> [echarts instances]
 const srcMap = {};            // cell id -> raw source (for markdown editing)
+let nbState = null;           // latest notebook state (drives the controls palette)
+// Min delay (ms) between live recomputes while dragging a control. Persisted.
+let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
 let lastVersion = -1;
 
 const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
@@ -128,7 +225,7 @@ window.addEventListener('resize', () => Object.values(charts).flat().forEach(c =
 function juliaHint(cm, callback) {
   const code = cm.getValue();
   const pos = cm.indexFromPos(cm.getCursor());
-  fetch('/api/complete', {
+  fetch(_apipath('/api/complete'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ code, pos })
   }).then(r => r.json()).then(d => {
@@ -142,35 +239,92 @@ function juliaHint(cm, callback) {
 juliaHint.async = true;
 
 async function api(method, path, body) {
-  const r = await fetch(path, {
+  const r = await fetch(_apipath(path), {
     method, headers: {'Content-Type': 'application/json'},
     body: body ? JSON.stringify(body) : undefined
   });
   return r.json();
 }
 
-function widgetHTML(c) {
-  const b = c.bind, p = b.params || {};
-  let ctrl = '';
-  if (b.widget === 'slider')
-    ctrl = `<input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${b.value}" data-bind="${c.id}"/>`;
-  else if (b.widget === 'number')
-    ctrl = `<input type="number" value="${b.value}" data-bind="${c.id}"/>`;
-  else if (b.widget === 'checkbox')
-    ctrl = `<input type="checkbox" ${b.value ? 'checked' : ''} data-bind="${c.id}"/>`;
-  else if (b.widget === 'text')
-    ctrl = `<input type="text" value="${b.value}" data-bind="${c.id}"/>`;
-  else if (b.widget === 'select')
-    ctrl = `<select data-bind="${c.id}">` +
-      (p.options || []).map(o => `<option ${o == b.value ? 'selected' : ''}>${o}</option>`).join('') + '</select>';
-  return `<div class="widget"><span class="wname">${b.name}</span>${ctrl}` +
-    `<span class="wval" id="wval-${c.id}">${b.value}</span></div>`;
+// Inner markup for one bound control. `bindId` is the *defining* bind cell's id
+// (the /api/bind POST target); `b` is its spec ({name,widget,params,value}). Used
+// by both the standalone @bind cell and any cell's control strip — wherever a
+// widget renders, changing it drives recompute the same way.
+const _esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
+
+function controlMarkup(bindId, b) {
+  const p = b.params || {}, w = b.widget;
+  const a = `data-bind="${bindId}" data-name="${b.name}" data-widget="${w}"`;
+  const opts = (p.options || []);
+  let ctrl = '', wval = `<span class="wval">${_esc(_showVal(b.value))}</span>`;
+  if (w === 'slider')
+    ctrl = `<input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${b.value}" ${a}/>`;
+  else if (w === 'number')
+    ctrl = `<input type="number" value="${b.value}" ${p.min != null ? `min="${p.min}"` : ''} ${p.max != null ? `max="${p.max}"` : ''} ${a}/>`;
+  else if (w === 'checkbox' || w === 'toggle')
+    ctrl = `<input type="checkbox" class="${w}" ${b.value ? 'checked' : ''} ${a}/>`;
+  else if (w === 'text')
+    ctrl = `<input type="text" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'textarea')
+    ctrl = `<textarea rows="${p.rows || 3}" ${a}>${_esc(b.value)}</textarea>`;
+  else if (w === 'color')
+    ctrl = `<input type="color" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'date')
+    ctrl = `<input type="date" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'time')
+    ctrl = `<input type="time" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'select')
+    ctrl = `<select ${a}>` + opts.map(o => `<option ${o == b.value ? 'selected' : ''}>${_esc(o)}</option>`).join('') + '</select>';
+  else if (w === 'multiselect')
+    ctrl = `<select multiple ${a}>` +
+      opts.map(o => `<option ${(b.value || []).includes(o) ? 'selected' : ''}>${_esc(o)}</option>`).join('') + '</select>';
+  else if (w === 'radio')
+    ctrl = `<span class="radiogroup" ${a}>` + opts.map((o, i) =>
+      `<label><input type="radio" name="r-${bindId}-${b.name}" value="${_esc(o)}" ${o == b.value ? 'checked' : ''}/>${_esc(o)}</label>`).join('') + '</span>';
+  else if (w === 'button') {
+    ctrl = `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
+    wval = `<span class="wval">×${b.value}</span>`;       // show the click count
+  }
+  return `<span class="wname">${b.name}</span>${ctrl}${wval}`;
+}
+
+// One row inside a bind/group cell: the live widget, or — when its control is
+// surfaced in a strip elsewhere — a slim chip (the variable stays live).
+const bindRow = (cellId, b) => b.hosted
+  ? `<div class="hostedph">⊞ <span class="wname">${b.name}</span>` +
+    '<span class="hint">— surfaced in a control strip</span></div>'
+  : `<div class="widget">${controlMarkup(cellId, b)}</div>`;
+
+// The body of a bind/group cell: one row per bound variable it defines.
+const bindsHTML = c => `<div class="binds">${(c.binds || []).map(b => bindRow(c.id, b)).join('')}</div>`;
+
+const hasBinds = c => c.binds && c.binds.length;
+
+// The control strip for a code cell: each surfaced bound control, wired to its
+// own defining bind cell. Rendered OUTSIDE `.output` so value-only updates
+// (which replace `.output`) never tear down a widget mid-drag. Always present
+// (even empty) so any code cell is a drop target for the palette. Each control
+// carries a drag grip (move/reorder) and a ✕ (un-host).
+function controlStrip(c) {
+  const cols = c.controls || [];                 // array of columns; each column an array of specs
+  const ctrl = s => `<div class="control" data-cname="${s.name}">` +
+    `<span class="cgrip" draggable="true" data-name="${s.name}" title="drag to move / reorder">⠿</span>` +
+    controlMarkup(s.id, s) +
+    `<button class="cdel" data-name="${s.name}" title="remove from strip">✕</button></div>`;
+  // Interleave thin column-drop zones (revealed while dragging) so a control can
+  // be dropped *between* columns to create a new one. `data-colindex` is the
+  // insertion index into the columns array.
+  const dz = i => `<div class="coldrop" data-colindex="${i}"></div>`;
+  let inner = dz(0);
+  cols.forEach((col, i) => { inner += `<div class="ccol" data-colindex="${i}">${col.map(ctrl).join('')}</div>` + dz(i + 1); });
+  return `<div class="controls${cols.length ? '' : ' empty'}" data-cell="${c.id}">${inner}</div>`;
 }
 
 function cellBar(c) {
   const other = c.kind === 'md' ? 'code' : 'md';
-  const editSrc = (c.kind === 'md' || c.bind)
-    ? `<button onclick="editSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
+  const editSrc = (c.kind === 'md' || hasBinds(c))
+    ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="toggle source / rendered">&lt;/&gt;</button>` : '';
   return '<div class="cellbar">' +
     '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     editSrc +
@@ -193,9 +347,10 @@ function cellEl(c) {
     div.innerHTML = cellBar(c) +
       `<div class="md" ondblclick="editSource('${c.id}','markdown')" title="double-click to edit">${mdHtml(c)}</div>` +
       srcEditHTML();
-  } else if (c.bind) {
+  } else if (hasBinds(c)) {
+    // A bind/control-group cell: one row per variable (live widget or hosted chip).
     div.className = 'cell bind state-' + c.state;
-    div.innerHTML = cellBar(c) + widgetHTML(c) + srcEditHTML();
+    div.innerHTML = cellBar(c) + bindsHTML(c) + srcEditHTML();
   } else {
     div.className = 'cell code state-' + c.state;
     div.innerHTML = cellBar(c) +
@@ -204,6 +359,7 @@ function cellEl(c) {
       '<span class="cdur">' + (c.duration != null ? c.duration + ' ms' : '') + '</span>' +
       '<span class="cid">' + c.id + '</span></div>' +
       '<textarea></textarea>' +
+      controlStrip(c) +
       '<div class="output">' + c.output + '</div>' +
       '<div class="echarts"></div>';
   }
@@ -212,25 +368,62 @@ function cellEl(c) {
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
-function mountWidget(c) {
-  if (!c.bind) return;
-  const el = document.querySelector('#cell-' + c.id + ' [data-bind]');
-  if (!el) return;
-  const send = debounce(v => setBind(c.id, v), 120);
-  const onInput = () => {
-    let v;
-    if (c.bind.widget === 'checkbox') v = el.checked;
-    else if (c.bind.widget === 'slider' || c.bind.widget === 'number') v = parseFloat(el.value);
-    else v = el.value;
-    const wv = document.getElementById('wval-' + c.id); if (wv) wv.textContent = v;
-    send(v);
+// Wire one widget input → its defining bind cell. `data-bind` is the bind cell
+// id (POST target); `data-widget` its type. The value mirror (`.wval`) is found
+// relative to the input, so strip and standalone widgets never collide on ids.
+//
+// Send policy while dragging: rate-limit to one recompute per `updateMs`, AND
+// coalesce in-flight (never queue a backlog — hold only the latest value while a
+// recompute runs). Releasing the control (`change`) flushes the final value
+// immediately, so the end state is always correct regardless of the rate limit.
+function wireControl(el) {
+  const id = el.dataset.bind, name = el.dataset.name, widget = el.dataset.widget;
+  let inflight = false, pending = null, lastSent = 0, timer = null;
+  const fire = v => {
+    lastSent = performance.now(); inflight = true; pending = null;
+    clearTimeout(timer); timer = null;
+    api('POST', '/api/bind/' + id, { name, value: v })
+      .then(updateStates)
+      .finally(() => { inflight = false; if (pending !== null) schedule(pending); });
   };
-  el.oninput = onInput;
-  el.onchange = onInput;
+  const schedule = v => {                       // throttled, coalescing
+    pending = v;
+    if (inflight) return;
+    const wait = Math.max(0, updateMs - (performance.now() - lastSent));
+    if (wait <= 0) fire(v);
+    else if (!timer) timer = setTimeout(() => fire(pending), wait);
+  };
+  const flush = v => { inflight ? (pending = v) : fire(v); };   // release → send now
+  const mirror = v => { const w = el.closest('.widget, .control'); const m = w && w.querySelector('.wval');
+    if (m) m.textContent = widget === 'button' ? '×' + v : _showVal(v); };
+  // Mark the control as just-touched so background refreshes (async live updates)
+  // don't yank its value out from under the user mid-interaction.
+  const touch = () => { el._touched = performance.now(); };
+  el.addEventListener('pointerdown', touch);
+  el.addEventListener('focus', touch, true);
+  if (widget === 'button') {                       // action button → increments a counter
+    el.onclick = () => { touch(); const n = (parseInt(el.dataset.count, 10) || 0) + 1; el.dataset.count = n; mirror(n); flush(n); };
+    return;
+  }
+  const readVal = () => {
+    if (widget === 'checkbox' || widget === 'toggle') return el.checked;
+    if (widget === 'slider' || widget === 'number') return parseFloat(el.value);
+    if (widget === 'multiselect') return [...el.selectedOptions].map(o => o.value);
+    if (widget === 'radio') { const c = el.querySelector('input:checked'); return c ? c.value : null; }
+    return el.value;
+  };
+  el.oninput  = () => { touch(); const v = readVal(); mirror(v); schedule(v); };
+  el.onchange = () => { touch(); const v = readVal(); mirror(v); flush(v); };
+}
+
+// Wire every bound widget in a cell — its own @bind widget and/or control strip.
+function mountControls(c) {
+  const cell = document.getElementById('cell-' + c.id);
+  if (cell) cell.querySelectorAll('[data-bind]').forEach(wireControl);
 }
 
 function mountEditor(c) {
-  if (c.kind !== 'code' || c.bind) return;
+  if (c.kind !== 'code' || hasBinds(c)) return;
   const ta = document.querySelector('#cell-' + c.id + ' textarea');
   const ed = CodeMirror.fromTextArea(ta, {
     mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity
@@ -254,7 +447,21 @@ function mountEditor(c) {
 
 // Source editing for non-code cells (markdown + @bind widgets): reveal a raw
 // source editor; ⇧⏎ commits (re-parsing/re-rendering the cell), esc cancels.
-const _disp = cell => cell.querySelector('.md') || cell.querySelector('.widget');
+const _disp = cell => cell.querySelector('.md') || cell.querySelector('.binds');
+
+// The `</>` button toggles a md/bind cell between its rendered form and raw
+// source. Opening when rendered; when already editing, commit if the source
+// changed (don't lose work) or just cancel back to rendered if it didn't.
+function toggleSource(id, mode) {
+  const cell = document.getElementById('cell-' + id); if (!cell) return;
+  const sed = cell.querySelector('.srcedit');
+  if (sed && sed.style.display !== 'none') {
+    const cm = editors[id];
+    (cm && cm.getValue() !== (srcMap[id] || '')) ? commitSource(id) : cancelSource(id);
+  } else {
+    editSource(id, mode);
+  }
+}
 
 function editSource(id, mode) {
   const cell = document.getElementById('cell-' + id);
@@ -287,6 +494,9 @@ function cancelSource(id) {
 }
 
 function renderAll(state) {
+  nbState = state;
+  const se = document.scrollingElement || document.documentElement;
+  const top = se.scrollTop;                    // preserve scroll across the full rebuild (structural ops)
   document.getElementById('title').textContent = state.title || 'Notebook';
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const nb = document.getElementById('nb');
@@ -295,8 +505,76 @@ function renderAll(state) {
   Object.keys(charts).forEach(k => { charts[k].forEach(i => i.dispose()); delete charts[k]; });
   state.cells.forEach(c => nb.appendChild(cellEl(c)));
   state.cells.forEach(mountEditor);
-  state.cells.forEach(mountWidget);
+  state.cells.forEach(mountControls);
   state.cells.forEach(renderCharts);
+  renderPalette();
+  // Restore scroll now, next frame, and after each figure decodes (base64 images
+  // change height late — Safari otherwise clamps scrollTop and the view jumps).
+  const restore = () => { se.scrollTop = top; };
+  restore();
+  requestAnimationFrame(restore);
+  nb.querySelectorAll('img').forEach(im => im.complete || im.addEventListener('load', restore, { once: true }));
+}
+
+// ── Controls palette ─────────────────────────────────────────────────────────
+// A side drawer listing every @bind declared across the notebook, where each is
+// hosted (surfaced in a cell's control strip), and its live value. Read-only here;
+// drag-to-host is wired in a later pass.
+function paletteChips() {
+  const cells = (nbState && nbState.cells) || [];
+  const hosts = {};                                    // var name → [host cell ids] (a control may be in several)
+  cells.forEach(h => (h.controls || []).flat().forEach(s => { (hosts[s.name] ||= []).push(h.id); }));
+  const chips = [];
+  cells.forEach(c => (c.binds || []).forEach(b =>
+    chips.push({ name: b.name, widget: b.widget, value: b.value, def: c.id, hosts: hosts[b.name] || [] })));
+  return chips;
+}
+function togglePalette() { document.getElementById('palette').classList.toggle('open'); }
+function renderPalette() {
+  const list = document.getElementById('palette-list'); if (!list) return;
+  const chips = paletteChips();
+  document.getElementById('palette-count').textContent = chips.length ? chips.length + ' declared' : '';
+  if (!chips.length) { list.innerHTML = '<div class="phint">No <code>@bind</code> controls declared yet.</div>'; return; }
+  list.innerHTML = chips.map(c => {
+    const host = c.hosts.length ? '→ ' + c.hosts.join(', ') : '';
+    return `<div class="chip${c.hosts.length ? ' hosted' : ''}" draggable="true" data-pname="${c.name}" data-def="${c.def}"` +
+      ` title="drag into a cell to surface it · click to jump to ‘${c.def}’${c.hosts.length ? ' · surfaced in ' + c.hosts.map(h => '‘' + h + '’').join(', ') : ''}">` +
+      `<span class="cname">${c.name}</span><span class="ctype">${c.widget}</span>` +
+      `<span class="cright">${host ? `<span class="chost">${host}</span>` : ''}` +
+      `<span class="pval" data-pname="${c.name}">${c.value}</span></span></div>`;
+  }).join('');
+}
+function updatePaletteValues(state) {
+  state.cells.forEach(c => (c.binds || []).forEach(b => {
+    const v = document.querySelector('#palette-list .pval[data-pname="' + b.name + '"]');
+    if (v) v.textContent = b.value;
+  }));
+}
+
+// Keep every widget bound to a variable in lockstep (a control may be surfaced in
+// multiple cells). Skips the element being actively dragged so we never fight it.
+function syncControlValues(state) {
+  const val = {};
+  state.cells.forEach(c => {
+    (c.binds || []).forEach(b => { val[b.name] = b.value; });
+    (c.controls || []).flat().forEach(s => { val[s.name] = s.value; });   // controls is columns-of-specs
+  });
+  const now = performance.now();
+  document.querySelectorAll('#nb [data-bind][data-name]').forEach(el => {
+    // Don't fight live interaction: skip the focused/contained element, and any
+    // control touched in the last 1.2s (covers a drag that isn't the activeElement).
+    if (el === document.activeElement || el.contains(document.activeElement)) return;
+    if (el._touched && now - el._touched < 1200) return;
+    const v = val[el.dataset.name]; if (v === undefined) return;
+    const w = el.dataset.widget;
+    if (w === 'checkbox' || w === 'toggle') el.checked = !!v;
+    else if (w === 'multiselect') [...el.options].forEach(o => { o.selected = Array.isArray(v) && v.includes(o.value); });
+    else if (w === 'radio') { const c = el.querySelector('input[value="' + v + '"]'); if (c) c.checked = true; }
+    else if (w === 'button') el.dataset.count = v;
+    else el.value = v;
+    const wrap = el.closest('.widget, .control'); const m = wrap && wrap.querySelector('.wval');
+    if (m) m.textContent = w === 'button' ? '×' + v : _showVal(v);
+  });
 }
 
 function setState(id, s) {
@@ -306,19 +584,41 @@ function setState(id, s) {
   const b = el.querySelector('.badge'); if (b) b.textContent = s;
 }
 
-// Update outputs + states in place (preserves editor instances/cursors).
+// Replace a cell's output, reserving its current height until the new content
+// (notably a base64 <img>, which has no size until it decodes) lays out. Without
+// this the output collapses to ~0 height mid-swap; Safari then clamps scrollTop to
+// the now-shorter page and the figure scrolls out of view (the P2 scroll bug).
+function _swapOutput(out, html) {
+  out.style.minHeight = out.offsetHeight + 'px';
+  out.innerHTML = html;
+  const imgs = out.querySelectorAll('img');
+  const release = () => { out.style.minHeight = ''; };
+  if (!imgs.length) { requestAnimationFrame(release); return; }
+  let n = imgs.length;
+  const done = () => { if (--n <= 0) release(); };
+  imgs.forEach(im => im.complete ? done() : (im.onload = im.onerror = done));
+}
+
+// Update outputs + states in place (preserves editor instances/cursors + scroll).
 function updateStates(state) {
+  nbState = state;
+  const se = document.scrollingElement || document.documentElement;
+  const top = se.scrollTop;
   state.cells.forEach(c => {
     const el = document.getElementById('cell-' + c.id);
     if (!el) return;
     srcMap[c.id] = c.source;
-    el.className = 'cell ' + (c.bind ? 'bind' : c.kind) + ' state-' + c.state;
+    el.className = 'cell ' + (hasBinds(c) ? 'bind' : c.kind) + ' state-' + c.state;
     const b = el.querySelector('.badge'); if (b) b.textContent = c.state;
     const dur = el.querySelector('.cdur'); if (dur) dur.textContent = c.duration != null ? c.duration + ' ms' : '';
-    const out = el.querySelector('.output'); if (out) out.innerHTML = c.output;
+    const out = el.querySelector('.output'); if (out) _swapOutput(out, c.output);
     const md = el.querySelector('.md'); if (md) md.innerHTML = mdHtml(c);
     renderCharts(c);   // setOption in place — animates data changes
   });
+  se.scrollTop = top;                          // hold scroll across the patch …
+  requestAnimationFrame(() => { se.scrollTop = top; });   // … and after Safari's deferred reflow
+  syncControlValues(state);
+  updatePaletteValues(state);
 }
 
 async function runCell(id) {
@@ -326,7 +626,6 @@ async function runCell(id) {
   setState(id, 'running');
   updateStates(await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' }));
 }
-async function setBind(id, value) { updateStates(await api('POST', '/api/bind/' + id, { value })); }
 async function addCell(after, kind)  { renderAll(await api('POST', '/api/cell-add', { after, kind })); }
 async function delCell(id)           { renderAll(await api('POST', '/api/cell-delete/' + id)); }
 async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
@@ -341,27 +640,118 @@ async function reload()  { const s = await api('GET', '/api/state'); lastVersion
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
 function connectLive() {
-  const es = new EventSource('/api/events');
+  const es = new EventSource(_apipath('/api/events'));
   es.onmessage = async (e) => {
+    if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // async live update — patch in place
     const v = parseInt(e.data, 10);
     if (!isNaN(v) && v !== lastVersion) { lastVersion = v; renderAll(await api('GET', '/api/state')); }
   };
   // EventSource auto-reconnects on error.
 }
 
-// Drag-to-reorder — only the ⠿ handle initiates a drag, so editor text stays
-// selectable. A line above/below the hovered cell shows exactly where it lands.
-let dragId = null, dropTarget = null;
+// ── Drag-to-host: arrange controls into cells' strips ─────────────────────────
+// Update one or more cells' `controls=` lists (the caller sends each affected
+// cell's *full desired* list). `hostControl` moves a control to a cell at an
+// index (removing it from any prior host); `unhostControl` removes it everywhere.
+const _cellById = id => ((nbState && nbState.cells) || []).find(c => c.id === id);
+// A cell's control layout as columns of names (deep copy, safe to mutate).
+const columnsOf = id => { const c = _cellById(id); return ((c && c.controls) || []).map(col => col.map(s => s.name)); };
+
+// Place `name` into cell `targetId` per a drop `target` ({newCol, colIndex,
+// rowIndex}). A control may live in multiple cells: from the palette (`fromCell`
+// null) it *copies*; dragging an existing grip (`fromCell` set) *moves* it. Within
+// a cell a name stays unique (so dropping where it already is reorders/re-columns).
+// Server drops any empty columns left behind, so we don't prune here.
+async function hostControl(name, targetId, target, fromCell) {
+  const map = {};
+  if (fromCell && fromCell !== targetId) map[fromCell] = columnsOf(fromCell).map(c => c.filter(n => n !== name));
+  const orig = columnsOf(targetId);
+  let row = target.rowIndex;                          // correct for self-removal shift within the target column
+  if (!target.newCol) {
+    const r0 = (orig[target.colIndex] || []).indexOf(name);
+    if (r0 !== -1 && r0 < (row ?? Infinity)) row = (row ?? (orig[target.colIndex] || []).length) - 1;
+  }
+  const cols = orig.map(c => c.filter(n => n !== name));   // remove dragged occurrence(s) in target
+  if (target.newCol) {
+    cols.splice(target.colIndex == null ? cols.length : target.colIndex, 0, [name]);
+  } else {
+    const col = cols[target.colIndex] || (cols[target.colIndex] = []);
+    col.splice(row == null || row > col.length ? col.length : row, 0, name);
+  }
+  map[targetId] = cols;
+  renderAll(await api('POST', '/api/controls', { map }));
+}
+// Remove just this instance (the control in cell `cellId`); other hosts remain.
+async function unhostControl(name, cellId) {
+  if (!cellId) return;
+  renderAll(await api('POST', '/api/controls', { map: { [cellId]: columnsOf(cellId).map(c => c.filter(n => n !== name)) } }));
+}
+// Insertion row within a column element, by cursor y (before the first control
+// whose midpoint is below the cursor; else at the end).
+function rowInCol(col, y) {
+  const items = [...col.querySelectorAll('.control')];
+  for (let j = 0; j < items.length; j++) {
+    const r = items[j].getBoundingClientRect();
+    if (y < r.top + r.height / 2) return j;
+  }
+  return items.length;
+}
+// Resolve the drop element under the cursor to a layout target. A `.coldrop` →
+// new column at its index; a `.ccol` → into that column at a row; otherwise append
+// a new column at the end.
+function dropTargetFor(el, cell, y) {
+  const dz = el.closest('.coldrop');
+  if (dz) return { newCol: true, colIndex: +dz.dataset.colindex };
+  const col = el.closest('.ccol');
+  if (col) return { newCol: false, colIndex: +col.dataset.colindex, rowIndex: rowInCol(col, y) };
+  return { newCol: true, colIndex: columnsOf(cell.dataset.cid).length };
+}
+
+// Drag-to-reorder cells (⠿ handle) AND drag-to-host controls (palette chip / strip
+// grip) share these handlers. `dragId` = a cell being reordered; `ctrlDrag` = a
+// control name being hosted. Only ⠿/grip/chip are draggable, so editor text and
+// sliders stay interactive.
+// ctrlDrag = { name, fromCell } — fromCell null when sourced from the palette
+// (copy), or the cell id when dragging an existing strip control's grip (move).
+let dragId = null, dropTarget = null, ctrlDrag = null;
 const nbEl = document.getElementById('nb');
 function clearDrop() { nbEl.querySelectorAll('.drop-before,.drop-after').forEach(x => x.classList.remove('drop-before', 'drop-after')); }
+function clearCtrlDrop() { nbEl.querySelectorAll('.cdrop, .cdup').forEach(x => x.classList.remove('cdrop', 'cdup')); }
+function startControlDrag(e, name, fromCell) {
+  ctrlDrag = { name, fromCell: fromCell || null };
+  e.dataTransfer.effectAllowed = 'copyMove';   // allow either dropEffect, so duplicate (move) drops aren't rejected
+  try { e.dataTransfer.setData('text/plain', name); } catch (_) {}
+  // Reveal drop-zones on the NEXT tick: toggling `cdnd` now reflows the strip the
+  // grip lives in, and a source element that moves during `dragstart` makes Chrome
+  // abort the drag. Deferring lets the drag lock in first.
+  setTimeout(() => { if (ctrlDrag) document.body.classList.add('cdnd'); }, 0);
+}
 nbEl.addEventListener('dragstart', e => {
+  const grip = e.target.closest('.cgrip');
+  if (grip) { startControlDrag(e, grip.dataset.name, grip.closest('.cell').dataset.cid); return; }  // existing → move
   const h = e.target.closest('.drag');
   if (!h) { e.preventDefault(); return; }
   dragId = h.closest('.cell').dataset.cid;
   e.dataTransfer.effectAllowed = 'move';
 });
 nbEl.addEventListener('dragover', e => {
-  e.preventDefault();
+  if (ctrlDrag) {                                  // hosting a control
+    clearCtrlDrop();
+    const cell = e.target.closest('.cell.code');
+    if (!cell) return;
+    e.preventDefault();
+    // If this cell already hosts the control, dropping just repositions it (no
+    // duplicate) — flag the existing instance so that's visible, and signal "move".
+    const dup = cell.querySelector('.control[data-cname="' + ctrlDrag.name + '"]');
+    e.dataTransfer.dropEffect = (ctrlDrag.fromCell || dup) ? 'move' : 'copy';
+    if (dup) dup.classList.add('cdup');
+    const dz = e.target.closest('.coldrop'), col = e.target.closest('.ccol');
+    if (dz) dz.classList.add('cdrop');
+    else if (col) col.classList.add('cdrop');
+    else { const last = cell.querySelector('.controls .coldrop:last-child'); if (last) last.classList.add('cdrop'); }
+    return;
+  }
+  e.preventDefault();                              // reordering a cell
   clearDrop();
   dropTarget = null;
   const t = e.target.closest('.cell');
@@ -373,12 +763,23 @@ nbEl.addEventListener('dragover', e => {
 });
 nbEl.addEventListener('drop', e => {
   e.preventDefault();
+  if (ctrlDrag) {
+    const cell = e.target.closest('.cell.code'), { name, fromCell } = ctrlDrag, el = e.target;
+    ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop();
+    if (cell) hostControl(name, cell.dataset.cid, dropTargetFor(el, cell, e.clientY), fromCell);
+    return;
+  }
   clearDrop();
   const dt = dropTarget, id = dragId;
   dragId = dropTarget = null;
   if (dt && id) moveCellRel(id, dt.id, dt.before);
 });
-nbEl.addEventListener('dragend', () => { clearDrop(); dragId = dropTarget = null; });
+nbEl.addEventListener('dragend', () => { clearDrop(); clearCtrlDrop(); dragId = dropTarget = ctrlDrag = null; document.body.classList.remove('cdnd'); });
+// ✕ on a strip control → remove this instance (other hosts, if any, remain).
+nbEl.addEventListener('click', e => {
+  const del = e.target.closest('.cdel');
+  if (del) { e.stopPropagation(); unhostControl(del.dataset.name, del.closest('.cell').dataset.cid); }
+});
 
 // ⌘Z / ⌘⇧Z notebook undo/redo — but defer to CodeMirror's text undo when an editor is focused.
 document.addEventListener('keydown', e => {
@@ -389,6 +790,52 @@ document.addEventListener('keydown', e => {
   }
 });
 
+// Live-update rate control (persisted): minimum ms between recomputes while dragging.
+const rateInput = document.getElementById('rateMs');
+rateInput.value = updateMs;
+rateInput.onchange = () => {
+  updateMs = Math.max(0, parseInt(rateInput.value, 10) || 0);
+  localStorage.setItem('slateUpdateMs', updateMs);
+};
+
+// Palette chips: click → jump to defining cell; drag → host into a cell's strip.
+const paletteList = document.getElementById('palette-list');
+paletteList.onclick = e => {
+  const ch = e.target.closest('.chip'); if (!ch) return;
+  const el = document.getElementById('cell-' + ch.dataset.def);
+  if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); editSource(ch.dataset.def, 'julia'); }
+};
+paletteList.addEventListener('dragstart', e => {
+  const chip = e.target.closest('.chip'); if (!chip) return;
+  startControlDrag(e, chip.dataset.pname);
+});
+// Drag a control out of a strip and drop it on the palette to remove that instance.
+paletteList.addEventListener('dragover', e => { if (ctrlDrag && ctrlDrag.fromCell) { e.preventDefault(); paletteList.classList.add('premove'); } });
+paletteList.addEventListener('dragleave', e => { if (!paletteList.contains(e.relatedTarget)) paletteList.classList.remove('premove'); });
+paletteList.addEventListener('drop', e => {
+  if (!ctrlDrag || !ctrlDrag.fromCell) return;
+  e.preventDefault();
+  const { name, fromCell } = ctrlDrag;
+  ctrlDrag = null; document.body.classList.remove('cdnd'); paletteList.classList.remove('premove'); clearCtrlDrop();
+  unhostControl(name, fromCell);
+});
+// A control drag can end outside the notebook (e.g. palette-sourced) — clear here.
+document.addEventListener('dragend', () => {
+  if (ctrlDrag !== null) { ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop(); }
+});
+
+// Populate the notebook switcher from the hub registry (a hub-level route, so
+// fetched raw — not through the nb-scoped `api()`).
+async function loadSwitcher() {
+  try {
+    const nbs = await (await fetch('/api/notebooks')).json();
+    const sel = document.getElementById('nbswitch');
+    sel.innerHTML = nbs.map(n => `<option value="${n.id}" ${n.id === NB_ID ? 'selected' : ''}>${n.title}</option>`).join('');
+    sel.onchange = () => { if (sel.value !== NB_ID) location.href = '/n/' + sel.value; };
+  } catch (e) {}
+}
+
+loadSwitcher();
 reload();
 connectLive();
 </script>
