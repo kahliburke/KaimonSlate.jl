@@ -539,6 +539,92 @@ function _path_completions(q::AbstractString; limit::Int = 40)
     return first(keep, limit)
 end
 
+# ── Cell-local completion ─────────────────────────────────────────────────────
+# `REPLCompletions` only sees the live module, so identifiers a cell BINDS before
+# it has run (assignments, `for`/`let`/`function`/generator vars, params) don't
+# complete. We parse the cell's complete leading statements and union their bound
+# names in — an over-approximation (ignores nested-scope visibility), which is fine
+# for completion. Only for bare identifiers; field access (after `.`) is left to
+# REPLCompletions.
+_isidcu(b::UInt8) = (UInt8('a') <= b <= UInt8('z')) || (UInt8('A') <= b <= UInt8('Z')) ||
+                    (UInt8('0') <= b <= UInt8('9')) || b == UInt8('_') || b == UInt8('!')
+
+# (token-start-0based, typed-prefix, is-field-access) for the identifier at `pos`.
+function _id_prefix(code::String, pos::Int)
+    cu = codeunits(code)
+    i = pos
+    while i > 0 && _isidcu(cu[i]); i -= 1; end
+    dotted = i >= 1 && cu[i] == UInt8('.')
+    return (i, String(cu[(i + 1):pos]), dotted)
+end
+
+# Names introduced at a binding site (LHS of `=`, params, `f(a,b)` def, `x::T`, …).
+function _bind_names!(out::Set{Symbol}, x)
+    if x isa Symbol
+        x === :_ || push!(out, x)
+    elseif x isa Expr
+        h = x.head
+        if h === :(::) || h === :(<:) || h === :kw || h === :(=) || h === :(...) || h === :curly
+            isempty(x.args) || _bind_names!(out, x.args[1])
+        elseif h === :tuple || h === :parameters || h === :call   # destructuring / def LHS+params
+            for a in x.args
+                _bind_names!(out, a)
+            end
+        end
+    end
+end
+
+function _collect_binds!(out::Set{Symbol}, ex)
+    ex isa Expr || return
+    h = ex.head
+    if h === :(=)
+        _bind_names!(out, ex.args[1]); _collect_binds!(out, ex.args[2])
+    elseif h === :function || h === :(->)
+        _bind_names!(out, ex.args[1])
+        for i in 2:length(ex.args); _collect_binds!(out, ex.args[i]); end
+    elseif h === :for
+        spec = ex.args[1]
+        for b in (spec isa Expr && spec.head === :block ? spec.args : (spec,))
+            b isa Expr && b.head === :(=) && _bind_names!(out, b.args[1])
+        end
+        for i in 2:length(ex.args); _collect_binds!(out, ex.args[i]); end
+    elseif h === :generator || h === :comprehension || h === :flatten
+        for a in ex.args
+            (a isa Expr && a.head === :(=)) ? _bind_names!(out, a.args[1]) : _collect_binds!(out, a)
+        end
+    elseif h === :let
+        binds = ex.args[1]
+        for b in (binds isa Expr && binds.head === :block ? binds.args : (binds,))
+            b isa Symbol ? push!(out, b) : (b isa Expr && b.head === :(=) && _bind_names!(out, b.args[1]))
+        end
+        for i in 2:length(ex.args); _collect_binds!(out, ex.args[i]); end
+    elseif h === :local || h === :global
+        for a in ex.args; _bind_names!(out, a); end
+    else
+        for a in ex.args; _collect_binds!(out, a); end
+    end
+end
+
+# All names bound by the cell's complete leading statements (stops at the first
+# incomplete/erroring statement — typically the line being typed).
+function _cell_locals(code::AbstractString)
+    out = Set{Symbol}()
+    s = String(code); n = ncodeunits(s); idx = 1
+    while idx <= n
+        ex, nxt = try
+            Meta.parse(s, idx; raise = false)
+        catch
+            break
+        end
+        ex === nothing && break
+        (ex isa Expr && (ex.head === :incomplete || ex.head === :error)) && break
+        _collect_binds!(out, ex)
+        nxt <= idx && break
+        idx = nxt
+    end
+    return out
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html(h)))
@@ -577,11 +663,18 @@ function _make_router(h::Hub)
         code = String(get(body, "code", ""))
         pos = clamp(Int(get(body, "pos", ncodeunits(code))), 0, ncodeunits(code))
         mod = nb.report.mod === nothing ? Main : nb.report.mod
+        pstart, prefix, dotted = _id_prefix(code, pos)
         texts, from, to = try
             comps, range, _ = REPL.REPLCompletions.completions(code, pos, mod)
             ([REPL.REPLCompletions.completion_text(c) for c in comps], first(range) - 1, last(range))
         catch
-            (String[], pos, pos)
+            (String[], pstart, pos)
+        end
+        if !dotted                          # union in cell-local bindings (skip field access)
+            have = Set(texts)
+            locals = try; _cell_locals(code); catch; Set{Symbol}(); end
+            extra = sort!(String[n for n in (String(s) for s in locals) if startswith(n, prefix) && !(n in have)])
+            isempty(extra) || (texts = vcat(extra, texts))
         end
         _json(Dict("completions" => texts, "from" => from, "to" => to))
     end))

@@ -43,7 +43,7 @@ through with the controls. `slate_table(data)` does the same for a `Vector` of
 # Imports in their own cell (as above) — keep value cells method-introduction-free.
 using Random, DataFrames
 
-#%% code id=tabledata
+#%% md id=tabledata
 # `slate_table` on a vector of NamedTuple rows. Numbers sort numerically; the
 # `metal` booleans and strings sort lexically.
 Random.seed!(42)
@@ -53,6 +53,8 @@ slate_table([(symbol = e, Z = i, mass = round(2.0i + randn(), digits = 3), metal
 
 #%% code id=3837ae
 elements
+
+#%% code id=80ab97
 
 #%% code id=tabledf
 # A bare DataFrame auto-renders (no slate_table call). 30 rows ⇒ pagination kicks in.
