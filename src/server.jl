@@ -131,6 +131,10 @@ end
 
 _echarts_specs(c::Cell) = c.output === nothing ? Any[] : c.output.echarts
 _table_specs(c::Cell) = c.output === nothing ? Any[] : c.output.tables
+# Specs from a markdown cell's `{{ }}` interpolations, in document order (matches
+# the `.ichart`/`.itable` placeholder indices the renderer emits).
+_md_interp_echarts(c::Cell) = (e = Any[]; for o in c.interp; append!(e, o.echarts); end; e)
+_md_interp_tables(c::Cell) = (t = Any[]; for o in c.interp; append!(t, o.tables); end; t)
 
 # A bound control resolved for the frontend: enough to render the widget *and*
 # POST value changes to `/api/bind/<id>` (the *defining* cell's id) keyed by
@@ -153,8 +157,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "source"  => c.source,
         "state"   => lowercase(string(c.state)),
         "output"  => c.kind == MARKDOWN ? markdown_html(c.source, c.interp) : output_html(c),
-        "echarts" => c.kind == MARKDOWN ? String[] : _echarts_specs(c),
-        "tables" => c.kind == MARKDOWN ? Any[] : _table_specs(c),
+        "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
+        "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
     )
@@ -794,7 +798,11 @@ function _make_router(h::Hub)
         id = HTTP.getparam(req, "id")
         close_notebook!(h, id) ? _json(Dict("closed" => id)) : HTTP.Response(404, "no such notebook")
     end)
-    HTTP.register!(router, "GET", "/n/{id}", _ -> _html(read(_ASSET, String)))
+    HTTP.register!(router, "GET", "/n/{id}", req -> begin
+        id = HTTP.getparam(req, "id")
+        present = lock(h.lock) do; haskey(h.notebooks, id); end
+        present ? _html(read(_ASSET, String)) : HTTP.Response(302, ["Location" => "/"])   # not open → home
+    end)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/cell/{cid}", req -> _withnb(h, req, nb -> begin
         edit_cell!(nb, HTTP.getparam(req, "cid"), get(_body(req), "source", "")); _json(state_json(nb))

@@ -80,10 +80,56 @@ end
 
 # Markdown variable interpolation: `{{ expr }}` blocks are captured (rich) and
 # spliced into the rendered prose; the md cell reads their free variables so it
-# re-renders reactively. The SAME regex/order is used by deps (reads) and the
+# re-renders reactively. The scan is brace-balanced and string-aware, so the
+# closing `}}` is never confused with braces inside the expression — e.g.
+# `Dict(:a=>1)`, `NamedTuple{(:a,)}(…)`, or a LaTeXString `L"\frac{a}{b}"`.
+# `_md_template` (template-with-tokens + exprs) is shared by deps (reads) and the
 # renderer (substitution), so captures line up positionally.
-const _MD_INTERP = r"\{\{(.+?)\}\}"s
-_md_interp_exprs(src::AbstractString) = String[strip(String(m.captures[1])) for m in eachmatch(_MD_INTERP, String(src))]
+_interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
+
+function _md_template(src::AbstractString)
+    s = String(src); out = IOBuffer(); exprs = String[]
+    i = firstindex(s); n = lastindex(s)
+    while i <= n
+        c = s[i]
+        if c == '{' && (i2 = nextind(s, i)) <= n && s[i2] == '{'
+            k = nextind(s, i2); depth = 0; instr = false; closeat = 0
+            while k <= n
+                ck = s[k]
+                if instr
+                    if ck == '\\'
+                        k = nextind(s, k); k <= n && (k = nextind(s, k)); continue
+                    end
+                    ck == '"' && (instr = false)
+                    k = nextind(s, k)
+                elseif ck == '"'
+                    instr = true; k = nextind(s, k)
+                elseif ck == '{'
+                    depth += 1; k = nextind(s, k)
+                elseif ck == '}'
+                    if depth > 0
+                        depth -= 1; k = nextind(s, k)
+                    else
+                        nk = nextind(s, k)
+                        (nk <= n && s[nk] == '}') ? (closeat = k; break) : (k = nextind(s, k))
+                    end
+                else
+                    k = nextind(s, k)
+                end
+            end
+            if closeat > 0
+                push!(exprs, String(strip(s[nextind(s, i2):prevind(s, closeat)])))
+                print(out, _interp_token(length(exprs)))
+                i = nextind(s, nextind(s, closeat))
+                continue
+            end
+        end
+        print(out, c); i = nextind(s, i)
+    end
+    return String(take!(out)), exprs
+end
+
+_md_interp_exprs(src::AbstractString) = _md_template(src)[2]
 
 mutable struct Report
     id::String

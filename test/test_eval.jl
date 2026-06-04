@@ -205,4 +205,14 @@ using .ReportEngine
         @test isempty(r2.cells[1].interp)
     end
 
+    @testset "markdown {{ }} brace-balanced + string-aware scan" begin
+        ME = ReportEngine._md_interp_exprs
+        @test ME("a {{ Dict(:x=>1) }} b") == ["Dict(:x=>1)"]                 # no braces
+        @test ME("{{ NamedTuple{(:a,)}((1,)) }}") == ["NamedTuple{(:a,)}((1,))"]  # balanced { }
+        @test ME("x {{ L\"\\frac{a}{b}\" }}") == ["L\"\\frac{a}{b}\""]       # braces inside a string
+        @test ME("{{x}} then {{ y }}") == ["x", "y"]
+        tmpl, ex = ReportEngine._md_template("v = {{ a }}.")
+        @test ex == ["a"] && occursin("xslateinterp", tmpl) && !occursin("{{", tmpl)
+    end
+
 end

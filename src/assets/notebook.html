@@ -105,6 +105,8 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .md .ival { color:var(--green); font-family:'Cascadia Code',monospace; }   /* {{ }} scalar */
 .md .interr { color:var(--red); font-family:'Cascadia Code',monospace; }   /* {{ }} error */
 .md .disp.img img { max-width:100%; height:auto; border-radius:4px; }       /* {{ plot }} */
+.md .ichart { height:300px; margin:8px 0; }                                 /* {{ echart(…) }} */
+.md .itable { margin:8px 0; display:block; }                                /* {{ slate_table(…) }} */
 .srcedit { padding:4px 6px; }
 .mdhint { color:var(--dim); font-size:.7rem; padding:3px 4px 0; }
 .cdur { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.7rem; }
@@ -311,17 +313,24 @@ const srcEditHTML = () => '<div class="srcedit" style="display:none"><textarea><
 // Render/refresh a cell's ECharts. Instances persist across reactive updates, so
 // data changes animate in place (setOption) instead of swapping an image.
 function renderCharts(c) {
-  const host = document.querySelector('#cell-' + c.id + ' .echarts');
-  if (!host) return;
   const specs = c.echarts || [];
-  if (!charts[c.id]) charts[c.id] = [];
-  const insts = charts[c.id];
-  while (host.children.length < specs.length) {
-    const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
-    insts.push(echarts.init(d, 'dark'));
+  const host = document.querySelector('#cell-' + c.id + ' .echarts');
+  if (host) {                                   // code-cell echarts host
+    if (!charts[c.id]) charts[c.id] = [];
+    const insts = charts[c.id];
+    while (host.children.length < specs.length) {
+      const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
+      insts.push(echarts.init(d, 'dark'));
+    }
+    while (host.children.length > specs.length) { host.removeChild(host.lastChild); insts.pop().dispose(); }
+    specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
   }
-  while (host.children.length > specs.length) { host.removeChild(host.lastChild); insts.pop().dispose(); }
-  specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
+  // Inline `{{ echart(…) }}` placeholders in a markdown cell.
+  document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
+    const spec = specs[+el.dataset.i]; if (!spec) return;
+    if (!el._inst) el._inst = echarts.init(el, 'dark');
+    try { el._inst.setOption(spec); } catch (e) {}
+  });
 }
 window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
 
@@ -339,18 +348,28 @@ function _cmp(a, b) {
 // Columns are strings (eager) or {name,type,sortable,filterable} objects (paged).
 const _colName = c => (typeof c === 'string' ? c : c.name);
 function renderTables(c) {
-  const host = document.querySelector('#cell-' + c.id + ' .tables');
-  if (!host) return;
   const specs = c.tables || [];
-  if (!specs.length) { host.innerHTML = ''; delete tableState[c.id]; return; }
-  const states = tableState[c.id] || (tableState[c.id] = []);
-  states.length = specs.length;                 // drop view-state for removed tables
-  while (host.children.length > specs.length) host.removeChild(host.lastChild);
-  specs.forEach((spec, i) => {
-    if (!states[i]) states[i] = { sort: null, filter: '', page: 0, pageSize: spec.paged ? (spec.pageSize || 50) : 25 };
-    let wrap = host.children[i];
-    if (!wrap) { wrap = document.createElement('div'); wrap.className = 'slatetable'; host.appendChild(wrap); }
-    drawTable(wrap, spec, states[i]);
+  const host = document.querySelector('#cell-' + c.id + ' .tables');
+  if (host) {                                   // code-cell tables host
+    if (!specs.length) { host.innerHTML = ''; delete tableState[c.id]; }
+    else {
+      const states = tableState[c.id] || (tableState[c.id] = []);
+      states.length = specs.length;             // drop view-state for removed tables
+      while (host.children.length > specs.length) host.removeChild(host.lastChild);
+      specs.forEach((spec, i) => {
+        if (!states[i]) states[i] = { sort: null, filter: '', page: 0, pageSize: spec.paged ? (spec.pageSize || 50) : 25 };
+        let wrap = host.children[i];
+        if (!wrap) { wrap = document.createElement('div'); wrap.className = 'slatetable'; host.appendChild(wrap); }
+        drawTable(wrap, spec, states[i]);
+      });
+    }
+  }
+  // Inline `{{ slate_table(…) / df }}` placeholders in a markdown cell.
+  document.querySelectorAll('#cell-' + c.id + ' .itable').forEach(el => {
+    const spec = specs[+el.dataset.i]; if (!spec) return;
+    el.classList.add('slatetable');
+    el._st = el._st || { sort: null, filter: '', page: 0, pageSize: spec.paged ? (spec.pageSize || 50) : 25 };
+    drawTable(el, spec, el._st);
   });
 }
 // Build the persistent shell once per column-signature; refresh fills the body.

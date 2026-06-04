@@ -111,5 +111,11 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
 
         # No interps → unchanged; math is still preserved byte-for-byte.
         @test occursin(raw"$e^{i\pi}$", markdown_html(raw"euler $e^{i\pi}$"))
+
+        # echart / table captures become inline host placeholders for the SPA.
+        ech = CellOutput("", MimeChunk[], Any[Dict("x" => 1)], Any[], "", nothing, nothing, 0.0)
+        @test occursin("ichart", markdown_html("chart {{e}}", [ech]))
+        tbl = CellOutput("", MimeChunk[], Any[], Any[Dict("columns" => ["a"])], "", nothing, nothing, 0.0)
+        @test occursin("itable", markdown_html("tbl {{t}}", [tbl]))
     end
 end

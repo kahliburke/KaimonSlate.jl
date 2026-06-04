@@ -61,40 +61,45 @@ end
 const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
 const _MATH_INLINE = r"\$([^\$\n]+?)\$"
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
-_interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
 
-# One markdown `{{ }}` interpolation's captured output → an inline HTML fragment.
-# Images / HTML / LaTeX / scalar values embed directly; echarts & interactive
-# tables need a JS host, so they aren't embedded inline (yet).
-function _interp_html(o::Union{CellOutput,Nothing})
-    o === nothing && return ""
-    o.exception === nothing || return "<span class=\"interr\">⟨" * _esc(o.exception) * "⟩</span>"
-    isempty(o.display) || return _render_chunks(o.display)
-    return isempty(o.value_repr) ? "" : "<span class=\"ival\">" * _esc(o.value_repr) * "</span>"
-end
-
+# Render markdown, splicing each `{{ expr }}` capture in. Self-contained outputs
+# (image / HTML / LaTeX / scalar) embed directly; echarts & interactive tables
+# emit a host placeholder (`.ichart`/`.itable` keyed by index) that the SPA
+# hydrates from the cell's collected `echarts`/`tables` — same order as here.
 function _md_html(src::AbstractString, interps = CellOutput[])
-    s = String(src)
-    # 1) `{{ expr }}` → placeholders; render each capture (document order matches `interps`).
-    frags = String[]
-    s = replace(s, ReportEngine._MD_INTERP => function (_m)
-        i = length(frags) + 1
-        push!(frags, _interp_html(i <= length(interps) ? interps[i] : nothing))
-        _interp_token(i)
-    end)
-    # 2) math → placeholders (kept byte-for-byte for KaTeX).
+    tmpl, exprs = ReportEngine._md_template(src)
+    frags = String[]; ec = 0; tc = 0
+    for i in 1:length(exprs)
+        o = i <= length(interps) ? interps[i] : nothing
+        if o === nothing
+            push!(frags, "")
+        elseif o.exception !== nothing
+            push!(frags, "<span class=\"interr\">⟨" * _esc(o.exception) * "⟩</span>")
+        elseif !isempty(o.display)
+            push!(frags, _render_chunks(o.display))
+        elseif !isempty(o.echarts)
+            push!(frags, "<div class=\"ichart\" data-i=\"$ec\"></div>"); ec += 1
+        elseif !isempty(o.tables)
+            push!(frags, "<div class=\"itable\" data-i=\"$tc\"></div>"); tc += 1
+        elseif !isempty(o.value_repr)
+            push!(frags, "<span class=\"ival\">" * _esc(o.value_repr) * "</span>")
+        else
+            push!(frags, "")
+        end
+    end
+    # math → placeholders (kept byte-for-byte for KaTeX).
     math = String[]
     stash(m) = (push!(math, String(m)); _math_token(length(math)))
-    s = replace(s, _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
+    s = replace(tmpl, _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
     s = replace(s, _MATH_INLINE => stash)
     p = CommonMark.Parser()
     enable!(p, CommonMark.TableRule())
     html = CommonMark.html(p(s))
     for (i, m) in enumerate(math)
-        html = replace(html, _math_token(i) => _esc(m))      # raw TeX, HTML-escaped; KaTeX reads the text node
+        html = replace(html, _math_token(i) => _esc(m))             # raw TeX, escaped; KaTeX reads the text node
     end
     for (i, f) in enumerate(frags)
-        html = replace(html, _interp_token(i) => f)          # trusted HTML fragment, injected raw
+        html = replace(html, ReportEngine._interp_token(i) => f)    # trusted HTML fragment, injected raw
     end
     return html
 end
