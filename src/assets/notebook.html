@@ -117,8 +117,9 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .addmenu button { display:block; width:100%; text-align:left; padding:5px 16px 5px 10px; border:none; background:none;
                   color:var(--text); cursor:pointer; font-size:.8rem; border-radius:5px; white-space:nowrap; }
 .addmenu button:hover { background:var(--bg3); color:var(--accent); }
-.cell.drop-before { box-shadow: inset 0 3px 0 0 var(--accent); }
-.cell.drop-after  { box-shadow: inset 0 -3px 0 0 var(--accent); }
+#nb { position:relative; }
+.dropline { position:absolute; left:0; right:0; height:3px; background:var(--purple); border-radius:2px;
+            box-shadow:0 0 8px var(--purple); display:none; z-index:5; pointer-events:none; }
 .cell.bind { border-left-color:var(--purple); }
 .widget { display:flex; align-items:center; gap:12px; padding:12px 14px; }
 .wname { font-family:'Cascadia Code',monospace; color:var(--accent); min-width:64px; }
@@ -1272,7 +1273,14 @@ function dropTargetFor(el, cell, y) {
 // (copy), or the cell id when dragging an existing strip control's grip (move).
 let dragId = null, dropTarget = null, ctrlDrag = null;
 const nbEl = document.getElementById('nb');
-function clearDrop() { nbEl.querySelectorAll('.drop-before,.drop-after').forEach(x => x.classList.remove('drop-before', 'drop-after')); }
+// A single purple insertion line, floated in the gap where the cell will land.
+let dropline = null;
+function _dropline() {
+  if (!dropline) { dropline = document.createElement('div'); dropline.className = 'dropline'; }
+  if (!dropline.isConnected) nbEl.appendChild(dropline);   // renderAll wipes #nb — re-attach
+  return dropline;
+}
+function clearDrop() { if (dropline) dropline.style.display = 'none'; }
 function clearCtrlDrop() { nbEl.querySelectorAll('.cdrop, .cdup').forEach(x => x.classList.remove('cdrop', 'cdup')); }
 function startControlDrag(e, name, fromCell) {
   ctrlDrag = { name, fromCell: fromCell || null };
@@ -1315,7 +1323,9 @@ nbEl.addEventListener('dragover', e => {
   if (!t || !dragId || t.dataset.cid === dragId) return;
   const r = t.getBoundingClientRect();
   const before = (e.clientY - r.top) < r.height / 2;
-  t.classList.add(before ? 'drop-before' : 'drop-after');
+  const dl = _dropline();                                  // float the line mid-gap, above or below `t`
+  dl.style.top = ((before ? t.offsetTop - 7 : t.offsetTop + t.offsetHeight + 7) - 1) + 'px';
+  dl.style.display = 'block';
   dropTarget = { id: t.dataset.cid, before };
 });
 nbEl.addEventListener('drop', e => {
