@@ -1324,16 +1324,21 @@ nbEl.addEventListener('dragover', e => {
     return;
   }
   e.preventDefault();                              // reordering a cell
-  clearDrop();
-  dropTarget = null;
-  const t = e.target.closest('.cell');
-  if (!t || !dragId || t.dataset.cid === dragId) return;
-  const r = t.getBoundingClientRect();
-  const before = (e.clientY - r.top) < r.height / 2;
-  const dl = _dropline();                                  // float the line mid-gap, above or below `t`
-  dl.style.top = ((before ? t.offsetTop - 7 : t.offsetTop + t.offsetHeight + 7) - 1) + 'px';
+  if (!dragId) { clearDrop(); dropTarget = null; return; }
+  // Pick the insertion point by cursor Y across all cells, so releasing in the
+  // gap (right on the drop line) still lands — not only when over a cell.
+  let target = null, before = true;
+  for (const c of nbEl.querySelectorAll('.cell')) {
+    if (c.dataset.cid === dragId) continue;
+    const r = c.getBoundingClientRect();
+    if (e.clientY < r.top + r.height / 2) { target = c; before = true; break; }
+    target = c; before = false;                    // past this cell's midpoint → after it
+  }
+  if (!target) { clearDrop(); dropTarget = null; return; }
+  const dl = _dropline();                                  // float the line mid-gap, above or below the target
+  dl.style.top = ((before ? target.offsetTop - 7 : target.offsetTop + target.offsetHeight + 7) - 1) + 'px';
   dl.style.display = 'block';
-  dropTarget = { id: t.dataset.cid, before };
+  dropTarget = { id: target.dataset.cid, before };
 });
 nbEl.addEventListener('drop', e => {
   e.preventDefault();
