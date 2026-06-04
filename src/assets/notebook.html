@@ -189,6 +189,21 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .chip .chost { color:var(--gold); font-size:.72rem; }
 .chip .pval { color:var(--green); font-family:'Cascadia Code',monospace; }
 .chip.hosted { opacity:.7; }
+.modal-bg { position:fixed; inset:0; background:rgba(5,8,16,.66); display:none; align-items:center; justify-content:center; z-index:50; }
+.modal-bg.show { display:flex; }
+.modal { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:18px 20px; max-width:520px; width:90%;
+         box-shadow:0 16px 48px rgba(0,0,0,.55); }
+.modal .msg { color:var(--text); font-size:.92rem; line-height:1.5; margin-bottom:16px; white-space:pre-wrap; word-break:break-word; }
+.modal .row { display:flex; justify-content:flex-end; gap:10px; }
+.modal button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:7px 16px; cursor:pointer; font-size:.85rem; }
+.modal button:hover { border-color:var(--accent); color:var(--accent); }
+.modal button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+.modal button.danger { color:var(--red); border-color:#3a2030; } .modal button.danger:hover { background:rgba(229,117,117,.12); border-color:var(--red); color:var(--red); }
+.loading { position:fixed; inset:0; background:rgba(5,8,16,.72); display:none; flex-direction:column; align-items:center; justify-content:center; gap:14px; z-index:60; }
+.loading.show { display:flex; }
+.spinner { width:38px; height:38px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.loading .lmsg { color:var(--text); font-size:.9rem; }
 </style>
 </head>
 <body>
@@ -215,6 +230,8 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <div id="palette-list" class="plist"></div>
   <div class="pfoot hint">Click a chip to jump to its cell. Drag a chip into a cell's control strip to surface it.</div>
 </aside>
+<div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
+<div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
 
 <script>
 // This notebook's hub id, from the /n/<id> URL; all API/SSE paths are scoped to it.
@@ -843,11 +860,39 @@ async function moveCellRel(id, target, before) { renderAll(await api('POST', '/a
 async function toggleType(id, kind)  { renderAll(await api('POST', '/api/cell-type/' + id, { kind })); }
 async function undoNb() { renderAll(await api('POST', '/api/undo')); }
 async function redoNb() { renderAll(await api('POST', '/api/redo')); }
+// ── Dark modal + loading overlay (shared confirm/alert + wait UX) ─────────────
+let _modalResolve = null;
+function _modalClose(v) {
+  if (_modalResolve) { const r = _modalResolve; _modalResolve = null;
+    document.getElementById('modalbg').classList.remove('show'); r(v); }
+}
+function dlg(message, buttons) {
+  return new Promise(resolve => {
+    _modalResolve = resolve;
+    const row = document.getElementById('modalrow');
+    document.getElementById('modalmsg').textContent = message; row.innerHTML = '';
+    buttons.forEach(b => { const el = document.createElement('button'); el.textContent = b.label;
+      if (b.cls) el.className = b.cls; el.onclick = () => _modalClose(b.value); row.appendChild(el); });
+    document.getElementById('modalbg').classList.add('show');
+    const pr = row.querySelector('.primary') || row.lastChild; if (pr) pr.focus();
+  });
+}
+const confirmDark = (msg, ok, cls) => dlg(msg, [{ label: 'Cancel', value: false }, { label: ok || 'OK', value: true, cls: cls || 'primary' }]);
+const alertDark = msg => dlg(msg, [{ label: 'OK', value: true, cls: 'primary' }]);
+function showLoading(m) { document.getElementById('lmsg').textContent = m || 'Working…'; document.getElementById('loading').classList.add('show'); }
+function hideLoading() { document.getElementById('loading').classList.remove('show'); }
+document.addEventListener('keydown', e => {
+  const bg = document.getElementById('modalbg');
+  if (bg && bg.classList.contains('show') && e.key === 'Escape') { e.stopPropagation(); _modalClose(false); }
+}, true);
+document.addEventListener('mousedown', e => { if (e.target && e.target.id === 'modalbg') _modalClose(false); });
+
 async function runAll()  { updateStates(await api('POST', '/api/run')); }
 async function resetAll(){ updateStates(await api('POST', '/api/reset')); }
 async function restartWorker(){
-  if (!confirm("Restart this notebook's worker? Its process is killed and cells re-run from a fresh namespace.")) return;
-  renderAll(await api('POST', '/api/restart'));
+  if (!await confirmDark("Restart this notebook's worker? Its process is killed and cells re-run from a fresh namespace.", 'Restart')) return;
+  showLoading('Restarting worker — respawning the process and re-running cells…');
+  try { renderAll(await api('POST', '/api/restart')); } finally { hideLoading(); }
 }
 async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); }
 
