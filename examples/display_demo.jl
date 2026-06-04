@@ -94,3 +94,7 @@ nothing
 #%% code id=pagedsql
 # 1,000,000 rows in DuckDB, browsed with SQL pushdown (sort/search/page in the DB).
 slate_query(con, "SELECT i, i*i AS sq, (i % 3) AS m FROM range(1, 1000001) t(i)")
+
+#%% code id=421e83
+
+#%% code id=429cc3

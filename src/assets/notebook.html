@@ -45,13 +45,20 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .cell.state-running { border-left-color:var(--green); animation:pulse 1s infinite; }
 .cell.state-errored { border-left-color:var(--red); }
 @keyframes pulse { 50% { border-left-color:var(--bg2); } }
-.cellhead { display:flex; align-items:center; gap:10px; padding:6px 12px; background:var(--bg3);
-            border-bottom:1px solid var(--border); font-size:.76rem; }
-.badge { text-transform:uppercase; letter-spacing:.04em; color:var(--dim); min-width:62px; }
-.cell.state-stale  .badge { color:var(--gold); }
-.cell.state-edited .badge { color:var(--orange); }
+.cellhead { display:flex; align-items:center; gap:8px; padding:3px 10px; background:var(--bg3);
+            border-bottom:1px solid var(--border); font-size:.74rem; min-height:27px; }
+.cellhead .run { padding:0 7px; font-size:.72rem; }
+.cellhead .hspace { flex:1; }
+.cellacts { display:flex; gap:3px; align-items:center; opacity:0; transition:opacity .12s; }
+.cell:hover .cellacts, .cell.selected .cellacts { opacity:1; }
+.cellacts button { padding:0 6px; font-size:.7rem; }
+.cellacts .drag { cursor:grab; color:var(--dim); padding:0 4px; user-select:none; }
+.badge { text-transform:uppercase; letter-spacing:.04em; font-size:.68rem; min-width:52px; text-align:right; color:var(--dim); }
+.cell.state-fresh   .badge { color:var(--accent); }
+.cell.state-stale   .badge { color:var(--gold); }
+.cell.state-edited  .badge { color:var(--orange); }
 .cell.state-errored .badge { color:var(--red); }
-.cid { margin-left:auto; color:var(--dim); font-family:monospace; }
+.cid { color:var(--dim); font-family:monospace; }
 .CodeMirror { height:auto; font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
 .output { font-size:.84rem; }
 .output .out, .output .val, .output .err { padding:8px 12px; border-top:1px solid var(--border); }
@@ -97,12 +104,12 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .mdhint { color:var(--dim); font-size:.7rem; padding:3px 4px 0; }
 .cdur { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.7rem; }
 .hint { color:var(--dim); font-size:.72rem; }
-.cellbar { display:flex; gap:4px; align-items:center; padding:3px 8px; opacity:0; transition:opacity .12s;
-           background:var(--bg3); border-bottom:1px solid var(--border); }
-.cell:hover .cellbar { opacity:1; }
-.cellbar button { padding:0 6px; font-size:.7rem; }
-.cellbar .drag { cursor:grab; color:var(--dim); padding:0 4px; user-select:none; }
-.cellbar .del { margin-left:auto; }
+.addmenu { position:fixed; z-index:55; background:var(--bg2); border:1px solid var(--border); border-radius:8px;
+           padding:4px; box-shadow:0 8px 24px rgba(0,0,0,.5); display:none; }
+.addmenu.show { display:block; }
+.addmenu button { display:block; width:100%; text-align:left; padding:5px 16px 5px 10px; border:none; background:none;
+                  color:var(--text); cursor:pointer; font-size:.8rem; border-radius:5px; white-space:nowrap; }
+.addmenu button:hover { background:var(--bg3); color:var(--accent); }
 .cell.drop-before { box-shadow: inset 0 3px 0 0 var(--accent); }
 .cell.drop-after  { box-shadow: inset 0 -3px 0 0 var(--accent); }
 .cell.bind { border-left-color:var(--purple); }
@@ -204,12 +211,12 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .spinner { width:38px; height:38px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .loading .lmsg { color:var(--text); font-size:.9rem; }
-.cell.selected { outline:2px solid var(--purple); outline-offset:-1px;       /* command mode */
-                 box-shadow:0 0 10px rgba(197,134,192,.35); }
-.cell.editing  { outline:2px solid var(--green); outline-offset:-1px; }       /* edit mode */
+.cell.selected { outline:3px solid var(--purple); outline-offset:-2px;       /* command mode */
+                 box-shadow:0 0 12px rgba(197,134,192,.4); }
+.cell.editing  { outline:3px solid var(--green); outline-offset:-2px; }       /* edit mode */
 .cid { cursor:pointer; } .cid:hover { color:var(--accent); }
 .cidedit { background:var(--bg3); color:var(--text); border:1px solid var(--accent); border-radius:4px;
-           font-family:monospace; font-size:.76rem; padding:0 4px; width:12ch; margin-left:auto; }
+           font-family:monospace; font-size:.76rem; padding:0 4px; width:14ch; }
 </style>
 </head>
 <body>
@@ -222,7 +229,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <a id="vscode" class="btnlink" href="#" title="Open the .jl in VS Code">⧉ VS Code</a>
   <button onclick="undoNb()" title="undo (⌘Z)">↶</button>
   <button onclick="redoNb()" title="redo (⌘⇧Z)">↷</button>
-  <button onclick="addCell('','code')">＋ cell</button>
+  <button onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
   <button onclick="runAll()">▶ Run stale</button>
   <button onclick="resetAll()">↻ Rebuild</button>
   <button onclick="restartWorker()" title="kill + respawn this notebook's worker process">⟲ Restart worker</button>
@@ -238,6 +245,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 </aside>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
+<div class="addmenu" id="addmenu"></div>
 
 <script>
 // This notebook's hub id, from the /n/<id> URL; all API/SSE paths are scoped to it.
@@ -550,20 +558,27 @@ function controlStrip(c) {
   return `<div class="controls${cols.length ? '' : ' empty'}" data-cell="${c.id}">${inner}</div>`;
 }
 
-function cellBar(c) {
+// One compact header line per cell: run + id (left), then duration, hover-revealed
+// actions, and the state badge (right). Replaces the old two-row bar+head.
+function cellHeader(c) {
+  const isCode = c.kind === 'code' && !hasBinds(c);
   const other = c.kind === 'md' ? 'code' : 'md';
   const editSrc = (c.kind === 'md' || hasBinds(c))
-    ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="toggle source / rendered">&lt;/&gt;</button>` : '';
-  return '<div class="cellbar">' +
-    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
-    editSrc +
-    `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
-    `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
-    `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
-    `<button onclick="addCell('${c.id}','code')" title="add code below">＋code</button>` +
-    `<button onclick="addCell('${c.id}','md')" title="add markdown below">＋md</button>` +
-    `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
+    ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
+  const run = isCode ? `<button class="run" data-run="${c.id}" title="run (⇧⏎)">▶</button>` : '';
+  return '<div class="cellhead">' + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
+    '<span class="hspace"></span>' +
+    `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
+    '<span class="cellacts">' +
+      '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' + editSrc +
+      `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
+      `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
+      `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
+      `<button class="addbtn" onclick="addCell('${c.id}','code')" oncontextmenu="addMenu(event,'${c.id}');return false" title="add below · right-click for type">＋</button>` +
+      `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
+    '</span>' +
+    `<span class="badge">${c.state}</span>` +
     '</div>';
 }
 
@@ -574,19 +589,16 @@ function cellEl(c) {
   srcMap[c.id] = c.source;
   if (c.kind === 'md') {
     div.className = 'cell md state-' + c.state;
-    div.innerHTML = cellBar(c) +
+    div.innerHTML = cellHeader(c) +
       `<div class="md" ondblclick="editSource('${c.id}','markdown')" title="double-click to edit">${mdHtml(c)}</div>` +
       srcEditHTML();
   } else if (hasBinds(c)) {
     // A bind/control-group cell: one row per variable (live widget or hosted chip).
     div.className = 'cell bind state-' + c.state;
-    div.innerHTML = cellBar(c) + bindsHTML(c) + srcEditHTML();
+    div.innerHTML = cellHeader(c) + bindsHTML(c) + srcEditHTML();
   } else {
     div.className = 'cell code state-' + c.state;
-    div.innerHTML = cellBar(c) +
-      '<div class="cellhead"><span class="badge">' + c.state + '</span>' +
-      '<button data-run="' + c.id + '">▶ run</button>' +
-      '<span class="cdur">' + (c.duration != null ? c.duration + ' ms' : '') + '</span></div>' +
+    div.innerHTML = cellHeader(c) +
       '<textarea></textarea>' +
       controlStrip(c) +
       '<div class="output">' + c.output + '</div>' +
@@ -870,8 +882,24 @@ async function addCell(after, kind, before) {
   const state = await api('POST', '/api/cell-add', { after, kind, before: !!before });
   renderAll(state);
   const neu = (state.cells || []).map(c => c.id).find(id => !oldIds.has(id));
-  if (neu) selectCell(neu, true);                  // select the new cell (stay in command mode)
+  // renderAll restores the prior scroll on the next frame, so scroll to the new
+  // cell a frame later (otherwise the restore wins and it doesn't move).
+  if (neu) requestAnimationFrame(() => requestAnimationFrame(() => selectCell(neu, true)));
 }
+// Right-click on a ＋ add button → a tiny code/markdown chooser at the cursor.
+function addMenu(e, cellId) {
+  const m = document.getElementById('addmenu');
+  m.innerHTML = '';
+  [['code', '＋ code below'], ['md', '＋ markdown below']].forEach(([k, label]) => {
+    const b = document.createElement('button'); b.textContent = label;
+    b.onclick = () => { hideAddMenu(); addCell(cellId, k); }; m.appendChild(b);
+  });
+  m.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
+  m.style.top = Math.min(e.clientY, window.innerHeight - 80) + 'px';
+  m.classList.add('show');
+}
+function hideAddMenu() { document.getElementById('addmenu').classList.remove('show'); }
+document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') && !e.target.closest('.addbtn')) hideAddMenu(); });
 async function delCell(id) {
   const idx = cellIds().indexOf(id);
   renderAll(await api('POST', '/api/cell-delete/' + id));
