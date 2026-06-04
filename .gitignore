@@ -4,3 +4,12 @@
 *.cov
 .DS_Store
 /.vscode/
+
+# editor swap files
+*.swp
+*.swo
+.*.swp
+.*.swo
+
+# personal scratch
+TODO.md
