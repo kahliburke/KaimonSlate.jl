@@ -467,7 +467,22 @@ function _index_html(h::Hub)
     .comp li{padding:4px 10px;border-radius:5px;cursor:pointer;font-family:monospace;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .comp li.on{background:#569cd6;color:#0d1120;} .comp li:hover{background:#1a1e2e;}
     .open button{background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 16px;cursor:pointer;}
-    .open button:hover{border-color:#569cd6;color:#569cd6;}</style></head>
+    .open button:hover{border-color:#569cd6;color:#569cd6;}
+    .modal-bg{position:fixed;inset:0;background:rgba(5,8,16,.66);display:none;align-items:center;justify-content:center;z-index:50;}
+    .modal-bg.show{display:flex;}
+    .modal{background:#141828;border:1px solid #2a2e40;border-radius:10px;padding:18px 20px;max-width:520px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,.55);}
+    .modal .msg{color:#d4d8e8;font-size:.92rem;line-height:1.5;margin-bottom:16px;white-space:pre-wrap;word-break:break-word;}
+    .modal .row{display:flex;justify-content:flex-end;gap:10px;}
+    .modal button{background:#1a1e2e;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 16px;cursor:pointer;font-size:.85rem;}
+    .modal button:hover{border-color:#569cd6;color:#569cd6;}
+    .modal button.primary{background:#569cd6;color:#0d1120;border-color:#569cd6;font-weight:600;}
+    .modal button.primary:hover{background:#6cb0e6;color:#0d1120;}
+    .modal button.danger{color:#e57575;border-color:#3a2030;} .modal button.danger:hover{background:rgba(229,117,117,.12);border-color:#e57575;color:#e57575;}
+    .loading{position:fixed;inset:0;background:rgba(5,8,16,.72);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;z-index:60;}
+    .loading.show{display:flex;}
+    .spinner{width:38px;height:38px;border:3px solid #2a2e40;border-top-color:#569cd6;border-radius:50%;animation:spin .8s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    .loading .lmsg{color:#d4d8e8;font-size:.9rem;}</style></head>
     <body><h1>📓 Kaimon Slate — notebooks</h1>
     <div class="open">
       <div class="pathwrap">
@@ -477,15 +492,34 @@ function _index_html(h::Hub)
       </div>
       <button id="openbtn">Open</button>
     </div>
+    <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
+    <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
     <script>
     (function(){
       var inp=document.getElementById('pathin'), comp=document.getElementById('comp'), items=[], sel=-1;
+      var modalBg=document.getElementById('modalbg'), modalMsg=document.getElementById('modalmsg'),
+          modalRow=document.getElementById('modalrow'), loadEl=document.getElementById('loading'),
+          loadMsg=document.getElementById('lmsg'), _resolve=null;
       var esc=function(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
       var isdir=function(p){return p.slice(-1)==='/';};
+      // Dark-themed modal (returns a Promise) replacing native confirm/alert.
+      function _close(v){if(_resolve){var r=_resolve;_resolve=null;modalBg.classList.remove('show');r(v);}}
+      function modal(message,buttons){return new Promise(function(resolve){_resolve=resolve;
+        modalMsg.textContent=message;modalRow.innerHTML='';
+        buttons.forEach(function(b){var el=document.createElement('button');el.textContent=b.label;if(b.cls)el.className=b.cls;
+          el.onclick=function(){_close(b.value);};modalRow.appendChild(el);});
+        modalBg.classList.add('show');var pr=modalRow.querySelector('.primary')||modalRow.lastChild;if(pr)pr.focus();});}
+      function confirmDark(msg,okLabel,okCls){return modal(msg,[{label:'Cancel',value:false},{label:okLabel||'OK',value:true,cls:okCls||'primary'}]);}
+      function alertDark(msg){return modal(msg,[{label:'OK',value:true,cls:'primary'}]);}
+      modalBg.addEventListener('mousedown',function(e){if(e.target===modalBg)_close(false);});
+      document.addEventListener('keydown',function(e){if(modalBg.classList.contains('show')&&e.key==='Escape')_close(false);});
+      function showLoading(m){loadMsg.textContent=m||'Working…';loadEl.classList.add('show');}
+      function hideLoading(){loadEl.classList.remove('show');}
       function openPath(p){p=(p||'').trim();if(!p)return;
+        showLoading('Opening “'+p+'” — starting the worker…');
         fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
           .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-          .then(function(d){location.href=d.url;}).catch(function(e){alert('Open failed: '+e);});}
+          .then(function(d){location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
       function render(){comp.innerHTML=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
         comp.style.display=items.length?'block':'none';}
       function fetchComp(){return fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
@@ -495,18 +529,18 @@ function _index_html(h::Hub)
       // Enter / Open: act on the active suggestion (highlighted, else the first),
       // else on the typed text. Directories are descended (never opened); a new
       // path is confirmed and offered a .jl extension before creating.
-      function submit(){
+      async function submit(){
         var idx = sel>=0?sel:(items.length?0:-1);
         if(idx>=0){var pick=items[idx];inp.value=pick;
           if(isdir(pick)){fetchComp();return;}     // commit dir + show subpaths, don't open
           openPath(pick);return;}                  // file suggestion → open
         var p=inp.value.trim(); if(!p)return;
-        fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();}).then(function(info){
-          if(info.isdir){if(p.slice(-1)!=='/')inp.value=p+'/';fetchComp();return;}   // never open a directory
-          if(info.isfile){openPath(p);return;}
-          if(!confirm('Create new notebook “'+p+'”?'))return;                          // confirm new file
-          if(p.slice(-3).toLowerCase()!=='.jl' && confirm('Add a .jl extension?  →  “'+p+'.jl”'))p=p+'.jl';
-          openPath(p);});
+        var info=await fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();});
+        if(info.isdir){if(p.slice(-1)!=='/')inp.value=p+'/';fetchComp();return;}        // never open a directory
+        if(info.isfile){openPath(p);return;}
+        if(!await confirmDark('Create new notebook “'+p+'”?','Create'))return;          // confirm new file
+        if(p.slice(-3).toLowerCase()!=='.jl'){ if(await confirmDark('“'+p+'” has no .jl extension. Add it?','Add .jl'))p=p+'.jl'; }
+        openPath(p);
       }
       var t;inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
       inp.addEventListener('keydown',function(e){
@@ -526,9 +560,10 @@ function _index_html(h::Hub)
         isdir(pick)?fetchComp():openPath(pick);});   // click dir = descend, click file = open
       document.getElementById('openbtn').onclick=function(){submit();};
       // Per-session shutdown buttons (event-delegated over the rows).
-      document.addEventListener('click',function(e){var b=e.target.closest('.kill');if(!b)return;
+      document.addEventListener('click',async function(e){var b=e.target.closest('.kill');if(!b)return;
         var id=b.dataset.id;
-        if(!confirm('Shut down session “'+id+'”? Its worker stops and the notebook closes.'))return;
+        if(!await confirmDark('Shut down session “'+id+'”? Its worker stops and the notebook closes.','Shutdown','danger'))return;
+        showLoading('Shutting down “'+id+'”…');
         fetch('/api/'+encodeURIComponent(id)+'/shutdown',{method:'POST'}).then(function(){location.reload();});});
       inp.focus();
     })();
