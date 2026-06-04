@@ -235,6 +235,13 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
              display:flex; justify-content:space-between; gap:12px; }
 .cmdpal li.on { background:var(--accent); color:var(--bg); }
 .cmdpal li .k { color:var(--dim); font-size:.76rem; } .cmdpal li.on .k { color:var(--bg); }
+/* Collapsible long outputs */
+.output.clip { max-height:440px; overflow:hidden; position:relative; }
+.output.clip::after { content:''; position:absolute; left:0; right:0; bottom:0; height:52px;
+  background:linear-gradient(transparent, var(--bg2)); pointer-events:none; }
+.outmore { display:block; width:100%; text-align:center; font-size:.74rem; color:var(--accent);
+  background:var(--bg3); border:none; border-top:1px solid var(--border); padding:4px; cursor:pointer; }
+.outmore:hover { background:var(--bg2); }
 </style>
 </head>
 <body>
@@ -247,7 +254,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <button onclick="undoNb()" title="undo (⌘Z)">↶</button>
   <button onclick="redoNb()" title="redo (⌘⇧Z)">↷</button>
   <button onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
-  <button onclick="runAll()">▶ Run stale</button>
+  <button id="runstale" onclick="runAll()">▶ Run stale</button>
   <button onclick="resetAll()" title="rebuild from a fresh namespace">↻ Rebuild</button>
   <button onclick="restartWorker()" title="kill + respawn the worker">⟲ Restart</button>
   <button onclick="togglePalette()" title="controls palette">🎛</button>
@@ -785,6 +792,8 @@ function renderAll(state) {
   state.cells.forEach(renderCharts);
   state.cells.forEach(renderTables);
   typeset(nb);
+  collapseOutputs(nb);
+  updateStaleBadge(state);
   renderPalette();
   if (selectedId && !cellIds().includes(selectedId)) selectedId = null;   // dropped/renamed
   if (selectedId) selectCell(selectedId);                                 // re-apply command-mode ring
@@ -900,6 +909,8 @@ function updateStates(state) {
   requestAnimationFrame(() => { se.scrollTop = top; });   // … and after Safari's deferred reflow
   syncControlValues(state);
   updatePaletteValues(state);
+  collapseOutputs();
+  updateStaleBadge(state);
 }
 
 async function runCell(id) {
@@ -1113,6 +1124,25 @@ document.getElementById('cmdbg').addEventListener('mousedown', e => { if (e.targ
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openPalette(); }
 });
+
+// ── Collapsible long outputs + stale-count badge ──────────────────────────────
+function collapseOutputs(root) {
+  (root || document).querySelectorAll('.cell .output').forEach(out => {
+    const nx = out.nextElementSibling;
+    if (nx && nx.classList.contains('outmore')) nx.remove();
+    out.classList.remove('clip');
+    if (out.scrollHeight > 480) {                       // tall output → clip + reveal toggle
+      out.classList.add('clip');
+      const btn = document.createElement('button'); btn.className = 'outmore'; btn.textContent = '⌄ show more';
+      btn.onclick = () => { const c = out.classList.toggle('clip'); btn.textContent = c ? '⌄ show more' : '⌃ show less'; };
+      out.after(btn);
+    }
+  });
+}
+function updateStaleBadge(state) {
+  const n = ((state && state.cells) || []).filter(c => c.kind === 'code' && (c.state === 'stale' || c.state === 'edited')).length;
+  const b = document.getElementById('runstale'); if (b) b.textContent = n ? `▶ Run stale (${n})` : '▶ Run stale';
+}
 
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
