@@ -23,8 +23,12 @@ const _TEMPLATE = joinpath(@__DIR__, "templates", "report.html.tmpl")
 
 _esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;")
 
-"Markdown source → HTML (for the live notebook + md cells)."
-markdown_html(src::AbstractString) = _md_html(src)
+"""
+Markdown source → HTML (live notebook + md cells). `interps` are the captured
+outputs of the cell's `{{ expr }}` blocks, spliced in document order.
+"""
+markdown_html(src::AbstractString) = _md_html(src, CellOutput[])
+markdown_html(src::AbstractString, interps) = _md_html(src, interps)
 
 """
     output_html(cell) -> String
@@ -57,17 +61,40 @@ end
 const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
 const _MATH_INLINE = r"\$([^\$\n]+?)\$"
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
+_interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
 
-function _md_html(src::AbstractString)
+# One markdown `{{ }}` interpolation's captured output → an inline HTML fragment.
+# Images / HTML / LaTeX / scalar values embed directly; echarts & interactive
+# tables need a JS host, so they aren't embedded inline (yet).
+function _interp_html(o::Union{CellOutput,Nothing})
+    o === nothing && return ""
+    o.exception === nothing || return "<span class=\"interr\">⟨" * _esc(o.exception) * "⟩</span>"
+    isempty(o.display) || return _render_chunks(o.display)
+    return isempty(o.value_repr) ? "" : "<span class=\"ival\">" * _esc(o.value_repr) * "</span>"
+end
+
+function _md_html(src::AbstractString, interps = CellOutput[])
+    s = String(src)
+    # 1) `{{ expr }}` → placeholders; render each capture (document order matches `interps`).
+    frags = String[]
+    s = replace(s, ReportEngine._MD_INTERP => function (_m)
+        i = length(frags) + 1
+        push!(frags, _interp_html(i <= length(interps) ? interps[i] : nothing))
+        _interp_token(i)
+    end)
+    # 2) math → placeholders (kept byte-for-byte for KaTeX).
     math = String[]
     stash(m) = (push!(math, String(m)); _math_token(length(math)))
-    s = replace(String(src), _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
+    s = replace(s, _MATH_DISPLAY => stash)   # $$…$$ first, so $…$ can't split it
     s = replace(s, _MATH_INLINE => stash)
     p = CommonMark.Parser()
     enable!(p, CommonMark.TableRule())
     html = CommonMark.html(p(s))
     for (i, m) in enumerate(math)
-        html = replace(html, _math_token(i) => _esc(m))   # raw TeX, HTML-escaped; KaTeX reads the text node
+        html = replace(html, _math_token(i) => _esc(m))      # raw TeX, HTML-escaped; KaTeX reads the text node
+    end
+    for (i, f) in enumerate(frags)
+        html = replace(html, _interp_token(i) => f)          # trusted HTML fragment, injected raw
     end
     return html
 end
@@ -108,7 +135,7 @@ end
 function _cell_view(cell::Cell)
     if cell.kind == MARKDOWN
         return (kind = "md", state = "", source = "", stdout = "", value = "",
-                error = "", display = "", html = _md_html(cell.source))
+                error = "", display = "", html = _md_html(cell.source, cell.interp))
     end
     o = cell.output
     chunks = o === nothing ? MimeChunk[] : o.display

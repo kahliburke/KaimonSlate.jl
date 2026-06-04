@@ -185,4 +185,24 @@ using .ReportEngine
         @test re.exception !== nothing && occursin("boom", re.exception)
     end
 
+    @testset "markdown {{ }} interpolation: reads, deps, reactive capture" begin
+        r = parse_report("#%% code id=a\nx = 21 * 2\n\n#%% md id=m\nThe answer is {{x}}.")
+        build_dependencies!(r)
+        mi = findfirst(c -> c.id == "m", r.cells)
+        @test :x in r.cells[mi].reads            # md cell reads the interpolated var
+        @test "a" in r.cells[mi].deps            # …and depends on the cell that writes it
+        eval_stale!(r)
+        @test length(r.cells[mi].interp) == 1
+        @test r.cells[mi].interp[1].value_repr == "42"
+        # editing the producer restales + re-resolves the md cell
+        update_source!(r, "#%% code id=a\nx = 100\n\n#%% md id=m\nThe answer is {{x}}.")
+        eval_stale!(r)
+        mi = findfirst(c -> c.id == "m", r.cells)
+        @test r.cells[mi].interp[1].value_repr == "100"
+        # a plain md cell (no interps) stays inert
+        r2 = parse_report("#%% md id=m\njust text")
+        eval_stale!(r2)
+        @test isempty(r2.cells[1].interp)
+    end
+
 end

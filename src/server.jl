@@ -152,7 +152,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
         "source"  => c.source,
         "state"   => lowercase(string(c.state)),
-        "output"  => c.kind == MARKDOWN ? markdown_html(c.source) : output_html(c),
+        "output"  => c.kind == MARKDOWN ? markdown_html(c.source, c.interp) : output_html(c),
         "echarts" => c.kind == MARKDOWN ? String[] : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? Any[] : _table_specs(c),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),

@@ -70,6 +70,19 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 function infer_bindings!(cell::Cell)
     empty!(cell.reads); empty!(cell.writes)
     delete!(cell.flags, :opaque)
+    if cell.kind == MARKDOWN
+        # A markdown cell "reads" the free variables of its `{{ expr }}` blocks, so
+        # it joins the reactive graph and re-renders when they change.
+        for e in _md_interp_exprs(cell.source)
+            ast = try; Meta.parse(e); catch; nothing; end
+            ast === nothing && continue
+            try
+                union!(cell.reads, EE.compute_reactive_node(Expr(:block, ast)).references)
+            catch
+            end
+        end
+        return cell
+    end
     cell.kind == CODE || return cell
 
     specs = parse_binds(cell.source)          # @bind widget / control-group cell?
@@ -124,6 +137,16 @@ function build_dependencies!(report::Report)
     barrier::Union{String,Nothing} = nothing
     seen = String[]
     for c in report.cells
+        if c.kind == MARKDOWN
+            # md cells depend on the writers of their interpolation vars (+ barrier),
+            # but never write, become a barrier, or enter `seen`.
+            for r in c.reads
+                haskey(writer, r) && push!(c.deps, writer[r])
+            end
+            barrier === nothing || push!(c.deps, barrier)
+            delete!(c.deps, c.id)
+            continue
+        end
         c.kind == CODE || continue
         for r in c.reads
             haskey(writer, r) && push!(c.deps, writer[r])
@@ -185,6 +208,7 @@ function update_source!(report::Report, new_source::AbstractString)
             nc.state = oc.state
             nc.deps = oc.deps
             nc.binds = oc.binds           # preserve live widget values
+            nc.interp = oc.interp         # carry resolved md interpolations forward
         else
             nc.state = STALE
             push!(changed, nc.id)         # new or edited
@@ -221,7 +245,7 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     prepare!(kernel, report)
     for c in report.cells
         if c.kind == MARKDOWN
-            c.state = FRESH
+            c.state == STALE && eval_cell!(report, c, kernel)   # re-resolve {{ }} interpolations
         elseif c.state == STALE
             eval_cell!(report, c, kernel)
         end

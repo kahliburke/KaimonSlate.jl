@@ -96,4 +96,20 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin(raw"\sqrt{x}", h_again)
         @test occursin(raw"\sqrt{x}", output_html(r3.cells[1]))   # output_html path too
     end
+
+    @testset "markdown {{ }} interpolation: rich fragments spliced in" begin
+        scalar = CellOutput("", MimeChunk[], Any[], Any[], "42", nothing, nothing, 0.0)
+        h = markdown_html("The answer is {{x}}.", [scalar])
+        @test occursin("42", h) && occursin("ival", h) && !occursin("{{", h)
+
+        img = CellOutput("", [MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], "", nothing, nothing, 0.0)
+        @test occursin("data:image/png;base64,", markdown_html("plot {{p}}", [img]))
+
+        err = CellOutput("", MimeChunk[], Any[], Any[], "", "boom", nothing, 0.0)
+        he = markdown_html("bad {{z}}", [err])
+        @test occursin("interr", he) && occursin("boom", he)
+
+        # No interps → unchanged; math is still preserved byte-for-byte.
+        @test occursin(raw"$e^{i\pi}$", markdown_html(raw"euler $e^{i\pi}$"))
+    end
 end

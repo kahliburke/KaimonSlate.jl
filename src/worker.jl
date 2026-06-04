@@ -64,6 +64,9 @@ __slate_reset() = (_NS[] = _new_ns(); true)
 __slate_table_page(table_id::String, page::Int, page_size::Int, sort_col::Int, sort_desc::Bool, search::String) =
     _provider_page(table_id, PageRequest(page, page_size, sort_col, sort_desc, search))
 
+"Capture markdown `{{ }}` interpolation expressions (rich) — one wire-form each."
+__slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e) for e in exprs]
+
 "GateTools exposed to the KaimonSlate server."
 function tools()
     return KaimonGate.GateTool[
@@ -71,6 +74,7 @@ function tools()
         KaimonGate.GateTool("__slate_assign", __slate_assign),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
+        KaimonGate.GateTool("__slate_interp", __slate_interp),
     ]
 end
 

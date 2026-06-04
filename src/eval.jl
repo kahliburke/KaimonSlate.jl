@@ -136,6 +136,15 @@ table_page(::InProcessKernel, ::Report, table_id::AbstractString, request::Abstr
     _provider_page(table_id, _page_request(request))
 
 """
+    interpolate(kernel, report, exprs) -> Vector{CellOutput}
+
+Capture each markdown `{{ expr }}` in the kernel (rich output, like a mini code
+cell). The gate kernel forwards to its worker.
+"""
+interpolate(::InProcessKernel, report::Report, exprs::Vector{String}) =
+    CellOutput[_eval_capture(report_module(report), e) for e in exprs]
+
+"""
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell
 
 Evaluate one cell through `kernel`. Markdown cells are inert (marked `FRESH`). A
@@ -144,6 +153,8 @@ captured, never propagated, so one bad cell doesn't abort the report.
 """
 function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel())
     if cell.kind == MARKDOWN
+        exprs = _md_interp_exprs(cell.source)
+        cell.interp = isempty(exprs) ? CellOutput[] : interpolate(kernel, report, exprs)
         cell.state = FRESH
         return cell
     end

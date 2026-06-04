@@ -202,6 +202,18 @@ function table_page(k::GateKernel, report::Report, table_id::AbstractString, req
     return (rows = collect(wire.rows), total = Int(wire.total))
 end
 
+# Capture markdown interpolation expressions in the worker (rich, one each).
+function interpolate(k::GateKernel, report::Report, exprs::Vector{String})
+    prepare!(k, report)
+    wires = try
+        _tool(k, "__slate_interp", Dict("exprs" => exprs))
+    catch
+        return CellOutput[]
+    end
+    wires === nothing && return CellOutput[]
+    return CellOutput[_wire_to_output(w) for w in wires]
+end
+
 function assign!(k::GateKernel, report::Report, name::Symbol, value)
     prepare!(k, report)
     try

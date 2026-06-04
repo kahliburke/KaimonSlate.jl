@@ -67,6 +67,7 @@ mutable struct Cell
     flags::Set{Symbol}            # :volatile :pinned :track :opaque …
     binds::Vector{BindSpec}       # the `@bind` widgets this cell defines (a *control group* if >1)
     controls::Vector{Vector{String}}  # control strip as columns of stacked var names (§Layer 3 UX)
+    interp::Vector{CellOutput}    # captured outputs of a markdown cell's `{{ }}` interpolations
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -74,8 +75,15 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[])
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[])
 end
+
+# Markdown variable interpolation: `{{ expr }}` blocks are captured (rich) and
+# spliced into the rendered prose; the md cell reads their free variables so it
+# re-renders reactively. The SAME regex/order is used by deps (reads) and the
+# renderer (substitution), so captures line up positionally.
+const _MD_INTERP = r"\{\{(.+?)\}\}"s
+_md_interp_exprs(src::AbstractString) = String[strip(String(m.captures[1])) for m in eachmatch(_MD_INTERP, String(src))]
 
 mutable struct Report
     id::String
