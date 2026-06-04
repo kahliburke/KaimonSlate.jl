@@ -189,6 +189,23 @@ input.toggle:checked::after { left:18px; }
   border-left:1px solid var(--border); transform:translateX(100%); transition:transform .18s ease;
   z-index:20; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.3); }
 .palette.open { transform:none; }
+/* Agent chat panel (consumer of Kaimon's agent service) */
+.agentpanel { position:fixed; top:0; right:0; height:100vh; width:380px; max-width:92vw; background:var(--bg2);
+  border-left:1px solid var(--border); transform:translateX(100%); transition:transform .18s ease;
+  z-index:25; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.35); }
+.agentpanel.open { transform:none; }
+.aphead { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); }
+.aphead strong { color:#fff; }
+.apmsgs { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.apmsg { font-size:.86rem; line-height:1.5; border-radius:8px; padding:8px 11px; max-width:92%; white-space:pre-wrap; word-break:break-word; }
+.apmsg.user { align-self:flex-end; background:var(--bg3); }
+.apmsg.assistant { align-self:flex-start; background:#11203a; }
+.apmsg.tool { align-self:flex-start; background:none; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; padding:2px 4px; }
+.apmsg.err { align-self:flex-start; color:var(--red); }
+.apinput { display:flex; gap:8px; padding:10px; border-top:1px solid var(--border); }
+.apinput textarea { flex:1; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem; }
+.apinput textarea:focus { outline:none; border-color:var(--accent); }
 .phead { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); }
 .phead strong { color:#fff; } .pclose { margin-left:auto; }
 .plist { flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:6px; }
@@ -271,6 +288,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <button onclick="togglePalette()" title="controls palette">🎛</button>
   <button onclick="openSettings()" title="settings">⚙</button>
   <button onclick="openPalette()" title="command palette (⌘K)">⌘K</button>
+  <button onclick="toggleAgent()" title="agent chat">💬</button>
 </div>
 <div class="page"><div id="nb"></div></div>
 <aside id="palette" class="palette">
@@ -278,6 +296,15 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
     <button class="pclose" onclick="togglePalette()" title="close">✕</button></div>
   <div id="palette-list" class="plist"></div>
   <div class="pfoot hint">Click a chip to jump to its cell. Drag a chip into a cell's control strip to surface it.</div>
+</aside>
+<aside id="agentpanel" class="agentpanel">
+  <div class="aphead"><strong>🤖 Agent</strong><span id="apstatus" class="hint"></span>
+    <button class="pclose" onclick="toggleAgent()" title="close">✕</button></div>
+  <div id="apmsgs" class="apmsgs"></div>
+  <div class="apinput">
+    <textarea id="apin" placeholder="Ask the agent to build/edit cells… (⏎ send · ⇧⏎ newline)"></textarea>
+    <button onclick="agentSend()">Send</button>
+  </div>
 </aside>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
@@ -1202,11 +1229,57 @@ function updateStaleBadge(state) {
   const b = document.getElementById('runstale'); if (b) b.textContent = n ? `▶ Run stale (${n})` : '▶ Run stale';
 }
 
+// ── Agent chat ────────────────────────────────────────────────────────────────
+// Consumer of Kaimon's agent service (see Kaimon/AGENT_SESSION_SERVICE_PLAN.md):
+// send a turn → POST /api/<id>/chat; the agent's streamed events arrive over SSE as
+// "agent:<json>" envelopes ({kind, turn, data}) and the agent edits cells via the
+// slate.* tools (so the cells update through the normal SSE path).
+let agentMsgs = [];   // {role:'user'|'assistant'|'tool'|'err', text, done?}
+function toggleAgent() {
+  const p = document.getElementById('agentpanel'); p.classList.toggle('open');
+  if (p.classList.contains('open')) document.getElementById('apin').focus();
+}
+const _esca = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function renderAgentMsgs() {
+  const el = document.getElementById('apmsgs');
+  el.innerHTML = agentMsgs.map(m => `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
+  el.scrollTop = el.scrollHeight;
+}
+const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
+async function agentSend() {
+  const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
+  inp.value = ''; agentMsgs.push({ role: 'user', text }); renderAgentMsgs(); agentStatus('thinking…');
+  try {
+    const r = await api('POST', '/api/chat', { text });
+    if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); renderAgentMsgs(); agentStatus(''); }
+  } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); renderAgentMsgs(); agentStatus(''); }
+}
+function agentEvent(env) {                                   // one relayed agent event
+  if (!env) return;
+  if (env.kind === 'assistant_text') {
+    let last = agentMsgs[agentMsgs.length - 1];
+    if (!last || last.role !== 'assistant' || last.done) { last = { role: 'assistant', text: '' }; agentMsgs.push(last); }
+    last.text += (env.data && env.data.text) || '';
+  } else if (env.kind === 'tool_use') {
+    agentMsgs.push({ role: 'tool', text: '⚙ ' + ((env.data && env.data.name) || 'tool') });
+  } else if (env.kind === 'result') {
+    const last = agentMsgs[agentMsgs.length - 1]; if (last && last.role === 'assistant') last.done = true;
+    agentStatus('');
+  } else if (env.kind === 'error') {
+    agentMsgs.push({ role: 'err', text: (env.data && env.data.message) || 'error' }); agentStatus('');
+  }
+  renderAgentMsgs();
+}
+document.getElementById('apin').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); }
+});
+
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
 function connectLive() {
   const es = new EventSource(_apipath('/api/events'));
   es.onmessage = async (e) => {
+    if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // async live update — patch in place
     const v = parseInt(e.data, 10);
     if (!isNaN(v) && v !== lastVersion) { lastVersion = v; renderAll(await api('GET', '/api/state')); }

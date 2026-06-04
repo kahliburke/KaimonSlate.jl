@@ -875,6 +875,14 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> (redo!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (eval_stale!(nb.report, nb.kernel); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> (restart_kernel!(nb); _json(state_json(nb)))))
+    # Agent chat seam (consumer of Kaimon's agent service — see
+    # Kaimon/AGENT_SESSION_SERVICE_PLAN.md). TODO: forward the turn to Kaimon
+    # (agent_send) and relay its `agent:<id>` stream events onto this notebook's SSE
+    # (via _broadcast as "agent:<json>"). Stubbed until that service lands.
+    HTTP.register!(router, "POST", "/api/{id}/chat", req -> _withnb(h, req, nb -> begin
+        _ = get(_body(req), "text", "")
+        _json(Dict("ok" => false, "error" => "agent service not connected yet (pending Kaimon agent_* service)"))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))
     end))
