@@ -217,6 +217,24 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .cid { cursor:pointer; } .cid:hover { color:var(--accent); }
 .cidedit { background:var(--bg3); color:var(--text); border:1px solid var(--accent); border-radius:4px;
            font-family:monospace; font-size:.76rem; padding:0 4px; width:14ch; }
+/* Settings modal */
+.setmodal .setrow { display:flex; align-items:center; justify-content:space-between; gap:18px; margin:14px 0; }
+.setmodal label { color:var(--text); font-size:.86rem; }
+.setmodal .rt { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.82rem; }
+.setmodal input[type=range] { accent-color:var(--accent); }
+.setmodal select { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-size:.84rem; }
+/* Command palette (⌘K) */
+.palette-bg { position:fixed; inset:0; background:rgba(5,8,16,.5); display:none; justify-content:center; align-items:flex-start; z-index:65; }
+.palette-bg.show { display:flex; }
+.cmdpal { margin-top:12vh; width:min(560px,92%); background:var(--bg2); border:1px solid var(--border); border-radius:10px;
+          box-shadow:0 16px 48px rgba(0,0,0,.55); overflow:hidden; }
+.cmdpal input { width:100%; padding:12px 16px; background:var(--bg2); color:var(--text); border:none;
+                border-bottom:1px solid var(--border); font-size:.95rem; outline:none; }
+.cmdpal ul { list-style:none; margin:0; padding:6px; max-height:50vh; overflow:auto; }
+.cmdpal li { padding:7px 12px; border-radius:6px; cursor:pointer; font-size:.86rem; color:var(--text);
+             display:flex; justify-content:space-between; gap:12px; }
+.cmdpal li.on { background:var(--accent); color:var(--bg); }
+.cmdpal li .k { color:var(--dim); font-size:.76rem; } .cmdpal li.on .k { color:var(--bg); }
 </style>
 </head>
 <body>
@@ -224,17 +242,17 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <a class="btnlink" href="/" title="all notebooks">📓</a>
   <select id="nbswitch" class="nbswitch" title="switch notebook"></select>
   <h1 id="title">Notebook</h1>
-  <span class="hint">⇧⏎ run · ⇥ complete</span>
-  <label class="hint" title="minimum delay between live recomputes while dragging a control (the final value is always sent on release)">⏱ <input id="rateMs" type="number" min="0" max="2000" step="25" style="width:56px"/> ms</label>
+  <span class="hint">⇧⏎ run · ⇥ complete · ⌘K commands</span>
   <a id="vscode" class="btnlink" href="#" title="Open the .jl in VS Code">⧉ VS Code</a>
   <button onclick="undoNb()" title="undo (⌘Z)">↶</button>
   <button onclick="redoNb()" title="redo (⌘⇧Z)">↷</button>
   <button onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
   <button onclick="runAll()">▶ Run stale</button>
-  <button onclick="resetAll()">↻ Rebuild</button>
-  <button onclick="restartWorker()" title="kill + respawn this notebook's worker process">⟲ Restart worker</button>
-  <button onclick="reload()">⟳ Reload</button>
-  <button onclick="togglePalette()" title="controls palette">🎛 Controls</button>
+  <button onclick="resetAll()" title="rebuild from a fresh namespace">↻ Rebuild</button>
+  <button onclick="restartWorker()" title="kill + respawn the worker">⟲ Restart</button>
+  <button onclick="togglePalette()" title="controls palette">🎛</button>
+  <button onclick="openSettings()" title="settings">⚙</button>
+  <button onclick="openPalette()" title="command palette (⌘K)">⌘K</button>
 </div>
 <div class="page"><div id="nb"></div></div>
 <aside id="palette" class="palette">
@@ -246,6 +264,18 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
 <div class="addmenu" id="addmenu"></div>
+<div class="modal-bg" id="setbg"><div class="modal setmodal">
+  <div class="msg"><strong>Settings</strong></div>
+  <div class="setrow"><label>Live-update debounce</label>
+    <span class="rt"><input type="range" id="setdeb" min="0" max="1000" step="25"/><span id="setdebv"></span> ms</span></div>
+  <div class="setrow"><label>Theme</label>
+    <select id="settheme"><option value="dark">Dark (default)</option></select></div>
+  <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
+</div></div>
+<div class="palette-bg" id="cmdbg"><div class="cmdpal">
+  <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>
+  <ul id="cmdlist"></ul>
+</div></div>
 
 <script>
 // This notebook's hub id, from the /n/<id> URL; all API/SSE paths are scoped to it.
@@ -1021,6 +1051,69 @@ function startRename(span) {
   inp.onblur = () => finish(true);
 }
 
+// ── Settings modal ────────────────────────────────────────────────────────────
+function openSettings() {
+  const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
+  deb.value = updateMs; v.textContent = updateMs;
+  deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
+  const th = document.getElementById('settheme');
+  th.value = localStorage.getItem('slateTheme') || 'dark';
+  th.onchange = () => localStorage.setItem('slateTheme', th.value);   // real themes land later
+  document.getElementById('setbg').classList.add('show');
+}
+function closeSettings() { document.getElementById('setbg').classList.remove('show'); }
+document.getElementById('setbg').addEventListener('mousedown', e => { if (e.target.id === 'setbg') closeSettings(); });
+
+// ── Command palette (⌘K) ──────────────────────────────────────────────────────
+function paletteCommands() {
+  const cmds = [
+    { label: 'Add code cell', run: () => addCell(selectedId || '', 'code') },
+    { label: 'Add markdown cell', run: () => addCell(selectedId || '', 'md') },
+    { label: 'Run stale cells', run: runAll },
+    { label: 'Rebuild (fresh namespace)', run: resetAll },
+    { label: 'Restart worker', run: restartWorker },
+    { label: 'Reload from disk', run: reload },
+    { label: 'Toggle controls palette', run: togglePalette },
+    { label: 'Settings…', run: openSettings },
+    { label: 'All notebooks', run: () => { location.href = '/'; } },
+  ];
+  cellIds().forEach(id => cmds.push({ tag: 'cell', label: 'Jump to cell: ' + id, run: () => selectCell(id, true) }));
+  return cmds;
+}
+let _cmd = [], _cmdSel = 0;
+const _escc = s => s.replace(/[&<>"]/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[x]));
+function openPalette() {
+  document.getElementById('cmdbg').classList.add('show');
+  const inp = document.getElementById('cmdin'); inp.value = '';
+  inp.oninput = () => renderPaletteList(inp.value);
+  renderPaletteList(''); inp.focus();
+}
+function closePalette() { document.getElementById('cmdbg').classList.remove('show'); }
+function renderPaletteList(filter) {
+  const f = filter.trim().toLowerCase();
+  _cmd = paletteCommands().filter(c => c.label.toLowerCase().includes(f));
+  _cmdSel = 0;
+  document.getElementById('cmdlist').innerHTML = _cmd.map((c, i) =>
+    `<li class="${i === 0 ? 'on' : ''}" data-i="${i}"><span>${_escc(c.label)}</span>${c.tag ? `<span class="k">${c.tag}</span>` : ''}</li>`).join('');
+}
+function _paintCmd() {
+  const ul = document.getElementById('cmdlist');
+  [...ul.children].forEach((li, i) => li.classList.toggle('on', i === _cmdSel));
+  const on = ul.children[_cmdSel]; if (on) on.scrollIntoView({ block: 'nearest' });
+}
+function _cmdRun(i) { const c = _cmd[i]; closePalette(); if (c) c.run(); }
+document.getElementById('cmdlist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li) { e.preventDefault(); _cmdRun(+li.dataset.i); } });
+document.getElementById('cmdin').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); _cmdSel = Math.min(_cmdSel + 1, _cmd.length - 1); _paintCmd(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); _cmdSel = Math.max(_cmdSel - 1, 0); _paintCmd(); }
+  else if (e.key === 'Enter') { e.preventDefault(); _cmdRun(_cmdSel); }
+  else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+});
+document.getElementById('cmdbg').addEventListener('mousedown', e => { if (e.target.id === 'cmdbg') closePalette(); });
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openPalette(); }
+});
+
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
 function connectLive() {
@@ -1174,13 +1267,7 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// Live-update rate control (persisted): minimum ms between recomputes while dragging.
-const rateInput = document.getElementById('rateMs');
-rateInput.value = updateMs;
-rateInput.onchange = () => {
-  updateMs = Math.max(0, parseInt(rateInput.value, 10) || 0);
-  localStorage.setItem('slateUpdateMs', updateMs);
-};
+// (Live-update debounce now lives in the Settings modal — see openSettings.)
 
 // Palette chips: click → jump to defining cell; drag → host into a cell's strip.
 const paletteList = document.getElementById('palette-list');
