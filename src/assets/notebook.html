@@ -27,6 +27,8 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .topbar { position:sticky; top:0; z-index:10; background:var(--bg2); border-bottom:1px solid var(--border);
           padding:10px 20px; display:flex; align-items:center; gap:12px; }
 .topbar h1 { font-size:1.1rem; margin:0; color:#fff; flex:1; }
+.wdot { width:9px; height:9px; border-radius:50%; background:var(--dim); display:inline-block; flex:0 0 auto; }
+.wdot.up { background:var(--green); } .wdot.inproc { background:var(--accent); } .wdot.down { background:var(--red); }
 .nbswitch { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
             padding:4px 8px; font-size:.82rem; max-width:220px; }
 .nbswitch:hover { border-color:var(--accent); }
@@ -248,6 +250,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 <div class="topbar">
   <a class="btnlink" href="/" title="all notebooks">📓</a>
   <select id="nbswitch" class="nbswitch" title="switch notebook"></select>
+  <span id="wdot" class="wdot" title=""></span>
   <h1 id="title">Notebook</h1>
   <span class="hint">⇧⏎ run · ⇥ complete · ⌘K commands</span>
   <a id="vscode" class="btnlink" href="#" title="Open the .jl in VS Code">⧉ VS Code</a>
@@ -718,7 +721,8 @@ function mountEditor(c) {
     if (cm.somethingSelected() || !/[\w.]/.test(before)) return CodeMirror.Pass;
     complete(cm);
   };
-  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Esc': () => ed.getInputField().blur() });
+  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Esc': () => ed.getInputField().blur(),
+                              'Shift-Ctrl--': () => splitCell(c.id, ed), 'Shift-Cmd--': () => splitCell(c.id, ed) });
   ed.on('inputRead', (cm, ev) => { if (ev.text[0] === '.') complete(cm); });   // auto on field access
   ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
   ed.on('blur', () => setEditing(c.id, false));
@@ -781,6 +785,11 @@ function renderAll(state) {
   const se = document.scrollingElement || document.documentElement;
   const top = se.scrollTop;                    // preserve scroll across the full rebuild (structural ops)
   document.getElementById('title').textContent = state.title || 'Notebook';
+  const w = state.worker || {}, dot = document.getElementById('wdot');
+  if (dot) {
+    dot.className = 'wdot ' + (w.kind === 'inproc' ? 'inproc' : (w.connected ? 'up' : 'down'));
+    dot.title = w.kind === 'gate' ? ('worker :' + w.port + (w.connected ? ' · connected' : ' · disconnected')) : 'in-process kernel';
+  }
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const nb = document.getElementById('nb');
   nb.innerHTML = '';
@@ -941,6 +950,22 @@ function addMenu(e, cellId) {
 }
 function hideAddMenu() { document.getElementById('addmenu').classList.remove('show'); }
 document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') && !e.target.closest('.addbtn')) hideAddMenu(); });
+// Split a code cell at the editor cursor into two cells.
+async function splitCell(id, cm) {
+  const idx = cm.indexFromPos(cm.getCursor()), val = cm.getValue();
+  renderAll(await api('POST', '/api/cell-split/' + id, { before: val.slice(0, idx), after: val.slice(idx) }));
+}
+// Merge a cell with the one below it (same kind only); sends current editor text.
+async function mergeBelow(id) {
+  const ids = cellIds(), i = ids.indexOf(id);
+  if (i < 0 || i >= ids.length - 1) return;
+  const a = _cellById(id), b = _cellById(ids[i + 1]);
+  if (!a || !b || a.kind !== b.kind || hasBinds(a) || hasBinds(b)) return;
+  const sa = editors[id] ? editors[id].getValue() : (srcMap[id] || '');
+  const sb = editors[ids[i + 1]] ? editors[ids[i + 1]].getValue() : (srcMap[ids[i + 1]] || '');
+  renderAll(await api('POST', '/api/cell-merge/' + id, { source: sa.replace(/\s+$/, '') + '\n' + sb.replace(/^\s+/, '') }));
+  selectCell(id, true);
+}
 async function delCell(id) {
   const idx = cellIds().indexOf(id);
   renderAll(await api('POST', '/api/cell-delete/' + id));
@@ -1028,6 +1053,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'b') { e.preventDefault(); addCell(selectedId, 'code', false); }
   else if (k === 'm') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'md') toggleType(selectedId, 'md'); }
   else if (k === 'y') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'code') toggleType(selectedId, 'code'); }
+  else if (k === 'M') { e.preventDefault(); mergeBelow(selectedId); }    // Shift-M: merge with cell below
   else if (k === 'd') { e.preventDefault();
     if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }
     else { _dPending = true; _dTimer = setTimeout(() => _dPending = false, 650); } }
@@ -1084,6 +1110,8 @@ function paletteCommands() {
     { label: 'Rebuild (fresh namespace)', run: resetAll },
     { label: 'Restart worker', run: restartWorker },
     { label: 'Reload from disk', run: reload },
+    { label: 'Split selected cell at cursor', run: () => { if (selectedId && editors[selectedId]) splitCell(selectedId, editors[selectedId]); } },
+    { label: 'Merge selected cell with below', run: () => { if (selectedId) mergeBelow(selectedId); } },
     { label: 'Toggle controls palette', run: togglePalette },
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },

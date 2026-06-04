@@ -204,12 +204,17 @@ function _bind_index(report::Report)
     return bindref, hostednames
 end
 
+# Worker/kernel status for the topbar dot.
+_kernel_status(k::GateKernel) = Dict{String,Any}("kind" => "gate", "port" => k.port, "connected" => (k.conn !== nothing))
+_kernel_status(::Kernel) = Dict{String,Any}("kind" => "inproc", "port" => 0, "connected" => true)
+
 function state_json(nb::LiveNotebook)
     bindref, hostednames = _bind_index(nb.report)
     return Dict("id"      => nb.id,
                 "title"   => nb.report.title,
                 "path"    => abspath(nb.path),
                 "version" => nb.version,
+                "worker"  => _kernel_status(nb.kernel),
                 "cells"   => [cell_json(c, bindref, hostednames) for c in nb.report.cells])
 end
 
@@ -266,6 +271,29 @@ function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractStr
     insert!(cells, pos, cell)
     _commit_structure!(nb, pos)
     return cell.id
+end
+
+# Split a cell into two at the editor cursor (frontend sends the before/after text).
+function split_cell!(nb::LiveNotebook, id::AbstractString, before::AbstractString, after::AbstractString)
+    i = _index_of(nb.report.cells, id); i === nothing && return nb
+    _snapshot!(nb)
+    cells = nb.report.cells
+    cells[i].source = String(before)
+    insert!(cells, i + 1, Cell(_gen_id(nb.report), cells[i].kind, String(after)))
+    _commit_structure!(nb, i)
+    return nb
+end
+
+# Merge a cell with the one below it (frontend sends the already-combined source).
+function merge_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString)
+    i = _index_of(nb.report.cells, id)
+    (i === nothing || i >= length(nb.report.cells)) && return nb
+    _snapshot!(nb)
+    cells = nb.report.cells
+    cells[i].source = String(source)
+    deleteat!(cells, i + 1)
+    _commit_structure!(nb, i)
+    return nb
 end
 
 # Rename a cell's id (its "label"). Ids must be unique and `#%%`-header-safe
@@ -799,6 +827,12 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/cell-rename/{cid}", req -> _withnb(h, req, nb -> begin
         ok, msg = rename_cell!(nb, HTTP.getparam(req, "cid"), get(_body(req), "newid", ""))
         ok ? _json(state_json(nb)) : HTTP.Response(400, msg)
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/cell-split/{cid}", req -> _withnb(h, req, nb -> begin
+        b = _body(req); split_cell!(nb, HTTP.getparam(req, "cid"), get(b, "before", ""), get(b, "after", "")); _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/cell-merge/{cid}", req -> _withnb(h, req, nb -> begin
+        merge_cell!(nb, HTTP.getparam(req, "cid"), get(_body(req), "source", "")); _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/cell-delete/{cid}", req -> _withnb(h, req, nb ->
         (delete_cell!(nb, HTTP.getparam(req, "cid")); _json(state_json(nb)))))
