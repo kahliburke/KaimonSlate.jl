@@ -204,8 +204,9 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .spinner { width:38px; height:38px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .loading .lmsg { color:var(--text); font-size:.9rem; }
-.cell.selected { outline:2px solid var(--accent); outline-offset:-1px; }     /* command mode */
-.cell.editing  { outline:2px solid var(--green); outline-offset:-1px; }      /* edit mode */
+.cell.selected { outline:2px solid var(--purple); outline-offset:-1px;       /* command mode */
+                 box-shadow:0 0 10px rgba(197,134,192,.35); }
+.cell.editing  { outline:2px solid var(--green); outline-offset:-1px; }       /* edit mode */
 .cid { cursor:pointer; } .cid:hover { color:var(--accent); }
 .cidedit { background:var(--bg3); color:var(--text); border:1px solid var(--accent); border-radius:4px;
            font-family:monospace; font-size:.76rem; padding:0 4px; width:12ch; margin-left:auto; }

@@ -25,6 +25,9 @@ using LaTeXStrings
 # with a text/latex `show` works the same way (Symbolics, Latexify, …).
 L"\frac{\partial \mathcal{L}}{\partial q} - \frac{d}{dt}\frac{\partial \mathcal{L}}{\partial \dot q} = 0"
 
+#%% code id=d3d4ca
+4
+
 #%% code id=quadratic
 # Computed LaTeX: substitute coefficients into the quadratic formula via %$ interpolation.
 a, b, c = 1, -3, 2
@@ -51,10 +54,14 @@ elements = ["H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne"]
 slate_table([(symbol = e, Z = i, mass = round(2.0i + randn(), digits = 3), metal = i in (3, 4))
              for (i, e) in enumerate(elements)])
 
-#%% code id=3837ae
-elements
+#%% code id=0464d6
 
 #%% code id=80ab97
+1+1
+a = []
+append!(a, 1)
+a .+= 2
+a .+ 5
 
 #%% code id=tabledf
 # A bare DataFrame auto-renders (no slate_table call). 30 rows ⇒ pagination kicks in.
