@@ -257,14 +257,32 @@ end
 
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
-function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString)
+function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
     _snapshot!(nb)
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
     cell = Cell(_gen_id(nb.report), kind == "md" ? MARKDOWN : CODE, "")
-    insert!(cells, i + 1, cell)
-    _commit_structure!(nb, i + 1)
+    pos = before ? max(1, i) : i + 1                 # insert above (at `i`) or below the reference
+    insert!(cells, pos, cell)
+    _commit_structure!(nb, pos)
     return cell.id
+end
+
+# Rename a cell's id (its "label"). Ids must be unique and `#%%`-header-safe
+# (letters/digits/underscore). Dependencies are by id, so rebuild them after.
+function rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractString)
+    nid = strip(String(newid))
+    isempty(nid) && return (false, "id cannot be empty")
+    occursin(r"[^A-Za-z0-9_]", nid) && return (false, "id may only contain letters, digits, and underscore")
+    i = _index_of(nb.report.cells, oldid)
+    i === nothing && return (false, "no such cell")
+    nid == oldid && return (true, "")
+    any(c -> c.id == nid, nb.report.cells) && return (false, "id $(nid) is already in use")
+    _snapshot!(nb)
+    nb.report.cells[i].id = String(nid)
+    build_dependencies!(nb.report)
+    write(nb.path, serialize_report(nb.report))
+    return (true, "")
 end
 
 function delete_cell!(nb::LiveNotebook, id::AbstractString)
@@ -775,7 +793,13 @@ function _make_router(h::Hub)
         _json(Dict("completions" => texts, "from" => from, "to" => to))
     end))
     HTTP.register!(router, "POST", "/api/{id}/cell-add", req -> _withnb(h, req, nb -> begin
-        b = _body(req); add_cell!(nb, get(b, "after", ""), get(b, "kind", "code")); _json(state_json(nb))
+        b = _body(req)
+        add_cell!(nb, get(b, "after", ""), get(b, "kind", "code"); before = get(b, "before", false) === true)
+        _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/cell-rename/{cid}", req -> _withnb(h, req, nb -> begin
+        ok, msg = rename_cell!(nb, HTTP.getparam(req, "cid"), get(_body(req), "newid", ""))
+        ok ? _json(state_json(nb)) : HTTP.Response(400, msg)
     end))
     HTTP.register!(router, "POST", "/api/{id}/cell-delete/{cid}", req -> _withnb(h, req, nb ->
         (delete_cell!(nb, HTTP.getparam(req, "cid")); _json(state_json(nb)))))

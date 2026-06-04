@@ -204,6 +204,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .spinner { width:38px; height:38px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .loading .lmsg { color:var(--text); font-size:.9rem; }
+.cell.selected { outline:2px solid var(--accent); outline-offset:-1px; }     /* command mode */
+.cell.editing  { outline:2px solid var(--green); outline-offset:-1px; }      /* edit mode */
+.cid { cursor:pointer; } .cid:hover { color:var(--accent); }
+.cidedit { background:var(--bg3); color:var(--text); border:1px solid var(--accent); border-radius:4px;
+           font-family:monospace; font-size:.76rem; padding:0 4px; width:12ch; margin-left:auto; }
 </style>
 </head>
 <body>
@@ -557,6 +562,7 @@ function cellBar(c) {
     `<button onclick="addCell('${c.id}','code')" title="add code below">＋code</button>` +
     `<button onclick="addCell('${c.id}','md')" title="add markdown below">＋md</button>` +
     `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
+    `<span class="cid" title="double-click to rename">${c.id}</span>` +
     '</div>';
 }
 
@@ -579,8 +585,7 @@ function cellEl(c) {
     div.innerHTML = cellBar(c) +
       '<div class="cellhead"><span class="badge">' + c.state + '</span>' +
       '<button data-run="' + c.id + '">▶ run</button>' +
-      '<span class="cdur">' + (c.duration != null ? c.duration + ' ms' : '') + '</span>' +
-      '<span class="cid">' + c.id + '</span></div>' +
+      '<span class="cdur">' + (c.duration != null ? c.duration + ' ms' : '') + '</span></div>' +
       '<textarea></textarea>' +
       controlStrip(c) +
       '<div class="output">' + c.output + '</div>' +
@@ -663,8 +668,10 @@ function mountEditor(c) {
     if (cm.somethingSelected() || !/[\w.]/.test(before)) return CodeMirror.Pass;
     complete(cm);
   };
-  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete });
+  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Esc': () => ed.getInputField().blur() });
   ed.on('inputRead', (cm, ev) => { if (ev.text[0] === '.') complete(cm); });   // auto on field access
+  ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
+  ed.on('blur', () => setEditing(c.id, false));
   document.querySelector('#cell-' + c.id + ' [data-run]').onclick = () => runCell(c.id);
   editors[c.id] = ed;
 }
@@ -700,6 +707,8 @@ function editSource(id, mode) {
     });
     cm.setValue(srcMap[id] || '');
     cm.setOption('extraKeys', { 'Shift-Enter': () => commitSource(id), 'Esc': () => cancelSource(id) });
+    cm.on('focus', () => setEditing(id, true));
+    cm.on('blur', () => setEditing(id, false));
     editors[id] = cm;
   }
   editors[id].refresh(); editors[id].focus();
@@ -734,6 +743,8 @@ function renderAll(state) {
   state.cells.forEach(renderTables);
   typeset(nb);
   renderPalette();
+  if (selectedId && !cellIds().includes(selectedId)) selectedId = null;   // dropped/renamed
+  if (selectedId) selectCell(selectedId);                                 // re-apply command-mode ring
   // Restore scroll now, next frame, and after each figure decodes (base64 images
   // change height late — Safari otherwise clamps scrollTop and the view jumps).
   const restore = () => { se.scrollTop = top; };
@@ -853,8 +864,19 @@ async function runCell(id) {
   setState(id, 'running');
   updateStates(await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' }));
 }
-async function addCell(after, kind)  { renderAll(await api('POST', '/api/cell-add', { after, kind })); }
-async function delCell(id)           { renderAll(await api('POST', '/api/cell-delete/' + id)); }
+async function addCell(after, kind, before) {
+  const oldIds = new Set(cellIds());
+  const state = await api('POST', '/api/cell-add', { after, kind, before: !!before });
+  renderAll(state);
+  const neu = (state.cells || []).map(c => c.id).find(id => !oldIds.has(id));
+  if (neu) selectCell(neu, true);                  // select the new cell (stay in command mode)
+}
+async function delCell(id) {
+  const idx = cellIds().indexOf(id);
+  renderAll(await api('POST', '/api/cell-delete/' + id));
+  const after = cellIds();
+  after.length ? selectCell(after[Math.min(Math.max(0, idx), after.length - 1)], true) : (selectedId = null);
+}
 async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
 async function moveCellRel(id, target, before) { renderAll(await api('POST', '/api/cell-move/' + id, { target, before })); }
 async function toggleType(id, kind)  { renderAll(await api('POST', '/api/cell-type/' + id, { kind })); }
@@ -895,6 +917,77 @@ async function restartWorker(){
   try { renderAll(await api('POST', '/api/restart')); } finally { hideLoading(); }
 }
 async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); }
+
+// ── Command/edit mode + Jupyter-style keyboard shortcuts ──────────────────────
+// Command mode: a cell is "selected" (accent ring) and single keys act on it —
+// j/k or ↑/↓ to move, a/b to insert above/below, dd to delete, m/y to set
+// markdown/code, Enter to edit. Edit mode: focus inside the CodeMirror (green
+// ring); Esc returns to command mode.
+let selectedId = null, _dPending = false, _dTimer = null;
+const cellIds = () => ((nbState && nbState.cells) || []).map(c => c.id);
+function selectCell(id, scroll) {
+  selectedId = id;
+  document.querySelectorAll('.cell').forEach(el => el.classList.toggle('selected', el.dataset.cid === id));
+  const el = id && document.getElementById('cell-' + id);
+  if (el && scroll) el.scrollIntoView({ block: 'nearest' });
+}
+function setEditing(id, on) {
+  const el = document.getElementById('cell-' + id); if (el) el.classList.toggle('editing', on);
+  if (on) selectCell(id);
+}
+function enterEdit(id) {
+  const c = _cellById(id); if (!c) return;
+  if (c.kind === 'code' && !hasBinds(c)) { const ed = editors[id]; if (ed) ed.focus(); }
+  else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
+}
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (document.getElementById('modalbg').classList.contains('show')) return;
+  const inField = e.target.closest('.CodeMirror') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  if (inField) return;                                  // edit mode / typing → leave keys alone
+  const ids = cellIds(); if (!ids.length) return;
+  if (!selectedId || !ids.includes(selectedId)) {
+    if (e.key === 'ArrowDown' || e.key === 'j' || e.key === 'Enter') { selectCell(ids[0], true); e.preventDefault(); }
+    return;
+  }
+  const idx = ids.indexOf(selectedId), k = e.key;
+  if (k === 'Enter') { e.preventDefault(); enterEdit(selectedId); }
+  else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); if (idx < ids.length - 1) selectCell(ids[idx + 1], true); }
+  else if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); if (idx > 0) selectCell(ids[idx - 1], true); }
+  else if (k === 'a') { e.preventDefault(); addCell(selectedId, 'code', true); }
+  else if (k === 'b') { e.preventDefault(); addCell(selectedId, 'code', false); }
+  else if (k === 'm') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'md') toggleType(selectedId, 'md'); }
+  else if (k === 'y') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'code') toggleType(selectedId, 'code'); }
+  else if (k === 'd') { e.preventDefault();
+    if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }
+    else { _dPending = true; _dTimer = setTimeout(() => _dPending = false, 650); } }
+});
+// Click selects (mousedown precedes editor focus); double-click the id label renames it.
+document.getElementById('nb').addEventListener('mousedown', e => {
+  const cell = e.target.closest('.cell'); if (cell) selectCell(cell.dataset.cid);
+});
+document.getElementById('nb').addEventListener('dblclick', e => {
+  const span = e.target.closest('.cid'); if (span) startRename(span);
+});
+function startRename(span) {
+  const oldid = span.closest('.cell').dataset.cid;
+  const inp = document.createElement('input'); inp.className = 'cidedit'; inp.value = oldid;
+  span.replaceWith(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = async commit => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (commit && v && v !== oldid) {
+      const r = await fetch(_apipath('/api/cell-rename/' + oldid),
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ newid: v }) });
+      if (r.ok) { renderAll(await r.json()); selectCell(v); }
+      else { await alertDark('Rename failed: ' + (await r.text())); renderAll(nbState); }
+    } else { renderAll(nbState); }   // cancel → rebuild the label
+  };
+  inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+  inp.onblur = () => finish(true);
+}
 
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
