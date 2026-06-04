@@ -430,23 +430,34 @@ _notebooks_json(h::Hub) = lock(h.lock) do
           "cells" => length(nb.report.cells)) for nb in values(h.notebooks)]
 end
 
-# The index / switcher page: a Pluto-style list of open notebooks.
+# A short "worker :port" tag for the index, when a notebook runs on a gate worker.
+_worker_label(nb::LiveNotebook) =
+    nb.kernel isa GateKernel && nb.kernel.port != 0 ? " · worker&nbsp;:$(nb.kernel.port)" : ""
+
+# The index / switcher page: a Pluto-style list of open notebooks/sessions, each
+# with a shutdown button; an open box (with Tab-completion) sits on top.
 function _index_html(h::Hub)
     rows = lock(h.lock) do
         isempty(h.notebooks) ?
-            "<p class=\"empty\">No notebooks open. Open one with the <code>slate.open</code> tool.</p>" :
-            join(("<a class=\"nb\" href=\"/n/$(nb.id)\"><span class=\"t\">$(_esc(nb.report.title))</span>" *
+            "<p class=\"empty\">No notebooks open — open one above.</p>" :
+            join(("<div class=\"nb\"><a class=\"nbmain\" href=\"/n/$(nb.id)\">" *
+                  "<span class=\"t\">$(_esc(nb.report.title))</span>" *
                   "<span class=\"p\">$(_esc(abspath(nb.path)))</span>" *
-                  "<span class=\"c\">$(length(nb.report.cells)) cells</span></a>"
+                  "<span class=\"c\">$(length(nb.report.cells)) cells$(_worker_label(nb))</span></a>" *
+                  "<button class=\"kill\" data-id=\"$(nb.id)\" title=\"shut down this session\">⨯ shutdown</button></div>"
                   for nb in values(h.notebooks)))
     end
     return """<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Kaimon Slate</title>
     <style>body{background:#0d1120;color:#d4d8e8;font-family:system-ui,sans-serif;margin:0;padding:40px;}
     h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
-    .nb{display:flex;flex-direction:column;gap:2px;padding:12px 16px;margin:8px 0;background:#141828;
-        border:1px solid #2a2e40;border-left:3px solid #569cd6;border-radius:8px;text-decoration:none;color:inherit;max-width:760px;}
-    .nb:hover{border-color:#569cd6;} .nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:monospace;font-size:.8rem;}
+    .nb{display:flex;align-items:center;gap:12px;padding:12px 16px;margin:8px 0;background:#141828;
+        border:1px solid #2a2e40;border-left:3px solid #569cd6;border-radius:8px;max-width:760px;}
+    .nb:hover{border-color:#569cd6;}
+    .nbmain{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;text-decoration:none;color:inherit;}
+    .nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:monospace;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;}
     .nb .c{color:#56d364;font-size:.75rem;}
+    .nb .kill{background:#141828;color:#e57575;border:1px solid #3a2030;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.78rem;white-space:nowrap;}
+    .nb .kill:hover{border-color:#e57575;background:rgba(229,117,117,.1);}
     .open{display:flex;gap:8px;margin:8px 0 18px;max-width:760px;}
     .pathwrap{position:relative;flex:1;}
     .pathwrap input{width:100%;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 12px;font-family:monospace;font-size:.85rem;}
@@ -470,16 +481,33 @@ function _index_html(h::Hub)
     (function(){
       var inp=document.getElementById('pathin'), comp=document.getElementById('comp'), items=[], sel=-1;
       var esc=function(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
+      var isdir=function(p){return p.slice(-1)==='/';};
       function openPath(p){p=(p||'').trim();if(!p)return;
         fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
           .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
           .then(function(d){location.href=d.url;}).catch(function(e){alert('Open failed: '+e);});}
       function render(){comp.innerHTML=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
         comp.style.display=items.length?'block':'none';}
-      function fetchComp(){fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
-        .then(function(r){return r.json();}).then(function(d){items=d.completions||[];sel=items.length?0:-1;render();});}
+      function fetchComp(){return fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
+        .then(function(r){return r.json();}).then(function(d){items=d.completions||[];sel=-1;render();});}
       function commonPrefix(a){if(!a.length)return '';var p=a[0];for(var k=0;k<a.length;k++){var s=a[k],i=0;
         while(i<p.length&&i<s.length&&p[i]===s[i])i++;p=p.slice(0,i);}return p;}
+      // Enter / Open: act on the active suggestion (highlighted, else the first),
+      // else on the typed text. Directories are descended (never opened); a new
+      // path is confirmed and offered a .jl extension before creating.
+      function submit(){
+        var idx = sel>=0?sel:(items.length?0:-1);
+        if(idx>=0){var pick=items[idx];inp.value=pick;
+          if(isdir(pick)){fetchComp();return;}     // commit dir + show subpaths, don't open
+          openPath(pick);return;}                  // file suggestion → open
+        var p=inp.value.trim(); if(!p)return;
+        fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();}).then(function(info){
+          if(info.isdir){if(p.slice(-1)!=='/')inp.value=p+'/';fetchComp();return;}   // never open a directory
+          if(info.isfile){openPath(p);return;}
+          if(!confirm('Create new notebook “'+p+'”?'))return;                          // confirm new file
+          if(p.slice(-3).toLowerCase()!=='.jl' && confirm('Add a .jl extension?  →  “'+p+'.jl”'))p=p+'.jl';
+          openPath(p);});
+      }
       var t;inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
       inp.addEventListener('keydown',function(e){
         if(e.key==='Tab'){e.preventDefault();
@@ -487,13 +515,21 @@ function _index_html(h::Hub)
           else if(items.length>1){var cp=commonPrefix(items);
             if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
             else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
+        else if(e.key==='/'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend
+          if(idx>=0&&isdir(items[idx])){e.preventDefault();inp.value=items[idx];fetchComp();}}
         else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
         else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
-        else if(e.key==='Enter'){e.preventDefault();openPath(inp.value);}
+        else if(e.key==='Enter'){e.preventDefault();submit();}
         else if(e.key==='Escape'){items=[];render();}});
       comp.addEventListener('mousedown',function(e){var li=e.target.closest('li');if(!li)return;e.preventDefault();
-        inp.value=items[+li.dataset.i];inp.focus();fetchComp();});
-      document.getElementById('openbtn').onclick=function(){openPath(inp.value);};
+        var pick=items[+li.dataset.i];inp.value=pick;inp.focus();
+        isdir(pick)?fetchComp():openPath(pick);});   // click dir = descend, click file = open
+      document.getElementById('openbtn').onclick=function(){submit();};
+      // Per-session shutdown buttons (event-delegated over the rows).
+      document.addEventListener('click',function(e){var b=e.target.closest('.kill');if(!b)return;
+        var id=b.dataset.id;
+        if(!confirm('Shut down session “'+id+'”? Its worker stops and the notebook closes.'))return;
+        fetch('/api/'+encodeURIComponent(id)+'/shutdown',{method:'POST'}).then(function(){location.reload();});});
       inp.focus();
     })();
     </script>
@@ -625,6 +661,20 @@ function _cell_locals(code::AbstractString)
     return out
 end
 
+# Restart a notebook's kernel: kill its worker (a gate worker is a real subprocess;
+# no-op in-process), then re-evaluate from a fresh namespace. The gate kernel
+# respawns a worker on the next `prepare!`.
+function restart_kernel!(nb::LiveNotebook)
+    lock(nb.lock) do
+        try; ReportEngine.shutdown!(nb.kernel); catch; end
+        ReportEngine.reset!(nb.kernel, nb.report)
+        build_dependencies!(nb.report)
+        eval_stale!(nb.report, nb.kernel)
+    end
+    _broadcast(nb, "restart")
+    return nb
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html(h)))
@@ -652,6 +702,17 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/path-complete", req -> begin
         q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
         _json(Dict("completions" => _path_completions(q)))
+    end)
+    # Stat a path (with ~ expansion) so the open box can decide: open file / show
+    # subpaths for a directory / confirm-create for a new path.
+    HTTP.register!(router, "GET", "/api/path-info", req -> begin
+        p = expanduser(strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))))
+        _json(Dict("path" => p, "exists" => ispath(p), "isdir" => isdir(p), "isfile" => isfile(p)))
+    end)
+    # Close a notebook by id (the index's per-session shutdown button).
+    HTTP.register!(router, "POST", "/api/{id}/shutdown", req -> begin
+        id = HTTP.getparam(req, "id")
+        close_notebook!(h, id) ? _json(Dict("closed" => id)) : HTTP.Response(404, "no such notebook")
     end)
     HTTP.register!(router, "GET", "/n/{id}", _ -> _html(read(_ASSET, String)))
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
@@ -710,6 +771,7 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/undo", req -> _withnb(h, req, nb -> (undo!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> (redo!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (eval_stale!(nb.report, nb.kernel); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> (restart_kernel!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))
     end))

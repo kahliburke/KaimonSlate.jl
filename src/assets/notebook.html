@@ -204,6 +204,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <button onclick="addCell('','code')">＋ cell</button>
   <button onclick="runAll()">▶ Run stale</button>
   <button onclick="resetAll()">↻ Rebuild</button>
+  <button onclick="restartWorker()" title="kill + respawn this notebook's worker process">⟲ Restart worker</button>
   <button onclick="reload()">⟳ Reload</button>
   <button onclick="togglePalette()" title="controls palette">🎛 Controls</button>
 </div>
@@ -844,6 +845,10 @@ async function undoNb() { renderAll(await api('POST', '/api/undo')); }
 async function redoNb() { renderAll(await api('POST', '/api/redo')); }
 async function runAll()  { updateStates(await api('POST', '/api/run')); }
 async function resetAll(){ updateStates(await api('POST', '/api/reset')); }
+async function restartWorker(){
+  if (!confirm("Restart this notebook's worker? Its process is killed and cells re-run from a fresh namespace.")) return;
+  renderAll(await api('POST', '/api/restart'));
+}
 async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); }
 
 // Instant push: the server streams the version over SSE and bumps it only on
