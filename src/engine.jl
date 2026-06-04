@@ -13,7 +13,7 @@ evaluation yet — so it is testable with `Base` alone.
 module ReportEngine
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
-export SlateTable, slate_table
+export SlateTable, slate_table, SlatePagedTable, slate_query
 export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
 export parse_report, serialize_report, source_text
 
@@ -280,6 +280,7 @@ source_text(cell::Cell) = cell.source
 
 include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table (used by capture.jl)
+include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query
 include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
 include(joinpath(@__DIR__, "eval.jl"))
 include(joinpath(@__DIR__, "deps.jl"))

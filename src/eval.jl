@@ -41,6 +41,7 @@ function _new_module(report::Report)
     Core.eval(m, :(const EChart = $(EChart)))
     Core.eval(m, :(const slate_table = $(slate_table)))
     Core.eval(m, :(const SlateTable = $(SlateTable)))
+    Core.eval(m, :(const slate_query = $(slate_query)))
     Core.eval(m, :(const __slate_bind_default = $(_bind_default)))
     Core.eval(m, :(macro bind(name, widget)
         esc(Expr(:(=), name, __slate_bind_default(widget)))
@@ -122,6 +123,17 @@ eval_capture(::InProcessKernel, report::Report, source::AbstractString) =
 "Assign `name = value` (a `@bind` widget value) into the kernel's namespace."
 assign!(::InProcessKernel, report::Report, name::Symbol, value) =
     Core.eval(report_module(report), Expr(:(=), name, value))
+
+"""
+    table_page(kernel, report, table_id, request) -> (rows, total)
+
+Fetch one page of a server-paged table (a `slate_table(…; paged=true)` /
+`slate_query` result), routing to the provider registered where cells eval. The
+`request` is the frontend's JSON body (page / page_size / sort_col / sort_desc /
+search). In-process providers live here; the gate kernel forwards to its worker.
+"""
+table_page(::InProcessKernel, ::Report, table_id::AbstractString, request::AbstractDict) =
+    _provider_page(table_id, _page_request(request))
 
 """
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell

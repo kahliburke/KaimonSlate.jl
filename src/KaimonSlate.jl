@@ -40,7 +40,9 @@ export serve_notebook, LiveNotebook
 # routing per-notebook by id (`/n/<id>`, `/api/<id>/…`); `/` is a switcher index.
 # The hub runs in the extension subprocess alongside the Gate loop.
 
-const _PORT = 8765
+# Port is configurable via the KAIMONSLATE_PORT env var (default 8765) so a
+# config UI / launcher can pin it; the hub auto-starts at extension init.
+const _PORT = something(tryparse(Int, get(ENV, "KAIMONSLATE_PORT", "8765")), 8765)
 const _HUB = Ref{Union{Hub,Nothing}}(nothing)
 const _LOCK = ReentrantLock()
 
@@ -52,6 +54,23 @@ function _hub()
         _HUB[] === nothing && (_HUB[] = start_hub(; port = _PORT))
         return _HUB[]::Hub
     end
+end
+
+# Restart-reaping backstop: kill leftover worker subprocesses from a previous
+# extension instance that exited non-gracefully (crash / hard kill), since that
+# path skips `on_shutdown`. Each worker's boot script carries the `SlateWorker.start`
+# marker in its argv, so `pgrep -f` finds exactly ours. Called once at init, BEFORE
+# this instance spawns any worker, so it never targets our own children.
+function _reap_orphan_workers!()
+    try
+        for line in split(readchomp(`pgrep -f SlateWorker.start`))
+            pid = tryparse(Int, strip(line))
+            pid === nothing && continue
+            try; run(`kill -9 $pid`); catch; end
+        end
+    catch  # pgrep absent / no matches — nothing to reap
+    end
+    return nothing
 end
 
 # ── Extension entrypoints ─────────────────────────────────────────────────────
@@ -73,6 +92,7 @@ function create_tools(GateTool::Type)
     Opening the same file again returns the existing server.
     """
     function nb_open(path::String)::String
+        path = expanduser(path)
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
         h = _hub()
         id = open_notebook!(h, path)
@@ -101,7 +121,7 @@ function create_tools(GateTool::Type)
     function nb_close(path::String)::String
         h = _HUB[]
         h === nothing && return "Not open: $(abspath(path))"
-        file = abspath(path)
+        file = abspath(expanduser(path))
         id = lock(h.lock) do
             for nb in values(h.notebooks)
                 abspath(nb.path) == file && return nb.id
@@ -111,6 +131,20 @@ function create_tools(GateTool::Type)
         id === nothing && return "Not open: $file"
         close_notebook!(h, id)
         return "Closed $file"
+    end
+
+    # Auto-start the hub at extension init so the server is always up on its port
+    # (browse the index, open notebooks over HTTP) — no longer gated on the first
+    # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
+    # first, and register an atexit backstop so a normal process exit also reaps.
+    # Guarded: a failure here must not break tool registration.
+    try
+        _reap_orphan_workers!()
+        atexit(on_shutdown)
+        _hub()
+        @info "KaimonSlate hub auto-started" url = _base()
+    catch e
+        @warn "KaimonSlate hub auto-start failed" exception = (e, catch_backtrace())
     end
 
     return [

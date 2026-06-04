@@ -21,6 +21,7 @@ end
 echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v) in option))
 
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table — uses no deps; soft-detects Tables.jl
+include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 
 # Per-notebook execution namespace (warm; reset by replacing the module). `echart`
@@ -31,6 +32,7 @@ function _new_ns()
     Core.eval(m, :(const EChart = $EChart))
     Core.eval(m, :(const slate_table = $slate_table))
     Core.eval(m, :(const SlateTable = $SlateTable))
+    Core.eval(m, :(const slate_query = $slate_query))
     # Async reactivity over the gate: a cell's background task calls
     # `slate_refresh(:data)`, which PUBs on the gate stream. The KaimonSlate server
     # (subscribed) recomputes the readers of those vars and pushes a live update.
@@ -56,12 +58,19 @@ end
 "Discard the namespace (full rebuild)."
 __slate_reset() = (_NS[] = _new_ns(); true)
 
+# Flat scalar args only (the gate reflects the signature into an MCP schema — a
+# nested-Dict argument doesn't validate, so we pass page params individually).
+"Fetch one page of a registered paged table (server-paged tables / `slate_query`)."
+__slate_table_page(table_id::String, page::Int, page_size::Int, sort_col::Int, sort_desc::Bool, search::String) =
+    _provider_page(table_id, PageRequest(page, page_size, sort_col, sort_desc, search))
+
 "GateTools exposed to the KaimonSlate server."
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_assign", __slate_assign),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
+        KaimonGate.GateTool("__slate_table_page", __slate_table_page),
     ]
 end
 

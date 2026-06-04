@@ -87,4 +87,58 @@ include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
         @test isempty(out.tables)
         @test !isempty(out.value_repr)
     end
+
+    @testset "paged: InMemoryPagedProvider fetch_page" begin
+        P = ReportEngine
+        prov = P._inmemory_provider((a = [3, 1, 2, 5, 4], b = ["c", "a", "b", "e", "d"]))
+        @test prov isa P.InMemoryPagedProvider
+        cols = P.page_columns(prov)
+        @test [c.name for c in cols] == ["a", "b"]
+        @test cols[1].col_type == :numeric && cols[2].col_type == :text
+
+        @test P.fetch_page(prov, P.PageRequest(1, 2, 0, false, "")).total == 5
+        @test length(P.fetch_page(prov, P.PageRequest(1, 2, 0, false, "")).rows) == 2
+        @test [r[1] for r in P.fetch_page(prov, P.PageRequest(1, 10, 1, false, "")).rows] == [1, 2, 3, 4, 5]
+        @test [r[1] for r in P.fetch_page(prov, P.PageRequest(1, 10, 1, true, "")).rows] == [5, 4, 3, 2, 1]
+        @test [r[1] for r in P.fetch_page(prov, P.PageRequest(2, 2, 1, false, "")).rows] == [3, 4]  # sorted page 2
+        @test P.fetch_page(prov, P.PageRequest(1, 10, 0, false, "a")).total == 1  # search across cols
+    end
+
+    @testset "paged: capture wire + table_page round-trip" begin
+        r = parse_report("#%% code id=t\nslate_table((a=collect(1:100), b=collect(101:200)); paged=true)")
+        eval_report!(r)
+        out = r.cells[1].output
+        @test out.exception === nothing
+        @test length(out.tables) == 1
+        spec = out.tables[1]
+        @test spec["paged"] == true
+        @test haskey(spec, "tableId")
+        @test [c["name"] for c in spec["columns"]] == ["a", "b"]
+        @test spec["opts"]["nrows"] == 100
+        @test length(spec["rows"]) == 50              # page 1, default page_size 50
+        @test spec["rows"][1] == Any[1, 101]
+
+        # Fetch later pages / sorts via the kernel seam, using the registered id.
+        res = ReportEngine.table_page(InProcessKernel(), r, spec["tableId"],
+            Dict("page" => 2, "page_size" => 50, "sort_col" => 0, "sort_desc" => false, "search" => ""))
+        @test res.total == 100 && length(res.rows) == 50 && res.rows[1] == Any[51, 151]
+        res2 = ReportEngine.table_page(InProcessKernel(), r, spec["tableId"],
+            Dict("page" => 1, "page_size" => 3, "sort_col" => 1, "sort_desc" => true))
+        @test [row[1] for row in res2.rows] == [100, 99, 98]
+        # Unknown id → graceful empty page (e.g. evicted / stale after recompute).
+        res3 = ReportEngine.table_page(InProcessKernel(), r, "nope", Dict("page" => 1))
+        @test res3.total == 0 && isempty(res3.rows)
+    end
+
+    @testset "paged: SQL provider plumbing (no DB needed)" begin
+        P = ReportEngine
+        @test P._like_arg("A'b%c") == "%a''b\\%c%"     # lowercased, quote-doubled, %/_ escaped
+        prov = P.SqlPagedProvider(nothing, "SELECT * FROM t",
+            [P.PagedColumnDef("x", :numeric, true, true), P.PagedColumnDef("y", :text, true, true)])
+        w = P._sql_where(prov, P.PageRequest(1, 10, 0, false, "foo"))
+        @test occursin("LOWER(CAST(\"x\" AS VARCHAR)) LIKE", w) && occursin(" OR ", w)
+        @test P._sql_where(prov, P.PageRequest(1, 10, 0, false, "")) == ""
+        # Without DBInterface/Tables loaded, slate_query errors clearly (not a MethodError).
+        @test_throws ArgumentError slate_query(nothing, "SELECT 1")
+    end
 end

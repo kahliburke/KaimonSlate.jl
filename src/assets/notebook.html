@@ -261,6 +261,8 @@ function _cmp(a, b) {
   if (typeof a === 'number' && typeof b === 'number') return a - b;
   return String(a).localeCompare(String(b), undefined, { numeric: true });
 }
+// Columns are strings (eager) or {name,type,sortable,filterable} objects (paged).
+const _colName = c => (typeof c === 'string' ? c : c.name);
 function renderTables(c) {
   const host = document.querySelector('#cell-' + c.id + ' .tables');
   if (!host) return;
@@ -270,7 +272,7 @@ function renderTables(c) {
   states.length = specs.length;                 // drop view-state for removed tables
   while (host.children.length > specs.length) host.removeChild(host.lastChild);
   specs.forEach((spec, i) => {
-    if (!states[i]) states[i] = { sort: null, filter: '', page: 0, pageSize: 25 };
+    if (!states[i]) states[i] = { sort: null, filter: '', page: 0, pageSize: spec.paged ? (spec.pageSize || 50) : 25 };
     let wrap = host.children[i];
     if (!wrap) { wrap = document.createElement('div'); wrap.className = 'slatetable'; host.appendChild(wrap); }
     drawTable(wrap, spec, states[i]);
@@ -279,7 +281,7 @@ function renderTables(c) {
 // Build the persistent shell once per column-signature; refresh fills the body.
 function drawTable(wrap, spec, st) {
   const cols = spec.columns || [];
-  const sig = cols.join('');
+  const sig = (spec.paged ? 'p:' : 'e:') + cols.map(_colName).join('');
   if (wrap._sig !== sig) { _buildShell(wrap, cols, spec, st); wrap._sig = sig; }
   _refreshTable(wrap, spec, st);
 }
@@ -287,19 +289,22 @@ function _buildShell(wrap, cols, spec, st) {
   wrap.innerHTML = '';
   const bar = document.createElement('div'); bar.className = 'st-bar';
   const fi = document.createElement('input');
-  fi.type = 'text'; fi.className = 'st-filter'; fi.placeholder = 'filter…'; fi.value = st.filter;
-  fi.oninput = () => { st.filter = fi.value; st.page = 0; _refreshTable(wrap, spec, st); };
+  fi.type = 'text'; fi.className = 'st-filter';
+  fi.placeholder = spec.paged ? 'search…' : 'filter…'; fi.value = st.filter;
+  const doFilter = () => { st.filter = fi.value; st.page = 0; _refreshTable(wrap, spec, st); };
+  fi.oninput = spec.paged ? debounce(doFilter, 250) : doFilter;   // paged hits the server → debounce
   const info = document.createElement('span'); info.className = 'st-info';
   bar.appendChild(fi); bar.appendChild(info); wrap.appendChild(bar);
   const tbl = document.createElement('table'); tbl.className = 'st-table';
   const thead = document.createElement('thead'); const htr = document.createElement('tr');
-  const ths = cols.map((name, ci) => {
-    const th = document.createElement('th'); th.dataset.label = name;
-    th.onclick = () => {
+  const ths = cols.map((c, ci) => {
+    const th = document.createElement('th'); th.dataset.label = _colName(c);
+    const sortable = typeof c === 'string' || c.sortable !== false;
+    if (sortable) th.onclick = () => {
       if (st.sort && st.sort.col === ci) st.sort.dir = st.sort.dir === 'asc' ? 'desc' : 'asc';
       else st.sort = { col: ci, dir: 'asc' };
       _refreshTable(wrap, spec, st);
-    };
+    }; else th.style.cursor = 'default';
     htr.appendChild(th); return th;
   });
   thead.appendChild(htr); tbl.appendChild(thead);
@@ -307,9 +312,16 @@ function _buildShell(wrap, cols, spec, st) {
   const pag = document.createElement('div'); pag.className = 'st-pag'; wrap.appendChild(pag);
   wrap._refs = { fi, info, ths, tbody, pag };
 }
+function _drawArrows(wrap, st) {
+  wrap._refs.ths.forEach((th, ci) => {
+    const arr = st.sort && st.sort.col === ci ? (st.sort.dir === 'desc' ? ' ▾' : ' ▴') : '';
+    th.textContent = th.dataset.label + arr;
+  });
+}
+// Dispatch: eager tables compute locally; paged tables fetch a page from the server.
 function _refreshTable(wrap, spec, st) {
-  const { info, ths, tbody, pag } = wrap._refs;
-  const allRows = spec.rows || [], opts = spec.opts || {};
+  if (spec.paged) return _refreshPaged(wrap, spec, st);
+  const allRows = spec.rows || [];
   const f = st.filter.trim().toLowerCase();
   let rows = !f ? allRows
     : allRows.filter(r => r.some(v => v != null && String(v).toLowerCase().includes(f)));
@@ -321,13 +333,31 @@ function _refreshTable(wrap, spec, st) {
   const pages = Math.max(1, Math.ceil(total / st.pageSize));
   st.page = Math.min(Math.max(0, st.page), pages - 1);
   const start = st.page * st.pageSize;
-  const pageRows = rows.slice(start, start + st.pageSize);
-  // header sort arrows
-  ths.forEach((th, ci) => {
-    const arr = st.sort && st.sort.col === ci ? (st.sort.dir === 'desc' ? ' ▾' : ' ▴') : '';
-    th.textContent = th.dataset.label + arr;
-  });
-  // body
+  _fillTable(wrap, spec, st, rows.slice(start, start + st.pageSize), total, allRows.length);
+}
+// Server-paged: POST the request; a request token discards superseded responses.
+function _refreshPaged(wrap, spec, st) {
+  const token = (wrap._tok = (wrap._tok || 0) + 1);
+  _drawArrows(wrap, st);                          // immediate feedback while the fetch is in flight
+  const body = {
+    table_id: spec.tableId, page: st.page + 1, page_size: st.pageSize,
+    sort_col: st.sort ? st.sort.col + 1 : 0,
+    sort_desc: !!(st.sort && st.sort.dir === 'desc'),
+    search: st.filter.trim(),
+  };
+  api('POST', '/api/table-page', body).then(res => {
+    if (token !== wrap._tok) return;              // a newer request already went out
+    const total = res.total || 0;
+    const pages = Math.max(1, Math.ceil(total / st.pageSize));
+    if (st.page > pages - 1) { st.page = pages - 1; _refreshPaged(wrap, spec, st); return; }
+    _fillTable(wrap, spec, st, res.rows || [], total, spec.opts ? spec.opts.nrows : total);
+  }).catch(() => {});
+}
+// Shared render of one page into the shell (body rows, info line, pagination).
+function _fillTable(wrap, spec, st, pageRows, total, baseCount) {
+  const { info, tbody, pag } = wrap._refs;
+  _drawArrows(wrap, st);
+  const start = st.page * st.pageSize;
   tbody.innerHTML = '';
   pageRows.forEach(r => {
     const tr = document.createElement('tr');
@@ -340,12 +370,11 @@ function _refreshTable(wrap, spec, st) {
     });
     tbody.appendChild(tr);
   });
-  // info
-  let txt = `${total ? start + 1 : 0}–${Math.min(start + st.pageSize, total)} of ${total}`;
-  if (f) txt += ` (filtered from ${allRows.length})`;
-  if (opts.truncated) txt += ` · capped at ${allRows.length} of ${opts.nrows}`;
+  let txt = `${total ? start + 1 : 0}–${start + pageRows.length} of ${total}`;
+  if (baseCount != null && total !== baseCount) txt += ` (filtered from ${baseCount})`;
+  if (spec.opts && spec.opts.truncated) txt += ` · capped at ${(spec.rows || []).length} of ${spec.opts.nrows}`;
   info.textContent = txt;
-  // pagination
+  const pages = Math.max(1, Math.ceil(total / st.pageSize));
   pag.innerHTML = '';
   if (pages > 1) {
     const mk = (label, to, disabled) => {

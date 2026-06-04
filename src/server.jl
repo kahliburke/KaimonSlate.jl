@@ -446,8 +446,58 @@ function _index_html(h::Hub)
     .nb{display:flex;flex-direction:column;gap:2px;padding:12px 16px;margin:8px 0;background:#141828;
         border:1px solid #2a2e40;border-left:3px solid #569cd6;border-radius:8px;text-decoration:none;color:inherit;max-width:760px;}
     .nb:hover{border-color:#569cd6;} .nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:monospace;font-size:.8rem;}
-    .nb .c{color:#56d364;font-size:.75rem;}</style></head>
-    <body><h1>📓 Kaimon Slate — notebooks</h1>$rows</body></html>"""
+    .nb .c{color:#56d364;font-size:.75rem;}
+    .open{display:flex;gap:8px;margin:8px 0 18px;max-width:760px;}
+    .pathwrap{position:relative;flex:1;}
+    .pathwrap input{width:100%;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 12px;font-family:monospace;font-size:.85rem;}
+    .pathwrap input:focus{outline:none;border-color:#569cd6;}
+    .comp{position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:5;list-style:none;margin:0;padding:4px;
+      background:#141828;border:1px solid #2a2e40;border-radius:8px;max-height:300px;overflow:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,.4);}
+    .comp li{padding:4px 10px;border-radius:5px;cursor:pointer;font-family:monospace;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .comp li.on{background:#569cd6;color:#0d1120;} .comp li:hover{background:#1a1e2e;}
+    .open button{background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 16px;cursor:pointer;}
+    .open button:hover{border-color:#569cd6;color:#569cd6;}</style></head>
+    <body><h1>📓 Kaimon Slate — notebooks</h1>
+    <div class="open">
+      <div class="pathwrap">
+        <input id="pathin" autocomplete="off" spellcheck="false"
+               placeholder="~/path/to/notebook.jl — Tab to complete, Enter to open"/>
+        <ul id="comp" class="comp"></ul>
+      </div>
+      <button id="openbtn">Open</button>
+    </div>
+    <script>
+    (function(){
+      var inp=document.getElementById('pathin'), comp=document.getElementById('comp'), items=[], sel=-1;
+      var esc=function(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
+      function openPath(p){p=(p||'').trim();if(!p)return;
+        fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
+          .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+          .then(function(d){location.href=d.url;}).catch(function(e){alert('Open failed: '+e);});}
+      function render(){comp.innerHTML=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
+        comp.style.display=items.length?'block':'none';}
+      function fetchComp(){fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
+        .then(function(r){return r.json();}).then(function(d){items=d.completions||[];sel=items.length?0:-1;render();});}
+      function commonPrefix(a){if(!a.length)return '';var p=a[0];for(var k=0;k<a.length;k++){var s=a[k],i=0;
+        while(i<p.length&&i<s.length&&p[i]===s[i])i++;p=p.slice(0,i);}return p;}
+      var t;inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
+      inp.addEventListener('keydown',function(e){
+        if(e.key==='Tab'){e.preventDefault();
+          if(items.length===1){inp.value=items[0];fetchComp();}
+          else if(items.length>1){var cp=commonPrefix(items);
+            if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
+            else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
+        else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
+        else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
+        else if(e.key==='Enter'){e.preventDefault();openPath(inp.value);}
+        else if(e.key==='Escape'){items=[];render();}});
+      comp.addEventListener('mousedown',function(e){var li=e.target.closest('li');if(!li)return;e.preventDefault();
+        inp.value=items[+li.dataset.i];inp.focus();fetchComp();});
+      document.getElementById('openbtn').onclick=function(){openPath(inp.value);};
+      inp.focus();
+    })();
+    </script>
+    $rows</body></html>"""
 end
 
 _html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store"], body)
@@ -460,10 +510,63 @@ function _withnb(h::Hub, req, f)
     return f(nb)
 end
 
+# Filesystem path completions for the open box. Expands a leading `~`, lists the
+# directory implied by the typed prefix, and returns full suggestions that PRESERVE
+# the user's `~` (directories suffixed `/`). Dirs and `.jl` files surface first;
+# dotfiles are hidden unless the prefix itself starts with a dot.
+function _path_completions(q::AbstractString; limit::Int = 40)
+    s = String(q)
+    isempty(s) && (s = "~/")
+    s == "~" && return ["~/"]
+    slash = findlast('/', s)
+    prefix = slash === nothing ? "" : s[1:slash]
+    leaf   = slash === nothing ? s : s[nextind(s, slash):end]
+    base   = isempty(prefix) ? pwd() : expanduser(prefix)
+    isdir(base) || return String[]
+    entries = try
+        readdir(base)
+    catch
+        return String[]
+    end
+    keep = String[]
+    for e in entries
+        startswith(e, leaf) || continue
+        (startswith(e, ".") && !startswith(leaf, ".")) && continue
+        full = joinpath(base, e)
+        push!(keep, isdir(full) ? prefix * e * "/" : prefix * e)
+    end
+    sort!(keep; by = p -> (endswith(p, "/") ? 0 : (endswith(p, ".jl") ? 1 : 2), lowercase(p)))
+    return first(keep, limit)
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html(h)))
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
+    # Open/close a notebook by path over HTTP — lets the index page (and any
+    # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
+    # `KaimonSlate.create_tools`'s open: creates the file if it doesn't exist.
+    HTTP.register!(router, "POST", "/api/open", req -> begin
+        path = expanduser(strip(String(get(_body(req), "path", ""))))   # resolve ~ (tab-complete emits ~ paths)
+        isempty(path) && return HTTP.Response(400, "missing path")
+        isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
+        id = open_notebook!(h, path)
+        _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
+    end)
+    HTTP.register!(router, "POST", "/api/close", req -> begin
+        file = abspath(expanduser(strip(String(get(_body(req), "path", "")))))
+        id = lock(h.lock) do
+            for nb in values(h.notebooks)
+                abspath(nb.path) == file && return nb.id
+            end
+            return nothing
+        end
+        id === nothing ? HTTP.Response(404, "not open") : (close_notebook!(h, id); _json(Dict("closed" => file)))
+    end)
+    HTTP.register!(router, "GET", "/api/path-complete", req -> begin
+        q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
+        _json(Dict("completions" => _path_completions(q)))
+    end)
     HTTP.register!(router, "GET", "/n/{id}", _ -> _html(read(_ASSET, String)))
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/cell/{cid}", req -> _withnb(h, req, nb -> begin
@@ -503,6 +606,13 @@ function _make_router(h::Hub)
         body = _body(req)
         set_bind!(nb, HTTP.getparam(req, "cid"), get(body, "name", ""), get(body, "value", nothing))
         _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/table-page", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        res = lock(nb.lock) do                       # serialize vs eval (shared gate connection)
+            ReportEngine.table_page(nb.kernel, nb.report, String(get(b, "table_id", "")), b)
+        end
+        _json(Dict("rows" => res.rows, "total" => res.total))
     end))
     HTTP.register!(router, "POST", "/api/{id}/undo", req -> _withnb(h, req, nb -> (undo!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> (redo!(nb); _json(state_json(nb)))))

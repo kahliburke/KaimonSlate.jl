@@ -186,6 +186,22 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString)
     return _wire_to_output(wire)
 end
 
+# Forward a paged-table page request to the worker (where the provider lives).
+# Normalize/clamp the request once here, then pass flat scalars over the gate.
+function table_page(k::GateKernel, report::Report, table_id::AbstractString, request::AbstractDict)
+    prepare!(k, report)
+    req = _page_request(request)
+    wire = try
+        _tool(k, "__slate_table_page", Dict{String,Any}(
+            "table_id" => String(table_id), "page" => req.page, "page_size" => req.page_size,
+            "sort_col" => req.sort_col, "sort_desc" => req.sort_desc, "search" => req.search))
+    catch
+        return (rows = Vector{Any}[], total = 0)
+    end
+    wire === nothing && return (rows = Vector{Any}[], total = 0)
+    return (rows = collect(wire.rows), total = Int(wire.total))
+end
+
 function assign!(k::GateKernel, report::Report, name::Symbol, value)
     prepare!(k, report)
     try

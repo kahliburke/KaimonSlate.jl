@@ -1,12 +1,8 @@
-# Environment for the bundled example notebooks.
-#
-# Core KaimonSlate is plotting-free (capture happens in the per-notebook gate
-# worker, not the server). The plotting demos live here so a gate worker pinned
-# to `examples/` resolves CairoMakie/Statistics/Random, while the package itself
-# stays lean. ECharts demos need no deps (pure option Dicts).
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DuckDB = "d2f5444f-75bc-4fdf-ac35-56f514c445e1"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"

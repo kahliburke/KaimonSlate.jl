@@ -139,7 +139,17 @@ scalars; numbers stay numeric so the browser sorts them numerically.
 """
 slate_table(t::SlateTable) = t
 
-function slate_table(x)
+# `paged=true` builds a server-paged table (provider lives where cells eval; the
+# browser fetches one page at a time) — see paged.jl. Otherwise the eager form
+# below materializes all rows (capped). `page_size` sets the paged page length.
+function slate_table(x; paged::Bool = false, page_size::Int = 50)
+    if paged
+        prov = _inmemory_provider(x)
+        prov === nothing && throw(ArgumentError(
+            "slate_table(…; paged=true): cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl " *
+            "source, a Vector of NamedTuples, or a Dict/NamedTuple of column vectors."))
+        return _make_paged(prov; page_size = page_size)
+    end
     t = _as_slate_table(x)
     t === nothing || return t
     t = _table_manual(x)

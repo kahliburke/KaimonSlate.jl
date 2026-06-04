@@ -57,3 +57,25 @@ elements
 #%% code id=tabledf
 # A bare DataFrame auto-renders (no slate_table call). 30 rows ⇒ pagination kicks in.
 DataFrame(x = 1:30, square = (1:30) .^ 2, parity = ifelse.(iseven.(1:30), "even", "odd"))
+
+#%% md id=pagedmd
+## Large tables — server-paged
+
+These tables keep their data in the **worker**; the browser fetches one page at a
+time, so size doesn't matter. `slate_table(df; paged=true)` pages an in-memory
+frame; `slate_query` runs the sort / search / paging as **SQL** (here, DuckDB).
+
+#%% code id=pagedmem
+# 100k rows, paged in-memory — only the visible page ever crosses the wire.
+slate_table(DataFrame(i = 1:100_000,
+                      v = round.(sin.((1:100_000) ./ 1000), digits = 4),
+                      bucket = mod.(1:100_000, 7)); paged = true)
+
+#%% code id=sqlimports
+using DuckDB, DBInterface
+const con = DBInterface.connect(DuckDB.DB)
+nothing
+
+#%% code id=pagedsql
+# 1,000,000 rows in DuckDB, browsed with SQL pushdown (sort/search/page in the DB).
+slate_query(con, "SELECT i, i*i AS sq, (i % 3) AS m FROM range(1, 1000001) t(i)")
