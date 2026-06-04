@@ -565,6 +565,7 @@ function _index_html(h::Hub)
       function showLoading(m){loadMsg.textContent=m||'Working…';loadEl.classList.add('show');}
       function hideLoading(){loadEl.classList.remove('show');}
       function openPath(p){p=(p||'').trim();if(!p)return;
+        try{localStorage.setItem('slateLastDir', p.replace(/[^/]*\$/,''));}catch(e){}   // remember the directory
         showLoading('Opening “'+p+'” — starting the worker…');
         fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
           .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
@@ -614,6 +615,8 @@ function _index_html(h::Hub)
         if(!await confirmDark('Shut down session “'+id+'”? Its worker stops and the notebook closes.','Shutdown','danger'))return;
         showLoading('Shutting down “'+id+'”…');
         fetch('/api/'+encodeURIComponent(id)+'/shutdown',{method:'POST'}).then(function(){location.reload();});});
+      // Prefill the last directory we opened from and show its files for one-click reopen.
+      try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last; fetchComp();}}catch(e){}
       inp.focus();
     })();
     </script>
