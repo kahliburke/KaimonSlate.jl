@@ -39,6 +39,7 @@ button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid v
          text-decoration:none; display:inline-block; }
 button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
 .page { max-width:980px; margin:0 auto; padding:20px; }
+body.fullwidth .page { max-width:none; }
 .cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
         margin:14px 0; background:var(--bg2); overflow:hidden; }
 .cell.state-fresh   { border-left-color:var(--accent); }
@@ -54,7 +55,8 @@ button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent);
 .cellacts { display:flex; gap:3px; align-items:center; opacity:0; transition:opacity .12s; }
 .cell:hover .cellacts, .cell.selected .cellacts { opacity:1; }
 .cellacts button { padding:0 6px; font-size:.7rem; }
-.cellacts .drag { cursor:grab; color:var(--dim); padding:0 4px; user-select:none; }
+.cellhead .drag { cursor:grab; color:var(--dim); padding:0 4px 0 0; user-select:none; font-size:.9rem; }
+.cellhead .drag:active { cursor:grabbing; } .cell:hover .cellhead .drag { color:var(--text); }
 .badge { text-transform:uppercase; letter-spacing:.04em; font-size:.68rem; min-width:52px; text-align:right; color:var(--dim); }
 .cell.state-fresh   .badge { color:var(--accent); }
 .cell.state-stale   .badge { color:var(--gold); }
@@ -284,6 +286,8 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <div class="msg"><strong>Settings</strong></div>
   <div class="setrow"><label>Live-update debounce</label>
     <span class="rt"><input type="range" id="setdeb" min="0" max="1000" step="25"/><span id="setdebv"></span> ms</span></div>
+  <div class="setrow"><label>Full page width</label>
+    <span class="rt"><input type="checkbox" id="setwide"/></span></div>
   <div class="setrow"><label>Theme</label>
     <select id="settheme"><option value="dark">Dark (default)</option></select></div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
@@ -629,12 +633,12 @@ function cellHeader(c) {
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
   const run = isCode ? `<button class="run" data-run="${c.id}" title="run (⇧⏎)">▶</button>` : '';
-  return '<div class="cellhead">' + run +
+  return '<div class="cellhead">' +
+    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
-    '<span class="cellacts">' +
-      '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' + editSrc +
+    '<span class="cellacts">' + editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
       `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
@@ -1116,6 +1120,9 @@ function openSettings() {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
   deb.value = updateMs; v.textContent = updateMs;
   deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
+  const wide = document.getElementById('setwide');
+  wide.checked = document.body.classList.contains('fullwidth');
+  wide.onchange = () => { document.body.classList.toggle('fullwidth', wide.checked); localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0'); };
   const th = document.getElementById('settheme');
   th.value = localStorage.getItem('slateTheme') || 'dark';
   th.onchange = () => localStorage.setItem('slateTheme', th.value);   // real themes land later
@@ -1396,6 +1403,7 @@ async function loadSwitcher() {
   } catch (e) {}
 }
 
+if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
 loadSwitcher();
 reload();
 connectLive();
