@@ -96,12 +96,35 @@ function _md_html(src::AbstractString, interps = CellOutput[])
     enable!(p, CommonMark.TableRule())
     html = CommonMark.html(p(s))
     for (i, m) in enumerate(math)
-        html = replace(html, _math_token(i) => _esc(m))             # raw TeX, escaped; KaTeX reads the text node
+        tex = m
+        for j in 1:length(exprs)                                    # interpolations inside math → raw TeX
+            tok = ReportEngine._interp_token(j)
+            occursin(tok, tex) && (tex = replace(tex, tok => _math_value(j <= length(interps) ? interps[j] : nothing)))
+        end
+        html = replace(html, _math_token(i) => _esc(tex))           # raw TeX, escaped; KaTeX reads the text node
     end
     for (i, f) in enumerate(frags)
-        html = replace(html, ReportEngine._interp_token(i) => f)    # trusted HTML fragment, injected raw
+        html = replace(html, ReportEngine._interp_token(i) => f)    # remaining (text) interps → HTML fragment
     end
     return html
+end
+
+# Raw text of an interpolation for *math* context (inside `$…$`/`$$…$$`): a scalar's
+# value, or a text/latex chunk's TeX (delimiters stripped). KaTeX is already in math
+# mode there, so we want bare TeX, not an HTML span.
+function _math_value(o::Union{CellOutput,Nothing})
+    o === nothing && return ""
+    o.exception === nothing || return "?"
+    isempty(o.value_repr) || return o.value_repr
+    for ch in o.display
+        if ch.mime == "text/latex"
+            t = strip(String(copy(ch.data)))
+            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 && return t[3:end-2]
+            startswith(t, "\$") && endswith(t, "\$") && length(t) >= 2 && return t[2:end-1]
+            return t
+        end
+    end
+    return ""
 end
 
 # Render captured MIME chunks to trusted HTML: images → base64 data-URI <img>,

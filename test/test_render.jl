@@ -117,5 +117,10 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin("ichart", markdown_html("chart {{e}}", [ech]))
         tbl = CellOutput("", MimeChunk[], Any[], Any[Dict("columns" => ["a"])], "", nothing, nothing, 0.0)
         @test occursin("itable", markdown_html("tbl {{t}}", [tbl]))
+
+        # Inside math, an interpolation substitutes the raw value (bare TeX), not a span.
+        v3 = CellOutput("", MimeChunk[], Any[], Any[], "3", nothing, nothing, 0.0)
+        mh = markdown_html(raw"$$x = e^{ {{v}} }$$", [v3])
+        @test occursin("e^{ 3 }", mh) && !occursin("ival", mh) && !occursin("xslateinterp", mh)
     end
 end
