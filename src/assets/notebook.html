@@ -974,6 +974,9 @@ function startRename(span) {
   const oldid = span.closest('.cell').dataset.cid;
   const inp = document.createElement('input'); inp.className = 'cidedit'; inp.value = oldid;
   span.replaceWith(inp); inp.focus(); inp.select();
+  // Ids must be header-safe — fold spaces/punctuation to underscores as you type
+  // (1:1, so the caret doesn't jump).
+  inp.oninput = () => { const p = inp.selectionStart; inp.value = inp.value.replace(/[^A-Za-z0-9_]/g, '_'); inp.setSelectionRange(p, p); };
   let done = false;
   const finish = async commit => {
     if (done) return; done = true;

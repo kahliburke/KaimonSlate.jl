@@ -271,9 +271,8 @@ end
 # Rename a cell's id (its "label"). Ids must be unique and `#%%`-header-safe
 # (letters/digits/underscore). Dependencies are by id, so rebuild them after.
 function rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractString)
-    nid = strip(String(newid))
+    nid = replace(strip(String(newid)), r"[^A-Za-z0-9_]+" => "_")   # fold spaces/punctuation to _
     isempty(nid) && return (false, "id cannot be empty")
-    occursin(r"[^A-Za-z0-9_]", nid) && return (false, "id may only contain letters, digits, and underscore")
     i = _index_of(nb.report.cells, oldid)
     i === nothing && return (false, "no such cell")
     nid == oldid && return (true, "")

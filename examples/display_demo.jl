@@ -27,6 +27,12 @@ L"\frac{\partial \mathcal{L}}{\partial q} - \frac{d}{dt}\frac{\partial \mathcal{
 
 #%% code id=d3d4ca
 4
+5
+2
+4
+7
+8
+8
 
 #%% code id=quadratic
 # Computed LaTeX: substitute coefficients into the quadratic formula via %$ interpolation.
