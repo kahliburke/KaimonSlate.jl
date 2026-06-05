@@ -990,11 +990,30 @@ end
 # — the debugging surface for "what is the worker doing". In-process kernels have
 # no separate log (cells eval in the extension process).
 function worker_log(nb::LiveNotebook; maxbytes::Int = 100_000)
-    nb.kernel isa GateKernel || return "(in-process kernel — no separate worker log; cells evaluate in the extension process)"
-    path = nb.kernel.logpath
-    (isempty(path) || !isfile(path)) && return "(worker not started yet)"
-    s = read(path, String)
-    ncodeunits(s) > maxbytes ? "…(truncated; last $(maxbytes ÷ 1000)KB)…\n" * String(last(s, maxbytes)) : s
+    if nb.kernel isa GateKernel                          # real subprocess → tail its raw log
+        path = nb.kernel.logpath
+        (isempty(path) || !isfile(path)) && return "(worker not started yet)"
+        s = read(path, String)
+        return ncodeunits(s) > maxbytes ? "…(truncated; last $(maxbytes ÷ 1000)KB)…\n" * String(last(s, maxbytes)) : s
+    end
+    # In-process kernel: no separate log file, so synthesize an eval console from the
+    # cells' captured output (state · duration · stdout · error).
+    io = IOBuffer()
+    println(io, "# in-process kernel — this notebook isn't in a Julia project, so cells eval in")
+    println(io, "# the extension. Open it inside a project dir for a separate gate worker + raw log.\n")
+    ran = false
+    for c in nb.report.cells
+        c.kind == CODE || continue
+        o = c.output; o === nothing && continue
+        ran = true
+        println(io, "[$(c.id)]  $(lowercase(string(c.state)))  ·  $(round(o.duration_ms; digits = 1))ms")
+        st = rstrip(o.stdout)
+        isempty(st) || println(io, "  " * replace(st, "\n" => "\n  "))
+        o.exception === nothing || println(io, "  ERROR: " * replace(o.exception, "\n" => "\n  "))
+        println(io)
+    end
+    ran || println(io, "(no code cells have run yet)")
+    return String(take!(io))
 end
 
 function _make_router(h::Hub)
