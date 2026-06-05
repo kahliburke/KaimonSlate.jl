@@ -155,6 +155,24 @@ function create_tools(GateTool::Type)
 end
 
 """
+    on_event(channel, data, session_name)
+
+Gate event-bus callback (the extension manifest subscribes to the `agent:` topic
+prefix). Kaimon's agent service publishes each agent session's `{kind,turn,data}`
+events on `agent:<id>`; we relay them onto the bound notebook's SSE so the chat
+pane updates live. Other channels are ignored.
+"""
+function on_event(channel, data, session_name)
+    try
+        startswith(String(channel), "agent:") &&
+            NotebookServer.relay_agent_event(String(channel), data)
+    catch e
+        @warn "KaimonSlate on_event failed" channel exception = (e, catch_backtrace())
+    end
+    return nothing
+end
+
+"""
     on_shutdown()
 
 Stop every running notebook server before the extension subprocess exits.

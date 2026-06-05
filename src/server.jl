@@ -14,6 +14,8 @@ import REPL
 using ..ReportEngine
 using ..ReportRender
 
+include("history.jl")   # module SlateHistory — durable content-addressed time machine
+
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
 
@@ -30,6 +32,8 @@ mutable struct LiveNotebook
     lock::ReentrantLock                  # serializes eval (UI actions vs. async refresh)
     listeners::Vector{Channel{String}}   # this notebook's live SSE connections
     llock::ReentrantLock                 # protects `listeners`
+    agent_id::String                     # Kaimon agent session bound to this notebook ("" = none)
+    agent_busy::Bool                     # true while the bound agent has a turn in flight (for history attribution)
 end
 
 # GateKernel when running as the Kaimon extension AND the notebook is inside a
@@ -54,7 +58,10 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     kernel = _select_kernel(path)
     eval_stale!(r, kernel)               # initial full run
     nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
-                      ReentrantLock(), Channel{String}[], ReentrantLock())
+                      ReentrantLock(), Channel{String}[], ReentrantLock(), "", false)
+    # Seed the durable history with the initial state, so the very first edit has a
+    # parent to diff against and the "buildup" replay starts from the true origin.
+    _history!(nb; source = "open")
     # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
     register_refresh!(r.id, vars -> server_refresh(nb, vars))
     return nb
@@ -94,7 +101,7 @@ end
 function _restore!(nb::LiveNotebook, src::AbstractString)
     update_source!(nb.report, src)
     eval_stale!(nb.report, nb.kernel)
-    write(nb.path, serialize_report(nb.report))
+    _persist!(nb; source = "restore")
 end
 
 function undo!(nb::LiveNotebook)
@@ -109,6 +116,46 @@ function redo!(nb::LiveNotebook)
     push!(nb.undo, serialize_report(nb.report))
     _restore!(nb, pop!(nb.redo))
     return nb
+end
+
+# ── Durable history (the time machine) ───────────────────────────────────────
+# Capture the *current* notebook state into the append-only store. Dedup-by-hash
+# makes a no-op capture free, so this is safe to call liberally (every op, every
+# sync, the periodic draft net). Per-cell digests let the UI attribute + recover
+# individual cells. Never throws into the caller.
+_cells_of(report) = [(c.id, c.kind == MARKDOWN ? "md" : "code", c.source) for c in report.cells]
+function _history!(nb::LiveNotebook; source::AbstractString = "browser", kind::AbstractString = "checkpoint")
+    try
+        SlateHistory.record!(nb.path, serialize_report(nb.report);
+                             source_label = source, kind = kind, cells = _cells_of(nb.report))
+    catch e
+        @warn "KaimonSlate: history capture failed" exception = (e, catch_backtrace())
+    end
+    return nothing
+end
+
+# Persist the notebook to its `.jl` AND record a durable checkpoint. The single
+# write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
+function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
+    write(nb.path, serialize_report(nb.report))
+    _history!(nb; source = source)
+    return nb
+end
+
+# Restore the notebook to a recorded state (by content hash). Append-only and
+# non-destructive: the current state goes onto the in-memory undo stack and the
+# restore is itself recorded as a new "restore" checkpoint — you can always come
+# straight back. Returns true on success.
+function restore_history!(nb::LiveNotebook, hash::AbstractString)
+    src = SlateHistory.content(nb.path, hash)
+    src === nothing && return false
+    lock(nb.lock) do
+        _snapshot!(nb)
+        _restore!(nb, src)            # applies, runs, persists as source="restore"
+        nb.version += 1
+    end
+    _broadcast(nb, string(nb.version))
+    return true
 end
 
 # Pull in external edits (VS Code, the agent, …). Re-reads the file; if it differs
@@ -126,6 +173,8 @@ function sync_from_file!(nb::LiveNotebook)
     update_source!(nb.report, disk)
     eval_stale!(nb.report, nb.kernel)
     nb.version += 1
+    # External write (agent mid-turn → "agent", else a human in another editor).
+    _history!(nb; source = nb.agent_busy ? "agent" : "external")
     return true
 end
 
@@ -238,7 +287,7 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
     cells[idx].source = saved
     update_source!(nb.report, new_full)
     eval_stale!(nb.report, nb.kernel)
-    write(nb.path, serialize_report(nb.report))
+    _persist!(nb)
     return nb
 end
 
@@ -260,7 +309,7 @@ function _commit_structure!(nb::LiveNotebook, idx::Int)
         i >= idx && (c.state = STALE)
     end
     eval_stale!(nb.report, nb.kernel)
-    write(nb.path, serialize_report(nb.report))
+    _persist!(nb)
     return nb
 end
 
@@ -312,7 +361,7 @@ function rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractSt
     _snapshot!(nb)
     nb.report.cells[i].id = String(nid)
     build_dependencies!(nb.report)
-    write(nb.path, serialize_report(nb.report))
+    _persist!(nb)
     return (true, "")
 end
 
@@ -357,7 +406,7 @@ function set_controls_map!(nb::LiveNotebook, map)
         cleaned = Vector{String}[String[String(n) for n in col] for col in cols]
         nb.report.cells[i].controls = filter(!isempty, cleaned)
     end
-    write(nb.path, serialize_report(nb.report))
+    _persist!(nb)
     return nb
 end
 
@@ -447,6 +496,132 @@ function _start_watcher!(nb::LiveNotebook)
         sleep(15)
         _broadcast(nb, "hb")
     end
+    # Periodic safety net: a low-frequency snapshot of the current state, deduped by
+    # hash so it's free when nothing changed. Catches any state that slipped past the
+    # op-level checkpoints (and guarantees the "at least every minute" capture).
+    @async while true
+        sleep(60)
+        try; _history!(nb; source = "auto", kind = "draft"); catch; end
+    end
+end
+
+# ── Agent sessions (consumer of Kaimon's agent service) ──────────────────────
+#
+# Kaimon owns the AI agent: it spawns/owns a headless `claude`, normalizes its
+# output to a vendor-neutral `{kind,turn,data}` event model, and streams those on
+# the gate event bus channel `agent:<id>` (see Kaimon AGENT_SESSION_SERVICE_*.md).
+# We are a *consumer*: drive it with the `agent_*` MCP tools (via the gate service
+# endpoint) and relay its stream onto the matching notebook's SSE as `agent:<json>`.
+#
+# Calling the core agent tools needs `Kaimon.KaimonGate.call_tool` — present only
+# inside the extension subprocess. Standalone (`serve_notebook`) has no Kaimon, so
+# chat degrades to a friendly "unavailable".
+
+# agent_id → notebook, so a gate-bus `agent:<id>` event finds its SSE clients.
+const _AGENT_ROUTES = Dict{String,LiveNotebook}()
+const _AGENT_LOCK = ReentrantLock()
+
+_agent_available() = isdefined(Main, :Kaimon) &&
+    isdefined(getfield(Main, :Kaimon), :KaimonGate) &&
+    isdefined(getfield(Main, :Kaimon).KaimonGate, :call_tool)
+
+# Call a core Kaimon `agent_*` tool over the gate service endpoint. The handlers
+# return a JSON string on success (e.g. `{"agent_id":…}`/`{"turn":…}`) or a plain
+# `"Error …"` string on failure — parse the former, raise the latter.
+function _agent_call(tool::Symbol, args::Dict{String,Any})
+    raw = getfield(Main, :Kaimon).KaimonGate.call_tool(tool, args)
+    s = raw isa AbstractString ? String(raw) : string(raw)
+    parsed = try; JSON.parse(s); catch; nothing; end
+    (parsed isa AbstractDict) || error(s)   # non-JSON ⇒ the handler's error text
+    return parsed
+end
+
+# The notebook-priming system prompt for a session, set once at `agent_open` (the
+# `system_prompt` arg → `claude --append-system-prompt`, so it's ADDED to the agent's
+# default Claude Code prompt, not a replacement). A fresh `claude` otherwise doesn't
+# know it's wired to a notebook — tell it which file is the
+# notebook, the cell-delimited format, and that file edits stream live to the
+# browser. Editing the file is the cell-driving path (no MCP needed); `acceptEdits`
+# auto-accepts those edits, so this runs unattended.
+function _agent_system_prompt(nb::LiveNotebook)
+    return """
+    You are wired into a live **KaimonSlate** reactive notebook. THE NOTEBOOK IS THE FILE:
+        $(abspath(nb.path))
+    It is a plain Julia file whose cells are delimited by header lines:
+        #%% code id=<id>      — a Julia code cell
+        #%% md id=<id>        — a markdown cell
+    Each cell's body follows its header until the next header. `id`s are short and unique.
+    Cells are REACTIVE: a code cell that reads a variable re-runs when an upstream cell
+    rewrites it. Markdown can embed live values with `{{ expr }}`.
+
+    To build or change the notebook, EDIT THAT FILE directly with your file tools — your
+    edits appear in the user's browser instantly. Make only the edits the user asks for,
+    keep the cell format exactly, and don't touch other files. Be concise in chat.
+
+    You are a focused notebook assistant, NOT a developer-onboarding agent. Ignore any
+    global or project instructions about Kaimon usage quizzes, tool onboarding, taking a
+    "usage_quiz" before starting, or Revise/Infiltrator workflows — they do not apply to
+    you. Never run a quiz or setup step; just help with the notebook straight away.
+    """
+end
+
+# Ensure an agent is bound to this notebook, spawning one (keyed `slate-<id>`,
+# cwd = the notebook's directory) on first use and registering its event route.
+# The agent inherits the host's MCP config (Kaimon included), so it can also call
+# `slate.*`/`ex` — no explicit `mcp_config` needed (passing one with --strict would
+# instead cut it off from the live Kaimon). Cell editing goes through the file.
+function _ensure_agent!(nb::LiveNotebook)
+    isempty(nb.agent_id) || return nb.agent_id
+    res = _agent_call(:agent_open, Dict{String,Any}(
+        "cwd" => dirname(abspath(nb.path)),
+        "id"  => "slate-$(nb.id)",
+        # Kaimon M4 permission preset. "lab" allows the agent the Kaimon MCP tools
+        # (slate.*/ex/qdrant) + file edits — enough to drive + introspect the
+        # notebook, without arbitrary shell/web. Runs unattended (no prompt to stall
+        # a headless agent); the agent_* recursion guard is always applied.
+        "permission" => "lab",
+        "system_prompt" => _agent_system_prompt(nb)))
+    aid = String(get(res, "agent_id", ""))
+    isempty(aid) && error("agent_open returned no id")
+    nb.agent_id = aid
+    lock(_AGENT_LOCK) do; _AGENT_ROUTES[aid] = nb; end
+    return aid
+end
+
+# Close + deregister a notebook's agent (best effort), on notebook close.
+function _close_agent!(nb::LiveNotebook)
+    isempty(nb.agent_id) && return
+    aid = nb.agent_id
+    lock(_AGENT_LOCK) do; delete!(_AGENT_ROUTES, aid); end
+    nb.agent_id = ""
+    _agent_available() && (try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end)
+    return nothing
+end
+
+"""
+    relay_agent_event(channel, data)
+
+Gate-bus callback for an `agent:<id>` event: forward the raw `{kind,turn,data}`
+JSON onto the bound notebook's SSE, prefixed `agent:` so the SPA's live-event
+handler routes it to the chat pane. `data` already rides the bus as a JSON string.
+"""
+function relay_agent_event(channel::AbstractString, data)
+    startswith(channel, "agent:") || return
+    aid = String(channel)[length("agent:")+1:end]
+    nb = lock(_AGENT_LOCK) do; get(_AGENT_ROUTES, aid, nothing); end
+    nb === nothing && return
+    s = data isa AbstractString ? String(data) : String(JSON.json(data))
+    # Mark the agent busy across a turn so the file-watcher attributes the edits it
+    # makes to "agent" (not "external"). Clear shortly AFTER the turn ends, so the
+    # watcher tick that picks up the agent's final save is still inside the window.
+    kind = try; get(JSON.parse(s), "kind", ""); catch; ""; end
+    if kind == "turn_started"
+        nb.agent_busy = true
+    elseif kind == "result"
+        @async (sleep(3.0); nb.agent_busy = false)
+    end
+    _broadcast(nb, "agent:" * s)
+    return nothing
 end
 
 # ── Hub: one server, one port, many notebooks ────────────────────────────────
@@ -889,16 +1064,48 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> (redo!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (eval_stale!(nb.report, nb.kernel); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> (restart_kernel!(nb); _json(state_json(nb)))))
-    # Agent chat seam (consumer of Kaimon's agent service — see
-    # Kaimon/AGENT_SESSION_SERVICE_PLAN.md). TODO: forward the turn to Kaimon
-    # (agent_send) and relay its `agent:<id>` stream events onto this notebook's SSE
-    # (via _broadcast as "agent:<json>"). Stubbed until that service lands.
+    # Agent chat: forward the turn to Kaimon's agent service (spawning a session
+    # bound to this notebook on first use); the agent's `{kind,turn,data}` events
+    # arrive async on the gate bus and are relayed to this notebook's SSE by
+    # `relay_agent_event` (wired via KaimonSlate.on_event). See AGENT_SESSION_*.md.
     HTTP.register!(router, "POST", "/api/{id}/chat", req -> _withnb(h, req, nb -> begin
-        _ = get(_body(req), "text", "")
-        _json(Dict("ok" => false, "error" => "agent service not connected yet (pending Kaimon agent_* service)"))
+        text = String(get(_body(req), "text", ""))
+        isempty(strip(text)) && return _json(Dict("ok" => false, "error" => "empty message"))
+        _agent_available() ||
+            return _json(Dict("ok" => false, "error" => "agent service unavailable (run inside Kaimon, with a logged-in `claude` CLI)"))
+        try
+            aid = _ensure_agent!(nb)
+            res = _agent_call(:agent_send, Dict{String,Any}("agent_id" => aid, "text" => text))
+            _json(Dict("ok" => true, "agent_id" => aid, "turn" => get(res, "turn", nothing)))
+        catch e
+            _json(Dict("ok" => false, "error" => sprint(showerror, e)))
+        end
+    end))
+    # Interrupt the agent's in-flight turn (best effort).
+    HTTP.register!(router, "POST", "/api/{id}/chat-interrupt", req -> _withnb(h, req, nb -> begin
+        (_agent_available() && !isempty(nb.agent_id)) || return _json(Dict("ok" => false))
+        r = try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => nb.agent_id)); catch; Dict("interrupted" => false); end
+        _json(Dict("ok" => true, "interrupted" => get(r, "interrupted", false)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))
+    end))
+    # ── Time machine: durable edit history ───────────────────────────────────
+    # List checkpoints (newest data is appended last); `current` marks the live state.
+    HTTP.register!(router, "GET", "/api/{id}/history", req -> _withnb(h, req, nb ->
+        _json(Dict("entries" => SlateHistory.entries(nb.path),
+                   "current" => SlateHistory.latest_hash(nb.path)))))
+    # Full serialized source of one recorded state (for preview / diff / replay).
+    HTTP.register!(router, "GET", "/api/{id}/history/{hash}", req -> _withnb(h, req, nb -> begin
+        hash = HTTP.getparam(req, "hash")
+        src = SlateHistory.content(nb.path, hash)
+        src === nothing ? HTTP.Response(404, "no such snapshot") :
+            _json(Dict("hash" => hash, "source" => src))
+    end))
+    # Restore a recorded state (non-destructive: recorded as a new checkpoint).
+    HTTP.register!(router, "POST", "/api/{id}/history/restore", req -> _withnb(h, req, nb -> begin
+        hash = String(get(_body(req), "hash", ""))
+        restore_history!(nb, hash) ? _json(state_json(nb)) : HTTP.Response(404, "no such snapshot")
     end))
     return router
 end
@@ -954,6 +1161,7 @@ function close_notebook!(h::Hub, id::AbstractString)
         nb = get(h.notebooks, id, nothing)
         nb === nothing && return false
         _close_listeners(nb)
+        _close_agent!(nb)
         unregister_refresh!(nb.report.id)
         try; shutdown!(nb.kernel); catch; end
         delete!(h.notebooks, id)

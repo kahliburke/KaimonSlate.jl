@@ -10,3 +10,4 @@ using SafeTestsets
 @safetestset "render" begin include("test_render.jl") end
 @safetestset "tables" begin include("test_tables.jl") end
 @safetestset "complete" begin include("test_complete.jl") end
+@safetestset "history" begin include("test_history.jl") end

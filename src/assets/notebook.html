@@ -202,6 +202,33 @@ input.toggle:checked::after { left:18px; }
 .apmsg.assistant { align-self:flex-start; background:#11203a; }
 .apmsg.tool { align-self:flex-start; background:none; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; padding:2px 4px; }
 .apmsg.err { align-self:flex-start; color:var(--red); }
+.apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
+.apmsg.img { align-self:flex-start; background:none; padding:0; max-width:100%; }
+.apmsg.img img { max-width:100%; border-radius:8px; display:block; }
+/* History panel (time machine) */
+.histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
+  border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
+  transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
+.histpanel.open { transform:none; }
+.hbtn { background:var(--bg3); border:none; color:var(--fg); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
+.hbtn:hover { background:var(--accent); }
+.hbtn.stop { background:var(--red); }
+.histlist { overflow:auto; padding:6px; display:flex; flex-direction:column; gap:2px; max-height:45%; flex:0 0 auto; border-bottom:1px solid var(--bg3); }
+.hrow { display:flex; align-items:baseline; gap:8px; padding:5px 8px; border-radius:6px; cursor:pointer; font-size:.82rem; border-left:2px solid transparent; }
+.hrow:hover { background:var(--bg3); }
+.hrow.sel { background:var(--bg3); border-left-color:var(--accent); }
+.hrow.cur { font-weight:600; }
+.hrow .hsrc { flex:0 0 1.2em; text-align:center; }
+.hrow .hlabel { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hrow .htime { color:var(--dim); font-size:.72rem; flex:0 0 auto; }
+.hrow.draft { opacity:.6; }
+.hrow.draft .hlabel { font-style:italic; }
+.histprev { flex:1; overflow:auto; padding:10px 12px; font-family:'Cascadia Code',monospace; font-size:.76rem; line-height:1.45; white-space:pre-wrap; }
+.histprev .pvhead { font-family:inherit; display:flex; gap:8px; align-items:center; margin-bottom:8px; position:sticky; top:0; background:var(--bg2); padding-bottom:6px; }
+.histprev .dl { display:block; padding:0 4px; border-radius:2px; }
+.histprev .dl.add { background:#11351c; color:#9fe6b0; }
+.histprev .dl.del { background:#3a1414; color:#e6a0a0; }
+.histprev .dl.ctx { color:var(--dim); }
 .apinput { display:flex; gap:8px; padding:10px; border-top:1px solid var(--border); }
 .apinput textarea { flex:1; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
   border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem; }
@@ -288,6 +315,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <button onclick="togglePalette()" title="controls palette">🎛</button>
   <button onclick="openSettings()" title="settings">⚙</button>
   <button onclick="openPalette()" title="command palette (⌘K)">⌘K</button>
+  <button onclick="toggleHistory()" title="edit history — time machine">🕘</button>
   <button onclick="toggleAgent()" title="agent chat">💬</button>
 </div>
 <div class="page"><div id="nb"></div></div>
@@ -305,6 +333,13 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
     <textarea id="apin" placeholder="Ask the agent to build/edit cells… (⏎ send · ⇧⏎ newline)"></textarea>
     <button onclick="agentSend()">Send</button>
   </div>
+</aside>
+<aside id="histpanel" class="histpanel">
+  <div class="aphead"><strong>🕘 History</strong><span id="histcount" class="hint"></span>
+    <button id="histplay" class="hbtn" onclick="histReplay()" title="replay the buildup">▶ Replay</button>
+    <button class="pclose" onclick="toggleHistory()" title="close">✕</button></div>
+  <div id="histlist" class="histlist"></div>
+  <div id="histprev" class="histprev"></div>
 </aside>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
@@ -1250,7 +1285,9 @@ function toggleAgent() {
 const _esca = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 function renderAgentMsgs() {
   const el = document.getElementById('apmsgs');
-  el.innerHTML = agentMsgs.map(m => `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
+  el.innerHTML = agentMsgs.map(m => m.role === 'img'
+    ? `<div class="apmsg img"><img src="${m.src}" alt="agent image"></div>`
+    : `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
   el.scrollTop = el.scrollHeight;
 }
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
@@ -1262,25 +1299,150 @@ async function agentSend() {
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); renderAgentMsgs(); agentStatus(''); }
   } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); renderAgentMsgs(); agentStatus(''); }
 }
-function agentEvent(env) {                                   // one relayed agent event
+// Map a Kaimon agent event ({kind,turn,data}) — shapes per AGENT_SESSION_SERVICE_STATUS.md
+// — onto the chat transcript. Text streams as complete messages (not token deltas).
+function agentEvent(env) {
   if (!env) return;
-  if (env.kind === 'assistant_text') {
+  const d = env.data || {};
+  const k = env.kind;
+  if (k === 'assistant_text' || k === 'thought') {
+    const txt = (d.content && d.content.text) || '';
+    if (!txt) return;
     let last = agentMsgs[agentMsgs.length - 1];
-    if (!last || last.role !== 'assistant' || last.done) { last = { role: 'assistant', text: '' }; agentMsgs.push(last); }
-    last.text += (env.data && env.data.text) || '';
-  } else if (env.kind === 'tool_use') {
-    agentMsgs.push({ role: 'tool', text: '⚙ ' + ((env.data && env.data.name) || 'tool') });
-  } else if (env.kind === 'result') {
+    const role = k === 'thought' ? 'think' : 'assistant';
+    if (!last || last.role !== role || last.done) { last = { role, text: '' }; agentMsgs.push(last); }
+    last.text += txt;
+  } else if (k === 'tool_use') {
+    const c = d.call || {};
+    agentMsgs.push({ role: 'tool', text: '⚙ ' + (c.title || c.kind || 'tool'), id: c.toolCallId, done: false });
+  } else if (k === 'tool_result') {
+    const u = d.update || {};
+    const tm = agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
+    if (tm) { tm.done = true; if (u.status === 'failed') tm.role = 'err'; }
+    // Surface any image blocks the tool returned (plots etc.) inline.
+    for (const b of (u.content || [])) {
+      const inner = b && b.content;
+      if (inner && inner.type === 'image' && inner.data)
+        agentMsgs.push({ role: 'img', src: `data:${inner.mimeType || 'image/png'};base64,${inner.data}` });
+    }
+  } else if (k === 'plan') {
+    const lines = (d.entries || []).map(e => `• ${e.content}${e.status === 'completed' ? ' ✓' : ''}`).join('\n');
+    if (lines) agentMsgs.push({ role: 'tool', text: '📋 plan\n' + lines, done: true });
+  } else if (k === 'status') {
+    agentStatus(d.status === 'working' ? 'working…' : (d.status || ''));
+    return;
+  } else if (k === 'turn_started') {
+    agentStatus('working…'); return;
+  } else if (k === 'result') {
     const last = agentMsgs[agentMsgs.length - 1]; if (last && last.role === 'assistant') last.done = true;
     agentStatus('');
-  } else if (env.kind === 'error') {
-    agentMsgs.push({ role: 'err', text: (env.data && env.data.message) || 'error' }); agentStatus('');
-  }
+  } else if (k === 'error') {
+    agentMsgs.push({ role: 'err', text: d.message || 'error' }); agentStatus('');
+  } else { return; }
   renderAgentMsgs();
 }
 document.getElementById('apin').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); }
 });
+
+// ── History (time machine) ──────────────────────────────────────────────────
+// Durable, append-only edit history. The rail lists every checkpoint (👤 human /
+// 🤖 agent / 📝 external / ↩ restore / 🌱 open / · auto-draft); selecting one shows
+// a line-diff of that step against its parent, and you can restore (non-destructive)
+// or ▶ replay the whole buildup. Sources are fetched lazily and cached by hash.
+let histEntries = [], histCurrent = '', histSel = '', histReplaying = false;
+const _histSrcCache = {};
+const _histIcon = { browser:'👤', agent:'🤖', external:'📝', restore:'↩', open:'🌱', auto:'·' };
+function _reltime(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+let _histPoll = null;
+async function toggleHistory() {
+  const p = document.getElementById('histpanel'); p.classList.toggle('open');
+  if (p.classList.contains('open')) {
+    await loadHistory();
+    // Light poll so the rail also reflects the user's own browser edits (which
+    // don't fire SSE). Cheap GET; paused during replay.
+    _histPoll = _histPoll || setInterval(() => { if (!histReplaying) loadHistory(); }, 3000);
+  } else if (_histPoll) { clearInterval(_histPoll); _histPoll = null; }
+}
+async function loadHistory() {
+  const r = await api('GET', '/api/history');
+  histEntries = (r && r.entries) || []; histCurrent = (r && r.current) || '';
+  document.getElementById('histcount').textContent = histEntries.length + ' steps';
+  renderHistList();
+}
+function renderHistList() {
+  const el = document.getElementById('histlist');
+  // newest first
+  el.innerHTML = histEntries.slice().reverse().map(e => {
+    const cur = e.hash === histCurrent ? ' cur' : '', sel = e.hash === histSel ? ' sel' : '';
+    const draft = e.kind === 'draft' ? ' draft' : '';
+    const icon = _histIcon[e.source] || '•';
+    return `<div class="hrow${cur}${sel}${draft}" onclick="histSelect('${e.hash}')">
+      <span class="hsrc">${icon}</span>
+      <span class="hlabel">${_esc(e.label)}${cur ? ' · now' : ''}</span>
+      <span class="htime">${_reltime(e.ts)}</span></div>`;
+  }).join('');
+}
+async function _histSrc(hash) {
+  if (_histSrcCache[hash] != null) return _histSrcCache[hash];
+  const r = await api('GET', '/api/history/' + hash);
+  return (_histSrcCache[hash] = (r && r.source) || '');
+}
+// Minimal LCS line-diff → array of {t:'add'|'del'|'ctx', s}.
+function _lineDiff(a, b) {
+  const A = a.split('\n'), B = b.split('\n'), n = A.length, m = B.length;
+  const C = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    C[i][j] = A[i] === B[j] ? C[i + 1][j + 1] + 1 : Math.max(C[i + 1][j], C[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push({ t: 'ctx', s: A[i] }); i++; j++; }
+    else if (C[i + 1][j] >= C[i][j + 1]) { out.push({ t: 'del', s: A[i] }); i++; }
+    else { out.push({ t: 'add', s: B[j] }); j++; }
+  }
+  while (i < n) out.push({ t: 'del', s: A[i++] });
+  while (j < m) out.push({ t: 'add', s: B[j++] });
+  return out;
+}
+async function histSelect(hash) {
+  histSel = hash; renderHistList();
+  const idx = histEntries.findIndex(e => e.hash === hash);
+  const e = histEntries[idx]; if (!e) return;
+  const cur = await _histSrc(hash);
+  const parent = idx > 0 ? await _histSrc(histEntries[idx - 1].hash) : '';
+  const diff = _lineDiff(parent, cur).map(d =>
+    `<span class="dl ${d.t === 'add' ? 'add' : d.t === 'del' ? 'del' : 'ctx'}">${d.t === 'add' ? '+' : d.t === 'del' ? '-' : ' '} ${_esc(d.s)}</span>`).join('');
+  const isCur = hash === histCurrent;
+  document.getElementById('histprev').innerHTML =
+    `<div class="pvhead"><span>${_histIcon[e.source] || '•'} ${_esc(e.label)}</span>
+       ${isCur ? '<span class="hint">current state</span>'
+               : `<button class="hbtn" onclick="histRestore('${hash}')">↩ Restore this version</button>`}</div>${diff}`;
+}
+async function histRestore(hash) {
+  const st = await api('POST', '/api/history/restore', { hash });
+  if (st && st.cells) { renderAll(st); lastVersion = st.version; }
+  _histSrcCache[hash] = _histSrcCache[hash];          // keep cache
+  await loadHistory(); histSelect(histCurrent);
+}
+async function histReplay() {
+  const btn = document.getElementById('histplay');
+  if (histReplaying) { histReplaying = false; return; }
+  if (!histEntries.length) return;
+  histReplaying = true; btn.textContent = '⏹ Stop'; btn.classList.add('stop');
+  for (const e of histEntries) {
+    if (!histReplaying) break;
+    await histSelect(e.hash);
+    document.querySelector('.hrow.sel')?.scrollIntoView({ block: 'nearest' });
+    await new Promise(r => setTimeout(r, 850));
+  }
+  histReplaying = false; btn.textContent = '▶ Replay'; btn.classList.remove('stop');
+}
 
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
@@ -1291,6 +1453,8 @@ function connectLive() {
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // async live update — patch in place
     const v = parseInt(e.data, 10);
     if (!isNaN(v) && v !== lastVersion) { lastVersion = v; renderAll(await api('GET', '/api/state')); }
+    // Keep the history rail fresh while it's open (agent turns, external edits).
+    if (document.getElementById('histpanel').classList.contains('open') && !histReplaying) loadHistory();
   };
   // EventSource auto-reconnects on error.
 }

@@ -5,4 +5,8 @@ namespace = "slate"
 module = "KaimonSlate"
 tools_function = "create_tools"
 shutdown_function = "on_shutdown"
+# Subscribe to all agent-session channels on the gate event bus (ZMQ prefix match).
+# Kaimon's agent service publishes `{kind,turn,data}` events on `agent:<id>`;
+# `KaimonSlate.on_event` relays them to the bound notebook's SSE (chat pane).
+event_topics = ["agent:"]
 description = "KaimonSlate — a warm-session reactive notebook with a live browser UI."
