@@ -680,6 +680,15 @@ function _index_html(h::Hub)
     .nbmain{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;text-decoration:none;color:inherit;}
     .nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:monospace;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;}
     .nb .c{color:#56d364;font-size:.75rem;}
+    .sect{color:#8a90b0;font-size:.78rem;font-weight:600;margin:20px 0 6px;max-width:760px;text-transform:uppercase;letter-spacing:.05em;}
+    .recent{max-width:760px;}
+    .ritem{display:flex;align-items:center;gap:10px;padding:7px 12px;margin:5px 0;background:#10131f;border:1px solid #21253a;border-radius:7px;cursor:pointer;}
+    .ritem:hover{border-color:#569cd6;}
+    .ritem .rt{flex:1;min-width:0;display:flex;flex-direction:column;}
+    .ritem .rb{color:#cdd3e6;font-size:.85rem;}
+    .ritem .rp{color:#6a7090;font-family:monospace;font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .ritem .rx{background:none;border:none;color:#6a7090;cursor:pointer;font-size:.95rem;padding:2px 6px;border-radius:5px;line-height:1;}
+    .ritem .rx:hover{color:#e57575;background:rgba(229,117,117,.1);}
     .nb .kill{background:#141828;color:#e57575;border:1px solid #3a2030;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.78rem;white-space:nowrap;}
     .nb .kill:hover{border-color:#e57575;background:rgba(229,117,117,.1);}
     .open{display:flex;gap:8px;margin:8px 0 18px;max-width:760px;}
@@ -716,6 +725,7 @@ function _index_html(h::Hub)
       </div>
       <button id="openbtn">Open</button>
     </div>
+    <div id="recent" class="recent"></div>
     <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
     <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
     <script>
@@ -744,7 +754,7 @@ function _index_html(h::Hub)
         showLoading('Opening “'+p+'” — starting the worker…');
         fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
           .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-          .then(function(d){location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
+          .then(function(d){pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
       function render(){comp.innerHTML=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
         comp.style.display=items.length?'block':'none';}
       function fetchComp(){return fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
@@ -790,6 +800,27 @@ function _index_html(h::Hub)
         if(!await confirmDark('Shut down session “'+id+'”? Its worker stops and the notebook closes.','Shutdown','danger'))return;
         showLoading('Shutting down “'+id+'”…');
         fetch('/api/'+encodeURIComponent(id)+'/shutdown',{method:'POST'}).then(function(){location.reload();});});
+      // Recently opened notebooks (per-browser, localStorage). Click to re-open;
+      // ones already open are hidden (they're listed below). ✕ forgets an entry.
+      var RECENT_KEY='slateRecents';
+      function getRecents(){try{return JSON.parse(localStorage.getItem(RECENT_KEY)||'[]');}catch(e){return [];}}
+      function saveRecents(a){try{localStorage.setItem(RECENT_KEY,JSON.stringify(a.slice(0,12)));}catch(e){}}
+      function pushRecent(p){if(!p)return;var a=getRecents().filter(function(x){return x!==p;});a.unshift(p);saveRecents(a);}
+      function forgetRecent(p){saveRecents(getRecents().filter(function(x){return x!==p;}));renderRecents();}
+      function openPaths(){var s={};document.querySelectorAll('.nb .p').forEach(function(e){s[e.textContent]=1;});return s;}
+      function baseName(p){var q=p.replace(/\\/+\$/,'');var i=q.lastIndexOf('/');return i<0?q:q.slice(i+1);}
+      function renderRecents(){
+        var box=document.getElementById('recent'),open=openPaths();
+        var list=getRecents().filter(function(p){return !open[p];});
+        box.innerHTML=list.length? '<h2 class="sect">Recent</h2>'+list.map(function(p){
+          return '<div class="ritem" data-p="'+esc(p)+'"><div class="rt"><span class="rb">'+esc(baseName(p))+
+            '</span><span class="rp">'+esc(p)+'</span></div><button class="rx" data-p="'+esc(p)+'" title="remove from recents">✕</button></div>';
+        }).join('') : '';
+      }
+      document.getElementById('recent').addEventListener('click',function(e){
+        var x=e.target.closest('.rx'); if(x){e.stopPropagation();forgetRecent(x.dataset.p);return;}
+        var it=e.target.closest('.ritem'); if(it)openPath(it.dataset.p);});
+      renderRecents();
       // Prefill the last directory we opened from and show its files for one-click reopen.
       try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last; fetchComp();}}catch(e){}
       inp.focus();
