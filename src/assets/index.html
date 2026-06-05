@@ -1,0 +1,177 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Kaimon Slate</title>
+<style>body{background:#0d1120;color:#d4d8e8;font-family:system-ui,sans-serif;margin:0;padding:40px;}
+h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
+.nb{display:flex;align-items:center;gap:12px;padding:12px 16px;margin:8px 0;background:#141828;
+    border:1px solid #2a2e40;border-left:3px solid #569cd6;border-radius:8px;max-width:760px;}
+.nb:hover{border-color:#569cd6;}
+.nbmain{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;text-decoration:none;color:inherit;}
+.nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:monospace;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;}
+.nb .c{color:#56d364;font-size:.75rem;}
+.sect{color:#8a90b0;font-size:.78rem;font-weight:600;margin:2px 0 6px;max-width:760px;text-transform:uppercase;letter-spacing:.05em;}
+.recent{flex:1 1 300px;max-width:520px;}
+.ritem{display:flex;align-items:center;gap:10px;padding:7px 12px;margin:5px 0;background:#10131f;border:1px solid #21253a;border-radius:7px;cursor:pointer;}
+.ritem:hover{border-color:#569cd6;}
+.ritem .rt{flex:1;min-width:0;display:flex;flex-direction:column;}
+.ritem .rb{color:#cdd3e6;font-size:.85rem;}
+.ritem .rp{color:#6a7090;font-family:monospace;font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ritem .rx{background:none;border:none;color:#6a7090;cursor:pointer;font-size:.95rem;padding:2px 6px;border-radius:5px;line-height:1;}
+.ritem .rx:hover{color:#e57575;background:rgba(229,117,117,.1);}
+.nb .kill{background:#141828;color:#e57575;border:1px solid #3a2030;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.78rem;white-space:nowrap;}
+.nb .kill:hover{border-color:#e57575;background:rgba(229,117,117,.1);}
+.topcols{display:flex;gap:30px;align-items:flex-start;flex-wrap:wrap;max-width:1120px;margin:8px 0 18px;}
+.open{display:flex;gap:8px;flex:1 1 380px;max-width:620px;}
+.pathwrap{position:relative;flex:1;}
+.pathwrap input{width:100%;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 12px;font-family:monospace;font-size:.85rem;}
+.pathwrap input:focus{outline:none;border-color:#569cd6;}
+.comp{position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:5;list-style:none;margin:0;padding:4px;
+  background:#141828;border:1px solid #2a2e40;border-radius:8px;max-height:300px;overflow:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,.4);}
+.comp li{padding:4px 10px;border-radius:5px;cursor:pointer;font-family:monospace;font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.comp li.on{background:#569cd6;color:#0d1120;} .comp li:hover{background:#1a1e2e;}
+.open button{background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 16px;cursor:pointer;}
+.open button:hover{border-color:#569cd6;color:#569cd6;}
+.modal-bg{position:fixed;inset:0;background:rgba(5,8,16,.66);display:none;align-items:center;justify-content:center;z-index:50;}
+.modal-bg.show{display:flex;}
+.modal{background:#141828;border:1px solid #2a2e40;border-radius:10px;padding:18px 20px;max-width:520px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,.55);}
+.modal .msg{color:#d4d8e8;font-size:.92rem;line-height:1.5;margin-bottom:16px;white-space:pre-wrap;word-break:break-word;}
+.modal .row{display:flex;justify-content:flex-end;gap:10px;}
+.modal button{background:#1a1e2e;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 16px;cursor:pointer;font-size:.85rem;}
+.modal button:hover{border-color:#569cd6;color:#569cd6;}
+.modal button.primary{background:#569cd6;color:#0d1120;border-color:#569cd6;font-weight:600;}
+.modal button.primary:hover{background:#6cb0e6;color:#0d1120;}
+.modal button.danger{color:#e57575;border-color:#3a2030;} .modal button.danger:hover{background:rgba(229,117,117,.12);border-color:#e57575;color:#e57575;}
+.loading{position:fixed;inset:0;background:rgba(5,8,16,.72);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;z-index:60;}
+.loading.show{display:flex;}
+.spinner{width:38px;height:38px;border:3px solid #2a2e40;border-top-color:#569cd6;border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.loading .lmsg{color:#d4d8e8;font-size:.9rem;}</style></head>
+<body><h1>📓 Kaimon Slate — notebooks</h1>
+<div class="topcols">
+<div class="open">
+  <div class="pathwrap">
+    <input id="pathin" autocomplete="off" spellcheck="false"
+           placeholder="~/path/to/notebook.jl — Tab to complete, Enter to open"/>
+    <ul id="comp" class="comp"></ul>
+  </div>
+  <button id="openbtn">Open</button>
+</div>
+<div id="recent" class="recent"></div>
+</div>
+<div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
+<div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
+<script>
+(function(){
+  var inp=document.getElementById('pathin'), comp=document.getElementById('comp'), items=[], sel=-1;
+  var modalBg=document.getElementById('modalbg'), modalMsg=document.getElementById('modalmsg'),
+      modalRow=document.getElementById('modalrow'), loadEl=document.getElementById('loading'),
+      loadMsg=document.getElementById('lmsg'), _resolve=null;
+  var esc=function(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
+  var isdir=function(p){return p.slice(-1)==='/';};
+  // Dark-themed modal (returns a Promise) replacing native confirm/alert.
+  function _close(v){if(_resolve){var r=_resolve;_resolve=null;modalBg.classList.remove('show');r(v);}}
+  function modal(message,buttons){return new Promise(function(resolve){_resolve=resolve;
+    modalMsg.textContent=message;modalRow.innerHTML='';
+    buttons.forEach(function(b){var el=document.createElement('button');el.textContent=b.label;if(b.cls)el.className=b.cls;
+      el.onclick=function(){_close(b.value);};modalRow.appendChild(el);});
+    modalBg.classList.add('show');var pr=modalRow.querySelector('.primary')||modalRow.lastChild;if(pr)pr.focus();});}
+  function confirmDark(msg,okLabel,okCls){return modal(msg,[{label:'Cancel',value:false},{label:okLabel||'OK',value:true,cls:okCls||'primary'}]);}
+  function alertDark(msg){return modal(msg,[{label:'OK',value:true,cls:'primary'}]);}
+  modalBg.addEventListener('mousedown',function(e){if(e.target===modalBg)_close(false);});
+  document.addEventListener('keydown',function(e){if(modalBg.classList.contains('show')&&e.key==='Escape')_close(false);});
+  function showLoading(m){loadMsg.textContent=m||'Working…';loadEl.classList.add('show');}
+  function hideLoading(){loadEl.classList.remove('show');}
+  function openPath(p){p=(p||'').trim();if(!p)return;
+    try{localStorage.setItem('slateLastDir', p.replace(/[^/]*$/,''));}catch(e){}   // remember the directory
+    showLoading('Opening “'+p+'” — starting the worker…');
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(d){pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
+  function render(){comp.innerHTML=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
+    comp.style.display=items.length?'block':'none';}
+  function fetchComp(){return fetch('/api/path-complete?q='+encodeURIComponent(inp.value))
+    .then(function(r){return r.json();}).then(function(d){items=d.completions||[];sel=-1;render();});}
+  function commonPrefix(a){if(!a.length)return '';var p=a[0];for(var k=0;k<a.length;k++){var s=a[k],i=0;
+    while(i<p.length&&i<s.length&&p[i]===s[i])i++;p=p.slice(0,i);}return p;}
+  // Enter / Open: act on the active suggestion (highlighted, else the first),
+  // else on the typed text. Directories are descended (never opened); a new
+  // path is confirmed and offered a .jl extension before creating.
+  async function submit(){
+    var idx = sel>=0?sel:(items.length?0:-1);
+    if(idx>=0){var pick=items[idx];inp.value=pick;
+      if(isdir(pick)){fetchComp();return;}     // commit dir + show subpaths, don't open
+      openPath(pick);return;}                  // file suggestion → open
+    var p=inp.value.trim(); if(!p)return;
+    var info=await fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();});
+    if(info.isdir){if(p.slice(-1)!=='/')inp.value=p+'/';fetchComp();return;}        // never open a directory
+    if(info.isfile){openPath(p);return;}
+    if(!await confirmDark('Create new notebook “'+p+'”?','Create'))return;          // confirm new file
+    if(p.slice(-3).toLowerCase()!=='.jl'){ if(await confirmDark('“'+p+'” has no .jl extension. Add it?','Add .jl'))p=p+'.jl'; }
+    openPath(p);
+  }
+  var t;inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
+  // Completion follows focus: load on focus, hide on blur (small delay so a
+  // click on a suggestion lands first).
+  inp.addEventListener('focus',function(){fetchComp();});
+  inp.addEventListener('blur',function(){setTimeout(function(){comp.style.display='none';},120);});
+  inp.addEventListener('keydown',function(e){
+    if(e.key==='Tab'){e.preventDefault();
+      if(items.length===1){inp.value=items[0];fetchComp();}
+      else if(items.length>1){var cp=commonPrefix(items);
+        if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
+        else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
+    else if(e.key==='/'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend
+      if(idx>=0&&isdir(items[idx])){e.preventDefault();inp.value=items[idx];fetchComp();}}
+    else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
+    else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
+    else if(e.key==='Enter'){e.preventDefault();submit();}
+    else if(e.key==='Escape'){items=[];render();}});
+  comp.addEventListener('mousedown',function(e){var li=e.target.closest('li');if(!li)return;e.preventDefault();
+    var pick=items[+li.dataset.i];inp.value=pick;inp.focus();
+    isdir(pick)?fetchComp():openPath(pick);});   // click dir = descend, click file = open
+  document.getElementById('openbtn').onclick=function(){submit();};
+  // Per-session shutdown buttons (event-delegated over the rows).
+  document.addEventListener('click',async function(e){var b=e.target.closest('.kill');if(!b)return;
+    var id=b.dataset.id;
+    if(!await confirmDark('Shut down session “'+id+'”? Its worker stops and the notebook closes.','Shutdown','danger'))return;
+    showLoading('Shutting down “'+id+'”…');
+    fetch('/api/'+encodeURIComponent(id)+'/shutdown',{method:'POST'}).then(function(){hideLoading();loadSessions();});});
+  // Recently opened notebooks (per-browser, localStorage). Click to re-open;
+  // ones already open are hidden (they're listed below). ✕ forgets an entry.
+  var RECENT_KEY='slateRecents';
+  function getRecents(){try{return JSON.parse(localStorage.getItem(RECENT_KEY)||'[]');}catch(e){return [];}}
+  function saveRecents(a){try{localStorage.setItem(RECENT_KEY,JSON.stringify(a.slice(0,12)));}catch(e){}}
+  function pushRecent(p){if(!p)return;var a=getRecents().filter(function(x){return x!==p;});a.unshift(p);saveRecents(a);}
+  function forgetRecent(p){saveRecents(getRecents().filter(function(x){return x!==p;}));renderRecents();}
+  function openPaths(){var s={};document.querySelectorAll('.nb .p').forEach(function(e){s[e.textContent]=1;});return s;}
+  function baseName(p){var q=p.replace(/\/+$/,'');var i=q.lastIndexOf('/');return i<0?q:q.slice(i+1);}
+  function renderRecents(){
+    var box=document.getElementById('recent'),open=openPaths();
+    var list=getRecents().filter(function(p){return !open[p];});
+    box.innerHTML=list.length? '<h2 class="sect">Recent</h2>'+list.map(function(p){
+      return '<div class="ritem" data-p="'+esc(p)+'"><div class="rt"><span class="rb">'+esc(baseName(p))+
+        '</span><span class="rp">'+esc(p)+'</span></div><button class="rx" data-p="'+esc(p)+'" title="remove from recents">✕</button></div>';
+    }).join('') : '';
+  }
+  document.getElementById('recent').addEventListener('click',function(e){
+    var x=e.target.closest('.rx'); if(x){e.stopPropagation();forgetRecent(x.dataset.p);return;}
+    var it=e.target.closest('.ritem'); if(it)openPath(it.dataset.p);});
+  // Open notebooks/sessions — rendered client-side from /api/notebooks.
+  function loadSessions(){
+    return fetch('/api/notebooks').then(function(r){return r.json();}).then(function(nbs){
+      var box=document.getElementById('sessions');
+      box.innerHTML = nbs.length ? nbs.map(function(n){
+        return '<div class="nb"><a class="nbmain" href="/n/'+encodeURIComponent(n.id)+'">'+
+          '<span class="t">'+esc(n.title)+'</span><span class="p">'+esc(n.path)+'</span>'+
+          '<span class="c">'+n.cells+' cells'+(n.worker||'')+'</span></a>'+
+          '<button class="kill" data-id="'+esc(n.id)+'" title="shut down this session">⨯ shutdown</button></div>';
+      }).join('') : '<p class="empty">No notebooks open — open one above.</p>';
+      renderRecents();   // recents hides notebooks already open (reads .nb .p)
+    }).catch(function(){});
+  }
+  loadSessions();
+  // Prefill the last directory we opened from (but DON'T open the completion
+  // dropdown on load — it would cover the open-sessions list; it opens when the
+  // user types or Tabs).
+  try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last;}}catch(e){}
+})();
+</script>
+<div id="sessions"></div></body></html>
