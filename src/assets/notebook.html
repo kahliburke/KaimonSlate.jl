@@ -244,6 +244,13 @@ li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
 .histprev .dl.add { background:#11351c; color:#9fe6b0; }
 .histprev .dl.del { background:#3a1414; color:#e6a0a0; }
 .histprev .dl.ctx { color:var(--dim); }
+/* Worker log panel */
+.logpanel { position:fixed; top:0; right:0; height:100vh; width:480px; max-width:96vw; background:var(--bg2);
+  border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
+  transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
+.logpanel.open { transform:none; }
+.logbox { flex:1; overflow:auto; padding:10px 12px; font-family:'Cascadia Code',monospace; font-size:.74rem;
+  line-height:1.4; white-space:pre-wrap; word-break:break-word; color:#c8cde0; }
 .apinput { display:flex; gap:8px; padding:10px; border-top:1px solid var(--border); }
 .apinput textarea { flex:1; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
   border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem; }
@@ -330,6 +337,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <button onclick="togglePalette()" title="controls palette">🎛</button>
   <button onclick="openSettings()" title="settings">⚙</button>
   <button onclick="openPalette()" title="command palette (⌘K)">⌘K</button>
+  <button onclick="toggleLog()" title="worker log — what the kernel is doing">🪵</button>
   <button onclick="toggleHistory()" title="edit history — time machine">🕘</button>
   <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬</button>
 </div>
@@ -355,6 +363,12 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
     <button class="pclose" onclick="toggleHistory()" title="close">✕</button></div>
   <div id="histlist" class="histlist"></div>
   <div id="histprev" class="histprev"></div>
+</aside>
+<aside id="logpanel" class="logpanel">
+  <div class="aphead"><strong>🪵 Worker log</strong><span id="logstatus" class="hint"></span>
+    <button id="logtail" class="hbtn" onclick="toggleTail()" title="auto-scroll to newest">⤓ tail</button>
+    <button class="pclose" onclick="toggleLog()" title="close">✕</button></div>
+  <pre id="logbox" class="logbox"></pre>
 </aside>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
@@ -1466,6 +1480,32 @@ function _reltime(ts) {
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
   return Math.floor(s / 86400) + 'd ago';
 }
+// ── Worker log ────────────────────────────────────────────────────────────────
+// Tail the gate worker's stdout/stderr — what the kernel is doing when it evaluates.
+let _logPoll = null, _logTail = true;
+function toggleLog() {
+  const p = document.getElementById('logpanel'); p.classList.toggle('open');
+  if (p.classList.contains('open')) { loadLog(); _logPoll = _logPoll || setInterval(loadLog, 1500); }
+  else if (_logPoll) { clearInterval(_logPoll); _logPoll = null; }
+}
+function toggleTail() {
+  _logTail = !_logTail;
+  document.getElementById('logtail').classList.toggle('stop', !_logTail);
+  if (_logTail) { const b = document.getElementById('logbox'); b.scrollTop = b.scrollHeight; }
+}
+async function loadLog() {
+  try {
+    const r = await api('GET', '/api/worker-log'); if (!r) return;
+    const box = document.getElementById('logbox');
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.textContent = r.log || '(empty)';
+    const w = r.worker || {};
+    document.getElementById('logstatus').textContent =
+      w.kind === 'gate' ? `worker :${w.port} · ${w.connected ? 'connected' : 'down'}` : (w.kind || '');
+    if (_logTail || atBottom) box.scrollTop = box.scrollHeight;
+  } catch (_) {}
+}
+
 let _histPoll = null;
 async function toggleHistory() {
   const p = document.getElementById('histpanel'); p.classList.toggle('open');

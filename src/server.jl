@@ -980,6 +980,17 @@ function restart_kernel!(nb::LiveNotebook)
     return nb
 end
 
+# The gate worker's stdout/stderr log (eval output, prints, errors, package loads)
+# — the debugging surface for "what is the worker doing". In-process kernels have
+# no separate log (cells eval in the extension process).
+function worker_log(nb::LiveNotebook; maxbytes::Int = 100_000)
+    nb.kernel isa GateKernel || return "(in-process kernel — no separate worker log; cells evaluate in the extension process)"
+    path = nb.kernel.logpath
+    (isempty(path) || !isfile(path)) && return "(worker not started yet)"
+    s = read(path, String)
+    ncodeunits(s) > maxbytes ? "…(truncated; last $(maxbytes ÷ 1000)KB)…\n" * String(last(s, maxbytes)) : s
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
@@ -1077,6 +1088,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/controls", req -> _withnb(h, req, nb -> begin
         set_controls_map!(nb, get(_body(req), "map", Dict{String,Any}())); _json(state_json(nb))
     end))
+    # The worker's stdout/stderr log — what the kernel is doing when evaluating cells.
+    HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb ->
+        _json(Dict("log" => worker_log(nb), "worker" => _kernel_status(nb.kernel)))))
     HTTP.register!(router, "POST", "/api/{id}/bind/{cid}", req -> _withnb(h, req, nb -> begin
         body = _body(req)
         set_bind!(nb, HTTP.getparam(req, "cid"), get(body, "name", ""), get(body, "value", nothing))
