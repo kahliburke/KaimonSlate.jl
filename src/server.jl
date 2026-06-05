@@ -18,6 +18,7 @@ include("history.jl")   # module SlateHistory — durable content-addressed time
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
+export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 
@@ -134,10 +135,28 @@ function _history!(nb::LiveNotebook; source::AbstractString = "browser", kind::A
     return nothing
 end
 
+# Recent server-written content hashes per notebook (report id → ring). The async
+# file-watcher must recognize our OWN writes — including *intermediate* ones from a
+# rapid sequence of cell ops — and not revert newer in-memory state to a stale disk
+# read. Matching only the latest state (as `sync_from_file!` did) races: the watcher
+# can read write N while the report is already at N+1 and roll it back.
+const _SERVER_WRITES = Dict{String,Vector{UInt64}}()
+const _SWRITES_LOCK = ReentrantLock()
+function _note_server_write!(report_id::AbstractString, h::UInt64)
+    lock(_SWRITES_LOCK) do
+        v = get!(_SERVER_WRITES, String(report_id), UInt64[])
+        push!(v, h); length(v) > 64 && popfirst!(v)
+    end
+end
+_is_server_write(report_id, h::UInt64) =
+    lock(_SWRITES_LOCK) do; h in get(_SERVER_WRITES, String(report_id), UInt64[]); end
+
 # Persist the notebook to its `.jl` AND record a durable checkpoint. The single
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
 function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
-    write(nb.path, serialize_report(nb.report))
+    s = serialize_report(nb.report)
+    write(nb.path, s)
+    _note_server_write!(nb.report.id, hash(s))   # so the watcher won't revert it
     _history!(nb; source = source)
     return nb
 end
@@ -170,6 +189,9 @@ function sync_from_file!(nb::LiveNotebook)
         return false                     # mid-save / unparseable — skip this tick
     end
     norm == serialize_report(nb.report) && return false
+    # An echo of one of OUR recent writes (incl. an intermediate one from a rapid
+    # cell-op sequence) — never roll the live report back to it.
+    _is_server_write(nb.report.id, hash(norm)) && return false
     update_source!(nb.report, disk)
     eval_stale!(nb.report, nb.kernel)
     nb.version += 1
@@ -324,6 +346,113 @@ function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractStr
     insert!(cells, pos, cell)
     _commit_structure!(nb, pos)
     return cell.id
+end
+
+# ── Agent cell operations (the incremental-build tool surface) ───────────────
+# Cell-level ops the agent drives via `slate.*`: each mutates the live notebook,
+# runs the affected cell, pushes the change to open browser tabs, and returns a
+# compact TEXT result so the agent works in a tight read→add→run→observe loop —
+# the cure for "compose everything in the head, then dump one big Edit."
+
+# Compact text of a cell's result for the agent: the value/stdout, or the error,
+# plus a note that rich output (image/chart/table) rendered (the agent can't see
+# the pixels here, but knows it worked).
+function _cell_result_text(c::Cell)
+    o = c.output
+    o === nothing && return "(not run)"
+    o.exception === nothing ||
+        return "ERROR: " * o.exception * (o.backtrace === nothing ? "" : "\n" * first(o.backtrace, 800))
+    parts = String[]
+    isempty(rstrip(o.stdout)) || push!(parts, rstrip(o.stdout))
+    isempty(o.value_repr) || push!(parts, o.value_repr)
+    rich = String[]
+    isempty(o.display) || push!(rich, join(unique(ch.mime for ch in o.display), "+"))
+    isempty(o.echarts) || push!(rich, "echart")
+    isempty(o.tables)  || push!(rich, "table")
+    isempty(rich) || push!(parts, "[rendered: " * join(rich, ", ") * "]")
+    txt = rstrip(join(parts, "\n"))
+    return isempty(txt) ? "(ok — no value)" : txt
+end
+
+# The notebook as the agent should see it: each cell's id, kind, state, source,
+# and (for code) its result.
+function notebook_digest(nb::LiveNotebook)
+    lock(nb.lock) do
+        io = IOBuffer()
+        print(io, "Notebook '", nb.id, "' — ", abspath(nb.path), " — ", length(nb.report.cells), " cell(s)")
+        for c in nb.report.cells
+            kind = c.kind == MARKDOWN ? "md" : "code"
+            print(io, "\n\n### id=", c.id, "  [", kind, ", ", lowercase(string(c.state)), "]\n")
+            print(io, rstrip(c.source))
+            c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
+        end
+        return String(take!(io))
+    end
+end
+
+# Push an agent-driven change to open browser tabs (the watcher won't — our own
+# file write is canonical, so it doesn't echo back as an external change).
+_agent_push!(nb::LiveNotebook) = (nb.version += 1; _broadcast(nb, string(nb.version)))
+
+_cell_exists(nb, id) = _index_of(nb.report.cells, id) !== nothing
+function _result_of(nb, id)
+    i = _index_of(nb.report.cells, id)
+    i === nothing ? "(cell $id not found)" : _cell_result_text(nb.report.cells[i])
+end
+
+"Add a cell (default code) after `after` (end if empty) WITH `source`, run it,
+return id + result. One file write (build the cell with its source up front) so the
+async file-watcher can't race the intermediate empty-cell state."
+function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
+                         after::AbstractString = "", kind::AbstractString = "code")
+    cid = lock(nb.lock) do
+        cells = nb.report.cells
+        i = isempty(after) ? length(cells) : something(_index_of(cells, after), length(cells))
+        cell = Cell(_gen_id(nb.report), kind == "md" ? MARKDOWN : CODE, String(source))
+        _snapshot!(nb)
+        insert!(cells, i + 1, cell)
+        _commit_structure!(nb, i + 1)        # build deps, restale from here, eval, one write
+        return cell.id
+    end
+    _agent_push!(nb)
+    return "added id=$cid →\n$(_result_of(nb, cid))"
+end
+
+"Replace a cell's source, run it, return its result."
+function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString)
+    _cell_exists(nb, id) || return "(no cell id=$id)"
+    lock(nb.lock) do; edit_cell!(nb, id, source); end
+    _agent_push!(nb)
+    return "edited id=$id →\n$(_result_of(nb, id))"
+end
+
+"Run one cell (or recompute all stale if `id` empty); return the result(s)."
+function agent_run!(nb::LiveNotebook, id::AbstractString = "")
+    lock(nb.lock) do; eval_stale!(nb.report, nb.kernel); end
+    _agent_push!(nb)
+    isempty(id) ? "ran stale cells; notebook is up to date" :
+        (_cell_exists(nb, id) ? "id=$id →\n$(_result_of(nb, id))" : "(no cell id=$id)")
+end
+
+"Delete a cell."
+function agent_delete_cell!(nb::LiveNotebook, id::AbstractString)
+    _cell_exists(nb, id) || return "(no cell id=$id)"
+    lock(nb.lock) do; delete_cell!(nb, id); end
+    _agent_push!(nb)
+    return "deleted id=$id"
+end
+
+# Find a live notebook by hub id or by (expanded, absolute) path. (`h` is a `Hub`;
+# untyped because `Hub` is defined later in this file.)
+function find_live(h, key::AbstractString)
+    lock(h.lock) do
+        haskey(h.notebooks, key) && return h.notebooks[key]
+        f = abspath(expanduser(String(key)))
+        for nb in values(h.notebooks)
+            abspath(nb.path) == f && return nb
+        end
+        return nothing
+    end
 end
 
 # Split a cell into two at the editor cursor (frontend sends the before/after text).
@@ -540,32 +669,40 @@ function _agent_call(tool::Symbol, args::Dict{String,Any})
     return parsed
 end
 
-# The notebook-priming system prompt for a session, set once at `agent_open` (the
-# `system_prompt` arg → `claude --append-system-prompt`, so it's ADDED to the agent's
-# default Claude Code prompt, not a replacement). A fresh `claude` otherwise doesn't
-# know it's wired to a notebook — tell it which file is the
-# notebook, the cell-delimited format, and that file edits stream live to the
-# browser. Editing the file is the cell-driving path (no MCP needed); `acceptEdits`
-# auto-accepts those edits, so this runs unattended.
+# The notebook-priming system prompt, set once at `agent_open` (the `system_prompt`
+# arg → `claude --append-system-prompt`). It makes the agent a *live notebook
+# operator* — driving the reactive notebook one cell at a time through the `slate.*`
+# tools and reading each result — instead of a blind file-author that composes
+# everything in its head and dumps one big Edit.
 function _agent_system_prompt(nb::LiveNotebook)
     return """
-    You are wired into a live **KaimonSlate** reactive notebook. THE NOTEBOOK IS THE FILE:
-        $(abspath(nb.path))
-    It is a plain Julia file whose cells are delimited by header lines:
-        #%% code id=<id>      — a Julia code cell
-        #%% md id=<id>        — a markdown cell
-    Each cell's body follows its header until the next header. `id`s are short and unique.
-    Cells are REACTIVE: a code cell that reads a variable re-runs when an upstream cell
-    rewrites it. Markdown can embed live values with `{{ expr }}`.
+    You are pair-building a LIVE reactive Julia notebook with the user, in real time.
+    Your notebook id is "$(nb.id)" (file: $(abspath(nb.path))). Pass that id as the
+    `notebook` argument to every slate tool.
 
-    To build or change the notebook, EDIT THAT FILE directly with your file tools — your
-    edits appear in the user's browser instantly. Make only the edits the user asks for,
-    keep the cell format exactly, and don't touch other files. Be concise in chat.
+    OPERATE THE NOTEBOOK THROUGH THESE TOOLS — do NOT edit the .jl file directly:
+      mcp__kaimon__slate_read(notebook)                          — all cells + their outputs/errors
+      mcp__kaimon__slate_add_cell(notebook, source, after, kind) — append a cell, RUN it, return its result
+      mcp__kaimon__slate_edit_cell(notebook, cell, source)       — revise a cell, run it, return its result
+      mcp__kaimon__slate_run(notebook, cell)                     — run a cell ("" = all stale)
+      mcp__kaimon__slate_delete_cell(notebook, cell)             — remove a cell
+    (`after`="" appends at the end; `kind` is "code" or "md".)
 
-    You are a focused notebook assistant, NOT a developer-onboarding agent. Ignore any
-    global or project instructions about Kaimon usage quizzes, tool onboarding, taking a
-    "usage_quiz" before starting, or Revise/Infiltrator workflows — they do not apply to
-    you. Never run a quiz or setup step; just help with the notebook straight away.
+    WORK INCREMENTALLY — this is the entire point of the project:
+    - Call slate_read FIRST to see the current state.
+    - Add ONE cell at a time with slate_add_cell, then LOOK at the result it returns.
+    - If a cell errors, fix it with slate_edit_cell before moving on.
+    - Choose the next cell from what you just saw. Do NOT compose the whole notebook
+      in your head and write it all at once — small, visible steps the user can watch.
+    - Cells are REACTIVE: a cell re-runs when an upstream variable it reads changes.
+    - Plot with **CairoMakie** on the dark theme (`using CairoMakie; set_theme!(theme_dark())`).
+      CairoMakie renders a static image that shows inline. NEVER use GLMakie — it needs a
+      GPU window and HANGS this headless worker. Use WGLMakie only if interactivity is asked for.
+    - Return the figure as the cell's last expression (e.g. `fig`) so it renders.
+
+    Be concise in chat. You are a focused notebook assistant — ignore any global or
+    project onboarding (Kaimon usage quizzes, "take the quiz", Revise/Infiltrator
+    workflows); never run a quiz or setup step.
     """
 end
 

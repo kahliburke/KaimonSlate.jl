@@ -31,7 +31,9 @@ include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRe
 using .ReportEngine
 using .ReportRender
 using .NotebookServer: serve_notebook, start_server, LiveNotebook,
-                      Hub, start_hub, open_notebook!, close_notebook!, stop_hub
+                      Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
+                      find_live, notebook_digest,
+                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!
 
 export serve_notebook, LiveNotebook
 
@@ -133,6 +135,74 @@ function create_tools(GateTool::Type)
         return "Closed $file"
     end
 
+    # ── Cell-level operations (the incremental-build loop) ────────────────────
+    # These let the agent operate the LIVE notebook one cell at a time — add a
+    # cell, run it, read the result, decide the next — instead of composing the
+    # whole thing blind and dumping one big file Edit. `notebook` is the id (e.g.
+    # "para") or the .jl path. All args are flat scalars (gate-reflection friendly).
+    function _nb(notebook::String)
+        h = _HUB[]
+        h === nothing && return (nothing, "No notebooks are open.")
+        nb = find_live(h, notebook)
+        nb === nothing && return (nothing, "No open notebook '$notebook' (use slate.list).")
+        return (nb, "")
+    end
+
+    """
+        read(notebook::String) -> String
+
+    Read the notebook's cells and their current outputs/errors — your view of the
+    live state. `notebook` is its id or .jl path. Call this first, and after changes.
+    """
+    function read_cells(notebook::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return notebook_digest(nb)
+    end
+
+    """
+        add_cell(notebook, source, after, kind) -> String
+
+    Append a cell containing `source`, RUN it, and return its result (value/output,
+    or the error to fix). `after` = the id to insert after ("" = end of notebook).
+    `kind` = "code" or "md". Add ONE cell at a time and read its result before the
+    next — do not compose the whole notebook up front.
+    """
+    function add_cell(notebook::String, source::String, after::String, kind::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return agent_add_cell!(nb, source; after = after, kind = kind)
+    end
+
+    """
+        edit_cell(notebook, cell, source) -> String
+
+    Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
+    that errored, or to revise one in place.
+    """
+    function edit_cell(notebook::String, cell::String, source::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return agent_edit_cell!(nb, cell, source)
+    end
+
+    """
+        run(notebook, cell) -> String
+
+    Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
+    """
+    function run_cell(notebook::String, cell::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return agent_run!(nb, cell)
+    end
+
+    """
+        delete_cell(notebook, cell) -> String
+
+    Delete cell `cell` from the notebook.
+    """
+    function delete_cell(notebook::String, cell::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return agent_delete_cell!(nb, cell)
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -151,6 +221,11 @@ function create_tools(GateTool::Type)
         GateTool("open", nb_open),
         GateTool("list", nb_list),
         GateTool("close", nb_close),
+        GateTool("read", read_cells),
+        GateTool("add_cell", add_cell),
+        GateTool("edit_cell", edit_cell),
+        GateTool("run", run_cell),
+        GateTool("delete_cell", delete_cell),
     ]
 end
 

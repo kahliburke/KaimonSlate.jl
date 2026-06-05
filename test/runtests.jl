@@ -11,3 +11,4 @@ using SafeTestsets
 @safetestset "tables" begin include("test_tables.jl") end
 @safetestset "complete" begin include("test_complete.jl") end
 @safetestset "history" begin include("test_history.jl") end
+@safetestset "agentops" begin include("test_agentops.jl") end
