@@ -696,10 +696,16 @@ function _agent_system_prompt(nb::LiveNotebook)
     - Choose the next cell from what you just saw. Do NOT compose the whole notebook
       in your head and write it all at once — small, visible steps the user can watch.
     - Cells are REACTIVE: a cell re-runs when an upstream variable it reads changes.
-    - Plot with **CairoMakie** on the dark theme (`using CairoMakie; set_theme!(theme_dark())`).
-      CairoMakie renders a static image that shows inline. NEVER use GLMakie — it needs a
-      GPU window and HANGS this headless worker. Use WGLMakie only if interactivity is asked for.
-    - Return the figure as the cell's last expression (e.g. `fig`) so it renders.
+    - Charts: prefer **ECharts** for interactive data viz — `echart(Dict("series"=>[...], …))`
+      returns a chart that is interactive IN THE BROWSER (hover, zoom, tooltips) and animates in
+      place on reactive updates. Use **CairoMakie** (dark theme: `using CairoMakie;
+      set_theme!(theme_dark())`; return the figure, e.g. `fig`) for static/scientific figures.
+      NEVER GLMakie (needs a GPU window → hangs the worker) or WGLMakie (incompatible deps).
+    - For controls / parameter interactivity, use the NOTEBOOK's reactivity, NOT Makie's: bind a
+      control in one cell — `@bind N Slider(10:5:300)` (also `Toggle`, `ColorPicker`, …) — and
+      have OTHER cells READ `N`; they re-run and re-render when it changes (works with both
+      ECharts and CairoMakie). Do NOT use Makie `SliderGrid`/`@lift`/`Observable` — they need an
+      interactive backend we don't have and render dead (static) under CairoMakie.
 
     Be concise in chat. You are a focused notebook assistant — ignore any global or
     project onboarding (Kaimon usage quizzes, "take the quiz", Revise/Infiltrator
