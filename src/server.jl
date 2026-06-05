@@ -990,9 +990,10 @@ function _index_html(h::Hub)
         var x=e.target.closest('.rx'); if(x){e.stopPropagation();forgetRecent(x.dataset.p);return;}
         var it=e.target.closest('.ritem'); if(it)openPath(it.dataset.p);});
       renderRecents();
-      // Prefill the last directory we opened from and show its files for one-click reopen.
-      // (Don't steal focus on load — the input is there when the user wants it.)
-      try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last; fetchComp();}}catch(e){}
+      // Prefill the last directory we opened from (but DON'T open the completion
+      // dropdown on load — it would cover the open-sessions list; it opens when the
+      // user types or Tabs).
+      try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last;}}catch(e){}
     })();
     </script>
     $rows</body></html>"""
