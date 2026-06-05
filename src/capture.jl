@@ -47,6 +47,37 @@ function Base.display(d::_CaptureDisplay, x)
     throw(MethodError(display, (d, x)))   # let the stack fall through to text
 end
 
+# Drop a trailing `# …` line comment, ignoring `#` inside a "…" string (so
+# `foo("#");` keeps its `;`). Only `"` strings are tracked — `'` is left alone to
+# avoid confusing adjoint (`a'`) with a char literal.
+function _strip_trailing_comment(line::AbstractString)
+    instr = false; i = firstindex(line)
+    while i <= lastindex(line)
+        c = line[i]
+        if instr
+            c == '"' && (instr = false)
+            c == '\\' && i < lastindex(line) && (i = nextind(line, i))
+        elseif c == '"'
+            instr = true
+        elseif c == '#'
+            return rstrip(line[1:prevind(line, i)])
+        end
+        i = nextind(line, i)
+    end
+    return rstrip(line)
+end
+
+# True if a cell is "quiet" — its last non-blank, non-comment line ends in `;`
+# (like the REPL / Jupyter, where a trailing `;` suppresses the value's display).
+function _is_quiet_cell(source::AbstractString)
+    for raw in Iterators.reverse(split(String(source), '\n'))
+        code = _strip_trailing_comment(raw)
+        isempty(code) && continue                    # blank/comment-only → look further up
+        return endswith(code, ';')
+    end
+    return false
+end
+
 """
     run_capture(mod, source) -> NamedTuple
 
@@ -89,9 +120,13 @@ function run_capture(mod::Module, source::AbstractString)
     # world-age in the eval frame); otherwise the richest MIME. The table check
     # precedes rich MIME so a DataFrame renders as our interactive table rather
     # than its own `text/html` show method.
+    # A cell whose last code line ends in `;` is "quiet" — suppress the RETURN
+    # value's display (like the REPL / Jupyter). stdout and explicit `display(…)`
+    # calls (already in `chunks`) still show.
+    quiet = _is_quiet_cell(source)
     echarts = Any[]
     tables = Any[]
-    if err === nothing && value !== nothing
+    if err === nothing && value !== nothing && !quiet
         if value isa EChart
             push!(echarts, value.option)
         elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
@@ -107,7 +142,7 @@ function run_capture(mod::Module, source::AbstractString)
     # text/plain repr — skipped when richer output exists (the renderer suppresses
     # it anyway), and `invokelatest`-guarded for the world-age reason.
     value_repr = ""
-    if err === nothing && value !== nothing && isempty(chunks) && isempty(echarts) && isempty(tables)
+    if err === nothing && value !== nothing && !quiet && isempty(chunks) && isempty(echarts) && isempty(tables)
         try
             value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
                                            context = :limit => true)

@@ -15,6 +15,17 @@ using .ReportEngine
         @test r.cells[2].output.value_repr == "6"
     end
 
+    @testset "quiet cells: trailing ; suppresses the value (stdout still shows)" begin
+        r = parse_report("#%% code id=loud\n5 + 5\n\n#%% code id=quiet\nprint(\"side\"); 5 + 5;")
+        eval_report!(r)
+        @test r.cells[1].output.value_repr == "10"            # loud → value shown
+        @test r.cells[2].output.value_repr == ""              # quiet → value suppressed
+        @test r.cells[2].output.stdout == "side"              # but stdout still shows
+        @test ReportEngine._is_quiet_cell("x = 1; # note")    # inline comment after ;
+        @test !ReportEngine._is_quiet_cell("y = \"a#b\"")      # # inside a string, no ;
+        @test ReportEngine._is_quiet_cell("foo(\"#\");")       # # inside a string, trailing ;
+    end
+
     @testset "rich capture of an in-notebook-defined show method (world age)" begin
         # A cell defines a type + its text/latex `show`; a later cell returns an
         # instance. The capture must see the just-defined method on FIRST eval and
