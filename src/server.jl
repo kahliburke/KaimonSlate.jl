@@ -636,11 +636,13 @@ function relay_agent_event(channel::AbstractString, data)
         # would otherwise be mislabeled "external".
         @async (sleep(8.0); nb.agent_busy = false)
     end
-    # Always push live (token deltas stream to the pane). Buffer for reload-replay,
-    # but SKIP streaming deltas (`data.delta == true`) — the authoritative complete
-    # copy is buffered, so replay stays clean and the cap isn't burned by chunks.
+    # Always push live (token + tool-input deltas stream to the pane). Buffer for
+    # reload-replay, but SKIP the liveness chunks (`data.delta == true` and
+    # `tool_input_delta`) — the authoritative copies (the `delta:false` block, the
+    # `tool_result`) are buffered, so replay stays clean and the cap isn't burned.
     _broadcast(nb, "agent:" * s)
-    is_delta = env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true)
+    is_delta = kind == "tool_input_delta" ||
+        (env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true))
     if !is_delta
         lock(_AGENT_LOCK) do
             buf = get!(_AGENT_LOG, aid, String[])

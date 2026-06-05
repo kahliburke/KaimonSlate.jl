@@ -200,7 +200,8 @@ input.toggle:checked::after { left:18px; }
 .apmsg { font-size:.86rem; line-height:1.5; border-radius:8px; padding:8px 11px; max-width:92%; white-space:pre-wrap; word-break:break-word; }
 .apmsg.user { align-self:flex-end; background:var(--bg3); }
 .apmsg.assistant { align-self:flex-start; background:#11203a; }
-.apmsg.tool { align-self:flex-start; background:none; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; padding:2px 4px; }
+.apmsg.tool { align-self:flex-start; background:none; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; padding:2px 4px; max-width:100%; }
+.apmsg.tool .toolcode { margin:4px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#cdd3e6; }
 .apmsg.err { align-self:flex-start; color:var(--red); }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
 .apmsg.img { align-self:flex-start; background:none; padding:0; max-width:100%; }
@@ -1328,9 +1329,10 @@ function setWorking(on) {
 const _esca = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 function renderAgentMsgs() {
   const el = document.getElementById('apmsgs');
-  let html = agentMsgs.map(m => m.role === 'img'
-    ? `<div class="apmsg img"><img src="${m.src}" alt="agent image"></div>`
-    : `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
+  let html = agentMsgs.map(m =>
+      m.role === 'img'  ? `<div class="apmsg img"><img src="${m.src}" alt="agent image"></div>`
+    : m.role === 'tool' ? `<div class="apmsg tool">${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}</div>`
+    :                     `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
   if (agentWorking) {
     const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
     html += `<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}</div>`;
@@ -1359,6 +1361,27 @@ async function agentSend() {
 }
 // Map a Kaimon agent event ({kind,turn,data}) — shapes per AGENT_SESSION_SERVICE_STATUS.md
 // — onto the chat transcript. Text streams as complete messages (not token deltas).
+// Tolerant-extract the field being written from a (possibly truncated) partial-JSON
+// args blob — the first of these keys present, decoding string escapes as far as the
+// buffer goes. Lets the agent's code render as it streams in.
+function _extractCode(s) {
+  const ESC = { n: '\n', t: '\t', r: '\r', '"': '"', '\\': '\\', '/': '/' };
+  for (const key of ['source', 'code', 'new_string', 'content', 'command', 'text']) {
+    const i = s.indexOf('"' + key + '"'); if (i < 0) continue;
+    let j = s.indexOf(':', i + key.length + 1); if (j < 0) continue;
+    j++; while (j < s.length && /\s/.test(s[j])) j++;
+    if (s[j] !== '"') continue;
+    let out = '', p = j + 1;
+    while (p < s.length) {
+      const ch = s[p];
+      if (ch === '\\') { const n = s[p + 1]; out += n in ESC ? ESC[n] : (n || ''); p += 2; }
+      else if (ch === '"') break;
+      else { out += ch; p++; }
+    }
+    return out;
+  }
+  return '';
+}
 function agentEvent(env) {
   if (!env) return;
   const d = env.data || {};
@@ -1382,8 +1405,20 @@ function agentEvent(env) {
       agentMsgs.push({ role, text: txt, done: true });
     }
   } else if (k === 'tool_use') {
+    // Upsert by toolCallId — `tool_use` fires at call-begin (in_progress) and may
+    // be re-emitted; don't duplicate. Authoritative input (if present) wins.
     const c = d.call || {};
-    agentMsgs.push({ role: 'tool', text: '⚙ ' + (c.title || c.kind || 'tool'), id: c.toolCallId, done: false });
+    let tm = agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
+    if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false }; agentMsgs.push(tm); }
+    tm.title = c.title || c.kind || tm.title || 'tool';
+    tm.text = '⚙ ' + tm.title;
+    if (c.rawInput) tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code;
+  } else if (k === 'tool_input_delta') {
+    // The call's arguments stream as raw JSON fragments — concatenate, then
+    // tolerant-extract the field being written (source/code/new_string/…) so the
+    // agent's code "types in" live. (Liveness only; not buffered for replay.)
+    const tm = agentMsgs.find(m => m.role === 'tool' && m.id === d.toolCallId);
+    if (tm) { tm.inputBuf = (tm.inputBuf || '') + (d.partialJson || ''); tm.code = _extractCode(tm.inputBuf); }
   } else if (k === 'tool_result') {
     const u = d.update || {};
     const tm = agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
