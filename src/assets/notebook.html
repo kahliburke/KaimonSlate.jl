@@ -1420,10 +1420,12 @@ function agentEvent(env) {
     const tm = agentMsgs.find(m => m.role === 'tool' && m.id === d.toolCallId);
     if (tm) { tm.inputBuf = (tm.inputBuf || '') + (d.partialJson || ''); tm.code = _extractCode(tm.inputBuf); }
   } else if (k === 'tool_result') {
+    // Every tool_result is terminal — Kaimon rides the authoritative input as a 2nd
+    // `tool_use` (rawInput), not an in_progress tool_result (consumed in tool_use
+    // above). So finalize the call and surface any image blocks.
     const u = d.update || {};
     const tm = agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
     if (tm) { tm.done = true; if (u.status === 'failed') tm.role = 'err'; }
-    // Surface any image blocks the tool returned (plots etc.) inline.
     for (const b of (u.content || [])) {
       const inner = b && b.content;
       if (inner && inner.type === 'image' && inner.data)
