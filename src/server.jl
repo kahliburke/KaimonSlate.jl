@@ -520,6 +520,10 @@ end
 # agent_id → notebook, so a gate-bus `agent:<id>` event finds its SSE clients.
 const _AGENT_ROUTES = Dict{String,LiveNotebook}()
 const _AGENT_LOCK = ReentrantLock()
+# agent_id → buffered relayed envelopes, so a browser reload can replay the
+# conversation (agentMsgs is in-memory JS, lost on reload). Capped ring.
+const _AGENT_LOG = Dict{String,Vector{String}}()
+const _AGENT_LOG_CAP = 4000
 
 _agent_available() = isdefined(Main, :Kaimon) &&
     isdefined(getfield(Main, :Kaimon), :KaimonGate) &&
@@ -572,16 +576,24 @@ end
 # instead cut it off from the live Kaimon). Cell editing goes through the file.
 function _ensure_agent!(nb::LiveNotebook)
     isempty(nb.agent_id) || return nb.agent_id
-    res = _agent_call(:agent_open, Dict{String,Any}(
-        "cwd" => dirname(abspath(nb.path)),
-        "id"  => "slate-$(nb.id)",
-        # Kaimon M4 permission preset. "lab" allows the agent the Kaimon MCP tools
-        # (slate.*/ex/qdrant) + file edits — enough to drive + introspect the
-        # notebook, without arbitrary shell/web. Runs unattended (no prompt to stall
-        # a headless agent); the agent_* recursion guard is always applied.
-        "permission" => "lab",
-        "system_prompt" => _agent_system_prompt(nb)))
-    aid = String(get(res, "agent_id", ""))
+    aid = "slate-$(nb.id)"
+    res = try
+        _agent_call(:agent_open, Dict{String,Any}(
+            "cwd" => dirname(abspath(nb.path)),
+            "id"  => aid,
+            # Kaimon M4 permission preset. "lab" allows the agent the Kaimon MCP tools
+            # (slate.*/ex/qdrant) + file edits — enough to drive + introspect the
+            # notebook, without arbitrary shell/web. Runs unattended (no prompt to stall
+            # a headless agent); the agent_* recursion guard is always applied.
+            "permission" => "lab",
+            "system_prompt" => _agent_system_prompt(nb)))
+    catch e
+        # Agent already running (e.g. it outlived an extension restart — agents are
+        # Kaimon-owned) → re-adopt it rather than failing the chat.
+        occursin("in use", lowercase(sprint(showerror, e))) || rethrow()
+        Dict("agent_id" => aid)
+    end
+    aid = String(get(res, "agent_id", aid))
     isempty(aid) && error("agent_open returned no id")
     nb.agent_id = aid
     lock(_AGENT_LOCK) do; _AGENT_ROUTES[aid] = nb; end
@@ -592,7 +604,7 @@ end
 function _close_agent!(nb::LiveNotebook)
     isempty(nb.agent_id) && return
     aid = nb.agent_id
-    lock(_AGENT_LOCK) do; delete!(_AGENT_ROUTES, aid); end
+    lock(_AGENT_LOCK) do; delete!(_AGENT_ROUTES, aid); delete!(_AGENT_LOG, aid); end
     nb.agent_id = ""
     _agent_available() && (try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end)
     return nothing
@@ -619,6 +631,12 @@ function relay_agent_event(channel::AbstractString, data)
         nb.agent_busy = true
     elseif kind == "result"
         @async (sleep(3.0); nb.agent_busy = false)
+    end
+    # Buffer for reload-replay, then push live.
+    lock(_AGENT_LOCK) do
+        buf = get!(_AGENT_LOG, aid, String[])
+        push!(buf, s)
+        length(buf) > _AGENT_LOG_CAP && popfirst!(buf)
     end
     _broadcast(nb, "agent:" * s)
     return nothing
@@ -1111,6 +1129,12 @@ function _make_router(h::Hub)
         catch e
             _json(Dict("ok" => false, "error" => sprint(showerror, e)))
         end
+    end))
+    # Replay the agent conversation after a page reload (buffered as relayed).
+    HTTP.register!(router, "GET", "/api/{id}/agent-log", req -> _withnb(h, req, nb -> begin
+        log = isempty(nb.agent_id) ? String[] :
+              lock(_AGENT_LOCK) do; copy(get(_AGENT_LOG, nb.agent_id, String[])); end
+        _json(Dict("events" => log, "agent_id" => nb.agent_id))
     end))
     # Interrupt the agent's in-flight turn (best effort).
     HTTP.register!(router, "POST", "/api/{id}/chat-interrupt", req -> _withnb(h, req, nb -> begin

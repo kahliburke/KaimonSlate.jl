@@ -205,6 +205,13 @@ input.toggle:checked::after { left:18px; }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
 .apmsg.img { align-self:flex-start; background:none; padding:0; max-width:100%; }
 .apmsg.img img { max-width:100%; border-radius:8px; display:block; }
+.apworking { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.8rem; padding:6px 2px; }
+.apworking .dots { display:inline-flex; }
+.apworking .dots i { width:6px; height:6px; border-radius:50%; background:var(--accent); margin:0 2px; animation:breathe 1.2s ease-in-out infinite; }
+.apworking .dots i:nth-child(2) { animation-delay:.2s; } .apworking .dots i:nth-child(3) { animation-delay:.4s; }
+@keyframes breathe { 0%,100%{opacity:.25;transform:scale(.6);} 50%{opacity:1;transform:scale(1);} }
+#agentbtn.pulse { animation:btnpulse 1.3s ease-in-out infinite; color:var(--accent); }
+@keyframes btnpulse { 0%,100%{box-shadow:0 0 0 0 rgba(86,156,214,.55);} 50%{box-shadow:0 0 0 5px rgba(86,156,214,0);} }
 /* History panel (time machine) */
 .histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
   border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
@@ -316,7 +323,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <button onclick="openSettings()" title="settings">⚙</button>
   <button onclick="openPalette()" title="command palette (⌘K)">⌘K</button>
   <button onclick="toggleHistory()" title="edit history — time machine">🕘</button>
-  <button onclick="toggleAgent()" title="agent chat">💬</button>
+  <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬</button>
 </div>
 <div class="page"><div id="nb"></div></div>
 <aside id="palette" class="palette">
@@ -1278,26 +1285,54 @@ function updateStaleBadge(state) {
 // "agent:<json>" envelopes ({kind, turn, data}) and the agent edits cells via the
 // slate.* tools (so the cells update through the normal SSE path).
 let agentMsgs = [];   // {role:'user'|'assistant'|'tool'|'err', text, done?}
+let agentWorking = false, agentT0 = 0, _agentTick = null;
 function toggleAgent() {
   const p = document.getElementById('agentpanel'); p.classList.toggle('open');
-  if (p.classList.contains('open')) document.getElementById('apin').focus();
+  if (p.classList.contains('open')) { document.getElementById('apin').focus(); setWorking(agentWorking); }
+}
+// Drive the breathing "working" indicator + elapsed timer. Pulses the closed
+// pane's 💬 button so activity is visible even when the panel isn't open.
+function setWorking(on) {
+  if (on && !_agentTick) _agentTick = setInterval(renderAgentMsgs, 1000);
+  if (!on && _agentTick) { clearInterval(_agentTick); _agentTick = null; }
+  if (on && !agentWorking) agentT0 = Date.now();
+  agentWorking = on;
+  const b = document.getElementById('agentbtn');
+  const open = document.getElementById('agentpanel').classList.contains('open');
+  if (b) b.classList.toggle('pulse', on && !open);
+  renderAgentMsgs();
 }
 const _esca = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 function renderAgentMsgs() {
   const el = document.getElementById('apmsgs');
-  el.innerHTML = agentMsgs.map(m => m.role === 'img'
+  let html = agentMsgs.map(m => m.role === 'img'
     ? `<div class="apmsg img"><img src="${m.src}" alt="agent image"></div>`
     : `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
+  if (agentWorking) {
+    const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
+    html += `<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}</div>`;
+  }
+  el.innerHTML = html;
   el.scrollTop = el.scrollHeight;
+}
+// Replay the buffered conversation after a page reload (in-memory agentMsgs is
+// gone, but the server kept every relayed envelope). Idempotent — clears first.
+async function loadAgentLog() {
+  try {
+    const r = await api('GET', '/api/agent-log');
+    if (!r || !r.events || !r.events.length) return;
+    agentMsgs = []; setWorking(false);
+    for (const line of r.events) { try { agentEvent(JSON.parse(line)); } catch (_) {} }
+  } catch (_) {}
 }
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
 async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
-  inp.value = ''; agentMsgs.push({ role: 'user', text }); renderAgentMsgs(); agentStatus('thinking…');
+  inp.value = ''; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
   try {
     const r = await api('POST', '/api/chat', { text });
-    if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); renderAgentMsgs(); agentStatus(''); }
-  } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); renderAgentMsgs(); agentStatus(''); }
+    if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
+  } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); agentStatus(''); setWorking(false); }
 }
 // Map a Kaimon agent event ({kind,turn,data}) — shapes per AGENT_SESSION_SERVICE_STATUS.md
 // — onto the chat transcript. Text streams as complete messages (not token deltas).
@@ -1332,12 +1367,12 @@ function agentEvent(env) {
     agentStatus(d.status === 'working' ? 'working…' : (d.status || ''));
     return;
   } else if (k === 'turn_started') {
-    agentStatus('working…'); return;
+    agentStatus('working…'); setWorking(true); return;
   } else if (k === 'result') {
     const last = agentMsgs[agentMsgs.length - 1]; if (last && last.role === 'assistant') last.done = true;
-    agentStatus('');
+    agentStatus(''); setWorking(false);
   } else if (k === 'error') {
-    agentMsgs.push({ role: 'err', text: d.message || 'error' }); agentStatus('');
+    agentMsgs.push({ role: 'err', text: d.message || 'error' }); agentStatus(''); setWorking(false);
   } else { return; }
   renderAgentMsgs();
 }
@@ -1656,7 +1691,9 @@ async function loadSwitcher() {
 if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
 loadSwitcher();
 reload();
-connectLive();
+// Replay the buffered agent conversation first, then start live SSE — so a live
+// event can't be wiped by the replay's clear.
+loadAgentLog().finally(connectLive);
 </script>
 </body>
 </html>
