@@ -212,6 +212,13 @@ input.toggle:checked::after { left:18px; }
 @keyframes breathe { 0%,100%{opacity:.25;transform:scale(.6);} 50%{opacity:1;transform:scale(1);} }
 #agentbtn.pulse { animation:btnpulse 1.3s ease-in-out infinite; color:var(--accent); }
 @keyframes btnpulse { 0%,100%{box-shadow:0 0 0 0 rgba(86,156,214,.55);} 50%{box-shadow:0 0 0 5px rgba(86,156,214,0);} }
+/* Top-bar kernel dot breathes while the worker is executing (any compute request in flight). */
+.wdot.busy { animation:btnpulse 1.1s ease-in-out infinite; }
+/* Completion popup — match the dark theme (CodeMirror show-hint defaults to bright white). */
+.CodeMirror-hints { background:var(--bg2); border:1px solid var(--border); border-radius:7px; box-shadow:0 8px 24px #000a;
+  font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; padding:3px; z-index:120; max-height:260px; }
+.CodeMirror-hint { color:var(--fg); padding:3px 9px; border-radius:4px; }
+li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
 /* History panel (time machine) */
 .histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
   border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
@@ -311,7 +318,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <select id="nbswitch" class="nbswitch" title="switch notebook"></select>
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title">Notebook</h1>
-  <span class="hint">⇧⏎ run · ⇥ complete · ⌘K commands</span>
+  <span class="hint">⇧⏎ run · ⌘⇧⏎ run+new · ⇥ complete · ⌘K commands</span>
   <a id="vscode" class="btnlink" href="#" title="Open the .jl in VS Code">⧉ VS Code</a>
   <button onclick="undoNb()" title="undo (⌘Z)">↶</button>
   <button onclick="redoNb()" title="redo (⌘⇧Z)">↷</button>
@@ -619,12 +626,21 @@ function juliaHint(cm, callback) {
 }
 juliaHint.async = true;
 
+// Pulse the kernel dot while a compute-triggering request is in flight. POSTs that
+// don't run cells (chat, completion, rename, agent log) are excluded.
+let _busy = 0;
+const _noBusy = /\/(chat|agent-log|complete|cell-rename)/;
+const setBusy = () => document.getElementById('wdot').classList.toggle('busy', _busy > 0);
 async function api(method, path, body) {
-  const r = await fetch(_apipath(path), {
-    method, headers: {'Content-Type': 'application/json'},
-    body: body ? JSON.stringify(body) : undefined
-  });
-  return r.json();
+  const track = method === 'POST' && !_noBusy.test(path);
+  if (track) { _busy++; setBusy(); }
+  try {
+    const r = await fetch(_apipath(path), {
+      method, headers: {'Content-Type': 'application/json'},
+      body: body ? JSON.stringify(body) : undefined
+    });
+    return r.json();
+  } finally { if (track) { _busy--; setBusy(); } }
 }
 
 // Inner markup for one bound control. `bindId` is the *defining* bind cell's id
@@ -826,6 +842,7 @@ function mountEditor(c) {
     complete(cm);
   };
   ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Esc': () => ed.getInputField().blur(),
+                              'Shift-Cmd-Enter': () => runAndAddBelow(c.id), 'Shift-Ctrl-Enter': () => runAndAddBelow(c.id),
                               'Shift-Ctrl--': () => splitCell(c.id, ed), 'Shift-Cmd--': () => splitCell(c.id, ed) });
   ed.on('inputRead', (cm, ev) => { if (ev.text[0] === '.') complete(cm); });   // auto on field access
   ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
@@ -864,7 +881,8 @@ function editSource(id, mode) {
       viewportMargin: Infinity, lineWrapping: mode === 'markdown'
     });
     cm.setValue(srcMap[id] || '');
-    cm.setOption('extraKeys', { 'Shift-Enter': () => commitSource(id), 'Esc': () => cancelSource(id) });
+    cm.setOption('extraKeys', { 'Shift-Enter': () => commitSource(id), 'Esc': () => cancelSource(id),
+                                'Shift-Cmd-Enter': () => commitAndAddBelow(id), 'Shift-Ctrl-Enter': () => commitAndAddBelow(id) });
     cm.on('focus', () => setEditing(id, true));
     cm.on('blur', () => setEditing(id, false));
     editors[id] = cm;
@@ -1031,15 +1049,20 @@ async function runCell(id) {
   setState(id, 'running');
   updateStates(await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' }));
 }
-async function addCell(after, kind, before) {
+async function addCell(after, kind, before, edit) {
   const oldIds = new Set(cellIds());
   const state = await api('POST', '/api/cell-add', { after, kind, before: !!before });
   renderAll(state);
   const neu = (state.cells || []).map(c => c.id).find(id => !oldIds.has(id));
   // renderAll restores the prior scroll on the next frame, so scroll to the new
   // cell a frame later (otherwise the restore wins and it doesn't move).
-  if (neu) requestAnimationFrame(() => requestAnimationFrame(() => selectCell(neu, true)));
+  if (neu) requestAnimationFrame(() => requestAnimationFrame(() => { selectCell(neu, true); if (edit) enterEdit(neu); }));
+  return neu;
 }
+// ⌘/Ctrl-⇧-Enter in edit mode: run (or commit) the cell, then open a fresh code
+// cell below and drop into it — the keyboard-driven "next cell" flow.
+async function runAndAddBelow(id)    { await runCell(id);       await addCell(id, 'code', false, true); }
+async function commitAndAddBelow(id) { await commitSource(id);  await addCell(id, 'code', false, true); }
 // Right-click on a ＋ add button → a tiny code/markdown chooser at the cursor.
 function addMenu(e, cellId) {
   const m = document.getElementById('addmenu');

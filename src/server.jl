@@ -704,8 +704,8 @@ function _index_html(h::Hub)
     .nbmain{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;text-decoration:none;color:inherit;}
     .nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:monospace;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;}
     .nb .c{color:#56d364;font-size:.75rem;}
-    .sect{color:#8a90b0;font-size:.78rem;font-weight:600;margin:20px 0 6px;max-width:760px;text-transform:uppercase;letter-spacing:.05em;}
-    .recent{max-width:760px;}
+    .sect{color:#8a90b0;font-size:.78rem;font-weight:600;margin:2px 0 6px;max-width:760px;text-transform:uppercase;letter-spacing:.05em;}
+    .recent{flex:1 1 300px;max-width:520px;}
     .ritem{display:flex;align-items:center;gap:10px;padding:7px 12px;margin:5px 0;background:#10131f;border:1px solid #21253a;border-radius:7px;cursor:pointer;}
     .ritem:hover{border-color:#569cd6;}
     .ritem .rt{flex:1;min-width:0;display:flex;flex-direction:column;}
@@ -715,7 +715,8 @@ function _index_html(h::Hub)
     .ritem .rx:hover{color:#e57575;background:rgba(229,117,117,.1);}
     .nb .kill{background:#141828;color:#e57575;border:1px solid #3a2030;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.78rem;white-space:nowrap;}
     .nb .kill:hover{border-color:#e57575;background:rgba(229,117,117,.1);}
-    .open{display:flex;gap:8px;margin:8px 0 18px;max-width:760px;}
+    .topcols{display:flex;gap:30px;align-items:flex-start;flex-wrap:wrap;max-width:1120px;margin:8px 0 18px;}
+    .open{display:flex;gap:8px;flex:1 1 380px;max-width:620px;}
     .pathwrap{position:relative;flex:1;}
     .pathwrap input{width:100%;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 12px;font-family:monospace;font-size:.85rem;}
     .pathwrap input:focus{outline:none;border-color:#569cd6;}
@@ -741,6 +742,7 @@ function _index_html(h::Hub)
     @keyframes spin{to{transform:rotate(360deg);}}
     .loading .lmsg{color:#d4d8e8;font-size:.9rem;}</style></head>
     <body><h1>📓 Kaimon Slate — notebooks</h1>
+    <div class="topcols">
     <div class="open">
       <div class="pathwrap">
         <input id="pathin" autocomplete="off" spellcheck="false"
@@ -750,6 +752,7 @@ function _index_html(h::Hub)
       <button id="openbtn">Open</button>
     </div>
     <div id="recent" class="recent"></div>
+    </div>
     <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
     <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
     <script>
@@ -846,8 +849,8 @@ function _index_html(h::Hub)
         var it=e.target.closest('.ritem'); if(it)openPath(it.dataset.p);});
       renderRecents();
       // Prefill the last directory we opened from and show its files for one-click reopen.
+      // (Don't steal focus on load — the input is there when the user wants it.)
       try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last; fetchComp();}}catch(e){}
-      inp.focus();
     })();
     </script>
     $rows</body></html>"""

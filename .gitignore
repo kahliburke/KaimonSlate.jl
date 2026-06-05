@@ -11,5 +11,6 @@
 .*.swp
 .*.swo
 
-# personal scratch
+# personal scratch / interim planning docs (not part of the repo)
 TODO.md
+VISION.md
