@@ -552,18 +552,26 @@ function typeset(el) {
 // KaTeX may finish loading after the first render; typeset everything once it's in.
 window.addEventListener('load', () => typeset(document.getElementById('nb')));
 
-// Context-aware completion via the live session (Julia REPLCompletions).
+// Julia indexes source by UTF-8 *byte* offset (REPLCompletions), but CodeMirror
+// works in UTF-16 char positions. Convert both ways so completion stays correct
+// once the cell contains unicode (π, etc.) — otherwise the replace range drifts.
+const _enc = new TextEncoder(), _dec = new TextDecoder();
+const _byteLen = s => _enc.encode(s).length;
+const _charFromByte = (code, b) => _dec.decode(_enc.encode(code).slice(0, b)).length;
+
+// Context-aware completion via the live session (Julia REPLCompletions). Includes
+// LaTeX/emoji symbols — typing `\pi` and accepting inserts π.
 function juliaHint(cm, callback) {
   const code = cm.getValue();
-  const pos = cm.indexFromPos(cm.getCursor());
+  const pos = _byteLen(code.slice(0, cm.indexFromPos(cm.getCursor())));
   fetch(_apipath('/api/complete'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ code, pos })
   }).then(r => r.json()).then(d => {
     callback({
       list: d.completions || [],
-      from: cm.posFromIndex(d.from),
-      to: cm.posFromIndex(d.to)
+      from: cm.posFromIndex(_charFromByte(code, d.from)),
+      to: cm.posFromIndex(_charFromByte(code, d.to))
     });
   }).catch(() => callback({ list: [], from: cm.getCursor(), to: cm.getCursor() }));
 }

@@ -3,7 +3,15 @@
 # needs HTTP/JSON), so it runs under `Pkg.test`.
 using Test
 using KaimonSlate
+import REPL
 const NS = KaimonSlate.NotebookServer
+
+# Insert-text for a LaTeX/emoji completion of `s` (mirrors the /complete path):
+# the unique symbol when `s` is an exact sequence, else the candidate names.
+function _latex(s)
+    comps, _, _ = REPL.REPLCompletions.completions(s, lastindex(s), Main)
+    filter(!isempty, String[NS._comp_text(c) for c in comps])
+end
 
 @testset "cell-local completion" begin
     L(code) = sort(String[String(s) for s in NS._cell_locals(code)])
@@ -28,5 +36,16 @@ const NS = KaimonSlate.NotebookServer
         @test NS._id_prefix("foob", 4) == (0, "foob", false)
         @test NS._id_prefix("foo.ba", 6) == (4, "ba", true)  # after a dot ⇒ field access
         @test NS._id_prefix("x = ab", 6) == (4, "ab", false)
+    end
+
+    @testset "LaTeX / unicode completion (\\pi → π)" begin
+        # completion_text throws on BslashCompletion (Julia ≥1.12); _comp_text must
+        # still yield the symbol — else `\pi` completes to nothing.
+        @test _latex("\\pi") == ["π"]
+        @test _latex("\\alpha") == ["α"]
+        @test _latex("\\sqrt") == ["√"]
+        @test _latex("x\\_2") == ["₂"]            # subscript
+        # Partial prefix offers the names to extend to (REPL two-step behaviour).
+        @test "\\alpha" in _latex("\\al")
     end
 end

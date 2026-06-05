@@ -681,6 +681,20 @@ function _id_prefix(code::String, pos::Int)
     return (i, String(cu[(i + 1):pos]), dotted)
 end
 
+# Text to insert for a completion. `completion_text` throws on `BslashCompletion`
+# (Julia ≥1.12 — that's the LaTeX/emoji `\pi`→π path), so fall back to the struct's
+# symbol field. Robust across Julia versions: normal path first, field access on throw.
+function _comp_text(c)
+    try
+        return REPL.REPLCompletions.completion_text(c)::AbstractString
+    catch
+        for f in (:completion, :name)               # BslashCompletion holds the symbol here
+            hasproperty(c, f) && return String(getfield(c, f))
+        end
+        return ""
+    end
+end
+
 # Names introduced at a binding site (LHS of `=`, params, `f(a,b)` def, `x::T`, …).
 function _bind_names!(out::Set{Symbol}, x)
     if x isa Symbol
@@ -818,7 +832,7 @@ function _make_router(h::Hub)
         pstart, prefix, dotted = _id_prefix(code, pos)
         texts, from, to = try
             comps, range, _ = REPL.REPLCompletions.completions(code, pos, mod)
-            ([REPL.REPLCompletions.completion_text(c) for c in comps], first(range) - 1, last(range))
+            (filter(!isempty, String[_comp_text(c) for c in comps]), first(range) - 1, last(range))
         catch
             (String[], pstart, pos)
         end
