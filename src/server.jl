@@ -631,7 +631,10 @@ function relay_agent_event(channel::AbstractString, data)
     if kind == "turn_started"
         nb.agent_busy = true
     elseif kind == "result"
-        @async (sleep(3.0); nb.agent_busy = false)
+        # Keep attributing edits to the agent for a bit after the turn ends — the
+        # final file-write often syncs a couple seconds late (watcher latency), and
+        # would otherwise be mislabeled "external".
+        @async (sleep(8.0); nb.agent_busy = false)
     end
     # Always push live (token deltas stream to the pane). Buffer for reload-replay,
     # but SKIP streaming deltas (`data.delta == true`) — the authoritative complete

@@ -909,7 +909,7 @@ function renderAll(state) {
   document.getElementById('title').textContent = state.title || 'Notebook';
   const w = state.worker || {}, dot = document.getElementById('wdot');
   if (dot) {
-    dot.className = 'wdot ' + (w.kind === 'inproc' ? 'inproc' : (w.connected ? 'up' : 'down'));
+    dot.className = 'wdot ' + (w.kind === 'inproc' ? 'inproc' : (w.connected ? 'up' : 'down')) + (_busy > 0 ? ' busy' : '');
     dot.title = w.kind === 'gate' ? ('worker :' + w.port + (w.connected ? ' · connected' : ' · disconnected')) : 'in-process kernel';
   }
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;

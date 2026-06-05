@@ -80,20 +80,27 @@ _celldigest(cells) =
 
 # Derive a human label by diffing this snapshot's cell digest against the previous
 # entry's: added / deleted / reordered / edited <ids>. No op-site bookkeeping needed.
+# Summarize a list of cell ids: name them if few, count them if many (so a
+# whole-notebook rewrite reads as "deleted 13 cells", not a wall of ids).
+_summ(ids) = length(ids) <= 4 ? join(ids, ", ") : "$(length(ids)) cells"
+
 function _derive_label(prev_cells, cur)
+    isempty(prev_cells) && return isempty(cur) ? "empty" : "initial"
     pids = [String(c["id"]) for c in prev_cells]
     cids = [String(c["id"]) for c in cur]
-    added = [id for id in cids if !(id in pids)]
+    added   = [id for id in cids if !(id in pids)]
     removed = [id for id in pids if !(id in cids)]
-    isempty(added)   || return "added " * join(added, ", ")
-    isempty(removed) || return "deleted " * join(removed, ", ")
-    if isempty(prev_cells)
-        return isempty(cur) ? "empty" : "initial"
-    end
     ph = Dict(String(c["id"]) => String(c["hash"]) for c in prev_cells)
-    changed = [String(c["id"]) for c in cur if get(ph, String(c["id"]), "") != String(c["hash"])]
+    ch = Dict(String(c["id"]) => String(c["hash"]) for c in cur)
+    changed = [id for id in cids if (id in pids) && ph[id] != ch[id]]
+    # Report EVERY kind of change — a destructive overwrite (adds + deletes) must
+    # not hide behind the additions.
+    parts = String[]
+    isempty(added)   || push!(parts, "added "   * _summ(added))
+    isempty(removed) || push!(parts, "deleted " * _summ(removed))
+    isempty(changed) || push!(parts, "edited "  * _summ(changed))
+    isempty(parts) || return join(parts, "; ")
     pids == cids || return "reordered cells"
-    isempty(changed) || return "edited " * join(changed, ", ")
     return "snapshot"
 end
 

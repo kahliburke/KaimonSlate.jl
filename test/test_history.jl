@@ -24,7 +24,17 @@ const H = SlateHistory
         H.record!(p, "A\nb\n"; cells = [("a", "md", "A\n"), ("b", "code", "b\n")])
         H.record!(p, "A\n"; cells = [("a", "md", "A\n")])
         labels = [e["label"] for e in H.entries(p)]
-        @test labels == ["added a", "added b", "edited a", "deleted b"]
+        @test labels == ["initial", "added b", "edited a", "deleted b"]   # seed = "initial"
+    end
+
+    @testset "destructive overwrite reports adds AND deletes (not just adds)" begin
+        q = "/tmp/__slate_hist_overwrite__.jl"
+        H.record!(q, "x\n"; cells = [("x", "code", "x\n")])
+        # A whole-notebook rewrite: drop x, add five new cells.
+        H.record!(q, "n\n"; cells = [(string("c", i), "code", "$i\n") for i in 1:5])
+        lab = H.entries(q)[end]["label"]
+        @test occursin("added 5 cells", lab)        # summarized by count when many
+        @test occursin("deleted x", lab)            # the deletion is NOT hidden
     end
 
     @testset "content round-trip + latest" begin
