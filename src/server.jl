@@ -947,6 +947,10 @@ function _index_html(h::Hub)
         openPath(p);
       }
       var t;inp.addEventListener('input',function(){clearTimeout(t);t=setTimeout(fetchComp,110);});
+      // Completion follows focus: load on focus, hide on blur (small delay so a
+      // click on a suggestion lands first).
+      inp.addEventListener('focus',function(){fetchComp();});
+      inp.addEventListener('blur',function(){setTimeout(function(){comp.style.display='none';},120);});
       inp.addEventListener('keydown',function(e){
         if(e.key==='Tab'){e.preventDefault();
           if(items.length===1){inp.value=items[0];fetchComp();}
