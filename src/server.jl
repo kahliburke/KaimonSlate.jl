@@ -623,22 +623,28 @@ function relay_agent_event(channel::AbstractString, data)
     nb = lock(_AGENT_LOCK) do; get(_AGENT_ROUTES, aid, nothing); end
     nb === nothing && return
     s = data isa AbstractString ? String(data) : String(JSON.json(data))
+    env = try; JSON.parse(s); catch; nothing; end
+    kind = env === nothing ? "" : get(env, "kind", "")
     # Mark the agent busy across a turn so the file-watcher attributes the edits it
     # makes to "agent" (not "external"). Clear shortly AFTER the turn ends, so the
     # watcher tick that picks up the agent's final save is still inside the window.
-    kind = try; get(JSON.parse(s), "kind", ""); catch; ""; end
     if kind == "turn_started"
         nb.agent_busy = true
     elseif kind == "result"
         @async (sleep(3.0); nb.agent_busy = false)
     end
-    # Buffer for reload-replay, then push live.
-    lock(_AGENT_LOCK) do
-        buf = get!(_AGENT_LOG, aid, String[])
-        push!(buf, s)
-        length(buf) > _AGENT_LOG_CAP && popfirst!(buf)
-    end
+    # Always push live (token deltas stream to the pane). Buffer for reload-replay,
+    # but SKIP streaming deltas (`data.delta == true`) — the authoritative complete
+    # copy is buffered, so replay stays clean and the cap isn't burned by chunks.
     _broadcast(nb, "agent:" * s)
+    is_delta = env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true)
+    if !is_delta
+        lock(_AGENT_LOCK) do
+            buf = get!(_AGENT_LOG, aid, String[])
+            push!(buf, s)
+            length(buf) > _AGENT_LOG_CAP && popfirst!(buf)
+        end
+    end
     return nothing
 end
 

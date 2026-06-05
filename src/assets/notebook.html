@@ -1341,12 +1341,23 @@ function agentEvent(env) {
   const d = env.data || {};
   const k = env.kind;
   if (k === 'assistant_text' || k === 'thought') {
-    const txt = (d.content && d.content.text) || '';
-    if (!txt) return;
-    let last = agentMsgs[agentMsgs.length - 1];
+    // Streaming: delta:true chunks APPEND live; the final delta:false copy REPLACES
+    // the streamed block (self-healing any dropped delta). Non-streaming services
+    // send only complete blocks → the else branch (back-compat).
     const role = k === 'thought' ? 'think' : 'assistant';
-    if (!last || last.role !== role || last.done) { last = { role, text: '' }; agentMsgs.push(last); }
-    last.text += txt;
+    const txt = (d.content && d.content.text) || '';
+    let last = agentMsgs[agentMsgs.length - 1];
+    const openSame = last && last.role === role && !last.done;
+    if (d.delta === true) {
+      if (!txt) return;
+      if (!openSame) { last = { role, text: '', streamed: true }; agentMsgs.push(last); }
+      last.text += txt; last.streamed = true;
+    } else if (openSame && last.streamed) {
+      last.text = txt; last.done = true;                 // authoritative copy
+    } else {
+      if (!txt) return;
+      agentMsgs.push({ role, text: txt, done: true });
+    }
   } else if (k === 'tool_use') {
     const c = d.call || {};
     agentMsgs.push({ role: 'tool', text: '⚙ ' + (c.title || c.kind || 'tool'), id: c.toolCallId, done: false });
