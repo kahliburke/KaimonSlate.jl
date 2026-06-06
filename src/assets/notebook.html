@@ -404,6 +404,22 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>
   <ul id="cmdlist"></ul>
 </div></div>
+<div class="palette-bg" id="docbg"><div class="cmdpal docpal">
+  <input id="docin" placeholder="Search docs — describe what you want (⌘⇧K)…" autocomplete="off" spellcheck="false"/>
+  <ul id="doclist" class="doclist"></ul>
+</div></div>
+<style>
+  .docpal { max-width: 680px; }
+  .doclist { max-height: 60vh; overflow: auto; }
+  .doclist li { display: block; padding: 7px 12px; cursor: pointer; border-radius: 6px; }
+  .doclist li.on, .doclist li:hover { background: rgba(120,160,255,.14); }
+  .doclist .docname { font-size: 13px; }
+  .doclist .docname b { color: #cfe0ff; }
+  .doclist .docname .k { float: right; opacity: .5; font-size: 11px; }
+  .doclist .docsnip { margin: 3px 0 0; font-size: 11.5px; line-height: 1.35; color: #9fb0c8;
+                      white-space: pre-wrap; max-height: 4.6em; overflow: hidden; }
+  .doclist .docempty, .doclist .dochint { padding: 10px 12px; color: #8190a8; font-size: 13px; }
+</style>
 
 <script>
 // This notebook's hub id, from the /n/<id> URL; all API/SSE paths are scoped to it.
@@ -1338,6 +1354,7 @@ function paletteCommands() {
     { label: 'Reload from disk', run: reload },
     { label: 'Split selected cell at cursor', run: () => { if (selectedId && editors[selectedId]) splitCell(selectedId, editors[selectedId]); } },
     { label: 'Merge selected cell with below', run: () => { if (selectedId) mergeBelow(selectedId); } },
+    { label: 'Search docs… (⌘⇧K)', run: openDocs },
     { label: 'Toggle controls palette', run: togglePalette },
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },
@@ -1375,8 +1392,58 @@ document.getElementById('cmdin').addEventListener('keydown', e => {
   else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
 });
 document.getElementById('cmdbg').addEventListener('mousedown', e => { if (e.target.id === 'cmdbg') closePalette(); });
+
+// ── Docs search palette (⌘⇧K) — semantic search of the notebook's package docs ──
+let _doc = [], _docSel = 0;
+function openDocs() {
+  document.getElementById('docbg').classList.add('show');
+  const inp = document.getElementById('docin'); inp.value = ''; _doc = []; _docSel = 0;
+  document.getElementById('doclist').innerHTML = '<li class="dochint">Describe an API in plain words — e.g. “draw a heatmap”, “group rows and aggregate”.</li>';
+  inp.oninput = _docSearch; inp.focus();
+}
+function closeDocs() { document.getElementById('docbg').classList.remove('show'); }
+const _docSearch = debounce(async () => {
+  const q = document.getElementById('docin').value.trim();
+  const ul = document.getElementById('doclist');
+  if (!q) { ul.innerHTML = '<li class="dochint">Describe an API in plain words…</li>'; _doc = []; return; }
+  ul.innerHTML = '<li class="dochint">Searching…</li>';
+  let res = [];
+  try { const r = await api('GET', '/api/docsearch?q=' + encodeURIComponent(q)); res = (r && r.results) || []; } catch (_) {}
+  _doc = res; _docSel = 0; _renderDocs();
+}, 200);
+function _renderDocs() {
+  const ul = document.getElementById('doclist');
+  if (!_doc.length) { ul.innerHTML = '<li class="docempty">No matches — try different words.</li>'; return; }
+  ul.innerHTML = _doc.map((r, i) =>
+    `<li class="${i === _docSel ? 'on' : ''}" data-i="${i}">` +
+    `<div class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>` +
+    `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span></div>` +
+    `<pre class="docsnip">${_escc(String(r.doc || '').split('\n').slice(0, 5).join('\n'))}</pre></li>`).join('');
+}
+function _paintDocs() {
+  const ul = document.getElementById('doclist');
+  [...ul.children].forEach((li, i) => li.classList.toggle('on', i === _docSel));
+  const on = ul.children[_docSel]; if (on) on.scrollIntoView({ block: 'nearest' });
+}
+// Pick a result → insert the bare name at the selected cell's cursor, else copy it.
+function _docPick(i) {
+  const r = _doc[i]; if (!r) return;
+  closeDocs();
+  const ed = editors[selectedId];
+  if (ed) { ed.replaceSelection(r.name); ed.focus(); }
+  else if (navigator.clipboard) { navigator.clipboard.writeText(r.module + '.' + r.name); }
+}
+document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _docPick(+li.dataset.i); } });
+document.getElementById('docin').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); _docSel = Math.min(_docSel + 1, _doc.length - 1); _paintDocs(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); _docSel = Math.max(_docSel - 1, 0); _paintDocs(); }
+  else if (e.key === 'Enter') { e.preventDefault(); _docPick(_docSel); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeDocs(); }
+});
+document.getElementById('docbg').addEventListener('mousedown', e => { if (e.target.id === 'docbg') closeDocs(); });
+
 document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openPalette(); }
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); e.shiftKey ? openDocs() : openPalette(); }
 });
 
 // ── Collapsible long outputs + stale-count badge ──────────────────────────────
