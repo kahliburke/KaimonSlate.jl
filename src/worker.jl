@@ -11,6 +11,7 @@
 module SlateWorker
 
 import KaimonGate
+import Pkg                                   # project dep listing for eager docs auto-index
 
 # Minimal ECharts marker so notebooks can `echart(opt)`. Only the struct + helper
 # live here (no JSON); the server JSON-encodes the option Dict. `capture.jl`
@@ -67,8 +68,35 @@ __slate_table_page(table_id::String, page::Int, page_size::Int, sort_col::Int, s
 "Capture markdown `{{ }}` interpolation expressions (rich) — one wire-form each."
 __slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e) for e in exprs]
 
-"Harvest `{module,name,doc}` for the named (loaded) modules — for semantic docs search."
-__slate_harvest_docs(mod_names::Vector{String}) = harvest_module_docs(_NS[], mod_names)
+# A throwaway module to `import` packages into for harvesting, so eager indexing can
+# load project deps the notebook hasn't `using`'d WITHOUT polluting the cell namespace.
+const _DOC_SCAN = Ref{Module}()
+_doc_scan() = (isassigned(_DOC_SCAN) || (_DOC_SCAN[] = Module(:_SlateDocScan)); _DOC_SCAN[])
+
+"Harvest `{module,name,doc}` for the named modules (loading them if needed) — for docs search."
+function __slate_harvest_docs(mod_names::Vector{String})
+    m = _doc_scan()
+    for nm in mod_names
+        try; Core.eval(m, Meta.parse("import " * nm)); catch; end   # load if needed; no-op if already
+    end
+    return harvest_module_docs(m, mod_names)
+end
+
+"The worker project's direct dependencies as `{name, version}` (for eager docs auto-index)."
+function __slate_project_deps()
+    out = Dict{String,Any}[]
+    try
+        proj = Pkg.project()
+        info = Pkg.dependencies()
+        for (name, uuid) in proj.dependencies
+            pi = get(info, uuid, nothing)
+            ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
+            push!(out, Dict{String,Any}("name" => name, "version" => ver))
+        end
+    catch
+    end
+    return out
+end
 
 "GateTools exposed to the KaimonSlate server."
 function tools()
@@ -79,6 +107,7 @@ function tools()
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_harvest_docs", __slate_harvest_docs),
+        KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),
     ]
 end
 

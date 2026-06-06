@@ -145,6 +145,15 @@ harvest_docs(::InProcessKernel, report::Report, mod_names) =
     harvest_module_docs(report_module(report), mod_names)
 
 """
+    project_deps(kernel, report) -> Vector{Dict}
+
+The notebook project's direct dependencies as `{name, version}` (for eager docs
+auto-indexing). The gate kernel reads its worker's active project; in-process has no
+distinct project, so it returns nothing (only `using`'d packages get indexed there).
+"""
+project_deps(::InProcessKernel, ::Report) = Dict{String,Any}[]
+
+"""
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell
 
 Evaluate one cell through `kernel`. Markdown cells are inert (marked `FRESH`). A

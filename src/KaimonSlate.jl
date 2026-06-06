@@ -168,7 +168,7 @@ function create_tools(GateTool::Type)
     `kind` = "code" or "md". Add ONE cell at a time and read its result before the
     next — do not compose the whole notebook up front.
     """
-    function add_cell(notebook::String, source::String, after::String, kind::String)::String
+    function add_cell(notebook::String, source::String, after::String = "", kind::String = "code")::String
         nb, err = _nb(notebook); nb === nothing && return err
         return agent_add_cell!(nb, source; after = after, kind = kind)
     end

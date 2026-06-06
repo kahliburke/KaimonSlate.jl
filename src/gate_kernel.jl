@@ -230,6 +230,17 @@ function harvest_docs(k::GateKernel, report::Report, mod_names)
     return Dict{String,Any}[Dict{String,Any}(String(k) => v for (k, v) in r) for r in wire]
 end
 
+function project_deps(k::GateKernel, report::Report)
+    prepare!(k, report)
+    wire = try
+        _tool(k, "__slate_project_deps", Dict{String,Any}())
+    catch
+        return Dict{String,Any}[]
+    end
+    wire === nothing && return Dict{String,Any}[]
+    return Dict{String,Any}[Dict{String,Any}(String(k) => v for (k, v) in r) for r in wire]
+end
+
 function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)
     prepare!(k, report)
     try

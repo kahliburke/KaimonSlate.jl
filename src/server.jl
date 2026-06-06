@@ -66,6 +66,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     _history!(nb; source = "open")
     # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
     register_refresh!(r.id, vars -> server_refresh(nb, vars))
+    _autoindex!(nb)                      # background: index project deps + used packages' docs
     return nb
 end
 
@@ -318,6 +319,7 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
     update_source!(nb.report, new_full)
     eval_stale!(nb.report, nb.kernel)
     _persist!(nb)
+    _autoindex!(nb)                      # a new `using` in this cell → pick up its docs
     return nb
 end
 
@@ -340,6 +342,7 @@ function _commit_structure!(nb::LiveNotebook, idx::Int)
     end
     eval_stale!(nb.report, nb.kernel)
     _persist!(nb)
+    _autoindex!(nb)                      # added/edited cell may introduce a new `using`
     return nb
 end
 
@@ -743,6 +746,72 @@ function search_docs(query::AbstractString; limit::Int = 8)
     return out
 end
 
+# ── Auto-indexing ─────────────────────────────────────────────────────────────
+# Index docs WITHOUT the agent asking: on open, eagerly index the notebook's project
+# deps; incrementally pick up any package a cell `using`s. Runs in the background and
+# is version-cached (persistent), so re-opens are instant and only changed deps re-index.
+const _DOC_CACHE = Dict{String,String}()                 # package name → last-indexed version
+const _DOC_CACHE_LOCK = ReentrantLock()
+_doc_cache_file() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+                             "kaimonslate", "docindex.json")
+function _doc_cache_load()
+    lock(_DOC_CACHE_LOCK) do
+        isempty(_DOC_CACHE) || return
+        f = _doc_cache_file()
+        isfile(f) || return
+        try; merge!(_DOC_CACHE, Dict(String(k) => string(v) for (k, v) in JSON.parsefile(f))); catch; end
+    end
+end
+function _doc_cache_put!(name, version)
+    lock(_DOC_CACHE_LOCK) do
+        _DOC_CACHE[String(name)] = String(version)
+        f = _doc_cache_file()
+        try; mkpath(dirname(f)); open(f, "w") do io; JSON.print(io, _DOC_CACHE); end; catch; end
+    end
+end
+
+# Package names `using`/`import`ed across the notebook's code cells (`using X: y` → X).
+function _used_packages(report::Report)
+    pkgs = String[]
+    for c in report.cells
+        c.kind == CODE || continue
+        top = try; Meta.parseall(c.source); catch; continue; end
+        for s in (top isa Expr && top.head === :toplevel ? top.args : Any[top])
+            (s isa Expr && (s.head === :using || s.head === :import)) || continue
+            for a in s.args
+                m = (a isa Expr && a.head === :(:)) ? a.args[1] : a
+                if m isa Expr && m.head === :. && !isempty(m.args) && m.args[1] isa Symbol
+                    nm = String(m.args[1])
+                    nm in ("Base", "Core", "Main") || push!(pkgs, nm)
+                end
+            end
+        end
+    end
+    return unique(pkgs)
+end
+
+"Background auto-index: project deps (eager) ∪ packages the cells use, version-cached."
+function _autoindex!(nb::LiveNotebook)
+    _agent_available() || return nothing
+    Threads.@spawn try
+        _doc_cache_load()
+        want = Dict{String,String}()
+        for d in (try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end)
+            n = string(get(d, "name", "")); isempty(n) || (want[n] = string(get(d, "version", "")))
+        end
+        for u in _used_packages(nb.report); haskey(want, u) || (want[u] = ""); end
+        pending = String[n for (n, v) in want if get(_DOC_CACHE, n, nothing) != v]
+        isempty(pending) && return
+        recs = ReportEngine.harvest_docs(nb.kernel, nb.report, pending)
+        index_docs!(recs)
+        for n in pending; _doc_cache_put!(n, get(want, n, "")); end
+        @info "slate: auto-indexed docs" notebook = nb.id packages = pending symbols = length(recs)
+    catch e
+        @warn "slate: auto-index failed" exception = (e, catch_backtrace())
+    end
+    return nothing
+end
+
 # The notebook-priming system prompt, set once at `agent_open` (the `system_prompt`
 # arg → `claude --append-system-prompt`). It makes the agent a *live notebook
 # operator* — driving the reactive notebook one cell at a time through the `slate.*`
@@ -763,10 +832,11 @@ function _agent_system_prompt(nb::LiveNotebook)
     (`after`="" appends at the end; `kind` is "code" or "md".)
 
     LEARN THE API — you have NO file access, so do NOT grep/read source. Search docs:
-      mcp__kaimon__slate_index_docs(notebook, modules) — index the docs of `using`'d
-        packages (comma-separated names) once, so they become searchable
       mcp__kaimon__slate_search_docs(notebook, query)  — fuzzy semantic search of the
-        indexed docs ("a function that sorts in place") → matching signatures + docs
+        notebook's package docs ("a function that sorts in place") → signatures + docs.
+        The project's packages are auto-indexed in the background, so usually just search.
+      mcp__kaimon__slate_index_docs(notebook, modules) — force-index more packages
+        (comma-separated) if a search comes up empty
 
     WORK INCREMENTALLY — this is the entire point of the project:
     - Call slate_read FIRST to see the current state.
