@@ -156,8 +156,8 @@ using .ReportEngine
         struct RecordingKernel <: ReportEngine.Kernel end
         ReportEngine.prepare!(::RecordingKernel, rep) = ReportEngine.report_module(rep)
         ReportEngine.reset!(::RecordingKernel, rep) = ReportEngine.reset_module!(rep)
-        ReportEngine.assign!(::RecordingKernel, rep, n::Symbol, v) =
-            Core.eval(ReportEngine.report_module(rep), Expr(:(=), n, v))
+        ReportEngine.assign_bind!(::RecordingKernel, rep, n::Symbol, v) =
+            Base.invokelatest(getfield(ReportEngine.report_module(rep), :__slate_set_bind), n, v)
         function ReportEngine.eval_capture(::RecordingKernel, rep, src::AbstractString)
             push!(seen, src)
             return ReportEngine.eval_capture(InProcessKernel(), rep, src)

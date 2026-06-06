@@ -40,6 +40,14 @@ a, b, c = 1, -3, 2
 disc = b^2 - 4a*c
 L"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a} = \frac{%$(-b) \pm \sqrt{%$disc}}{%$(2a)}"
 
+#%% md id=8704bf
+## Variable interpolation in markdown
+
+Markdown embeds **live values** with `{{ }}` — reactive, so editing the code above
+updates this prose. Here `a = {{ a }}`, the discriminant is **{{ disc }}**, and
+√disc ≈ {{ round(sqrt(disc), digits = 3) }}. Rich values embed too — a LaTeXString
+renders inline: {{ L"\alpha^2 + \beta^2" }}.
+
 #%% md id=tablesmd
 ## Interactive tables
 
@@ -93,8 +101,14 @@ nothing
 
 #%% code id=pagedsql
 # 1,000,000 rows in DuckDB, browsed with SQL pushdown (sort/search/page in the DB).
-slate_query(con, "SELECT i, i*i AS sq, (i % 3) AS m FROM range(1, 1000001) t(i)")
+tb = slate_query(con, "SELECT i, i*i AS sq, (i % 3) AS m FROM range(1, 1000001) t(i)")
 
 #%% code id=421e83
+@bind a Slider(1:1:50)
 
-#%% code id=429cc3
+#%% md id=429cc3
+{{ a }}
+
+$$ e^{ {{ a }} } $$
+
+{{ tb }}

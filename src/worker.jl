@@ -22,22 +22,20 @@ echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v)
 
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table — uses no deps; soft-detects Tables.jl
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
+include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 
-# Per-notebook execution namespace (warm; reset by replacing the module). `echart`
-# is injected so cells can call it without importing anything.
+# Per-notebook execution namespace (warm; reset by replacing the module). Built by the
+# SAME shared contract `_populate_notebook_ns!` as the in-process kernel, so the two
+# namespaces are identical; only `slate_refresh` differs — here it PUBs on the gate
+# stream (a cell's async task calls `slate_refresh(:data)`; the KaimonSlate server,
+# subscribed, recomputes those vars' readers and pushes a live update).
 function _new_ns()
     m = Module(:NB)
-    Core.eval(m, :(const echart = $echart))
-    Core.eval(m, :(const EChart = $EChart))
-    Core.eval(m, :(const slate_table = $slate_table))
-    Core.eval(m, :(const SlateTable = $SlateTable))
-    Core.eval(m, :(const slate_query = $slate_query))
-    # Async reactivity over the gate: a cell's background task calls
-    # `slate_refresh(:data)`, which PUBs on the gate stream. The KaimonSlate server
-    # (subscribed) recomputes the readers of those vars and pushes a live update.
-    Core.eval(m, :(const slate_refresh =
-        $((vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")))))
+    _populate_notebook_ns!(m;
+        echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
+        slate_query = slate_query,
+        slate_refresh = (vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")))
     return m
 end
 const _NS = Ref{Module}(_new_ns())
@@ -49,10 +47,11 @@ const _NS = Ref{Module}(_new_ns())
 "Evaluate a cell's source in the warm namespace; return the wire-form capture."
 __slate_eval(source::String) = run_capture(_NS[], source)
 
-"Assign a `@bind` widget value into the namespace."
-function __slate_assign(name::String, value)
-    Core.eval(_NS[], Expr(:(=), Symbol(name), value))
-    return true
+"Apply a browser `@bind` value change: coerce against the widget, update the registry,
+and assign the global — via the namespace's injected `__slate_set_bind`. Returns the
+coerced value."
+function __slate_set_bind(name::String, value)
+    return Base.invokelatest(getfield(_NS[], :__slate_set_bind), Symbol(name), value)
 end
 
 "Discard the namespace (full rebuild)."
@@ -71,7 +70,7 @@ __slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e) for e in exprs]
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
-        KaimonGate.GateTool("__slate_assign", __slate_assign),
+        KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),

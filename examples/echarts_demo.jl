@@ -37,7 +37,7 @@ echart(Dict(
 ))
 
 #%% code id=bar
-echart(Dict(
+bar_chart = echart(Dict(
     "title" => Dict("text" => "Bar — stacked"),
     "tooltip" => Dict("trigger" => "axis"),
     "legend" => Dict("top" => 24),
@@ -49,6 +49,13 @@ echart(Dict(
         Dict("name" => "Ads", "type" => "bar", "stack" => "t", "data" => [220, 182, 191, 234, 290, 330, 310]),
     ],
 ))
+
+#%% md id=af6747
+# Chart embeds?
+
+Here we goooo!
+
+{{ bar_chart }}
 
 #%% code id=scatter controls=chartColor
 echart(Dict(
@@ -188,3 +195,24 @@ echart(Dict(
     "series" => [Dict("type" => "bar", "coordinateSystem" => "polar",
         "data" => [2, 1.2, 2.4, 3.6], "itemStyle" => Dict("color" => chartColor))],
 ))
+
+#%% code id=4ae287
+my_var = 69
+
+#%% md id=89cd5e
+Here is some embedded variable in markdown! {{ my_var }}
+
+But can I embed it into LaTeX too?
+
+$$x = e^{ {{my_var}} }$$
+
+#%% md id=c18381
+## Math in markdown
+
+Inline math like $e^{i\pi} + 1 = 0$ flows in a sentence, and display math sits on
+its own line:
+
+$$\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$$
+
+Backslash-escapes (`\,`, `\;`), subscripts $a_i$, and emphasis like _this_ all
+coexist — the math is kept byte-for-byte, only _this_ becomes italic.

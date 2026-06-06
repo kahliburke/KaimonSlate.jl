@@ -1,3 +1,7 @@
+#%% code id=setup
+using Random
+"ready"
+
 #%% md id=title
 # ⚡ Async reactivity — live data acquisition
 
@@ -6,10 +10,6 @@ samples into `data` and calls **`slate_refresh(:data)`** each tick. The server
 recomputes the cells that *read* `data` (the chart + status) and pushes a live,
 in-place update — the UI stays responsive the whole time. Changing the **rate**
 (or clicking again) cancels the running loop and starts a fresh one.
-
-#%% code id=setup
-using Random
-"ready"
 
 #%% code id=controls
 @bind go Button("Run acquisition")

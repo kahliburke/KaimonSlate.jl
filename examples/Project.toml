@@ -4,8 +4,10 @@ DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 DuckDB = "d2f5444f-75bc-4fdf-ac35-56f514c445e1"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
+OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
 
 [compat]
 CairoMakie = "0.15"

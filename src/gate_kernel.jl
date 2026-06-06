@@ -90,9 +90,13 @@ end
 # Worker boot: put KaimonGate on LOAD_PATH (via Kaimon's env), load the SlateWorker
 # capture payload, and serve its tools over TCP. Pinned to the notebook's project.
 function _worker_script(port::Int, stream_port::Int)
-    kaimon_dir = Base.pkgdir(_kaimon())
+    # Put ONLY KaimonGate (the ZMQ bridge) on the worker's LOAD_PATH — from its own
+    # minimal project (ZMQ/Serialization/…, no HTTP), NOT Kaimon's full env. Kaimon's
+    # Manifest pins the custom HTTP 2.0 (Reseau); prepending it would shadow a notebook
+    # project's standard HTTP v1 and break packages that need it (WGLMakie→Bonito, …).
+    kgate_dir = joinpath(Base.pkgdir(_kaimon()), "lib", "KaimonGate")
     return """
-    insert!(LOAD_PATH, 1, $(repr(kaimon_dir)))
+    insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
     import KaimonGate
     include($(repr(_WORKER_JL)))
     SlateWorker.start(; host = "127.0.0.1", port = $port, stream_port = $stream_port)
@@ -170,10 +174,11 @@ end
 # (`run_capture`'s output), the same mapping as the in-process `_eval_capture`.
 function _wire_to_output(wire)
     wire === nothing &&
-        return CellOutput("", MimeChunk[], Any[], Any[], "", "gate returned no value", nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", "gate returned no value", nothing, 0.0)
     chunks = MimeChunk[MimeChunk(String(m), Vector{UInt8}(bytes)) for (m, bytes) in wire.mime]
+    binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in wire.binds]
     return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
-                      String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms))
+                      binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms))
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString)
@@ -181,7 +186,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString)
     wire = try
         _tool(k, "__slate_eval", Dict("source" => String(source)))
     catch e
-        return CellOutput("", MimeChunk[], Any[], Any[], "", sprint(showerror, e), nothing, 0.0)
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
 end
@@ -214,13 +219,13 @@ function interpolate(k::GateKernel, report::Report, exprs::Vector{String})
     return CellOutput[_wire_to_output(w) for w in wires]
 end
 
-function assign!(k::GateKernel, report::Report, name::Symbol, value)
+function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)
     prepare!(k, report)
     try
-        _tool(k, "__slate_assign", Dict("name" => string(name), "value" => value))
+        return _tool(k, "__slate_set_bind", Dict("name" => string(name), "value" => value))
     catch
+        return value
     end
-    return nothing
 end
 
 # Reset the worker namespace and mark every cell stale (mirrors `reset_module!`).

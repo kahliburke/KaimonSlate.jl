@@ -28,24 +28,25 @@ struct MimeChunk
     data::Vector{UInt8}           # text encoded UTF-8
 end
 
-"Captured result of evaluating a code cell."
-struct CellOutput
-    stdout::String
-    display::Vector{MimeChunk}    # richest first
-    echarts::Vector{Any}          # raw ECharts option dicts (JSON-encoded server-side)
-    tables::Vector{Any}           # raw interactive-table specs (JSON-encoded server-side)
-    value_repr::String            # text/plain fallback of the return value
-    exception::Union{String,Nothing}
-    backtrace::Union{String,Nothing}
-    duration_ms::Float64          # wall-clock eval time
-end
-
 "A reactive input widget bound to a variable (`@bind name Slider(0:100)`, §Layer 3)."
 mutable struct BindSpec
     name::Symbol                  # the bound variable
     widget::String                # "slider" | "number" | "checkbox" | "text" | "select"
     params::Dict{String,Any}      # min/max/step/options …
     value::Any                    # current value (assigned into the module)
+end
+
+"Captured result of evaluating a code cell."
+struct CellOutput
+    stdout::String
+    display::Vector{MimeChunk}    # richest first
+    echarts::Vector{Any}          # raw ECharts option dicts (JSON-encoded server-side)
+    tables::Vector{Any}           # raw interactive-table specs (JSON-encoded server-side)
+    binds::Vector{BindSpec}       # `@bind` controls this cell declared on its last run
+    value_repr::String            # text/plain fallback of the return value
+    exception::Union{String,Nothing}
+    backtrace::Union{String,Nothing}
+    duration_ms::Float64          # wall-clock eval time
 end
 
 """
@@ -335,6 +336,7 @@ source_text(cell::Cell) = cell.source
 include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table (used by capture.jl)
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query
+include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
 include(joinpath(@__DIR__, "eval.jl"))
 include(joinpath(@__DIR__, "deps.jl"))

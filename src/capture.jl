@@ -87,8 +87,10 @@ a text/plain repr fallback, eval duration, and any thrown error + backtrace.
 
 Returns the wire form:
 `(stdout::String, mime::Vector{Tuple{String,Vector{UInt8}}}, echarts::Vector{Any},
-  tables::Vector{Any}, value_repr::String, exception::Union{String,Nothing},
-  backtrace::Union{String,Nothing}, duration_ms::Float64)`.
+  tables::Vector{Any}, binds::Vector{NamedTuple}, value_repr::String,
+  exception::Union{String,Nothing}, backtrace::Union{String,Nothing},
+  duration_ms::Float64)`. `binds` are the `@bind` controls declared this eval
+(`(name, kind, params, value)` each), for the host to render.
 """
 function run_capture(mod::Module, source::AbstractString)
     chunks = Tuple{String,Vector{UInt8}}[]
@@ -97,6 +99,11 @@ function run_capture(mod::Module, source::AbstractString)
     original = stdout
     (rd, wr) = redirect_stdout()
     reader = @async read(rd, String)
+
+    # Collect `@bind` controls declared during this eval — the namespace's injected
+    # `__slate_bind` pushes to this sink. Absent on bare modules (e.g. tests) → no-op.
+    sinkref = isdefined(mod, :__slate_bind_sink) ? getfield(mod, :__slate_bind_sink) : nothing
+    sinkref === nothing || (sinkref[] = NamedTuple[])
 
     value = nothing
     err = nothing
@@ -112,6 +119,8 @@ function run_capture(mod::Module, source::AbstractString)
         close(wr)
         popdisplay(capture)
     end
+    binds = sinkref === nothing ? NamedTuple[] : copy(sinkref[])
+    sinkref === nothing || (sinkref[] = nothing)
     stdout_str = fetch(reader)
     dur_ms = (time_ns() - t0) / 1e6
 
@@ -154,5 +163,6 @@ function run_capture(mod::Module, source::AbstractString)
         sprint((io, t) -> Base.show_backtrace(io, t), btrace)
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
-            value_repr = value_repr, exception = exc, backtrace = bt, duration_ms = dur_ms)
+            binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
+            duration_ms = dur_ms)
 end

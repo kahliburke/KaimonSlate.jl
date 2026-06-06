@@ -88,14 +88,32 @@ function _derive_label(prev_cells, cur)
     isempty(prev_cells) && return isempty(cur) ? "empty" : "initial"
     pids = [String(c["id"]) for c in prev_cells]
     cids = [String(c["id"]) for c in cur]
-    added   = [id for id in cids if !(id in pids)]
-    removed = [id for id in pids if !(id in cids)]
     ph = Dict(String(c["id"]) => String(c["hash"]) for c in prev_cells)
     ch = Dict(String(c["id"]) => String(c["hash"]) for c in cur)
+    added   = [id for id in cids if !(id in pids)]
+    removed = [id for id in pids if !(id in cids)]
+    # Rename detection (git-style): the per-cell digest hashes the SOURCE only, not the
+    # id — so a removed id and an added id with the same content hash are one cell whose
+    # id changed. Pair them up and label it a rename, not a delete+add. (A cell renamed
+    # AND edited won't match by hash → it falls back to added/deleted, which is honest.)
+    renames = Tuple{String,String}[]
+    avail = copy(added)
+    for r in removed
+        i = findfirst(a -> ch[a] == ph[r], avail)
+        i === nothing && continue
+        push!(renames, (r, avail[i])); deleteat!(avail, i)
+    end
+    if !isempty(renames)
+        newids = Set(a for (_, a) in renames); oldids = Set(r for (r, _) in renames)
+        added   = [a for a in added if !(a in newids)]
+        removed = [r for r in removed if !(r in oldids)]
+    end
     changed = [id for id in cids if (id in pids) && ph[id] != ch[id]]
     # Report EVERY kind of change — a destructive overwrite (adds + deletes) must
     # not hide behind the additions.
     parts = String[]
+    isempty(renames) || push!(parts, length(renames) <= 3 ?
+        join(("renamed $r → $a" for (r, a) in renames), ", ") : "renamed $(length(renames)) cells")
     isempty(added)   || push!(parts, "added "   * _summ(added))
     isempty(removed) || push!(parts, "deleted " * _summ(removed))
     isempty(changed) || push!(parts, "edited "  * _summ(changed))

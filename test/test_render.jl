@@ -98,14 +98,14 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
     end
 
     @testset "markdown {{ }} interpolation: rich fragments spliced in" begin
-        scalar = CellOutput("", MimeChunk[], Any[], Any[], "42", nothing, nothing, 0.0)
+        scalar = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "42", nothing, nothing, 0.0)
         h = markdown_html("The answer is {{x}}.", [scalar])
         @test occursin("42", h) && occursin("ival", h) && !occursin("{{", h)
 
-        img = CellOutput("", [MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], "", nothing, nothing, 0.0)
+        img = CellOutput("", [MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], BindSpec[], "", nothing, nothing, 0.0)
         @test occursin("data:image/png;base64,", markdown_html("plot {{p}}", [img]))
 
-        err = CellOutput("", MimeChunk[], Any[], Any[], "", "boom", nothing, 0.0)
+        err = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", "boom", nothing, 0.0)
         he = markdown_html("bad {{z}}", [err])
         @test occursin("interr", he) && occursin("boom", he)
 
@@ -113,13 +113,13 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         @test occursin(raw"$e^{i\pi}$", markdown_html(raw"euler $e^{i\pi}$"))
 
         # echart / table captures become inline host placeholders for the SPA.
-        ech = CellOutput("", MimeChunk[], Any[Dict("x" => 1)], Any[], "", nothing, nothing, 0.0)
+        ech = CellOutput("", MimeChunk[], Any[Dict("x" => 1)], Any[], BindSpec[], "", nothing, nothing, 0.0)
         @test occursin("ichart", markdown_html("chart {{e}}", [ech]))
-        tbl = CellOutput("", MimeChunk[], Any[], Any[Dict("columns" => ["a"])], "", nothing, nothing, 0.0)
+        tbl = CellOutput("", MimeChunk[], Any[], Any[Dict("columns" => ["a"])], BindSpec[], "", nothing, nothing, 0.0)
         @test occursin("itable", markdown_html("tbl {{t}}", [tbl]))
 
         # Inside math, an interpolation substitutes the raw value (bare TeX), not a span.
-        v3 = CellOutput("", MimeChunk[], Any[], Any[], "3", nothing, nothing, 0.0)
+        v3 = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "3", nothing, nothing, 0.0)
         mh = markdown_html(raw"$$x = e^{ {{v}} }$$", [v3])
         @test occursin("e^{ 3 }", mh) && !occursin("ival", mh) && !occursin("xslateinterp", mh)
     end

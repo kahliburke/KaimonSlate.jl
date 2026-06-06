@@ -414,6 +414,8 @@ const editors = {};
 const charts = {};            // cell id -> [echarts instances]
 const tableState = {};        // cell id -> [{sort,filter,page,pageSize} per table] (view prefs, sticky)
 const srcMap = {};            // cell id -> raw source (for markdown editing)
+const outMap = {};            // cell id -> last injected output HTML (skip redundant re-swaps)
+const mdMap = {};             // cell id -> last injected markdown HTML (skip redundant re-renders)
 let nbState = null;           // latest notebook state (drives the controls palette)
 // Min delay (ms) between live recomputes while dragging a control. Persisted.
 let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
@@ -785,9 +787,16 @@ function cellEl(c) {
       `<div class="md" ondblclick="editSource('${c.id}','markdown')" title="double-click to edit">${mdHtml(c)}</div>` +
       srcEditHTML();
   } else if (hasBinds(c)) {
-    // A bind/control-group cell: one row per variable (live widget or hosted chip).
+    // A bind cell: one row per variable (live widget or hosted chip), PLUS an output
+    // area so a MIXED cell (binds + code) shows its result too. The output/tables/
+    // echarts hosts sit OUTSIDE the widgets, so value-only updates never tear a widget
+    // down mid-drag. Empty (invisible) for a pure bind cell.
     div.className = 'cell bind state-' + c.state;
-    div.innerHTML = cellHeader(c) + bindsHTML(c) + srcEditHTML();
+    div.innerHTML = cellHeader(c) + bindsHTML(c) +
+      '<div class="output">' + c.output + '</div>' +
+      '<div class="tables"></div>' +
+      '<div class="echarts"></div>' +
+      srcEditHTML();
   } else {
     div.className = 'cell code state-' + c.state;
     div.innerHTML = cellHeader(c) +
@@ -950,6 +959,10 @@ function renderAll(state) {
   for (const k of Object.keys(editors)) delete editors[k];
   Object.keys(charts).forEach(k => { charts[k].forEach(i => i.dispose()); delete charts[k]; });
   state.cells.forEach(c => nb.appendChild(cellEl(c)));
+  // Seed change-tracking from this fresh build so the next /state poll won't
+  // redundantly re-swap (and re-init) outputs, then boot any embedded scripts.
+  state.cells.forEach(c => { outMap[c.id] = c.output; if (c.kind === 'md') mdMap[c.id] = mdHtml(c); });
+  runScripts(nb);
   state.cells.forEach(mountEditor);
   state.cells.forEach(mountControls);
   state.cells.forEach(renderCharts);
@@ -1005,11 +1018,13 @@ function updatePaletteValues(state) {
 
 // Keep every widget bound to a variable in lockstep (a control may be surfaced in
 // multiple cells). Skips the element being actively dragged so we never fight it.
+const _sameList = (a, b) => a.length === b.length && a.every((x, i) => String(x) === String(b[i]));
+
 function syncControlValues(state) {
-  const val = {};
+  const val = {}, par = {};
   state.cells.forEach(c => {
-    (c.binds || []).forEach(b => { val[b.name] = b.value; });
-    (c.controls || []).flat().forEach(s => { val[s.name] = s.value; });   // controls is columns-of-specs
+    (c.binds || []).forEach(b => { val[b.name] = b.value; par[b.name] = b.params || {}; });
+    (c.controls || []).flat().forEach(s => { val[s.name] = s.value; par[s.name] = s.params || {}; });   // controls is columns-of-specs
   });
   const now = performance.now();
   document.querySelectorAll('#nb [data-bind][data-name]').forEach(el => {
@@ -1019,6 +1034,30 @@ function syncControlValues(state) {
     if (el._touched && now - el._touched < 1200) return;
     const v = val[el.dataset.name]; if (v === undefined) return;
     const w = el.dataset.widget;
+    // Keep the widget's RANGE/options in sync, not just its value — a dynamic widget
+    // (e.g. `Slider(1:hi)`) re-reports new params when `hi` changes. Apply range
+    // BEFORE the value so the browser doesn't clamp against the stale bounds.
+    const p = par[el.dataset.name] || {};
+    if (w === 'slider') {
+      if (p.min != null) el.min = p.min;
+      if (p.max != null) el.max = p.max;
+      if (p.step != null) el.step = p.step;
+    } else if (w === 'number') {
+      p.min != null ? (el.min = p.min) : el.removeAttribute('min');
+      p.max != null ? (el.max = p.max) : el.removeAttribute('max');
+    } else if ((w === 'select' || w === 'multiselect') && Array.isArray(p.options)) {
+      // Dynamic options: rebuild the <option> list only if it changed (the value-set
+      // below re-applies the selection). Avoids tearing the menu down every sync.
+      const cur = [...el.options].map(o => o.value);
+      if (!_sameList(cur, p.options)) el.innerHTML = p.options.map(o => `<option>${_esc(o)}</option>`).join('');
+    } else if (w === 'radio' && Array.isArray(p.options)) {
+      const cur = [...el.querySelectorAll('input[type=radio]')].map(i => i.value);
+      if (!_sameList(cur, p.options)) {
+        const nm = 'r-' + el.dataset.bind + '-' + el.dataset.name;
+        el.innerHTML = p.options.map(o =>
+          `<label><input type="radio" name="${nm}" value="${_esc(o)}"/>${_esc(o)}</label>`).join('');
+      }
+    }
     if (w === 'checkbox' || w === 'toggle') el.checked = !!v;
     else if (w === 'multiselect') [...el.options].forEach(o => { o.selected = Array.isArray(v) && v.includes(o.value); });
     else if (w === 'radio') { const c = el.querySelector('input[value="' + v + '"]'); if (c) c.checked = true; }
@@ -1043,12 +1082,32 @@ function setState(id, s) {
 function _swapOutput(out, html) {
   out.style.minHeight = out.offsetHeight + 'px';
   out.innerHTML = html;
+  runScripts(out);   // <script> set via innerHTML is inert — re-create so figures boot
   const imgs = out.querySelectorAll('img');
   const release = () => { out.style.minHeight = ''; };
   if (!imgs.length) { requestAnimationFrame(release); return; }
   let n = imgs.length;
   const done = () => { if (--n <= 0) release(); };
   imgs.forEach(im => im.complete ? done() : (im.onload = im.onerror = done));
+}
+
+// A <script> assigned via innerHTML is parsed but never executed. Rich output
+// (notably a WGLMakie/Bonito figure: a module bundle <script src> that defines
+// `Bonito`, then an inline module that calls `Bonito.init_session(…)`) only boots
+// if those scripts actually run. Re-create each as a live element so the browser
+// executes it; await external/`src` scripts so the bundle finishes (and `Bonito`
+// is defined) before the inline init module that depends on it runs. (Inline
+// scripts execute on insert and aren't awaited — inline module `load` is unreliable.)
+async function runScripts(root) {
+  if (!root) return;
+  for (const old of Array.from(root.querySelectorAll('script'))) {
+    const s = document.createElement('script');
+    for (const a of old.attributes) s.setAttribute(a.name, a.value);
+    if (old.textContent) s.textContent = old.textContent;
+    const loaded = s.src ? new Promise(res => { s.onload = s.onerror = res; }) : null;
+    old.replaceWith(s);
+    if (loaded) await loaded;
+  }
 }
 
 // Update outputs + states in place (preserves editor instances/cursors + scroll).
@@ -1063,8 +1122,13 @@ function updateStates(state) {
     el.className = 'cell ' + (hasBinds(c) ? 'bind' : c.kind) + ' state-' + c.state;
     const b = el.querySelector('.badge'); if (b) b.textContent = c.state;
     const dur = el.querySelector('.cdur'); if (dur) dur.textContent = c.duration != null ? c.duration + ' ms' : '';
-    const out = el.querySelector('.output'); if (out) { _swapOutput(out, c.output); typeset(out); }
-    const md = el.querySelector('.md'); if (md) { md.innerHTML = mdHtml(c); typeset(md); }
+    // Only re-inject when the HTML actually changed: an unconditional swap on every
+    // /state poll would tear down and re-init a live figure (e.g. Bonito), spawning
+    // duplicate sessions/WebSockets and flicker.
+    const out = el.querySelector('.output');
+    if (out && c.output !== outMap[c.id]) { outMap[c.id] = c.output; _swapOutput(out, c.output); typeset(out); }
+    const md = el.querySelector('.md');
+    if (md) { const h = mdHtml(c); if (h !== mdMap[c.id]) { mdMap[c.id] = h; md.innerHTML = h; runScripts(md); typeset(md); } }
     renderCharts(c);   // setOption in place — animates data changes
     renderTables(c);   // refill rows in place — keeps sort/filter/page
   });
@@ -1340,7 +1404,7 @@ function updateStaleBadge(state) {
 // "agent:<json>" envelopes ({kind, turn, data}) and the agent edits cells via the
 // slate.* tools (so the cells update through the normal SSE path).
 let agentMsgs = [];   // {role:'user'|'assistant'|'tool'|'err', text, done?}
-let agentWorking = false, agentT0 = 0, _agentTick = null;
+let agentWorking = false, agentT0 = 0, _agentTick = null, _stopArmed = false;
 function toggleAgent() {
   const p = document.getElementById('agentpanel'); p.classList.toggle('open');
   if (p.classList.contains('open')) { document.getElementById('apin').focus(); setWorking(agentWorking); }
@@ -1351,6 +1415,7 @@ function setWorking(on) {
   if (on && !_agentTick) _agentTick = setInterval(renderAgentMsgs, 1000);
   if (!on && _agentTick) { clearInterval(_agentTick); _agentTick = null; }
   if (on && !agentWorking) agentT0 = Date.now();
+  if (!on) _stopArmed = false;     // turn ended → reset STOP escalation
   agentWorking = on;
   const b = document.getElementById('agentbtn');
   const open = document.getElementById('agentpanel').classList.contains('open');
@@ -1366,7 +1431,8 @@ function renderAgentMsgs() {
     :                     `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
   if (agentWorking) {
     const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
-    html += `<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}</div>`;
+    html += `<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` +
+      `<button class="apstop" style="margin-left:10px;cursor:pointer" onclick="agentStop()">${_stopArmed ? '⛔ Force stop' : '⏹ Stop'}</button></div>`;
   }
   el.innerHTML = html;
   el.scrollTop = el.scrollHeight;
@@ -1382,9 +1448,23 @@ async function loadAgentLog() {
   } catch (_) {}
 }
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
+// STOP escalates: first press interrupts the in-flight turn (graceful); if the agent
+// is wedged and still working, a second press hard-kills it (terminates the process,
+// clears the agent — the next message spawns a fresh one).
+async function agentStop() {
+  if (!_stopArmed) {
+    _stopArmed = true; agentStatus('stopping…'); renderAgentMsgs();
+    try { await api('POST', '/api/chat-interrupt', {}); } catch (_) {}
+    return;
+  }
+  agentStatus('killing…');
+  try { await api('POST', '/api/chat-kill', {}); } catch (_) {}
+  setWorking(false); agentStatus('stopped');
+  agentMsgs.push({ role: 'err', text: '⛔ agent stopped' }); renderAgentMsgs();
+}
 async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
-  inp.value = ''; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
+  inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
   try {
     const r = await api('POST', '/api/chat', { text });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }

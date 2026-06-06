@@ -85,18 +85,6 @@ function infer_bindings!(cell::Cell)
     end
     cell.kind == CODE || return cell
 
-    specs = parse_binds(cell.source)          # @bind widget / control-group cell?
-    if !isempty(specs)
-        prev = Dict(b.name => b.value for b in cell.binds)
-        for s in specs
-            haskey(prev, s.name) && (s.value = prev[s.name])  # preserve live widget values
-            push!(cell.writes, s.name)        # each bind writes its variable
-        end
-        cell.binds = specs
-        return cell
-    end
-    cell.binds = BindSpec[]
-
     top = try
         Meta.parseall(cell.source)
     catch
@@ -105,16 +93,39 @@ function infer_bindings!(cell::Cell)
     if _has_parse_error(top)
         push!(cell.flags, :opaque); return cell
     end
-    blk = Expr(:block, top.args...)
-    try
-        node = EE.compute_reactive_node(blk)
-        union!(cell.reads, node.references)
-        union!(cell.writes, node.definitions)
-        union!(cell.writes, node.funcdefs_without_signatures)
-    catch
-        push!(cell.flags, :opaque)
+    stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+
+    # `@bind name W(…)` statements: the bound name is a WRITE, the widget call's free
+    # vars are READS (so `Slider(1:step:hi)` makes the cell depend on `step`/`hi`). No
+    # widget evaluation here — dynamic args are fine. Everything else is ordinary code,
+    # analyzed normally, so a cell may freely mix binds and code. `cell.binds` (for the
+    # UI) is populated by EVAL from what the run reports, not by this static pass.
+    nonbind = Any[]
+    for s in stmts
+        s isa LineNumberNode && continue
+        bm = _bind_macrocall(s)
+        if bm === nothing
+            push!(nonbind, s)
+        else
+            push!(cell.writes, bm[1])
+            try
+                union!(cell.reads, EE.compute_reactive_node(Expr(:block, bm[2])).references)
+            catch
+            end
+        end
     end
-    _collect_mutations!(cell.writes, cell.reads, blk)
+    if !isempty(nonbind)
+        blk = Expr(:block, nonbind...)
+        try
+            node = EE.compute_reactive_node(blk)
+            union!(cell.reads, node.references)
+            union!(cell.writes, node.definitions)
+            union!(cell.writes, node.funcdefs_without_signatures)
+        catch
+            push!(cell.flags, :opaque)
+        end
+        _collect_mutations!(cell.writes, cell.reads, blk)
+    end
     _is_barrier_expr(top) && push!(cell.flags, :opaque)
     return cell
 end

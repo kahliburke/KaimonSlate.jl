@@ -256,8 +256,15 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
     isempty(cell.binds) && return nb
     lock(nb.lock) do
         set_bind_value!(nb.report, cell, Symbol(name), value, nb.kernel)
+        # Re-run the defining cell itself ONLY when it actually depends on the control
+        # that changed — i.e. the changed var is in its `reads` (its own code or another
+        # widget's args use it: `@bind a …; y = a*2`, or `@bind d Slider(1:a)`). The
+        # registry preserves the value across that re-run. A cell that defines the control
+        # but doesn't read it (incl. a pure bind cell) is skipped, so dragging its slider
+        # never needlessly re-evaluates (and re-renders) the control.
+        reruns_self = Symbol(name) in cell.reads
         for did in dependents_of(nb.report, Set([id]))
-            did == id && continue
+            (did == id && !reruns_self) && continue
             j = findfirst(c -> c.id == did, nb.report.cells)
             j === nothing || (nb.report.cells[j].state = STALE)
         end
@@ -1155,11 +1162,22 @@ function _make_router(h::Hub)
               lock(_AGENT_LOCK) do; copy(get(_AGENT_LOG, nb.agent_id, String[])); end
         _json(Dict("events" => log, "agent_id" => nb.agent_id))
     end))
-    # Interrupt the agent's in-flight turn (best effort).
+    # Interrupt the agent's in-flight turn (best effort, graceful).
     HTTP.register!(router, "POST", "/api/{id}/chat-interrupt", req -> _withnb(h, req, nb -> begin
         (_agent_available() && !isempty(nb.agent_id)) || return _json(Dict("ok" => false))
         r = try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => nb.agent_id)); catch; Dict("interrupted" => false); end
         _json(Dict("ok" => true, "interrupted" => get(r, "interrupted", false)))
+    end))
+    # Hard stop: interrupt AND close (terminate) the agent — for a wedged agent that
+    # `agent_interrupt` alone can't stop (it only cancels an in-flight LLM turn). Clears
+    # the agent id so the next chat message spawns a fresh agent.
+    HTTP.register!(router, "POST", "/api/{id}/chat-kill", req -> _withnb(h, req, nb -> begin
+        (_agent_available() && !isempty(nb.agent_id)) || return _json(Dict("ok" => false))
+        aid = nb.agent_id
+        try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => aid)); catch; end
+        try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end
+        nb.agent_id = ""
+        _json(Dict("ok" => true, "killed" => true))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))

@@ -27,6 +27,21 @@ const H = SlateHistory
         @test labels == ["initial", "added b", "edited a", "deleted b"]   # seed = "initial"
     end
 
+    @testset "rename detection (id change, same content)" begin
+        p2 = "/tmp/__slate_rename_test__.jl"
+        H.record!(p2, "#%% code id=foo\nx\n"; cells = [("foo", "code", "x\n")])
+        e = H.record!(p2, "#%% code id=bar\nx\n"; cells = [("bar", "code", "x\n")])
+        @test e["label"] == "renamed foo → bar"                 # not "added bar; deleted foo"
+        # a rename and an unrelated add are reported together
+        e2 = H.record!(p2, "#%% code id=baz\nx\n\n#%% code id=c\ny\n";
+                       cells = [("baz", "code", "x\n"), ("c", "code", "y\n")])
+        @test e2["label"] == "renamed bar → baz; added c"
+        # rename + content edit (hash changes) → honest fallback to add/delete
+        e3 = H.record!(p2, "#%% code id=qux\nz\n\n#%% code id=c\ny\n";
+                       cells = [("qux", "code", "z\n"), ("c", "code", "y\n")])
+        @test e3["label"] == "added qux; deleted baz"
+    end
+
     @testset "destructive overwrite reports adds AND deletes (not just adds)" begin
         q = "/tmp/__slate_hist_overwrite__.jl"
         H.record!(q, "x\n"; cells = [("x", "code", "x\n")])

@@ -26,31 +26,16 @@ function _do_refresh(report_id::AbstractString, vars)
     return nothing
 end
 
-# A fresh report namespace with the report-builder helpers (e.g. `echart`)
-# injected, so cells can call them without importing anything.
-#
-# `@bind` is injected as a real (no-op-ish) macro: recognized bind/group cells are
-# intercepted by the engine and never run as code, but a cell that *contains*
-# `@bind` yet isn't recognized as a pure bind cell (e.g. mixed code) would
-# otherwise hit `UndefVarError: @bind`. Here it expands to assigning the variable
-# its widget's default (extracted syntactically — no need for `Slider` et al. to
-# exist), so such cells evaluate harmlessly instead of erroring.
+# A fresh report namespace, built by the SINGLE shared contract `_populate_notebook_ns!`
+# (widgets.jl) — the same one the gate worker uses, so the two namespaces can't drift.
+# Only the context-specific helper implementations differ: here `slate_refresh` fires
+# the in-process recompute callback (the worker PUBs on the gate stream instead).
 function _new_module(report::Report)
     m = Module(Symbol(:Report_, report.id))
-    Core.eval(m, :(const echart = $(echart)))
-    Core.eval(m, :(const EChart = $(EChart)))
-    Core.eval(m, :(const slate_table = $(slate_table)))
-    Core.eval(m, :(const SlateTable = $(SlateTable)))
-    Core.eval(m, :(const slate_query = $(slate_query)))
-    Core.eval(m, :(const __slate_bind_default = $(_bind_default)))
-    Core.eval(m, :(macro bind(name, widget)
-        esc(Expr(:(=), name, __slate_bind_default(widget)))
-    end))
-    # `slate_refresh(:a, :b)` — from a cell's async task, announce that globals
-    # a/b changed so the server recomputes their readers and pushes a live update.
-    let rid = report.id
-        Core.eval(m, :(const slate_refresh = $((vars...) -> _do_refresh(rid, vars))))
-    end
+    rid = report.id
+    _populate_notebook_ns!(m;
+        echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
+        slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars))
     return m
 end
 
@@ -81,7 +66,8 @@ end
 function _eval_capture(mod::Module, source::AbstractString)
     r = run_capture(mod, source)
     chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
-    return CellOutput(r.stdout, chunks, r.echarts, r.tables, r.value_repr, r.exception,
+    binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in r.binds]
+    return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
                       r.backtrace, r.duration_ms)
 end
 
@@ -120,9 +106,13 @@ reset!(::InProcessKernel, report::Report) = reset_module!(report)
 eval_capture(::InProcessKernel, report::Report, source::AbstractString) =
     _eval_capture(report_module(report), source)
 
-"Assign `name = value` (a `@bind` widget value) into the kernel's namespace."
-assign!(::InProcessKernel, report::Report, name::Symbol, value) =
-    Core.eval(report_module(report), Expr(:(=), name, value))
+"""
+Set a `@bind` control's value from the browser: coerce it against the widget, update
+the per-notebook registry (so a later re-run preserves it), and assign the global so
+readers see it. Returns the coerced value. Routed through the namespace's injected
+`__slate_set_bind` so the logic lives in exactly one place (widgets.jl)."""
+assign_bind!(::InProcessKernel, report::Report, name::Symbol, value) =
+    Base.invokelatest(getfield(report_module(report), :__slate_set_bind), name, value)
 
 """
     table_page(kernel, report, table_id, request) -> (rows, total)
@@ -158,17 +148,11 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
         cell.state = FRESH
         return cell
     end
-    isempty(cell.binds) && (cell.binds = parse_binds(cell.source))   # lazily detect
-    if !isempty(cell.binds)
-        # bind/group cells aren't run as code — each widget value is assigned directly
-        for b in cell.binds
-            assign!(kernel, report, b.name, b.value)
-        end
-        cell.state = FRESH
-        return cell
-    end
+    # Bind cells are ordinary code now: `@bind x W(…)` runs, assigns `x`, and reports
+    # its control through the capture channel (`output.binds`). No special path.
     cell.state = RUNNING
     cell.output = eval_capture(kernel, report, cell.source)
+    cell.binds = cell.output.binds
     cell.state = cell.output.exception === nothing ? FRESH : ERRORED
     return cell
 end
