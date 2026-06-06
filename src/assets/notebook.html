@@ -370,6 +370,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
     <button class="pclose" onclick="toggleAgent()" title="close">✕</button></div>
   <div id="apmsgs" class="apmsgs"></div>
   <div class="apinput">
+    <div id="chattarget" class="chattarget" style="display:none"></div>
     <textarea id="apin" placeholder="Ask the agent to build/edit cells… (⏎ send · ⇧⏎ newline)"></textarea>
     <button onclick="agentSend()">Send</button>
   </div>
@@ -421,6 +422,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .docdetail h4 { margin: 4px 0 8px; font-size: 13.5px; color: #cfe0ff; }
   .docdetail pre { white-space: pre-wrap; font-size: 12px; line-height: 1.45; color: #c2cee0; margin: 0; }
   .docdetail .hint { margin-top: 10px; color: #8190a8; font-size: 11.5px; }
+  .askai { opacity: .7; } .askai:hover { opacity: 1; }
+  .chattarget { font-size: 12px; color: #9fb0c8; padding: 4px 8px; margin-bottom: 6px;
+                background: rgba(120,160,255,.12); border-radius: 6px; }
+  .chattarget b { color: #cfe0ff; }
+  .chattarget .x { float: right; cursor: pointer; opacity: .6; } .chattarget .x:hover { opacity: 1; }
 </style>
 
 <script>
@@ -801,7 +807,9 @@ function cellHeader(c) {
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
-    '<span class="cellacts">' + editSrc +
+    '<span class="cellacts">' +
+      `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
+      editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
       `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
@@ -1503,9 +1511,26 @@ function updateStaleBadge(state) {
 // slate.* tools (so the cells update through the normal SSE path).
 let agentMsgs = [];   // {role:'user'|'assistant'|'tool'|'err', text, done?}
 let agentWorking = false, agentT0 = 0, _agentTick = null, _stopArmed = false;
+let _chatTarget = null;   // per-cell ✨: chat turns scoped to this cell id (+ its dep cone)
 function toggleAgent() {
   const p = document.getElementById('agentpanel'); p.classList.toggle('open');
   if (p.classList.contains('open')) { document.getElementById('apin').focus(); setWorking(agentWorking); }
+}
+// Per-cell ✨ — scope chat turns to a cell; the server sends its source/output + upstream
+// dependency cone to the agent. Persists until cleared, so follow-ups stay focused.
+function askCell(id) {
+  _chatTarget = id;
+  document.getElementById('agentpanel').classList.contains('open') || toggleAgent();
+  _updateChatTarget();
+  document.getElementById('apin').focus();
+}
+function clearChatTarget() { _chatTarget = null; _updateChatTarget(); }
+function _updateChatTarget() {
+  const el = document.getElementById('chattarget'); if (!el) return;
+  if (_chatTarget) {
+    el.style.display = '';
+    el.innerHTML = '↳ focused on cell <b>' + _esca(_chatTarget) + '</b><span class="x" onclick="clearChatTarget()" title="unfocus">✕</span>';
+  } else { el.style.display = 'none'; el.innerHTML = ''; }
 }
 // Drive the breathing "working" indicator + elapsed timer. Pulses the closed
 // pane's 💬 button so activity is visible even when the panel isn't open.
@@ -1564,7 +1589,7 @@ async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
   inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
   try {
-    const r = await api('POST', '/api/chat', { text });
+    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '' });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
   } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); agentStatus(''); setWorking(false); }
 }

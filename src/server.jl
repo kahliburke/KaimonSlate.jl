@@ -855,6 +855,46 @@ end
 # operator* — driving the reactive notebook one cell at a time through the `slate.*`
 # tools and reading each result — instead of a blind file-author that composes
 # everything in its head and dumps one big Edit.
+# DAG-scoped context for a per-cell ✨ turn: the target cell + its upstream dependency
+# cone (what it reads, transitively, with sources) + downstream impact. Lets the agent
+# work focused — edit this cell, branch upstream only when the cause is a precursor — and
+# it knows WHERE the precursors are instead of grepping.
+function _cell_context(nb::LiveNotebook, id::AbstractString)
+    cells = nb.report.cells
+    i = findfirst(c -> c.id == id, cells)
+    i === nothing && return ""
+    byid = Dict(c.id => c for c in cells)
+    up = Set{String}(); frontier = String[id]
+    while !isempty(frontier)
+        c = get(byid, pop!(frontier), nothing); c === nothing && continue
+        for d in c.deps
+            (d == id || d in up) && continue
+            push!(up, d); push!(frontier, d)
+        end
+    end
+    down = setdiff(dependents_of(nb.report, Set([id])), Set([id]))
+    io = IOBuffer()
+    println(io, "The user is FOCUSED on cell `", id, "`. Work on it directly; branch to an upstream",
+            " cell only if the real cause is a precursor. `slate_view(\"", id, "\")` shows its figure;",
+            " `slate_read` shows full state.")
+    tc = cells[i]
+    println(io, "\n--- cell `", id, "` source ---\n", tc.source)
+    o = tc.output
+    if o !== nothing
+        o.exception !== nothing ? println(io, "→ ERROR: ", first(split(o.exception, "\n"))) :
+            (isempty(o.value_repr) || println(io, "→ ", o.value_repr))
+    end
+    upcells = [c for c in cells if c.id in up]
+    if !isempty(upcells)
+        println(io, "\n--- upstream cells it depends on (define what it reads) ---")
+        for c in upcells
+            println(io, "[`", c.id, "`] ", replace(strip(first(split(c.source, "\n"))), r"\s+" => " "))
+        end
+    end
+    isempty(down) || println(io, "\n--- changing it re-runs downstream: ", join(sort(collect(down)), ", "))
+    return String(take!(io))
+end
+
 function _agent_system_prompt(nb::LiveNotebook)
     return """
     You are pair-building a LIVE reactive Julia notebook with the user, in real time.
@@ -1330,6 +1370,8 @@ function _make_router(h::Hub)
         isempty(strip(text)) && return _json(Dict("ok" => false, "error" => "empty message"))
         _agent_available() ||
             return _json(Dict("ok" => false, "error" => "agent service unavailable (run inside Kaimon, with a logged-in `claude` CLI)"))
+        tgt = String(get(_body(req), "target", ""))   # per-cell ✨: scope the turn to a cell + its dep cone
+        isempty(tgt) || (text = _cell_context(nb, tgt) * "\n\nUSER REQUEST:\n" * text)
         try
             aid = _ensure_agent!(nb)
             res = _agent_call(:agent_send, Dict{String,Any}("agent_id" => aid, "text" => text))
