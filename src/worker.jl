@@ -98,6 +98,22 @@ function __slate_project_deps()
     return out
 end
 
+"Add or remove a package in the worker's OWN active project (the notebook's deps).
+`op` is \"add\" or \"rm\". Returns `{ok, message}`."
+function __slate_pkg(op, name)
+    nm = strip(String(name))
+    isempty(nm) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    try
+        o = String(op)
+        o == "add" ? Pkg.add(nm) :
+        o == "rm"  ? Pkg.rm(nm) :
+        return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
+        return Dict{String,Any}("ok" => true, "message" => "$(o == "add" ? "added" : "removed") $nm")
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
 "GateTools exposed to the KaimonSlate server."
 function tools()
     return KaimonGate.GateTool[
@@ -108,6 +124,7 @@ function tools()
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_harvest_docs", __slate_harvest_docs),
         KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),
+        KaimonGate.GateTool("__slate_pkg", __slate_pkg),
     ]
 end
 

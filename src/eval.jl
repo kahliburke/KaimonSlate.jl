@@ -154,6 +154,18 @@ distinct project, so it returns nothing (only `using`'d packages get indexed the
 project_deps(::InProcessKernel, ::Report) = Dict{String,Any}[]
 
 """
+    pkg_op(kernel, report, op, name) -> Dict{String,Any}
+
+Add (`op="add"`) or remove (`op="rm"`) a package in the kernel's active project — the
+notebook's own dependency environment. The gate kernel mutates its worker's project;
+the in-process kernel has NO distinct notebook project (cells eval in the extension), so
+it refuses rather than touch the host environment. Returns `{ok, message}`.
+"""
+pkg_op(::InProcessKernel, ::Report, ::AbstractString, ::AbstractString) =
+    Dict{String,Any}("ok" => false,
+        "message" => "This notebook isn't inside a Julia project (in-process kernel), so it has no package environment to manage. Open it inside a project directory to add packages.")
+
+"""
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell
 
 Evaluate one cell through `kernel`. Markdown cells are inert (marked `FRESH`). A

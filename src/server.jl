@@ -69,6 +69,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     _history!(nb; source = "open")
     # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
     register_refresh!(r.id, vars -> server_refresh(nb, vars))
+    _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     _autoindex!(nb)                      # background: index project deps + used packages' docs
     return nb
 end
@@ -795,6 +796,35 @@ const _AGENT_CREW = Dict{String,String}()
 const _AGENT_LOG = Dict{String,Vector{String}}()
 const _AGENT_LOG_CAP = 4000
 
+# Durable chat transcript: the in-memory `_AGENT_LOG` replays across a browser reload,
+# but is lost on a SERVER restart. Mirror it to a per-notebook JSONL (keyed by abspath,
+# in the cache dir) so the conversation survives a restart too. Loaded on open; appended
+# as each (non-delta) envelope is relayed; compacted to the cap; wiped by "clear chat".
+_chat_log_file(path) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+                                "kaimonslate", "chat", SlateHistory._sha(abspath(String(path)))[1:16] * ".jsonl")
+function _load_chat_log!(nb::LiveNotebook)
+    f = _chat_log_file(nb.path)
+    isfile(f) || return
+    try
+        lines = filter(!isempty, readlines(f))
+        length(lines) > _AGENT_LOG_CAP && (lines = last(lines, _AGENT_LOG_CAP))
+        lock(_AGENT_LOCK) do; _AGENT_LOG[nb.id] = collect(String, lines); end
+    catch e
+        @warn "slate: chat-log load failed" exception = (e, catch_backtrace())
+    end
+    return nothing
+end
+_append_chat_log(nb::LiveNotebook, line::AbstractString) =
+    (f = _chat_log_file(nb.path); try; mkpath(dirname(f)); open(f, "a") do io; println(io, line); end; catch; end; nothing)
+_rewrite_chat_log(nb::LiveNotebook, lines) =
+    (f = _chat_log_file(nb.path); try; mkpath(dirname(f)); open(f, "w") do io; for l in lines; println(io, l); end; end; catch; end; nothing)
+function _clear_chat_log!(nb::LiveNotebook)
+    lock(_AGENT_LOCK) do; delete!(_AGENT_LOG, nb.id); end
+    f = _chat_log_file(nb.path)
+    try; isfile(f) && rm(f); catch; end
+    return nothing
+end
+
 _agent_available() = isdefined(Main, :Kaimon) &&
     isdefined(getfield(Main, :Kaimon), :KaimonGate) &&
     isdefined(getfield(Main, :Kaimon).KaimonGate, :call_tool)
@@ -979,6 +1009,97 @@ function cell_image(nb::LiveNotebook, cell::AbstractString)
     return _snapshot(nb.id, cell)
 end
 
+# ── Static export (HTML / print-to-PDF) ──────────────────────────────────────
+# A self-contained HTML document of the notebook: markdown rendered, code shown,
+# outputs embedded (images as base64), client-rendered ECharts frozen to their latest
+# snapshot PNG, interactive tables flattened to static HTML. KaTeX from a CDN typesets
+# math. No server, no scripts to boot — openable offline and printable to PDF.
+const _EXPORT_CSS = """
+:root{--bg:#0d1120;--bg2:#141828;--bg3:#1a1e2e;--border:#2a2e40;--text:#d4d8e8;--dim:#6a7090;
+  --accent:#569cd6;--green:#56d364;--red:#e57575;--gold:#ffd700;}
+*{box-sizing:border-box;} body{background:var(--bg);color:var(--text);margin:0;
+  font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
+.export{max-width:900px;margin:0 auto;padding:36px 24px 80px;}
+.exp-title{color:#fff;font-size:1.9rem;margin:0 0 2px;}
+.exp-meta{color:var(--dim);font-size:.78rem;font-family:monospace;margin-bottom:24px;
+  border-bottom:1px solid var(--border);padding-bottom:14px;}
+.exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
+.exp-md table,.exp-table{border-collapse:collapse;margin:8px 0;font-size:.84rem;}
+.exp-md td,.exp-md th,.exp-table td,.exp-table th{border:1px solid var(--border);padding:4px 10px;text-align:left;}
+.exp-table th{background:var(--bg3);color:var(--dim);} .exp-table td{font-variant-numeric:tabular-nums;}
+.exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
+.exp-code{margin:14px 0;border:1px solid var(--border);border-radius:8px;background:var(--bg2);overflow:hidden;}
+.exp-src{margin:0;padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);overflow-x:auto;}
+.exp-src code{font-family:'Cascadia Code','Fira Code',monospace;font-size:.82rem;color:var(--text);white-space:pre;}
+.exp-out{font-size:.86rem;} .exp-out .out,.exp-out .val,.exp-out .err{padding:8px 14px;}
+.exp-out .out{color:var(--dim);} .exp-out .val{color:var(--green);} .exp-out .err{color:var(--red);}
+.exp-out pre{margin:0;white-space:pre-wrap;} .exp-out .dispwrap,.disp.img{padding:10px 14px;}
+.disp.img img{max-width:100%;height:auto;border-radius:4px;display:block;}
+.disp.latex{padding:6px 14px;overflow-x:auto;} .katex{font-size:1.1em;}
+@media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
+"""
+
+function _export_table_html(spec)
+    cols = get(spec, "columns", Any[])
+    rows = get(spec, "rows", Any[])
+    io = IOBuffer()
+    print(io, "<table class=\"exp-table\"><thead><tr>")
+    for c in cols
+        nm = c isa AbstractDict ? get(c, "name", "") : c
+        print(io, "<th>", _esc(string(nm)), "</th>")
+    end
+    print(io, "</tr></thead><tbody>")
+    for r in rows
+        print(io, "<tr>")
+        for v in r
+            print(io, "<td>", v === nothing ? "" : _esc(string(v)), "</td>")
+        end
+        print(io, "</tr>")
+    end
+    print(io, "</tbody></table>")
+    return String(take!(io))
+end
+
+function export_html(nb::LiveNotebook; include_source::Bool = true)
+    lock(nb.lock) do
+        title = _esc(nb.report.title)
+        io = IOBuffer()
+        print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
+              "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
+              "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
+              "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
+              "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
+              "<style>", _EXPORT_CSS, "</style></head><body><article class=\"export\">")
+        print(io, "<h1 class=\"exp-title\">", title, "</h1>")
+        print(io, "<div class=\"exp-meta\">Exported from Kaimon Slate · ", _esc(abspath(nb.path)), "</div>")
+        for c in nb.report.cells
+            if c.kind == MARKDOWN
+                print(io, "<section class=\"exp-md\">", markdown_html(c.source, c.interp), "</section>")
+            else
+                print(io, "<section class=\"exp-code\">")
+                (include_source && !isempty(strip(c.source))) &&
+                    print(io, "<pre class=\"exp-src\"><code>", _esc(c.source), "</code></pre>")
+                print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
+                if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot
+                    png = _snapshot(nb.id, c.id)
+                    png === nothing || print(io, "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,",
+                                                  Base64.base64encode(png), "\"/></div>")
+                end
+                for spec in _table_specs(c)
+                    print(io, _export_table_html(spec))
+                end
+                print(io, "</section>")
+            end
+        end
+        print(io, "</article><script>window.addEventListener('load',function(){",
+              "if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[",
+              "{left:'\$\$',right:'\$\$',display:true},{left:'\\\\[',right:'\\\\]',display:true},",
+              "{left:'\$',right:'\$',display:false},{left:'\\\\(',right:'\\\\)',display:false}],throwOnError:false});});",
+              "</script></body></html>")
+        return String(take!(io))
+    end
+end
+
 # The notebook-priming system prompt, set once at `agent_open` (the `system_prompt`
 # arg → `claude --append-system-prompt`). It makes the agent a *live notebook
 # operator* — driving the reactive notebook one cell at a time through the `slate.*`
@@ -988,6 +1109,29 @@ end
 # cone (what it reads, transitively, with sources) + downstream impact. Lets the agent
 # work focused — edit this cell, branch upstream only when the cause is a precursor — and
 # it knows WHERE the precursors are instead of grepping.
+# Inline-reference expansion: a user can mention a cell by `@id` in chat (the UI offers
+# autocomplete on `@`). For each @token that resolves to a real cell id, append that cell's
+# source + current result, so the agent has the referenced cells in hand without surveying
+# the whole notebook. Returns "" when nothing resolves.
+function _mention_context(nb::LiveNotebook, text::AbstractString)
+    byid = Dict(c.id => c for c in nb.report.cells)
+    refs = String[]
+    for m in eachmatch(r"@([A-Za-z0-9_]+)", String(text))
+        id = String(m.captures[1])
+        (haskey(byid, id) && !(id in refs)) && push!(refs, id)
+    end
+    isempty(refs) && return ""
+    io = IOBuffer()
+    print(io, "══ REFERENCED CELLS — the user mentioned these by @id; here is each one's source and current result. ══")
+    for id in refs
+        c = byid[id]
+        kind = c.kind == MARKDOWN ? "md" : "code"
+        print(io, "\n\n--- @", id, " [", kind, "] ---\n", rstrip(c.source))
+        c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
+    end
+    return String(take!(io))
+end
+
 function _cell_context(nb::LiveNotebook, id::AbstractString)
     cells = nb.report.cells
     i = findfirst(c -> c.id == id, cells)
@@ -1092,7 +1236,8 @@ end
 # crew agents share one notebook; `_AGENT_ROUTES` already maps each id → this nb.
 # `model` ("" = service default = sonnet) binds at spawn only — an already-running
 # crew agent keeps its model until reaped (the UI kills it on a model-setting change).
-function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::AbstractString = "")
+function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::AbstractString = "",
+                        permission::AbstractString = "")
     label = String(crew)
     existing = get(nb.agents, label, "")
     isempty(existing) || return existing
@@ -1100,11 +1245,13 @@ function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::Abst
     open_args = Dict{String,Any}(
             "cwd" => dirname(abspath(nb.path)),
             "id"  => aid,
-            # Kaimon M4 permission preset. "lab" allows the agent the Kaimon MCP tools
-            # (slate.*/ex/qdrant) + file edits — enough to drive + introspect the
-            # notebook, without arbitrary shell/web. Runs unattended (no prompt to stall
-            # a headless agent); the agent_* recursion guard is always applied.
-            "permission" => "lab",
+            # Kaimon M4 permission preset. "lab" (the default) allows the agent the Kaimon
+            # MCP tools (slate.*/ex/qdrant) + file edits — enough to drive + introspect the
+            # notebook, without arbitrary shell/web. Runs unattended (no prompt to stall a
+            # headless agent); the agent_* recursion guard is always applied. The user can
+            # pick another preset in Settings ("auto"/"default"/"bypass"); it binds at spawn,
+            # so a change reaps the agent (chat-kill) and the next turn respawns on it.
+            "permission" => (isempty(permission) ? "lab" : String(permission)),
             "system_prompt" => _agent_system_prompt(nb))
     isempty(model) || (open_args["model"] = model)   # omit → Kaimon's default (sonnet)
     res = try
@@ -1191,11 +1338,15 @@ function relay_agent_event(channel::AbstractString, data)
     is_delta = kind == "tool_input_delta" ||
         (env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true))
     if !is_delta
+        compact = false; bufcopy = String[]
         lock(_AGENT_LOCK) do
             buf = get!(_AGENT_LOG, nb.id, String[])
             push!(buf, s)
-            length(buf) > _AGENT_LOG_CAP && popfirst!(buf)
+            length(buf) > _AGENT_LOG_CAP && (popfirst!(buf); compact = true; bufcopy = copy(buf))
         end
+        # Mirror to disk (outside the lock): append the new line, or compact the file to
+        # the capped buffer once we start dropping the oldest (bounds the file to the cap).
+        compact ? _rewrite_chat_log(nb, bufcopy) : _append_chat_log(nb, s)
     end
     return nothing
 end
@@ -1516,6 +1667,41 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/controls", req -> _withnb(h, req, nb -> begin
         set_controls_map!(nb, get(_body(req), "map", Dict{String,Any}())); _json(state_json(nb))
     end))
+    # Static export: a self-contained HTML document of the notebook (also the print →
+    # PDF path — the browser's print dialog saves it as PDF). `?dl=1` downloads; `?source=0`
+    # hides code. No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.
+    HTTP.register!(router, "GET", "/api/{id}/export.html", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        html = export_html(nb; include_source = get(qp, "source", "1") != "0")
+        headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
+        if get(qp, "dl", "0") == "1"
+            fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
+            push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
+        end
+        HTTP.Response(200, headers, html)
+    end))
+    # ── Notebook packages ─────────────────────────────────────────────────────
+    # List the notebook project's direct deps; add/remove a package in that project
+    # (the worker's active env). `manageable` is false for an in-process kernel (no
+    # project). A successful op restales + re-runs so cells using the package update.
+    HTTP.register!(router, "GET", "/api/{id}/packages", req -> _withnb(h, req, nb -> begin
+        deps = try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end
+        _json(Dict("packages" => deps, "manageable" => !(nb.kernel isa InProcessKernel)))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
+        b = _body(req); op = String(get(b, "op", "")); name = String(get(b, "name", ""))
+        (op in ("add", "rm")) || return _json(Dict("ok" => false, "message" => "bad op '$op'"))
+        res = lock(nb.lock) do
+            r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name)
+            if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
+                for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
+                eval_stale!(nb.report, nb.kernel)
+            end
+            r
+        end
+        get(res, "ok", false) === true && (_autoindex!(nb); _agent_push!(nb))
+        _json(res)
+    end))
     # The worker's stdout/stderr log — what the kernel is doing when evaluating cells.
     HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb ->
         _json(Dict("log" => worker_log(nb), "worker" => _kernel_status(nb.kernel)))))
@@ -1547,9 +1733,12 @@ function _make_router(h::Hub)
         tgt = String(get(_body(req), "target", ""))   # per-cell ✨: scope the turn to a cell + its dep cone
         crew = String(get(_body(req), "crew", ""))     # crew label → route to that crew member's agent ("" = solo)
         model = String(get(_body(req), "model", ""))   # agent model ("" = service default = sonnet); binds at spawn
+        perm = String(get(_body(req), "permission", "")) # permission preset (lab/auto/default/bypass); binds at spawn
+        ment = _mention_context(nb, text)              # @id cell references → inline those cells' context
+        isempty(ment) || (text = ment * "\n\n" * text)
         isempty(tgt) || (text = _cell_context(nb, tgt) * "\n\nUSER REQUEST:\n" * text)
         try
-            aid = _ensure_agent!(nb; crew = crew, model = model)
+            aid = _ensure_agent!(nb; crew = crew, model = model, permission = perm)
             res = _agent_call(:agent_send, Dict{String,Any}("agent_id" => aid, "text" => text))
             _json(Dict("ok" => true, "agent_id" => aid, "crew" => crew, "turn" => get(res, "turn", nothing)))
         catch e
@@ -1582,6 +1771,18 @@ function _make_router(h::Hub)
         end
         _reap_agents!(nb; keep_log = true)   # agents gone, transcript stays visible
         _json(Dict("ok" => true, "killed" => true))
+    end))
+    # Clear the conversation entirely: interrupt + reap every agent, then wipe the
+    # transcript from memory AND disk. The next message starts a clean chat.
+    HTTP.register!(router, "POST", "/api/{id}/chat-clear", req -> _withnb(h, req, nb -> begin
+        if _agent_available() && !isempty(nb.agents)
+            for aid in collect(values(nb.agents))
+                try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => aid)); catch; end
+            end
+        end
+        _reap_agents!(nb; keep_log = false)   # agents gone + in-memory log dropped
+        _clear_chat_log!(nb)                  # and the on-disk transcript
+        _json(Dict("ok" => true, "cleared" => true))
     end))
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin

@@ -43,8 +43,25 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .loading.show{display:flex;}
 .spinner{width:38px;height:38px;border:3px solid #2a2e40;border-top-color:#569cd6;border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
-.loading .lmsg{color:#d4d8e8;font-size:.9rem;}</style></head>
-<body><h1>📓 Kaimon Slate — notebooks</h1>
+.loading .lmsg{color:#d4d8e8;font-size:.9rem;}
+.hero{display:flex;align-items:center;gap:16px;margin:0 0 22px;}
+.hero .logo{width:50px;height:50px;flex:0 0 auto;filter:drop-shadow(0 2px 10px rgba(86,156,214,.25));}
+.hero h1{font-size:1.6rem;margin:0;line-height:1.1;font-weight:700;letter-spacing:-.01em;
+  background:linear-gradient(90deg,#7cc0ff 10%,#c586c0 55%,#56d364 100%);-webkit-background-clip:text;background-clip:text;color:transparent;}
+.hero .tag{color:#7a82a4;font-size:.84rem;margin-top:3px;}
+.nb,.ritem{transition:border-color .14s,transform .14s,box-shadow .14s;}
+.nb:hover,.ritem:hover{transform:translateX(2px);box-shadow:0 4px 18px rgba(0,0,0,.28);}</style></head>
+<body>
+<div class="hero">
+  <svg class="logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+    <rect x="2.5" y="2.5" width="43" height="43" rx="12" fill="#141828" stroke="#2a2e40" stroke-width="1.5"/>
+    <path d="M16 15 L33 20 M33 20 L22 34 M16 15 L22 34" stroke="#566089" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="16" cy="15" r="4" fill="#7cc0ff"/>
+    <circle cx="33" cy="20" r="4" fill="#c586c0"/>
+    <circle cx="22" cy="34" r="4" fill="#56d364"/>
+  </svg>
+  <div><h1>Kaimon Slate</h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
+</div>
 <div class="topcols">
 <div class="open">
   <div class="pathwrap">

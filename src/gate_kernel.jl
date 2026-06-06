@@ -241,6 +241,18 @@ function project_deps(k::GateKernel, report::Report)
     return Dict{String,Any}[Dict{String,Any}(String(k) => v for (k, v) in r) for r in wire]
 end
 
+# Add/remove a package in the worker's active project (notebook-local deps).
+function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::AbstractString)
+    prepare!(k, report)
+    try
+        r = _tool(k, "__slate_pkg", Dict{String,Any}("op" => String(op), "name" => String(name)))
+        r === nothing && return Dict{String,Any}("ok" => false, "message" => "no response from worker")
+        return Dict{String,Any}(String(kk) => v for (kk, v) in r)
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
 function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)
     prepare!(k, report)
     try
