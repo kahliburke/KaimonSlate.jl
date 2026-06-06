@@ -34,6 +34,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
                       find_live, notebook_digest,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
+                      acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image
 
 export serve_notebook, LiveNotebook
@@ -168,40 +169,76 @@ function create_tools(GateTool::Type)
     `kind` = "code" or "md". Add ONE cell at a time and read its result before the
     next — do not compose the whole notebook up front.
     """
-    function add_cell(notebook::String, source::String, after::String = "", kind::String = "code")::String
+    function add_cell(notebook::String, source::String, after::String = "", kind::String = "code",
+                      token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_add_cell!(nb, source; after = after, kind = kind)
+        return agent_add_cell!(nb, source; after = after, kind = kind,
+                               token = token, expected_version = expected_version)
     end
 
     """
-        edit_cell(notebook, cell, source) -> String
+        edit_cell(notebook, cell, source, token, expected_version) -> String
 
     Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
-    that errored, or to revise one in place.
+    that errored, or to revise one in place. `token`/`expected_version` are for
+    multi-agent safety — see `add_cell` (omit when you're the only agent).
     """
-    function edit_cell(notebook::String, cell::String, source::String)::String
+    function edit_cell(notebook::String, cell::String, source::String,
+                       token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_edit_cell!(nb, cell, source)
+        return agent_edit_cell!(nb, cell, source; token = token, expected_version = expected_version)
     end
 
     """
-        run(notebook, cell) -> String
+        run(notebook, cell, token, expected_version) -> String
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
     """
-    function run_cell(notebook::String, cell::String)::String
+    function run_cell(notebook::String, cell::String,
+                      token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_run!(nb, cell)
+        return agent_run!(nb, cell; token = token, expected_version = expected_version)
     end
 
     """
-        delete_cell(notebook, cell) -> String
+        delete_cell(notebook, cell, token, expected_version) -> String
 
     Delete cell `cell` from the notebook.
     """
-    function delete_cell(notebook::String, cell::String)::String
+    function delete_cell(notebook::String, cell::String,
+                         token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_delete_cell!(nb, cell)
+        return agent_delete_cell!(nb, cell; token = token, expected_version = expected_version)
+    end
+
+    # ── Multi-agent write safety (MULTIAGENT.md §3) ───────────────────────────
+    # Only needed when SEVERAL agents drive one notebook. A solo agent ignores all of
+    # this (omit `token`/`expected_version` and the ops behave exactly as before).
+
+    """
+        acquire_floor(notebook, holder) -> String
+
+    Claim the notebook's BUILD-FLOOR before a run of edits, so no other agent can
+    commit underneath you ("one voice at a time"). Returns a `token` — pass it to
+    `add_cell`/`edit_cell`/`run`/`delete_cell` while you work, then `release_floor`.
+    The lease auto-expires after a few minutes idle. If another agent holds it, you
+    get told who — coordinate or retry.
+    """
+    function acquire_floor(notebook::String, holder::String = "agent")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        tok, why = acquire_floor!(nb, holder)
+        tok === nothing && return "⛔ build-floor $why. Try again shortly, or coordinate via the team."
+        return "🔓 build-floor acquired by '$holder' — token=$tok. Pass it as `token` to every edit, then slate.release_floor. Auto-expires after $(Int(NotebookServer.FLOOR_TTL))s idle."
+    end
+
+    """
+        release_floor(notebook, token) -> String
+
+    Release the build-floor you hold (by its `token`) so other agents can commit.
+    """
+    function release_floor(notebook::String, token::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return release_floor!(nb, token) ? "✅ build-floor released." : "(you don't hold the build-floor — nothing to release)"
     end
 
     """
@@ -283,6 +320,8 @@ function create_tools(GateTool::Type)
         GateTool("edit_cell", edit_cell),
         GateTool("run", run_cell),
         GateTool("delete_cell", delete_cell),
+        GateTool("acquire_floor", acquire_floor),
+        GateTool("release_floor", release_floor),
         GateTool("view", view_cell),
         GateTool("index_docs", index_docs),
         GateTool("search_docs", search_docs_tool),
