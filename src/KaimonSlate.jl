@@ -169,7 +169,7 @@ function create_tools(GateTool::Type)
     `kind` = "code" or "md". Add ONE cell at a time and read its result before the
     next — do not compose the whole notebook up front.
     """
-    function add_cell(notebook::String, source::String, after::String = "", kind::String = "code",
+    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code",
                       token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
         return agent_add_cell!(nb, source; after = after, kind = kind,
@@ -183,7 +183,7 @@ function create_tools(GateTool::Type)
     that errored, or to revise one in place. `token`/`expected_version` are for
     multi-agent safety — see `add_cell` (omit when you're the only agent).
     """
-    function edit_cell(notebook::String, cell::String, source::String,
+    function edit_cell(notebook::String, cell::String, source::String;
                        token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
         return agent_edit_cell!(nb, cell, source; token = token, expected_version = expected_version)
@@ -194,7 +194,7 @@ function create_tools(GateTool::Type)
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
     """
-    function run_cell(notebook::String, cell::String,
+    function run_cell(notebook::String, cell::String;
                       token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
         return agent_run!(nb, cell; token = token, expected_version = expected_version)
@@ -205,7 +205,7 @@ function create_tools(GateTool::Type)
 
     Delete cell `cell` from the notebook.
     """
-    function delete_cell(notebook::String, cell::String,
+    function delete_cell(notebook::String, cell::String;
                          token::String = "", expected_version::Int = -1)::String
         nb, err = _nb(notebook); nb === nothing && return err
         return agent_delete_cell!(nb, cell; token = token, expected_version = expected_version)
@@ -224,7 +224,7 @@ function create_tools(GateTool::Type)
     The lease auto-expires after a few minutes idle. If another agent holds it, you
     get told who — coordinate or retry.
     """
-    function acquire_floor(notebook::String, holder::String = "agent")::String
+    function acquire_floor(notebook::String; holder::String = "agent")::String
         nb, err = _nb(notebook); nb === nothing && return err
         tok, why = acquire_floor!(nb, holder)
         tok === nothing && return "⛔ build-floor $why. Try again shortly, or coordinate via the team."
