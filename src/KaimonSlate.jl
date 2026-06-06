@@ -34,7 +34,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
                       find_live, notebook_digest,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
-                      index_docs!, search_docs
+                      index_docs!, search_docs, cell_image
 
 export serve_notebook, LiveNotebook
 
@@ -252,17 +252,12 @@ function create_tools(GateTool::Type)
     """
     function view_cell(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        i = findfirst(c -> c.id == cell, nb.report.cells)
-        i === nothing && return "No cell '$cell' in '$notebook' (use slate.read to list cells)."
-        o = nb.report.cells[i].output
-        o === nothing && return "Cell '$cell' has no output yet — run it first."
-        png = nothing
-        for ch in o.display
-            if ch.mime == "image/png"; png = ch.data; break; end
-        end
-        png === nothing && return "Cell '$cell' has no raster figure to view. Return a CairoMakie figure for a viewable image; ECharts/tables/text → use slate.read."
+        findfirst(c -> c.id == cell, nb.report.cells) === nothing &&
+            return "No cell '$cell' in '$notebook' (use slate.read to list cells)."
+        png = cell_image(nb, cell)   # CairoMakie raster OR client-captured ECharts snapshot
+        png === nothing && return "Cell '$cell' has no figure to view yet — run a plotting cell (CairoMakie or an ECharts chart); text/data → use slate.read."
         isdefined(Main, :Kaimon) || return "Image view needs the Kaimon host (unavailable in standalone mode)."
-        return getfield(Main, :Kaimon).KaimonGate.image_result(Vector{UInt8}(png); text = "Cell '$cell' — rendered figure")
+        return getfield(Main, :Kaimon).KaimonGate.image_result(png; text = "Cell '$cell' — rendered figure")
     end
 
     # Auto-start the hub at extension init so the server is always up on its port

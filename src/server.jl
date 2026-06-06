@@ -10,7 +10,7 @@ the engine (`ReportEngine`) and per-cell renderer (`ReportRender`).
 module NotebookServer
 
 using HTTP, JSON, FileWatching
-import REPL
+import REPL, Base64
 using ..ReportEngine
 using ..ReportRender
 
@@ -19,6 +19,7 @@ include("history.jl")   # module SlateHistory — durable content-addressed time
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
 export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!
+export cell_image, set_snapshot!
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 const _INDEX_ASSET = joinpath(@__DIR__, "assets", "index.html")
@@ -812,6 +813,43 @@ function _autoindex!(nb::LiveNotebook)
     return nothing
 end
 
+# ── Client-rendered image snapshots ───────────────────────────────────────────
+# Client-side visuals (ECharts) only render in the browser, so the SPA captures their
+# PNG from the canvas and posts it here, keyed by (notebook, cell). That gives a
+# UNIFORM image interface: `cell_image` returns a PNG whether the figure was produced
+# server-side (CairoMakie's `image/png`) or client-side (ECharts) — one approach for
+# the agent (`slate_view`) today, and the source of figure bytes for PDF export later.
+const _SNAPSHOTS = Dict{String,Dict{String,Vector{UInt8}}}()   # nbid → cellid → latest PNG
+const _SNAP_LOCK = ReentrantLock()
+function set_snapshot!(nbid::AbstractString, cell::AbstractString, png::Vector{UInt8})
+    lock(_SNAP_LOCK) do
+        get!(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}())[String(cell)] = png
+    end
+    return nothing
+end
+_snapshot(nbid, cell) = lock(_SNAP_LOCK) do
+    get(get(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}()), String(cell), nothing)
+end
+
+"""
+    cell_image(nb, cell) -> Vector{UInt8} | nothing
+
+A PNG of the cell's rendered figure, regardless of where it was drawn: the server-side
+raster (CairoMakie `image/png`) if present, else the latest client-captured snapshot
+(ECharts). `nothing` if the cell has no viewable figure.
+"""
+function cell_image(nb::LiveNotebook, cell::AbstractString)
+    i = findfirst(c -> c.id == cell, nb.report.cells)
+    i === nothing && return nothing
+    o = nb.report.cells[i].output
+    if o !== nothing
+        for ch in o.display
+            ch.mime == "image/png" && return copy(ch.data)
+        end
+    end
+    return _snapshot(nb.id, cell)
+end
+
 # The notebook-priming system prompt, set once at `agent_open` (the `system_prompt`
 # arg → `claude --append-system-prompt`). It makes the agent a *live notebook
 # operator* — driving the reactive notebook one cell at a time through the `slate.*`
@@ -1327,6 +1365,13 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
         _json(Dict("results" => isempty(q) ? Dict{String,Any}[] : search_docs(String(q))))
+    end))
+    # Client-rendered figure snapshot (ECharts canvas → PNG) — feeds slate_view + PDF.
+    HTTP.register!(router, "POST", "/api/{id}/snapshot", req -> _withnb(h, req, nb -> begin
+        b = _body(req); cell = String(get(b, "cell", "")); img = String(get(b, "image", ""))
+        (isempty(cell) || isempty(img)) && return _json(Dict("ok" => false))
+        try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(img))); catch; return _json(Dict("ok" => false)); end
+        _json(Dict("ok" => true))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))

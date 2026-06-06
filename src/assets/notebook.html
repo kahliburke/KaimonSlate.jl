@@ -441,6 +441,23 @@ const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-c
 const srcEditHTML = () => '<div class="srcedit" style="display:none"><textarea></textarea>' +
   '<div class="mdhint">⇧⏎ commit · esc cancel</div></div>';
 
+// Capture a cell's (first) ECharts canvas as a PNG and stash it server-side, so the
+// agent's slate_view — and future PDF export — get a uniform image for client-rendered
+// charts, the same way CairoMakie figures come through. Debounced so animation settles
+// and reactive ticks don't spam; raw fetch so it doesn't pulse the busy indicator.
+const _snapPending = {};
+function _snapCell(cellId, insts) {
+  clearTimeout(_snapPending[cellId]);
+  _snapPending[cellId] = setTimeout(() => {
+    const inst = insts[0]; if (!inst) return;
+    try {
+      const b64 = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#0e1116' }) || '').split(',')[1];
+      if (b64) fetch(_apipath('/api/snapshot'), { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cell: cellId, image: b64 }) }).catch(() => {});
+    } catch (_) {}
+  }, 700);
+}
+
 // Render/refresh a cell's ECharts. Instances persist across reactive updates, so
 // data changes animate in place (setOption) instead of swapping an image.
 function renderCharts(c) {
@@ -455,6 +472,7 @@ function renderCharts(c) {
     }
     while (host.children.length > specs.length) { host.removeChild(host.lastChild); insts.pop().dispose(); }
     specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
+    if (insts.length) _snapCell(c.id, insts);   // capture PNG → server (uniform slate_view / PDF)
   }
   // Inline `{{ echart(…) }}` placeholders in a markdown cell.
   document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
