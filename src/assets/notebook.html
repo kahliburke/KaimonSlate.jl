@@ -206,6 +206,13 @@ input.toggle:checked::after { left:18px; }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
 .apmsg.img { align-self:flex-start; background:none; padding:0; max-width:100%; }
 .apmsg.img img { max-width:100%; border-radius:8px; display:block; }
+/* Multi-agent crew lanes: a stable hue (--ch) per crew member tints a left accent
+   bar; the badge names the speaker. Solo/default agent ('' crew) renders unchanged. */
+.apmsg.lane { border-left:2px solid hsl(var(--ch,210) 60% 55%); }
+.apmsg.img.lane, .apmsg.tool.lane { padding-left:9px; }
+.crewbadge { display:inline-block; margin-right:6px; padding:0 6px; border-radius:5px;
+  font-size:.66rem; font-weight:600; letter-spacing:.02em; vertical-align:1px;
+  color:hsl(var(--ch,210) 70% 82%); background:hsl(var(--ch,210) 55% 22%); }
 .apworking { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.8rem; padding:6px 2px; }
 .apworking .dots { display:inline-flex; }
 .apworking .dots i { width:6px; height:6px; border-radius:50%; background:var(--accent); margin:0 2px; animation:breathe 1.2s ease-in-out infinite; }
@@ -314,6 +321,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .setmodal .rt { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.82rem; }
 .setmodal input[type=range] { accent-color:var(--accent); }
 .setmodal select { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-size:.84rem; }
+.setmodal .sethint { display:block; color:var(--dim); font-size:.76rem; margin:-6px 0 4px; }
 /* Command palette (⌘K) */
 .palette-bg { position:fixed; inset:0; background:rgba(5,8,16,.5); display:none; justify-content:center; align-items:flex-start; z-index:65; }
 .palette-bg.show { display:flex; }
@@ -404,6 +412,13 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
     <span class="rt"><input type="checkbox" id="setwide"/></span></div>
   <div class="setrow"><label>Theme</label>
     <select id="settheme"><option value="dark">Dark (default)</option></select></div>
+  <div class="setrow"><label>Agent model</label>
+    <select id="setmodel">
+      <option value="">Sonnet (default)</option>
+      <option value="opus">Opus</option>
+      <option value="haiku">Haiku</option>
+    </select></div>
+  <div class="setrow sethint" id="setmodelhint" style="display:none"><span></span>↻ restarts the agent on your next message (chat history kept).</div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
 </div></div>
 <div class="palette-bg" id="cmdbg"><div class="cmdpal">
@@ -1385,8 +1400,20 @@ function openSettings() {
   const th = document.getElementById('settheme');
   th.value = localStorage.getItem('slateTheme') || 'dark';
   th.onchange = () => localStorage.setItem('slateTheme', th.value);   // real themes land later
+  const mdl = document.getElementById('setmodel'), mhint = document.getElementById('setmodelhint');
+  mdl.value = agentModel();
+  mdl.onchange = async () => {
+    localStorage.setItem('slateAgentModel', mdl.value);
+    // Model only binds at spawn — reap the running agent so the next turn respawns on
+    // the new model. chat-kill keeps the transcript; no-ops if no agent is live.
+    mhint.style.display = '';
+    try { await api('POST', '/api/chat-kill', {}); } catch (_) {}
+    setWorking(false);
+  };
   document.getElementById('setbg').classList.add('show');
 }
+// The chosen agent model ('' = server default = sonnet), sent with every chat turn.
+function agentModel() { return localStorage.getItem('slateAgentModel') || ''; }
 function closeSettings() { document.getElementById('setbg').classList.remove('show'); }
 document.getElementById('setbg').addEventListener('mousedown', e => { if (e.target.id === 'setbg') closeSettings(); });
 
@@ -1565,12 +1592,24 @@ function setWorking(on) {
   renderAgentMsgs();
 }
 const _esca = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+// Deterministic hue per crew label so each agent gets a stable lane color.
+function _crewHue(name) { let h = 0; for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
+// A small colored chip naming the speaking crew member (omitted for the solo agent).
+function _crewBadge(crew) {
+  if (!crew) return '';
+  const h = _crewHue(crew);
+  return `<span class="crewbadge" style="--ch:${h}">${_esca(crew)}</span>`;
+}
 function renderAgentMsgs() {
   const el = document.getElementById('apmsgs');
-  let html = agentMsgs.map(m =>
-      m.role === 'img'  ? `<div class="apmsg img"><img src="${m.src}" alt="agent image"></div>`
-    : m.role === 'tool' ? `<div class="apmsg tool">${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}</div>`
-    :                     `<div class="apmsg ${m.role}">${_esca(m.text)}</div>`).join('');
+  let html = agentMsgs.map(m => {
+    const lane = m.crew ? ` lane` : '';
+    const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
+    return (
+      m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
+    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}</div>`
+    :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
+  }).join('');
   if (agentWorking) {
     const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
     html += `<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` +
@@ -1608,7 +1647,7 @@ async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
   inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
   try {
-    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '' });
+    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: agentModel() });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
   } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); agentStatus(''); setWorking(false); }
 }
@@ -1639,6 +1678,7 @@ function agentEvent(env) {
   if (!env) return;
   const d = env.data || {};
   const k = env.kind;
+  const crew = env.crew || '';   // crew label of the speaking agent ('' = solo/default)
   if (k === 'assistant_text' || k === 'thought') {
     // Streaming: delta:true chunks APPEND live; the final delta:false copy REPLACES
     // the streamed block (self-healing any dropped delta). Non-streaming services
@@ -1649,20 +1689,20 @@ function agentEvent(env) {
     const openSame = last && last.role === role && !last.done;
     if (d.delta === true) {
       if (!txt) return;
-      if (!openSame) { last = { role, text: '', streamed: true }; agentMsgs.push(last); }
+      if (!openSame) { last = { role, text: '', streamed: true, crew }; agentMsgs.push(last); }
       last.text += txt; last.streamed = true;
     } else if (openSame && last.streamed) {
       last.text = txt; last.done = true;                 // authoritative copy
     } else {
       if (!txt) return;
-      agentMsgs.push({ role, text: txt, done: true });
+      agentMsgs.push({ role, text: txt, done: true, crew });
     }
   } else if (k === 'tool_use') {
     // Upsert by toolCallId — `tool_use` fires at call-begin (in_progress) and may
     // be re-emitted; don't duplicate. Authoritative input (if present) wins.
     const c = d.call || {};
     let tm = agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
-    if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false }; agentMsgs.push(tm); }
+    if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
     tm.title = c.title || c.kind || tm.title || 'tool';
     tm.text = '⚙ ' + tm.title;
     if (c.rawInput) tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code;
@@ -1682,11 +1722,11 @@ function agentEvent(env) {
     for (const b of (u.content || [])) {
       const inner = b && b.content;
       if (inner && inner.type === 'image' && inner.data)
-        agentMsgs.push({ role: 'img', src: `data:${inner.mimeType || 'image/png'};base64,${inner.data}` });
+        agentMsgs.push({ role: 'img', src: `data:${inner.mimeType || 'image/png'};base64,${inner.data}`, crew });
     }
   } else if (k === 'plan') {
     const lines = (d.entries || []).map(e => `• ${e.content}${e.status === 'completed' ? ' ✓' : ''}`).join('\n');
-    if (lines) agentMsgs.push({ role: 'tool', text: '📋 plan\n' + lines, done: true });
+    if (lines) agentMsgs.push({ role: 'tool', text: '📋 plan\n' + lines, done: true, crew });
   } else if (k === 'status') {
     agentStatus(d.status === 'working' ? 'working…' : (d.status || ''));
     return;

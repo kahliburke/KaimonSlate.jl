@@ -35,8 +35,9 @@ mutable struct LiveNotebook
     lock::ReentrantLock                  # serializes eval (UI actions vs. async refresh)
     listeners::Vector{Channel{String}}   # this notebook's live SSE connections
     llock::ReentrantLock                 # protects `listeners`
-    agent_id::String                     # Kaimon agent session bound to this notebook ("" = none)
-    agent_busy::Bool                     # true while the bound agent has a turn in flight (for history attribution)
+    agent_id::String                     # default/solo agent (crew "") — back-compat alias of agents[""]
+    agent_busy::Bool                     # true while ANY bound agent has a turn in flight (history attribution)
+    agents::Dict{String,String}          # crew label → Kaimon agent id (multi-agent crew; "" = default)
 end
 
 # GateKernel when running as the Kaimon extension AND the notebook is inside a
@@ -61,7 +62,8 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     kernel = _select_kernel(path)
     eval_stale!(r, kernel)               # initial full run
     nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
-                      ReentrantLock(), Channel{String}[], ReentrantLock(), "", false)
+                      ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                      Dict{String,String}())
     # Seed the durable history with the initial state, so the very first edit has a
     # parent to diff against and the "buildup" replay starts from the true origin.
     _history!(nb; source = "open")
@@ -661,8 +663,12 @@ end
 # agent_id → notebook, so a gate-bus `agent:<id>` event finds its SSE clients.
 const _AGENT_ROUTES = Dict{String,LiveNotebook}()
 const _AGENT_LOCK = ReentrantLock()
-# agent_id → buffered relayed envelopes, so a browser reload can replay the
-# conversation (agentMsgs is in-memory JS, lost on reload). Capped ring.
+# agent_id → crew label ("" = default/solo). Lets the relay tag each event with the
+# speaking crew member so the UI can lane multiple agents and replay stays attributed.
+const _AGENT_CREW = Dict{String,String}()
+# notebook id → buffered relayed envelopes (crew-tagged, in arrival order), so a
+# browser reload can replay the whole conversation across ALL crew agents (agentMsgs
+# is in-memory JS, lost on reload). One ordered ring per notebook. Capped.
 const _AGENT_LOG = Dict{String,Vector{String}}()
 const _AGENT_LOG_CAP = 4000
 
@@ -957,11 +963,18 @@ end
 # The agent inherits the host's MCP config (Kaimon included), so it can also call
 # `slate.*`/`ex` — no explicit `mcp_config` needed (passing one with --strict would
 # instead cut it off from the live Kaimon). Cell editing goes through the file.
-function _ensure_agent!(nb::LiveNotebook)
-    isempty(nb.agent_id) || return nb.agent_id
-    aid = "slate-$(nb.id)"
-    res = try
-        _agent_call(:agent_open, Dict{String,Any}(
+# Ensure a crew member's agent is bound to this notebook, spawning one on first use.
+# `crew` is a crew label ("" = the default/solo agent — id stays `slate-<id>` for
+# back-compat so a re-adopted agent matches across an extension restart). Multiple
+# crew agents share one notebook; `_AGENT_ROUTES` already maps each id → this nb.
+# `model` ("" = service default = sonnet) binds at spawn only — an already-running
+# crew agent keeps its model until reaped (the UI kills it on a model-setting change).
+function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::AbstractString = "")
+    label = String(crew)
+    existing = get(nb.agents, label, "")
+    isempty(existing) || return existing
+    aid = isempty(label) ? "slate-$(nb.id)" : "slate-$(nb.id)-$(label)"
+    open_args = Dict{String,Any}(
             "cwd" => dirname(abspath(nb.path)),
             "id"  => aid,
             # Kaimon M4 permission preset. "lab" allows the agent the Kaimon MCP tools
@@ -969,7 +982,10 @@ function _ensure_agent!(nb::LiveNotebook)
             # notebook, without arbitrary shell/web. Runs unattended (no prompt to stall
             # a headless agent); the agent_* recursion guard is always applied.
             "permission" => "lab",
-            "system_prompt" => _agent_system_prompt(nb)))
+            "system_prompt" => _agent_system_prompt(nb))
+    isempty(model) || (open_args["model"] = model)   # omit → Kaimon's default (sonnet)
+    res = try
+        _agent_call(:agent_open, open_args)
     catch e
         # Agent already running (e.g. it outlived an extension restart — agents are
         # Kaimon-owned) → re-adopt it rather than failing the chat.
@@ -978,20 +994,37 @@ function _ensure_agent!(nb::LiveNotebook)
     end
     aid = String(get(res, "agent_id", aid))
     isempty(aid) && error("agent_open returned no id")
-    nb.agent_id = aid
-    lock(_AGENT_LOCK) do; _AGENT_ROUTES[aid] = nb; end
+    lock(_AGENT_LOCK) do
+        _AGENT_ROUTES[aid] = nb
+        _AGENT_CREW[aid] = label
+        nb.agents[label] = aid
+    end
+    isempty(label) && (nb.agent_id = aid)   # keep the back-compat alias in sync
     return aid
 end
 
-# Close + deregister a notebook's agent (best effort), on notebook close.
-function _close_agent!(nb::LiveNotebook)
-    isempty(nb.agent_id) && return
-    aid = nb.agent_id
-    lock(_AGENT_LOCK) do; delete!(_AGENT_ROUTES, aid); delete!(_AGENT_LOG, aid); end
+# Close + deregister a notebook's crew agents (best effort). `keep_log=true` preserves
+# the replay transcript (hard-kill: agents gone, but the conversation stays visible and
+# a fresh agent continues it); `false` wipes it (notebook close — nothing left to show).
+function _reap_agents!(nb::LiveNotebook; keep_log::Bool = false)
+    aids = lock(_AGENT_LOCK) do
+        ids = collect(values(nb.agents))
+        for aid in ids
+            delete!(_AGENT_ROUTES, aid); delete!(_AGENT_CREW, aid)
+        end
+        empty!(nb.agents)
+        keep_log || delete!(_AGENT_LOG, nb.id)
+        ids
+    end
     nb.agent_id = ""
-    _agent_available() && (try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end)
+    if _agent_available()
+        for aid in aids
+            try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end
+        end
+    end
     return nothing
 end
+_close_agent!(nb::LiveNotebook) = _reap_agents!(nb; keep_log = false)   # on notebook close
 
 """
     relay_agent_event(channel, data)
@@ -1003,11 +1036,19 @@ handler routes it to the chat pane. `data` already rides the bus as a JSON strin
 function relay_agent_event(channel::AbstractString, data)
     startswith(channel, "agent:") || return
     aid = String(channel)[length("agent:")+1:end]
-    nb = lock(_AGENT_LOCK) do; get(_AGENT_ROUTES, aid, nothing); end
+    nb, crew = lock(_AGENT_LOCK) do
+        get(_AGENT_ROUTES, aid, nothing), get(_AGENT_CREW, aid, "")
+    end
     nb === nothing && return
     s = data isa AbstractString ? String(data) : String(JSON.json(data))
     env = try; JSON.parse(s); catch; nothing; end
     kind = env === nothing ? "" : get(env, "kind", "")
+    # Tag the envelope with the speaking crew member so the SPA can lane multiple
+    # agents (and replay stays attributed). Re-serialize only when we parsed cleanly.
+    if env !== nothing
+        env["crew"] = crew
+        s = JSON.json(env)
+    end
     # Mark the agent busy across a turn so the file-watcher attributes the edits it
     # makes to "agent" (not "external"). Clear shortly AFTER the turn ends, so the
     # watcher tick that picks up the agent's final save is still inside the window.
@@ -1028,7 +1069,7 @@ function relay_agent_event(channel::AbstractString, data)
         (env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true))
     if !is_delta
         lock(_AGENT_LOCK) do
-            buf = get!(_AGENT_LOG, aid, String[])
+            buf = get!(_AGENT_LOG, nb.id, String[])
             push!(buf, s)
             length(buf) > _AGENT_LOG_CAP && popfirst!(buf)
         end
@@ -1381,36 +1422,42 @@ function _make_router(h::Hub)
         _agent_available() ||
             return _json(Dict("ok" => false, "error" => "agent service unavailable (run inside Kaimon, with a logged-in `claude` CLI)"))
         tgt = String(get(_body(req), "target", ""))   # per-cell ✨: scope the turn to a cell + its dep cone
+        crew = String(get(_body(req), "crew", ""))     # crew label → route to that crew member's agent ("" = solo)
+        model = String(get(_body(req), "model", ""))   # agent model ("" = service default = sonnet); binds at spawn
         isempty(tgt) || (text = _cell_context(nb, tgt) * "\n\nUSER REQUEST:\n" * text)
         try
-            aid = _ensure_agent!(nb)
+            aid = _ensure_agent!(nb; crew = crew, model = model)
             res = _agent_call(:agent_send, Dict{String,Any}("agent_id" => aid, "text" => text))
-            _json(Dict("ok" => true, "agent_id" => aid, "turn" => get(res, "turn", nothing)))
+            _json(Dict("ok" => true, "agent_id" => aid, "crew" => crew, "turn" => get(res, "turn", nothing)))
         catch e
             _json(Dict("ok" => false, "error" => sprint(showerror, e)))
         end
     end))
-    # Replay the agent conversation after a page reload (buffered as relayed).
+    # Replay the conversation after a page reload (buffered as relayed, crew-tagged,
+    # in arrival order across ALL crew agents on this notebook).
     HTTP.register!(router, "GET", "/api/{id}/agent-log", req -> _withnb(h, req, nb -> begin
-        log = isempty(nb.agent_id) ? String[] :
-              lock(_AGENT_LOCK) do; copy(get(_AGENT_LOG, nb.agent_id, String[])); end
-        _json(Dict("events" => log, "agent_id" => nb.agent_id))
+        log = lock(_AGENT_LOCK) do; copy(get(_AGENT_LOG, nb.id, String[])); end
+        _json(Dict("events" => log, "agents" => copy(nb.agents)))
     end))
-    # Interrupt the agent's in-flight turn (best effort, graceful).
+    # Interrupt EVERY crew agent's in-flight turn (best effort, graceful).
     HTTP.register!(router, "POST", "/api/{id}/chat-interrupt", req -> _withnb(h, req, nb -> begin
-        (_agent_available() && !isempty(nb.agent_id)) || return _json(Dict("ok" => false))
-        r = try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => nb.agent_id)); catch; Dict("interrupted" => false); end
-        _json(Dict("ok" => true, "interrupted" => get(r, "interrupted", false)))
+        (_agent_available() && !isempty(nb.agents)) || return _json(Dict("ok" => false))
+        any_int = false
+        for aid in collect(values(nb.agents))
+            r = try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => aid)); catch; Dict("interrupted" => false); end
+            get(r, "interrupted", false) === true && (any_int = true)
+        end
+        _json(Dict("ok" => true, "interrupted" => any_int))
     end))
-    # Hard stop: interrupt AND close (terminate) the agent — for a wedged agent that
-    # `agent_interrupt` alone can't stop (it only cancels an in-flight LLM turn). Clears
-    # the agent id so the next chat message spawns a fresh agent.
+    # Hard stop: interrupt AND close (terminate) every crew agent — for a wedged agent
+    # that `agent_interrupt` alone can't stop (it only cancels an in-flight LLM turn).
+    # Reaps the whole crew so the next chat message spawns fresh.
     HTTP.register!(router, "POST", "/api/{id}/chat-kill", req -> _withnb(h, req, nb -> begin
-        (_agent_available() && !isempty(nb.agent_id)) || return _json(Dict("ok" => false))
-        aid = nb.agent_id
-        try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => aid)); catch; end
-        try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end
-        nb.agent_id = ""
+        (_agent_available() && !isempty(nb.agents)) || return _json(Dict("ok" => false))
+        for aid in collect(values(nb.agents))
+            try; _agent_call(:agent_interrupt, Dict{String,Any}("agent_id" => aid)); catch; end
+        end
+        _reap_agents!(nb; keep_log = true)   # agents gone, transcript stays visible
         _json(Dict("ok" => true, "killed" => true))
     end))
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
