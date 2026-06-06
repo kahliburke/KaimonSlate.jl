@@ -829,6 +829,8 @@ function _agent_system_prompt(nb::LiveNotebook)
       mcp__kaimon__slate_edit_cell(notebook, cell, source)       — revise a cell, run it, return its result
       mcp__kaimon__slate_run(notebook, cell)                     — run a cell ("" = all stale)
       mcp__kaimon__slate_delete_cell(notebook, cell)             — remove a cell
+      mcp__kaimon__slate_view(notebook, cell)                    — SEE a cell's rendered
+        figure (returns the image) — inspect a CairoMakie plot you made and fix it
     (`after`="" appends at the end; `kind` is "code" or "md".)
 
     LEARN THE API — you have NO file access, so do NOT grep/read source. Search docs:

@@ -242,6 +242,29 @@ function create_tools(GateTool::Type)
         return String(take!(io))
     end
 
+    """
+        view(notebook, cell) -> image
+
+    SEE a cell's rendered figure — returns the cell's PNG as an image you can look at
+    (e.g. a CairoMakie plot), so you can inspect/verify/fix a visualization. Use this
+    after running a plotting cell. ECharts/tables are interactive (not raster) — read
+    those with `read`; text output also comes back via `read`.
+    """
+    function view_cell(notebook::String, cell::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        i = findfirst(c -> c.id == cell, nb.report.cells)
+        i === nothing && return "No cell '$cell' in '$notebook' (use slate.read to list cells)."
+        o = nb.report.cells[i].output
+        o === nothing && return "Cell '$cell' has no output yet — run it first."
+        png = nothing
+        for ch in o.display
+            if ch.mime == "image/png"; png = ch.data; break; end
+        end
+        png === nothing && return "Cell '$cell' has no raster figure to view. Return a CairoMakie figure for a viewable image; ECharts/tables/text → use slate.read."
+        isdefined(Main, :Kaimon) || return "Image view needs the Kaimon host (unavailable in standalone mode)."
+        return getfield(Main, :Kaimon).KaimonGate.image_result(Vector{UInt8}(png); text = "Cell '$cell' — rendered figure")
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -265,6 +288,7 @@ function create_tools(GateTool::Type)
         GateTool("edit_cell", edit_cell),
         GateTool("run", run_cell),
         GateTool("delete_cell", delete_cell),
+        GateTool("view", view_cell),
         GateTool("index_docs", index_docs),
         GateTool("search_docs", search_docs_tool),
     ]
