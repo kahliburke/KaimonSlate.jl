@@ -677,6 +677,72 @@ function _agent_call(tool::Symbol, args::Dict{String,Any})
     return parsed
 end
 
+# ── Semantic docs search (docs v2) ────────────────────────────────────────────
+# Index harvested docstrings into a Qdrant collection via Kaimon's Ollama+Qdrant
+# tools (reached through the service endpoint), so the agent AND the UI can search
+# the Julia/package API by meaning. Embeddings: qwen3-embedding:0.6b (1024-d, cosine).
+const _DOCS_COLLECTION = "slate_docs"
+const _DOCS_DIM = 1024
+const _DOCS_MODEL = "qwen3-embedding:0.6b"
+
+# Call a Kaimon MCP tool, RAW value (service endpoint uses Serialization, so
+# vectors/dicts come back native; tolerate a JSON-string handler too).
+_kt(tool::Symbol, args::Dict) = getfield(Main, :Kaimon).KaimonGate.call_tool(tool, Dict{String,Any}(args))
+_kt_json(v) = v isa AbstractString ? JSON.parse(v) : v
+# Tolerant field access — results may be Dicts (string or symbol keys) or NamedTuples.
+_field(x, k) = x isa AbstractDict ? get(x, k, get(x, Symbol(k), nothing)) :
+               (hasproperty(x, Symbol(k)) ? getproperty(x, Symbol(k)) : nothing)
+
+_embed(text::AbstractString) = Float64[Float64(x) for x in
+    _kt_json(_kt(:ollama_embed, Dict("text" => String(text), "model" => _DOCS_MODEL)))]
+
+function _ensure_docs_collection()
+    ex = _kt_json(_kt(:qdrant_collection_exists, Dict("collection" => _DOCS_COLLECTION)))
+    (ex === true || ex == "true") && return
+    _kt(:qdrant_create_collection, Dict("collection" => _DOCS_COLLECTION,
+                                        "vector_size" => _DOCS_DIM, "distance" => "Cosine"))
+    return
+end
+
+# Stable positive id for a doc record (first 60 bits of its SHA-256 → fits Int).
+_doc_id(s) = parse(Int, SlateHistory._sha(s)[1:15]; base = 16)
+
+"Embed + upsert harvested doc records into the search index. Returns the count indexed."
+function index_docs!(records)
+    _agent_available() || return 0
+    isempty(records) && return 0
+    _ensure_docs_collection()
+    n = 0
+    for r in records
+        modname = string(get(r, "module", "")); name = string(get(r, "name", ""))
+        doc = string(get(r, "doc", "")); text = "$modname.$name\n$doc"
+        vec = try; _embed(text); catch; continue; end
+        pt = Dict("id" => _doc_id(text), "vector" => vec,
+                  "payload" => Dict("module" => modname, "name" => name, "doc" => doc))
+        try; _kt(:qdrant_upsert_points, Dict("collection" => _DOCS_COLLECTION, "points" => [pt])); n += 1; catch; end
+    end
+    return n
+end
+
+"Semantic search the docs index → up to `limit` {module,name,doc,score} matches."
+function search_docs(query::AbstractString; limit::Int = 8)
+    _agent_available() || return Dict{String,Any}[]
+    vec = try; _embed(query); catch; return Dict{String,Any}[]; end
+    res = _kt_json(_kt(:qdrant_search, Dict("collection" => _DOCS_COLLECTION,
+                                            "vector" => vec, "limit" => limit)))
+    hits = res isa AbstractVector ? res :
+           something(_field(res, "result"), _field(res, "hits"), Any[])
+    out = Dict{String,Any}[]
+    for h in hits
+        p = something(_field(h, "payload"), h)
+        push!(out, Dict("module" => string(something(_field(p, "module"), "")),
+                        "name"   => string(something(_field(p, "name"), "")),
+                        "doc"    => string(something(_field(p, "doc"), "")),
+                        "score"  => something(_field(h, "score"), 0.0)))
+    end
+    return out
+end
+
 # The notebook-priming system prompt, set once at `agent_open` (the `system_prompt`
 # arg → `claude --append-system-prompt`). It makes the agent a *live notebook
 # operator* — driving the reactive notebook one cell at a time through the `slate.*`
@@ -695,6 +761,12 @@ function _agent_system_prompt(nb::LiveNotebook)
       mcp__kaimon__slate_run(notebook, cell)                     — run a cell ("" = all stale)
       mcp__kaimon__slate_delete_cell(notebook, cell)             — remove a cell
     (`after`="" appends at the end; `kind` is "code" or "md".)
+
+    LEARN THE API — you have NO file access, so do NOT grep/read source. Search docs:
+      mcp__kaimon__slate_index_docs(notebook, modules) — index the docs of `using`'d
+        packages (comma-separated names) once, so they become searchable
+      mcp__kaimon__slate_search_docs(notebook, query)  — fuzzy semantic search of the
+        indexed docs ("a function that sorts in place") → matching signatures + docs
 
     WORK INCREMENTALLY — this is the entire point of the project:
     - Call slate_read FIRST to see the current state.
@@ -1178,6 +1250,11 @@ function _make_router(h::Hub)
         try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => aid)); catch; end
         nb.agent_id = ""
         _json(Dict("ok" => true, "killed" => true))
+    end))
+    # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
+    HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
+        q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
+        _json(Dict("results" => isempty(q) ? Dict{String,Any}[] : search_docs(String(q))))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))

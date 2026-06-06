@@ -33,7 +33,8 @@ using .ReportRender
 using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
                       find_live, notebook_digest,
-                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!
+                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
+                      index_docs!, search_docs
 
 export serve_notebook, LiveNotebook
 
@@ -203,6 +204,44 @@ function create_tools(GateTool::Type)
         return agent_delete_cell!(nb, cell)
     end
 
+    """
+        index_docs(notebook, modules) -> String
+
+    Index the documentation of `using`'d packages/modules (comma- or space-separated
+    names) into semantic search so `search_docs` can find them. The modules must be
+    loaded in the notebook first (a cell with `using Foo`).
+    """
+    function index_docs(notebook::String, modules::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        mods = String[strip(m) for m in split(modules, r"[,\s]+") if !isempty(strip(m))]
+        isempty(mods) && return "Name the packages/modules to index (comma-separated); they must be `using`'d in the notebook."
+        recs = ReportEngine.harvest_docs(nb.kernel, nb.report, mods)
+        n = index_docs!(recs)
+        return n == 0 ?
+            "Indexed nothing — are the modules loaded (run `using …`) and the docs service (Ollama/Qdrant) up?" :
+            "Indexed $n documented symbols from $(join(mods, ", ")). Search them with slate.search_docs."
+    end
+
+    """
+        search_docs(notebook, query) -> String
+
+    Fuzzy SEMANTIC search of indexed docs ("a function that sorts in place") — discover
+    Julia/package API by meaning instead of reading source (you have no file access).
+    Build the index first with `index_docs`.
+    """
+    function search_docs_tool(notebook::String, query::String)::String
+        res = search_docs(query)
+        isempty(res) && return "No matches — build the index first with slate.index_docs, or rephrase."
+        io = IOBuffer()
+        for r in res
+            println(io, "● $(r["module"]).$(r["name"])  (", round(Float64(get(r, "score", 0.0)); digits = 3), ")")
+            snip = join(first(split(rstrip(string(r["doc"])), "\n"), 4), "\n")
+            isempty(strip(snip)) || println(io, snip)
+            println(io)
+        end
+        return String(take!(io))
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -226,6 +265,8 @@ function create_tools(GateTool::Type)
         GateTool("edit_cell", edit_cell),
         GateTool("run", run_cell),
         GateTool("delete_cell", delete_cell),
+        GateTool("index_docs", index_docs),
+        GateTool("search_docs", search_docs_tool),
     ]
 end
 
