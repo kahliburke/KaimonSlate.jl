@@ -5,6 +5,13 @@ using Test
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
 
+# Real-source fixture module (docstrings register normally, unlike a hand-built Expr).
+module _DocFixture
+export fixture_fn
+"Return `x` unchanged — a documented fixture function."
+fixture_fn(x) = x
+end
+
 @testset "ReportEngine eval" begin
 
     @testset "cross-cell state sharing (warm namespace)" begin
@@ -141,6 +148,16 @@ using .ReportEngine
         disp = r.cells[1].output.display
         @test any(c -> c.mime == "text/html", disp)
         @test r.cells[1].state == FRESH
+    end
+
+    @testset "docstring harvest" begin
+        recs = ReportEngine.harvest_module_docs(@__MODULE__, ["_DocFixture"])
+        @test !isempty(recs)
+        ff = findfirst(r -> r["name"] == "fixture_fn", recs)
+        @test ff !== nothing
+        @test occursin("documented fixture", recs[ff]["doc"]) && recs[ff]["module"] == "_DocFixture"
+        @test all(r -> haskey(r, "module") && haskey(r, "name") && haskey(r, "doc"), recs)
+        @test isempty(ReportEngine.harvest_module_docs(@__MODULE__, ["NoSuchModule"]))
     end
 
     @testset "Kernel seam" begin

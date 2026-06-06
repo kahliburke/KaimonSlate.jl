@@ -23,6 +23,7 @@ echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table — uses no deps; soft-detects Tables.jl
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
+include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 
 # Per-notebook execution namespace (warm; reset by replacing the module). Built by the
@@ -66,6 +67,9 @@ __slate_table_page(table_id::String, page::Int, page_size::Int, sort_col::Int, s
 "Capture markdown `{{ }}` interpolation expressions (rich) — one wire-form each."
 __slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e) for e in exprs]
 
+"Harvest `{module,name,doc}` for the named (loaded) modules — for semantic docs search."
+__slate_harvest_docs(mod_names::Vector{String}) = harvest_module_docs(_NS[], mod_names)
+
 "GateTools exposed to the KaimonSlate server."
 function tools()
     return KaimonGate.GateTool[
@@ -74,6 +78,7 @@ function tools()
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
+        KaimonGate.GateTool("__slate_harvest_docs", __slate_harvest_docs),
     ]
 end
 

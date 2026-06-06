@@ -135,6 +135,16 @@ interpolate(::InProcessKernel, report::Report, exprs::Vector{String}) =
     CellOutput[_eval_capture(report_module(report), e) for e in exprs]
 
 """
+    harvest_docs(kernel, report, mod_names) -> Vector{Dict}
+
+Harvest `{module, name, doc}` for documented exported bindings of the named modules,
+resolved WHERE cells evaluate (so the modules must be `using`'d in the notebook). The
+gate kernel forwards to its worker, where the notebook's packages live.
+"""
+harvest_docs(::InProcessKernel, report::Report, mod_names) =
+    harvest_module_docs(report_module(report), mod_names)
+
+"""
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell
 
 Evaluate one cell through `kernel`. Markdown cells are inert (marked `FRESH`). A

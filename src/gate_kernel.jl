@@ -219,6 +219,17 @@ function interpolate(k::GateKernel, report::Report, exprs::Vector{String})
     return CellOutput[_wire_to_output(w) for w in wires]
 end
 
+function harvest_docs(k::GateKernel, report::Report, mod_names)
+    prepare!(k, report)
+    wire = try
+        _tool(k, "__slate_harvest_docs", Dict("mod_names" => collect(String, mod_names)))
+    catch
+        return Dict{String,Any}[]
+    end
+    wire === nothing && return Dict{String,Any}[]
+    return Dict{String,Any}[Dict{String,Any}(String(k) => v for (k, v) in r) for r in wire]
+end
+
 function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)
     prepare!(k, report)
     try
