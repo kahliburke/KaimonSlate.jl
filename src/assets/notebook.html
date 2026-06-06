@@ -38,7 +38,7 @@ button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid v
          border-radius:6px; padding:4px 12px; cursor:pointer; font-size:.82rem;
          text-decoration:none; display:inline-block; }
 button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
-.page { max-width:980px; margin:0 auto; padding:20px; }
+.page { max-width:980px; margin:0 auto; padding:20px 20px 160px; }
 body.fullwidth .page { max-width:none; }
 .cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
         margin:14px 0; background:var(--bg2); overflow:hidden; }
@@ -261,10 +261,15 @@ li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
   border-radius:6px; cursor:pointer; font-size:.84rem; text-decoration:none; display:block; white-space:nowrap; }
 .topmenu button:hover, .topmenu a:hover { background:var(--bg3); color:var(--accent); }
 .topmenu hr { border:none; border-top:1px solid var(--bg3); margin:4px 6px; }
-.apinput { display:flex; gap:8px; padding:10px; border-top:1px solid var(--border); }
-.apinput textarea { flex:1; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
-  border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem; }
+.apinput { display:flex; flex-wrap:wrap; gap:8px; padding:10px; border-top:1px solid var(--border); }
+.apinput textarea { flex:1; min-width:0; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem;
+  scrollbar-width:thin; scrollbar-color:var(--bg2) transparent; }
 .apinput textarea:focus { outline:none; border-color:var(--accent); }
+.apinput textarea::-webkit-scrollbar { width:9px; }
+.apinput textarea::-webkit-scrollbar-track { background:transparent; }
+.apinput textarea::-webkit-scrollbar-thumb { background:var(--bg2); border-radius:5px; border:2px solid var(--bg3); }
+.apinput textarea::-webkit-scrollbar-thumb:hover { background:var(--border); }
 .phead { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); }
 .phead strong { color:#fff; } .pclose { margin-left:auto; }
 .plist { flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:6px; }
@@ -423,10 +428,13 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .docdetail pre { white-space: pre-wrap; font-size: 12px; line-height: 1.45; color: #c2cee0; margin: 0; }
   .docdetail .hint { margin-top: 10px; color: #8190a8; font-size: 11.5px; }
   .askai { opacity: .7; } .askai:hover { opacity: 1; }
-  .chattarget { font-size: 12px; color: #9fb0c8; padding: 4px 8px; margin-bottom: 6px;
-                background: rgba(120,160,255,.12); border-radius: 6px; }
-  .chattarget b { color: #cfe0ff; }
-  .chattarget .x { float: right; cursor: pointer; opacity: .6; } .chattarget .x:hover { opacity: 1; }
+  .chattarget { flex: 0 0 100%; box-sizing: border-box; display: flex; align-items: center; gap: 6px;
+                font-size: 12px; color: #9fb0c8; padding: 5px 6px 5px 10px;
+                background: rgba(120,160,255,.12); border: 1px solid rgba(120,160,255,.22); border-radius: 7px; }
+  .chattarget b { color: #cfe0ff; font-weight: 600; }
+  .chattarget .x { margin-left: auto; cursor: pointer; opacity: .55; line-height: 1;
+                   padding: 2px 6px; border-radius: 5px; font-size: 11px; }
+  .chattarget .x:hover { opacity: 1; background: rgba(255,255,255,.08); }
 </style>
 
 <script>
@@ -1196,7 +1204,18 @@ async function addCell(after, kind, before, edit) {
   const neu = (state.cells || []).map(c => c.id).find(id => !oldIds.has(id));
   // renderAll restores the prior scroll on the next frame, so scroll to the new
   // cell a frame later (otherwise the restore wins and it doesn't move).
-  if (neu) requestAnimationFrame(() => requestAnimationFrame(() => { selectCell(neu, true); if (edit) enterEdit(neu); }));
+  // `nearest` jams a bottom-added cell against the viewport edge; nudge it up so a
+  // small gap stays below it (the .page bottom padding gives the room to scroll).
+  if (neu) requestAnimationFrame(() => requestAnimationFrame(() => {
+    selectCell(neu, false);
+    if (edit) enterEdit(neu);
+    const el = document.getElementById('cell-' + neu);
+    if (el) {
+      el.scrollIntoView({ block: 'nearest' });
+      const gap = 90, overflow = el.getBoundingClientRect().bottom - (window.innerHeight - gap);
+      if (overflow > 0) window.scrollBy({ top: overflow, behavior: 'smooth' });
+    }
+  }));
   return neu;
 }
 // ⌘/Ctrl-⇧-Enter in edit mode: run (or commit) the cell, then open a fresh code

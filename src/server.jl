@@ -874,9 +874,14 @@ function _cell_context(nb::LiveNotebook, id::AbstractString)
     end
     down = setdiff(dependents_of(nb.report, Set([id])), Set([id]))
     io = IOBuffer()
-    println(io, "The user is FOCUSED on cell `", id, "`. Work on it directly; branch to an upstream",
-            " cell only if the real cause is a precursor. `slate_view(\"", id, "\")` shows its figure;",
-            " `slate_read` shows full state.")
+    println(io, "══ SCOPED TURN — the user clicked ✨ on cell `", id, "`. This cell is your ENTIRE focus. ══")
+    println(io, "- Answer about / modify ONLY cell `", id, "` (and, if a fix truly requires it, the upstream",
+            " cells listed below that it reads from).")
+    println(io, "- Do NOT review, critique, or touch any OTHER cell. Do NOT call `slate_read` to survey the",
+            " whole notebook — this cell's source, output, its upstream dependency cone, and its downstream",
+            " impact are ALL given below. Only read another cell if you genuinely need one not shown here.")
+    println(io, "- If the request can't be satisfied within this cell + its precursors, say so briefly instead",
+            " of widening scope. `slate_view(\"", id, "\")` shows this cell's figure if it has one.")
     tc = cells[i]
     println(io, "\n--- cell `", id, "` source ---\n", tc.source)
     o = tc.output
@@ -935,6 +940,11 @@ function _agent_system_prompt(nb::LiveNotebook)
       have OTHER cells READ `N`; they re-run and re-render when it changes (works with both
       ECharts and CairoMakie). Do NOT use Makie `SliderGrid`/`@lift`/`Observable` — they need an
       interactive backend we don't have and render dead (static) under CairoMakie.
+
+    SCOPED TURNS: if a turn begins with a "SCOPED TURN — the user clicked ✨ on cell `…`"
+    block, that cell is your whole focus for the turn. Stay on it (and only the upstream cells
+    that block lists); do NOT survey or comment on the rest of the notebook, and do NOT
+    slate_read the whole thing — the relevant context is already in the block.
 
     Be concise in chat. You are a focused notebook assistant — ignore any global or
     project onboarding (Kaimon usage quizzes, "take the quiz", Revise/Infiltrator
