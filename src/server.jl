@@ -11,6 +11,7 @@ module NotebookServer
 
 using HTTP, JSON, FileWatching
 import REPL, Base64
+import Typst_jll
 using ..ReportEngine
 using ..ReportRender
 
@@ -1587,6 +1588,8 @@ function _ollama_models()
     end
 end
 
+include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
@@ -1696,6 +1699,18 @@ function _make_router(h::Hub)
             push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
         end
         HTTP.Response(200, headers, html)
+    end))
+    # Publication-quality PDF via Typst (server-side). `?source=0` hides code listings.
+    HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        pdf = try
+            export_pdf(nb; include_source = get(qp, "source", "1") != "0")
+        catch e
+            return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))
+        end
+        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf"
+        HTTP.Response(200, ["Content-Type" => "application/pdf",
+                            "Content-Disposition" => "attachment; filename=\"$fn\""], pdf)
     end))
     # ── Notebook packages ─────────────────────────────────────────────────────
     # List the notebook project's direct deps; add/remove a package in that project

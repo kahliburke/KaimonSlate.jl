@@ -389,7 +389,8 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
       <button onclick="openPalette();closeTopMenu()">⌘K Command palette</button>
       <hr>
       <button onclick="exportHtml();closeTopMenu()">⬇ Export HTML</button>
-      <button onclick="printNotebook();closeTopMenu()">🖨 Print / Save PDF</button>
+      <button onclick="exportPdf();closeTopMenu()">📄 Export PDF (publication)</button>
+      <button onclick="printNotebook();closeTopMenu()">🖨 Print HTML</button>
       <hr>
       <button onclick="openSettings();closeTopMenu()">⚙ Settings</button>
       <a id="vscode" href="#" title="Open the .jl in VS Code" onclick="closeTopMenu()">⧉ Open in VS Code</a>
@@ -1415,6 +1416,21 @@ function exportHtml() {
 function printNotebook() {
   const w = window.open(_apipath('/api/export.html'), '_blank');
   if (w) w.addEventListener('load', () => setTimeout(() => w.print(), 300));
+}
+// Publication-quality PDF, rendered server-side via Typst. Can take a few seconds
+// (first run also fetches the Typst packages), so show the loading overlay + blob-download.
+async function exportPdf() {
+  showLoading('Rendering PDF with Typst…');
+  try {
+    const r = await fetch(_apipath('/api/export.pdf'));
+    if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
+    const blob = await r.blob(), url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = (nbState && nbState.title || 'notebook') + '.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { await alertDark('PDF export failed: ' + e); }
+  finally { hideLoading(); }
 }
 
 // ── Command/edit mode + Jupyter-style keyboard shortcuts ──────────────────────
