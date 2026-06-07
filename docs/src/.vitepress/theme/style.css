@@ -1,0 +1,117 @@
+/* JuliaMono font for code blocks — @import must be first */
+@import url('https://cdn.jsdelivr.net/gh/cormullion/juliamono/webfonts/JuliaMono-Regular.woff2');
+
+/* KaimonSlate brand colors — the notebook's reactive-DAG palette (blue → purple → green) */
+:root {
+  --slate-blue: #3a7fc4;
+  --slate-blue-bright: #569cd6;
+  --slate-purple: #b06fc0;
+  --slate-green: #3aa84a;
+
+  /* VitePress brand color overrides */
+  --vp-c-brand-1: var(--slate-blue);
+  --vp-c-brand-2: #336fae;
+  --vp-c-brand-3: var(--slate-blue);
+  --vp-c-brand-soft: rgba(86, 156, 214, 0.14);
+
+  --vp-font-family-mono: 'JuliaMono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
+}
+
+.dark {
+  --vp-c-brand-1: #7cc0ff;
+  --vp-c-brand-2: var(--slate-blue-bright);
+  --vp-c-brand-3: #7cc0ff;
+  --vp-c-brand-soft: rgba(86, 156, 214, 0.16);
+}
+
+/* Home-page hero name → the brand gradient (blue → purple → green), matching the app mark. */
+.VPHero .name {
+  background: linear-gradient(90deg, #7cc0ff 10%, #c586c0 55%, #56d364 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ── Mermaid diagram theming ──────────────────────────────────────────────── */
+
+/* Node shapes */
+.vp-doc .mermaid svg .node rect,
+.vp-doc .mermaid svg .node polygon,
+.vp-doc .mermaid svg .node circle,
+.vp-doc .mermaid svg .node ellipse {
+  fill: #eaf3fc !important;
+  stroke: var(--slate-blue) !important;
+  stroke-width: 1.5px !important;
+}
+
+/* Cluster / subgraph boxes */
+.vp-doc .mermaid svg .cluster rect {
+  fill: #f4f9ff !important;
+  stroke: #a8cdec !important;
+  stroke-width: 1px !important;
+}
+
+/* Edge paths */
+.vp-doc .mermaid svg .edgePath path,
+.vp-doc .mermaid svg .flowchart-link {
+  stroke: var(--slate-blue) !important;
+  stroke-width: 1.5px !important;
+}
+
+/* Arrowhead markers */
+.vp-doc .mermaid svg marker path {
+  fill: var(--slate-blue) !important;
+  stroke: var(--slate-blue) !important;
+}
+
+/* Edge label backgrounds */
+.vp-doc .mermaid svg .edgeLabel rect,
+.vp-doc .mermaid svg .edgeLabel .label {
+  background: transparent !important;
+  fill: transparent !important;
+}
+
+/* Cluster label text */
+.vp-doc .mermaid svg .cluster span {
+  color: #2c5a88 !important;
+}
+
+/* ── Dark mode ── */
+.dark .vp-doc .mermaid svg .node rect,
+.dark .vp-doc .mermaid svg .node polygon,
+.dark .vp-doc .mermaid svg .node circle,
+.dark .vp-doc .mermaid svg .node ellipse {
+  fill: #16263a !important;
+  stroke: #7cc0ff !important;
+}
+
+.dark .vp-doc .mermaid svg .cluster rect {
+  fill: #11203a !important;
+  stroke: #2a4e74 !important;
+}
+
+.dark .vp-doc .mermaid svg .edgePath path,
+.dark .vp-doc .mermaid svg .flowchart-link {
+  stroke: #7cc0ff !important;
+}
+
+.dark .vp-doc .mermaid svg marker path {
+  fill: #7cc0ff !important;
+  stroke: #7cc0ff !important;
+}
+
+.dark .vp-doc .mermaid svg .cluster span {
+  color: #a8cdec !important;
+}
+
+/* ── Docstring container styling ─────────────────────────────────────────── */
+.docstring {
+  border-left: 3px solid var(--slate-blue);
+  padding-left: 1rem;
+  margin: 1rem 0;
+}
+
+.docstring h3 {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.95rem;
+}

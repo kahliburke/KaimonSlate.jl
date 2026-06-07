@@ -1,0 +1,16 @@
+node_modules/
+build/
+src/.vitepress/cache/
+src/.vitepress/dist/
+Manifest.toml
+package-lock.json
+.render_cache.json
+# Generated demo assets are hosted via the docs-assets GitHub Release, not committed.
+# (The committed logo lives at src/public/assets/slate-logo.svg and is NOT matched here.)
+src/assets/*.gif
+src/assets/*.mp4
+src/assets/*.webm
+src/assets/*.png
+src/public/assets/*.gif
+src/public/assets/*.mp4
+src/public/assets/*.webm

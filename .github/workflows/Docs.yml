@@ -1,0 +1,112 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+
+      - uses: julia-actions/cache@v2
+
+      - name: Install Julia dependencies
+        run: |
+          julia --project=docs -e '
+            using Pkg
+            Pkg.develop(PackageSpec(path=pwd()))
+            Pkg.instantiate()'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: docs/node_modules
+          key: npm-${{ hashFiles('docs/package-lock.json', 'docs/package.json') }}
+
+      - name: Install VitePress dependencies
+        working-directory: docs
+        run: npm install
+
+      # ── Demo assets (web UI) ────────────────────────────────────────────────
+      # A headless-Chromium recorder (Playwright) boots the Slate server, opens curated
+      # example notebooks, and records the built-in time-machine replay → GIF/MP4. The
+      # generated media lands in docs/src/assets and is hosted via the docs-assets GitHub
+      # Release (keeping binaries out of the repo). Guarded so CI stays green until the
+      # generator (docs/generate_assets.mjs) is added.
+      - name: Cache generated doc assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            docs/src/assets/*.gif
+            docs/src/assets/*.mp4
+            docs/src/assets/*.webm
+            docs/.render_cache.json
+          key: doc-assets-${{ hashFiles('docs/generate_assets.mjs', 'src/assets/notebook.html') }}
+          restore-keys: |
+            doc-assets-
+
+      - name: Install Playwright browsers
+        working-directory: docs
+        run: |
+          if [ -f generate_assets.mjs ]; then
+            npx playwright install --with-deps chromium
+          else
+            echo "No docs/generate_assets.mjs yet — skipping Playwright install."
+          fi
+
+      - name: Generate doc assets
+        working-directory: docs
+        run: |
+          if [ -f generate_assets.mjs ]; then
+            node generate_assets.mjs
+          else
+            echo "No docs/generate_assets.mjs yet — skipping asset generation."
+          fi
+
+      - name: Upload assets to docs-assets release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          assets=(docs/src/assets/*.gif docs/src/assets/*.mp4 docs/src/assets/*.webm docs/src/assets/*.png docs/src/assets/*.jpg)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "No generated assets to upload yet."
+            exit 0
+          fi
+          gh release view docs-assets --repo ${{ github.repository }} \
+            || gh release create docs-assets --repo ${{ github.repository }} \
+               --title "Documentation Assets" --prerelease \
+               --notes "Auto-updated demo media for the documentation site."
+          for f in "${assets[@]}"; do
+            gh release upload docs-assets "$f" --repo ${{ github.repository }} --clobber
+          done
+
+      - name: Build and deploy documentation
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
+          KAIMONSLATE_ASSET_BASE: 'https://github.com/kahliburke/KaimonSlate.jl/releases/download/docs-assets/'
+        run: julia --project=docs docs/make.jl
