@@ -15,6 +15,11 @@
 
 const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
 
+# Vector format captured *in addition* to a raster figure, for publication PDF export
+# (fonts embedded, scales crisply). The browser ignores this chunk; only the Typst
+# exporter consumes it (preferring it over the raster). See `_capture_export_vector!`.
+const _EXPORT_VEC_MIME = "application/pdf"
+
 struct _CaptureDisplay <: AbstractDisplay
     chunks::Vector{Tuple{String,Vector{UInt8}}}
 end
@@ -36,10 +41,27 @@ function _capture_rich!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     for m in _RICH_MIMES
         if Base.invokelatest(showable, m, x)
             push!(chunks, (m, Base.invokelatest(_mime_bytes, MIME(m), x)))
+            startswith(m, "image/") && _capture_export_vector!(chunks, x)
             return true
         end
     end
     return false
+end
+
+# When we just captured a raster figure (image/*), also try to render it to PDF — a
+# vector form for publication export. We attempt `show(io, MIME"application/pdf", x)`
+# *directly* (not gated on `showable`): CairoMakie gates `showable` on its active output
+# `type` (png by default → `showable` is false for pdf) but its `show` method still
+# renders a PDF. Anything without a PDF method just throws and is skipped. The chunk is
+# export-only — `_render_chunks` (browser) handles image/*, html, latex and ignores it.
+function _capture_export_vector!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
+    any(c -> c[1] == _EXPORT_VEC_MIME, chunks) && return
+    try
+        bytes = Base.invokelatest(_mime_bytes, MIME(_EXPORT_VEC_MIME), x)
+        isempty(bytes) || push!(chunks, (_EXPORT_VEC_MIME, bytes))
+    catch
+    end
+    return
 end
 
 function Base.display(d::_CaptureDisplay, x)

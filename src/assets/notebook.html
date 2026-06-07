@@ -467,6 +467,27 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <div class="setrow sethint" id="setmodelhint" style="display:none"><span></span>↻ restarts the agent on your next message (chat history kept).</div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
 </div></div>
+<div class="modal-bg" id="pdfbg"><div class="modal setmodal">
+  <div class="msg"><strong>Export PDF</strong> <span style="color:var(--dim);font-weight:400">— publication-quality, rendered with Typst</span></div>
+  <div class="setrow"><label>Theme</label>
+    <select id="pdftheme"><option value="light">Light (publication)</option><option value="dark">Dark (matches UI)</option></select></div>
+  <div class="setrow"><label>Layout</label>
+    <select id="pdflayout">
+      <option value="article|1">Article — single column</option>
+      <option value="article|2">Article — two column</option>
+      <option value="report|1">Report — single column</option>
+      <option value="report|2">Report — two column</option>
+    </select></div>
+  <div class="setrow"><label>Code listings</label>
+    <select id="pdfcode">
+      <option value="normal">Normal</option>
+      <option value="small">Small</option>
+      <option value="smaller">Smaller</option>
+      <option value="tiny">Tiny</option>
+      <option value="hidden">Hidden (outputs only)</option>
+    </select></div>
+  <div class="row"><button onclick="closePdfDialog(false)">Cancel</button><button class="primary" onclick="closePdfDialog(true)">Export</button></div>
+</div></div>
 <div class="palette-bg" id="cmdbg"><div class="cmdpal">
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>
   <ul id="cmdlist"></ul>
@@ -530,15 +551,34 @@ const srcEditHTML = () => '<div class="srcedit" style="display:none"><textarea><
 // charts, the same way CairoMakie figures come through. Debounced so animation settles
 // and reactive ticks don't spam; raw fetch so it doesn't pulse the busy indicator.
 const _snapPending = {};
-function _snapCell(cellId, insts) {
+function _snapCell(cellId, insts, spec) {
   clearTimeout(_snapPending[cellId]);
   _snapPending[cellId] = setTimeout(() => {
     const inst = insts[0]; if (!inst) return;
-    try {
-      const b64 = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#0e1116' }) || '').split(',')[1];
-      if (b64) fetch(_apipath('/api/snapshot'), { method: 'POST',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cell: cellId, image: b64 }) }).catch(() => {});
-    } catch (_) {}
+    let png = '', svg = '', svgDark = '';
+    // PNG (dark theme) → matches the live UI for the agent's slate_view.
+    try { png = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#0e1116' }) || '').split(',')[1] || ''; } catch (_) {}
+    // Vector SVG for publication PDF: re-render the spec offscreen with the SVG renderer,
+    // once for a light page (default theme, white bg) and once for a dark page (dark
+    // theme, dark bg), so each PDF theme gets a chart that reads on its background.
+    // Best-effort; the server prefers these over the raster PNG when present.
+    const renderSvg = (themeName, bg) => {
+      try {
+        const w = inst.getWidth() || 640, h = inst.getHeight() || 400;
+        const div = document.createElement('div');
+        div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
+        document.body.appendChild(div);
+        const off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
+        off.setOption(Object.assign({ animation: false, backgroundColor: bg }, spec));
+        const out = off.renderToSVGString();
+        off.dispose(); div.remove();
+        return out;
+      } catch (_) { return ''; }
+    };
+    if (spec) { svg = renderSvg(null, '#ffffff'); svgDark = renderSvg('dark', '#12141c'); }
+    if (png) fetch(_apipath('/api/snapshot'), { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cell: cellId, image: png, svg: svg || undefined, svgDark: svgDark || undefined }) }).catch(() => {});
   }, 700);
 }
 
@@ -556,7 +596,7 @@ function renderCharts(c) {
     }
     while (host.children.length > specs.length) { host.removeChild(host.lastChild); insts.pop().dispose(); }
     specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
-    if (insts.length) _snapCell(c.id, insts);   // capture PNG → server (uniform slate_view / PDF)
+    if (insts.length) _snapCell(c.id, insts, specs[0]);   // PNG (slate_view) + SVG (vector PDF) → server
   }
   // Inline `{{ echart(…) }}` placeholders in a markdown cell.
   document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
@@ -1417,12 +1457,35 @@ function printNotebook() {
   const w = window.open(_apipath('/api/export.html'), '_blank');
   if (w) w.addEventListener('load', () => setTimeout(() => w.print(), 300));
 }
-// Publication-quality PDF, rendered server-side via Typst. Can take a few seconds
+// Publication-quality PDF, rendered server-side via Typst. Options (theme, layout, code
+// size) come from a small modal; the last choices are remembered. Can take a few seconds
 // (first run also fetches the Typst packages), so show the loading overlay + blob-download.
+// Figures embed as vector (CairoMakie PDF / ECharts SVG) when available.
+let _pdfResolve = null;
+function closePdfDialog(go) {
+  document.getElementById('pdfbg').classList.remove('show');
+  if (_pdfResolve) { const r = _pdfResolve; _pdfResolve = null; r(go); }
+}
+function _pdfPick() {
+  return new Promise(resolve => {
+    _pdfResolve = resolve;
+    ['pdftheme', 'pdflayout', 'pdfcode'].forEach(id => {
+      const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
+    });
+    document.getElementById('pdfbg').classList.add('show');
+  });
+}
 async function exportPdf() {
+  const go = await _pdfPick();
+  if (!go) return;
+  const theme = document.getElementById('pdftheme').value;
+  const [style, columns] = document.getElementById('pdflayout').value.split('|');
+  const code = document.getElementById('pdfcode').value;
+  ['pdftheme', 'pdflayout', 'pdfcode'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
   showLoading('Rendering PDF with Typst…');
   try {
-    const r = await fetch(_apipath('/api/export.pdf'));
+    const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&code=' + code;
+    const r = await fetch(_apipath('/api/export.pdf') + qs);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
     const blob = await r.blob(), url = URL.createObjectURL(blob);
     const a = document.createElement('a');

@@ -980,15 +980,27 @@ end
 # server-side (CairoMakie's `image/png`) or client-side (ECharts) — one approach for
 # the agent (`slate_view`) today, and the source of figure bytes for PDF export later.
 const _SNAPSHOTS = Dict{String,Dict{String,Vector{UInt8}}}()   # nbid → cellid → latest PNG
+const _SNAP_SVG = Dict{String,Dict{String,String}}()           # nbid → cellid → latest light-theme SVG (vector)
+const _SNAP_SVG_DARK = Dict{String,Dict{String,String}}()      # nbid → cellid → latest dark-theme SVG (vector)
 const _SNAP_LOCK = ReentrantLock()
-function set_snapshot!(nbid::AbstractString, cell::AbstractString, png::Vector{UInt8})
+function set_snapshot!(nbid::AbstractString, cell::AbstractString, png::Vector{UInt8};
+                       svg::Union{AbstractString,Nothing} = nothing,
+                       svg_dark::Union{AbstractString,Nothing} = nothing)
     lock(_SNAP_LOCK) do
         get!(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}())[String(cell)] = png
+        svg === nothing || (get!(_SNAP_SVG, String(nbid), Dict{String,String}())[String(cell)] = String(svg))
+        svg_dark === nothing || (get!(_SNAP_SVG_DARK, String(nbid), Dict{String,String}())[String(cell)] = String(svg_dark))
     end
     return nothing
 end
 _snapshot(nbid, cell) = lock(_SNAP_LOCK) do
     get(get(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}()), String(cell), nothing)
+end
+# Vector (SVG) snapshot of a client-rendered chart for PDF export — crisp at any scale.
+# `dark` picks the dark-theme rendering (for a dark-mode PDF). `nothing` if absent.
+_snapshot_svg(nbid, cell; dark::Bool = false) = lock(_SNAP_LOCK) do
+    store = dark ? _SNAP_SVG_DARK : _SNAP_SVG
+    get(get(store, String(nbid), Dict{String,String}()), String(cell), nothing)
 end
 
 """
@@ -1704,7 +1716,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         pdf = try
-            export_pdf(nb; include_source = get(qp, "source", "1") != "0")
+            export_pdf(nb; include_source = get(qp, "source", "1") != "0",
+                       style = get(qp, "style", "article"),
+                       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
+                       theme = get(qp, "theme", "light"),
+                       code = get(qp, "code", "normal"))
         catch e
             return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))
         end
@@ -1827,8 +1843,10 @@ function _make_router(h::Hub)
     # Client-rendered figure snapshot (ECharts canvas → PNG) — feeds slate_view + PDF.
     HTTP.register!(router, "POST", "/api/{id}/snapshot", req -> _withnb(h, req, nb -> begin
         b = _body(req); cell = String(get(b, "cell", "")); img = String(get(b, "image", ""))
+        getstr(k) = (v = get(b, k, nothing); (v isa AbstractString && !isempty(v)) ? String(v) : nothing)
+        svg = getstr("svg"); svg_dark = getstr("svgDark")
         (isempty(cell) || isempty(img)) && return _json(Dict("ok" => false))
-        try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(img))); catch; return _json(Dict("ok" => false)); end
+        try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(img)); svg = svg, svg_dark = svg_dark); catch; return _json(Dict("ok" => false)); end
         _json(Dict("ok" => true))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
