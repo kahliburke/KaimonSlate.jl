@@ -1720,7 +1720,8 @@ function _make_router(h::Hub)
                        style = get(qp, "style", "article"),
                        columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
                        theme = get(qp, "theme", "light"),
-                       code = get(qp, "code", "normal"))
+                       code = get(qp, "code", "normal"),
+                       body = get(qp, "body", ""))
         catch e
             return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))
         end

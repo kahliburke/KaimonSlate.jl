@@ -478,6 +478,14 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
       <option value="report|1">Report — single column</option>
       <option value="report|2">Report — two column</option>
     </select></div>
+  <div class="setrow"><label>Body text</label>
+    <select id="pdfbody">
+      <option value="">Auto (compact for two-column)</option>
+      <option value="large">Large</option>
+      <option value="normal">Normal</option>
+      <option value="compact">Compact</option>
+      <option value="small">Small</option>
+    </select></div>
   <div class="setrow"><label>Code listings</label>
     <select id="pdfcode">
       <option value="normal">Normal</option>
@@ -1469,7 +1477,7 @@ function closePdfDialog(go) {
 function _pdfPick() {
   return new Promise(resolve => {
     _pdfResolve = resolve;
-    ['pdftheme', 'pdflayout', 'pdfcode'].forEach(id => {
+    ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
       const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
     });
     document.getElementById('pdfbg').classList.add('show');
@@ -1480,11 +1488,12 @@ async function exportPdf() {
   if (!go) return;
   const theme = document.getElementById('pdftheme').value;
   const [style, columns] = document.getElementById('pdflayout').value.split('|');
+  const body = document.getElementById('pdfbody').value;
   const code = document.getElementById('pdfcode').value;
-  ['pdftheme', 'pdflayout', 'pdfcode'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
+  ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
   showLoading('Rendering PDF with Typst…');
   try {
-    const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&code=' + code;
+    const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code;
     const r = await fetch(_apipath('/api/export.pdf') + qs);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
     const blob = await r.blob(), url = URL.createObjectURL(blob);

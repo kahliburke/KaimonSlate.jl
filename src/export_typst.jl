@@ -78,28 +78,51 @@ const _CODE_DARK_TMTHEME = """
 const _CODE_SIZES = Dict("normal" => "9.5pt", "small" => "8.5pt", "smaller" => "7.5pt", "tiny" => "6.5pt")
 _code_size(code) = get(_CODE_SIZES, code, _CODE_SIZES["normal"])
 
+# Body (prose) font sizes (the `body` option). Two-column layouts usually want a smaller
+# body, so the export defaults `body` to "compact" when columns == 2.
+const _BODY_SIZES = Dict("large" => "11.5pt", "normal" => "10.5pt", "compact" => "9.5pt", "small" => "8.5pt")
+_body_size(body) = get(_BODY_SIZES, body, _BODY_SIZES["normal"])
+
 function _typst_preamble(title::AbstractString; style::AbstractString = "article",
                          columns::Int = 1, theme::AbstractString = "light",
-                         code::AbstractString = "normal")
+                         code::AbstractString = "normal", body::AbstractString = "normal")
     pre = _typ_str(strip(replace(_MITEX_SHIMS, r"\s+" => " ")))
     st = get(_STYLES, style, _STYLES["article"])
     p = _palette(theme)
     csize = _code_size(code)
-    cols = clamp(columns, 1, 2)
-    pageopts = "paper: \"a4\", margin: $(st.margin), numbering: \"1\", fill: $(p.page)" * (cols == 2 ? ", columns: 2" : "")
+    bsize = _body_size(body)
+    # Two-column flows via a `#columns()` wrapper on the body (see export_pdf), NOT a
+    # page setting — that keeps the title block and abstract spanning the full width.
+    pageopts = "paper: \"a4\", margin: $(st.margin), numbering: \"1\", fill: $(p.page)"
     rawtheme = isempty(p.codetheme) ? "" : "\n    #set raw(theme: \"$(p.codetheme)\")"
     return """
     #import "@preview/cmarker:$(_CMARKER_VER)"
     #import "@preview/mitex:$(_MITEX_VER)": mitex, mi
     #set document(title: "$(_typ_str(title))")
     #set page($pageopts)
-    #set text(font: "New Computer Modern", size: $(st.textsize), fill: $(p.text))$(rawtheme)
+    #set text(font: "New Computer Modern", size: $(bsize), fill: $(p.text))$(rawtheme)
     #set par(justify: true)
     #show heading: set block(above: 1.1em, below: 0.6em)
     #show heading: set text(fill: $(p.title))
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
     #let titleblock(t) = { align(center, text(size: $(st.titlesize), weight: "bold", fill: $(p.title), t)); v(2pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt) }
+    #let metablock(title, subtitle, byline, abstract) = {
+      align(center)[
+        #text(size: $(st.titlesize), weight: "bold", fill: $(p.title))[#title]
+        #if subtitle != none { v(4pt); text(size: 1.25em, fill: $(p.title))[#subtitle] }
+        #if byline != none { v(6pt); text(size: 0.86em, fill: $(p.parlabel))[#byline] }
+      ]
+      v(6pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt)
+      if abstract != none {
+        block(width: 86%, inset: 0pt)[
+          #align(center, text(size: 0.82em, weight: "bold", tracking: 0.08em, fill: $(p.parlabel))[ABSTRACT])
+          #v(3pt)
+          #text(size: 0.94em, style: "italic")[#abstract]
+        ]
+        v(12pt)
+      }
+    }
     #let codeblock(s) = block(width: 100%, fill: $(p.codebg), inset: 8pt, radius: 4pt, text(size: $(csize), raw(block: true, lang: "julia", s)))
     #let outblock(s) = block(width: 100%, inset: 7pt, fill: $(p.outbg), radius: 3pt, text(size: 8.5pt, fill: $(p.outfg), raw(s)))
     #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 8.5pt, fill: $(p.valfg), raw(s)))
@@ -113,8 +136,8 @@ end
 
 # Markdown source with `{{ expr }}` interpolations resolved to their scalar values (the
 # only interp kind embeddable as text in v1; charts/tables-in-markdown are dropped).
-function _md_for_typst(c::Cell)
-    tmpl, exprs = ReportEngine._md_template(c.source)
+function _md_for_typst(c::Cell, src::AbstractString = c.source)
+    tmpl, exprs = ReportEngine._md_template(src)
     s = tmpl
     for i in 1:length(exprs)
         o = i <= length(c.interp) ? c.interp[i] : nothing
@@ -122,6 +145,44 @@ function _md_for_typst(c::Cell)
         s = replace(s, ReportEngine._interp_token(i) => val)
     end
     return s
+end
+
+# Parse an optional YAML-ish front-matter block fenced by `---` lines at the very top of
+# the notebook's first markdown cell:
+#
+#     ---
+#     title: The Two-State Paramagnet
+#     subtitle: A Complete Statistical-Mechanics Tutorial
+#     author: Kahli Burke
+#     date: 2026-06-07
+#     abstract: The two-state paramagnet is the simplest exactly-solvable model …
+#     ---
+#
+# Returns `(meta::Dict{String,String}, rest::String)` where `rest` is the cell body after
+# the closing fence (rendered as normal markdown). A line that doesn't start a new `key:`
+# continues the previous value, so long abstracts may wrap across lines. When there is no
+# front matter, returns `(empty, original)`. Recognised keys: title/subtitle/author/date/
+# abstract (others are ignored).
+function _parse_frontmatter(src::AbstractString)
+    lines = split(String(src), '\n')
+    i = 1
+    while i <= length(lines) && isempty(strip(lines[i])); i += 1; end          # skip leading blanks
+    (i > length(lines) || strip(lines[i]) != "---") && return (Dict{String,String}(), String(src))
+    meta = Dict{String,String}(); lastkey = ""; close = 0
+    j = i + 1
+    while j <= length(lines)
+        if strip(lines[j]) == "---"; close = j; break; end
+        m = match(r"^\s*([A-Za-z][\w-]*)\s*:\s?(.*)$", lines[j])
+        if m !== nothing
+            lastkey = lowercase(m.captures[1]); meta[lastkey] = String(m.captures[2])
+        elseif !isempty(lastkey)
+            meta[lastkey] = rstrip(meta[lastkey]) * " " * strip(lines[j])      # continuation
+        end
+        j += 1
+    end
+    close == 0 && return (Dict{String,String}(), String(src))                  # unterminated → not front matter
+    rest = join(lines[(close + 1):end], '\n')
+    return (meta, String(rest))
 end
 
 # A static Typst table from a wire table spec (Dict with "columns"/"rows"). Capped.
@@ -234,33 +295,66 @@ function _typst_compile(typ::String, pdf::String)
 end
 
 """
-    export_pdf(nb; include_source=true, style="article", columns=1, theme="light", code="normal")
-        -> Vector{UInt8}
+    export_pdf(nb; include_source=true, style="article", columns=1,
+               theme="light", code="normal", body="normal") -> Vector{UInt8}
 
 Render the notebook to a publication-quality PDF via Typst and return the bytes.
 `style ∈ ("article", "report")` picks a layout preset; `columns ∈ (1, 2)` lays the body
 out single- or two-column; `theme ∈ ("light", "dark")` sets the colour scheme (dark
 matches the live UI and Makie-dark figures). `code ∈ ("normal","small","smaller","tiny")`
 sets the code-listing font size, or `"hidden"` to omit source entirely (also honoured via
-`include_source`). Figures use vector data when available (CairoMakie PDF, ECharts SVG);
-`@bind` controls are frozen to their current values as a parameter strip.
+`include_source`). `body ∈ ("large","normal","compact","small")` sets the prose font size
+(defaults to "compact" for two-column). Figures use vector data when available (CairoMakie
+PDF, ECharts SVG); `@bind` controls are frozen to their current values as a parameter strip.
+
+If the first markdown cell opens with a `---`-fenced front-matter block, its
+title/subtitle/author/date/abstract render as an academic title block (the title overrides
+the filename) and the remainder of that cell becomes normal body text.
 """
 function export_pdf(nb::LiveNotebook; include_source::Bool = true,
                     style::AbstractString = "article", columns::Integer = 1,
-                    theme::AbstractString = "light", code::AbstractString = "normal")
+                    theme::AbstractString = "light", code::AbstractString = "normal",
+                    body::AbstractString = "")
     show_source = include_source && code != "hidden"
+    cols = clamp(Int(columns), 1, 2)
+    body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
     lock(nb.lock) do
         dir = mktempdir()
         # Dark theme highlights code via a bundled tmTheme that Typst reads from the root.
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
         io = IOBuffer()
-        print(io, _typst_preamble(nb.report.title; style = style, columns = Int(columns),
-                                  theme = theme, code = code))
-        print(io, "#titleblock(\"", _typ_str(nb.report.title), "\")\n\n")
-        for (k, c) in enumerate(nb.report.cells)
+        print(io, _typst_preamble(nb.report.title; style = style, columns = cols,
+                                  theme = theme, code = code, body = body))
+        # Front matter (first markdown cell) → academic title + abstract spanning full width.
+        cells = nb.report.cells
+        meta, firstmd_rest = Dict{String,String}(), nothing
+        firsti = findfirst(c -> c.kind == MARKDOWN, cells)
+        if firsti !== nothing
+            meta, rest = _parse_frontmatter(cells[firsti].source)
+            isempty(meta) || (firstmd_rest = rest)
+        end
+        if isempty(meta)
+            print(io, "#titleblock(\"", _typ_str(nb.report.title), "\")\n\n")
+        else
+            ttl = get(meta, "title", nb.report.title)
+            sub = get(meta, "subtitle", "")
+            byline = strip(join(filter(!isempty, [get(meta, "author", ""), get(meta, "date", "")]), " · "))
+            abs = get(meta, "abstract", "")
+            arg(s) = isempty(s) ? "none" : "\"" * _typ_str(s) * "\""
+            absarg = "none"
+            if !isempty(abs)
+                write(joinpath(dir, "abstract.md"), abs)
+                absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn)"
+            end
+            print(io, "#metablock(", arg(ttl), ", ", arg(sub), ", ", arg(byline), ", ", absarg, ")\n\n")
+        end
+        cols == 2 && print(io, "#columns(2)[\n")
+        for (k, c) in enumerate(cells)
             base = "c$(k)"
             if c.kind == MARKDOWN
-                write(joinpath(dir, base * ".md"), _md_for_typst(c))
+                md = (k == firsti && firstmd_rest !== nothing) ? _md_for_typst(c, firstmd_rest) : _md_for_typst(c)
+                isempty(strip(md)) && continue       # front-matter-only cell leaves nothing to render
+                write(joinpath(dir, base * ".md"), md)
                 print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
             else
                 if show_source && !isempty(strip(c.source))
@@ -272,6 +366,7 @@ function export_pdf(nb::LiveNotebook; include_source::Bool = true,
                 print(io, "\n")
             end
         end
+        cols == 2 && print(io, "]\n")
         typ = joinpath(dir, "doc.typ")
         write(typ, String(take!(io)))
         pdf = joinpath(dir, "out.pdf")
