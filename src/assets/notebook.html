@@ -214,6 +214,7 @@ input.toggle:checked::after { left:18px; }
 .apmsg.tool { align-self:flex-start; background:none; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; padding:2px 4px; max-width:100%; }
 .apmsg.tool .toolcode { margin:4px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#cdd3e6; }
 .apmsg.err { align-self:flex-start; color:var(--red); }
+.apmsg.note { align-self:center; background:none; color:var(--dim); font-size:.74rem; padding:2px 6px; max-width:100%; }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
 .apmsg.img { align-self:flex-start; background:none; padding:0; max-width:100%; }
 .apmsg.img img { max-width:100%; border-radius:8px; display:block; }
@@ -1510,11 +1511,33 @@ function openSettings() {
   // Model and permission both bind only at spawn — changing either reaps the running
   // agent (chat-kill keeps the transcript) so the next turn respawns on the new setting.
   const reapAgent = async () => { mhint.style.display = ''; try { await api('POST', '/api/chat-kill', {}); } catch (_) {} setWorking(false); };
+  // Confirm if a turn is in flight (the reap interrupts it), persist, reap, and drop a
+  // visible note in the chat. Reverts the <select> if the user backs out mid-turn.
+  const _selText = sel => sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value;
+  const switchSetting = async (sel, key, verb, noun) => {
+    if (agentWorking && !await confirmDark('A turn is in progress — ' + verb + ' and stop it?', 'Switch & stop', 'danger')) {
+      sel.value = localStorage.getItem(key) || '';   // back out → restore the prior selection
+      return;
+    }
+    localStorage.setItem(key, sel.value);
+    await reapAgent();
+    _agentNote('⚙ ' + noun + ' → ' + _selText(sel) + ' · applies to your next message');
+  };
   mdl.value = agentModel();
-  mdl.onchange = async () => { localStorage.setItem('slateAgentModel', mdl.value); await reapAgent(); };
+  mdl.onchange = () => switchSetting(mdl, 'slateAgentModel', 'switch the model', 'model');
+  // Append locally-installed Ollama models (needs Ollama running + Kaimon's OllamaBackend).
+  // Rebuilt each open so the list stays fresh and never duplicates.
+  [...mdl.querySelectorAll('option[value^="ollama:"]')].forEach(o => o.remove());
+  api('GET', '/api/ollama-models').then(r => {
+    (r && r.models || []).forEach(name => {
+      const o = document.createElement('option');
+      o.value = 'ollama:' + name; o.textContent = 'Ollama · ' + name + ' (local)'; mdl.appendChild(o);
+    });
+    mdl.value = agentModel();   // re-apply: the saved choice may be one of these ollama models
+  }).catch(() => {});
   const perm = document.getElementById('setperm');
   perm.value = agentPerm();
-  perm.onchange = async () => { localStorage.setItem('slateAgentPerm', perm.value); await reapAgent(); };
+  perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
   document.getElementById('setbg').classList.add('show');
 }
 // The chosen agent model ('' = server default = sonnet), sent with every chat turn.
@@ -1785,6 +1808,8 @@ async function loadAgentLog() {
   } catch (_) {}
 }
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
+// A centered, dim system line in the transcript (e.g. "⚙ model → … applies next message").
+function _agentNote(text) { agentMsgs.push({ role: 'note', text }); renderAgentMsgs(); }
 // STOP escalates: first press interrupts the in-flight turn (graceful); if the agent
 // is wedged and still working, a second press hard-kills it (terminates the process,
 // clears the agent — the next message spawns a fresh one).

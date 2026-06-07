@@ -1570,6 +1570,23 @@ function worker_log(nb::LiveNotebook; maxbytes::Int = 100_000)
     return String(take!(io))
 end
 
+# Locally-installed Ollama models (for the Settings dropdown), via Ollama's HTTP API.
+# Proxied through the server so the browser dodges cross-origin issues; best-effort —
+# returns [] if Ollama isn't running. Needs Kaimon's OllamaBackend to actually drive them.
+function _ollama_models()
+    host = get(ENV, "OLLAMA_HOST", "http://127.0.0.1:11434")
+    startswith(host, "http") || (host = "http://" * host)
+    try
+        r = HTTP.get(rstrip(host, '/') * "/api/tags"; connect_timeout = 2, request_timeout = 4, retry = false)
+        d = JSON.parse(String(r.body))
+        names = String[String(get(m, "name", "")) for m in get(d, "models", Any[])]
+        # Drop embedding-only models — they can't run /api/chat, so they're useless as agents.
+        return filter(n -> !isempty(n) && !occursin(r"embed"i, n), names)
+    catch
+        return String[]
+    end
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
@@ -1784,6 +1801,9 @@ function _make_router(h::Hub)
         _clear_chat_log!(nb)                  # and the on-disk transcript
         _json(Dict("ok" => true, "cleared" => true))
     end))
+    # Locally-installed Ollama models → the Settings model dropdown (ollama:<name> entries).
+    HTTP.register!(router, "GET", "/api/{id}/ollama-models", req -> _withnb(h, req, _ ->
+        _json(Dict("models" => _ollama_models()))))
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
