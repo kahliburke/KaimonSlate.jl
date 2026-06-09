@@ -1655,6 +1655,7 @@ function _ollama_models()
 end
 
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
+include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
 
 function _make_router(h::Hub)
     router = HTTP.Router()
@@ -1782,6 +1783,18 @@ function _make_router(h::Hub)
         fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf"
         HTTP.Response(200, ["Content-Type" => "application/pdf",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], pdf)
+    end))
+    # Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a
+    # shallow git bundle when the project is a repo). Reinflate with `KaimonSlate.expand`.
+    HTTP.register!(router, "GET", "/api/{id}/export.standalone.jl", req -> _withnb(h, req, nb -> begin
+        jl = try
+            export_standalone(nb)
+        catch e
+            return HTTP.Response(500, "Standalone export failed: " * sprint(showerror, e))
+        end
+        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".standalone.jl"
+        HTTP.Response(200, ["Content-Type" => "text/x-julia; charset=utf-8",
+                            "Content-Disposition" => "attachment; filename=\"$fn\""], jl)
     end))
     # ── Notebook packages ─────────────────────────────────────────────────────
     # Show the environment with provenance: `notebook` deps (the notebook's own forked env,

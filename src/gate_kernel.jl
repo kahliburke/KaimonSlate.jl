@@ -307,6 +307,20 @@ function env_info(k::GateKernel, report::Report)
     return (notebook = nb === nothing ? (path = "", name = "", deps = Dict{String,Any}[]) : nb, parent = par)
 end
 
+# Filesystem coordinates for a self-contained export (active project dir + path-dep sources).
+function bundle_info(k::GateKernel, report::Report)
+    prepare!(k, report)
+    wire = try
+        _tool(k, "__slate_bundle_info", Dict{String,Any}())
+    catch
+        return (projectdir = "", pathdeps = NamedTuple[])
+    end
+    wire === nothing && return (projectdir = "", pathdeps = NamedTuple[])
+    pd = [(name = String(get(p, :name, get(p, "name", ""))), source = String(get(p, :source, get(p, "source", ""))))
+          for p in get(wire, :pathdeps, get(wire, "pathdeps", Any[]))]
+    return (projectdir = String(get(wire, :projectdir, get(wire, "projectdir", ""))), pathdeps = pd)
+end
+
 # Add/remove a package in the notebook's own env. Adding the FIRST package while in base
 # mode forks the notebook off its parent (seed + activate a single extended env) before the
 # add, so the parent's `Project.toml` is never touched and there's one consistent resolution.

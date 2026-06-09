@@ -395,6 +395,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
       <button onclick="exportHtml();closeTopMenu()">⬇ Export HTML</button>
       <button onclick="exportPdf();closeTopMenu()">📄 Export PDF (publication)</button>
       <button onclick="printNotebook();closeTopMenu()">🖨 Print HTML</button>
+      <button onclick="exportStandalone();closeTopMenu()">📦 Export self-contained .jl</button>
       <hr>
       <button onclick="openSettings();closeTopMenu()">⚙ Settings</button>
       <a id="vscode" href="#" title="Open the .jl in VS Code" onclick="closeTopMenu()">⧉ Open in VS Code</a>
@@ -1468,6 +1469,21 @@ function exportHtml() {
 function printNotebook() {
   const w = window.open(_apipath('/api/export.html'), '_blank');
   if (w) w.addEventListener('load', () => setTimeout(() => w.print(), 300));
+}
+// Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a git
+// bundle when the project is a repo). Can take a moment (tars the env + source).
+async function exportStandalone() {
+  showLoading('Bundling environment + source…');
+  try {
+    const r = await fetch(_apipath('/api/export.standalone.jl'));
+    if (!r.ok) { await alertDark('Standalone export failed:\n' + (await r.text())); return; }
+    const blob = await r.blob(), url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = (nbState && nbState.title || 'notebook') + '.standalone.jl';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { await alertDark('Standalone export failed: ' + e); }
+  finally { hideLoading(); }
 }
 // Publication-quality PDF, rendered server-side via Typst. Options (theme, layout, code
 // size) come from a small modal; the last choices are remembered. Can take a few seconds

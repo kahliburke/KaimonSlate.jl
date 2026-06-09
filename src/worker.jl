@@ -243,6 +243,24 @@ function __slate_reconstruct(envdir, parent, pkgs)
     end
 end
 
+"Filesystem coordinates for a self-contained export: the active project dir (its
+Project.toml + Manifest.toml fully pin the env) and any path/dev dependencies' source dirs
+(the local/parent module code to bundle). The server reads these paths directly (same
+machine) to build the tarball. Shape: `{projectdir, pathdeps:[{name, source}]}`."
+function __slate_bundle_info()
+    out = Dict{String,Any}("projectdir" => "", "pathdeps" => Dict{String,Any}[])
+    try
+        out["projectdir"] = dirname(Pkg.project().path)
+        for (_uuid, pi) in Pkg.dependencies()
+            if pi.is_tracking_path && pi.source !== nothing && isdir(pi.source)
+                push!(out["pathdeps"], Dict{String,Any}("name" => pi.name, "source" => String(pi.source)))
+            end
+        end
+    catch
+    end
+    return out
+end
+
 "Add or remove a package in the worker's OWN active project (the notebook's deps).
 `op` is \"add\" or \"rm\". Returns `{ok, message}`."
 function __slate_pkg(op, name)
@@ -273,6 +291,7 @@ function tools()
         KaimonGate.GateTool("__slate_fork", __slate_fork),
         KaimonGate.GateTool("__slate_sync_parent", __slate_sync_parent),
         KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
+        KaimonGate.GateTool("__slate_bundle_info", __slate_bundle_info),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
     ]
 end

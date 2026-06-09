@@ -35,9 +35,10 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       find_live, notebook_digest,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
                       acquire_floor!, release_floor!, floor_status,
-                      index_docs!, search_docs, cell_image
+                      index_docs!, search_docs, cell_image,
+                      export_standalone, expand
 
-export serve_notebook, LiveNotebook
+export serve_notebook, LiveNotebook, expand
 
 # ── Single-server hub ─────────────────────────────────────────────────────────
 # The extension serves *all* notebooks from one HTTP 2.0 server on one port,
