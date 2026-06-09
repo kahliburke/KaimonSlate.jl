@@ -90,6 +90,7 @@ in the chat to reference a specific cell by id. Pick the model and permission pr
 
 ## Export
 
-When you're done, **☰ → Export HTML** produces a self-contained document (figures embedded,
-math typeset), and **☰ → Print / Save PDF** opens that document and triggers your browser's
-print dialog. See [Export](export.md).
+When you're done, export from the **☰** menu: a self-contained **HTML** document, a
+publication-quality **PDF** (typeset server-side with Typst — themes, columns, vector
+figures), **Print HTML** for a quick browser PDF, or a fully reproducible **self-contained
+`.jl`** (cells + environment + source). See [Export](export.md).

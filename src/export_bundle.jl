@@ -76,7 +76,9 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
     write(joinpath(stage, nbname), cells)
     _maybe_git_bundle!(stage, projectdir)
     tgz = joinpath(mktempdir(), "bundle.tgz")
-    run(`tar czf $tgz -C $stage .`)
+    # COPYFILE_DISABLE stops macOS BSD tar from emitting `._*` AppleDouble entries that would
+    # otherwise litter the tree when extracted on another platform.
+    run(addenv(`tar czf $tgz -C $stage .`, "COPYFILE_DISABLE" => "1"))
     return Base64.base64encode(read(tgz))
 end
 
