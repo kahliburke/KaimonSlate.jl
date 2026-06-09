@@ -13,6 +13,11 @@ module SlateWorker
 import KaimonGate
 import Pkg                                   # project dep listing for eager docs auto-index
 
+# The enclosing/parent project dir stacked behind this notebook env on LOAD_PATH (set by
+# the boot script; "" when the notebook is detached). Used to attribute package provenance
+# — which deps are notebook-specific adds vs. inherited from the parent project.
+const PARENT_PROJECT = Ref("")
+
 # Minimal ECharts marker so notebooks can `echart(opt)`. Only the struct + helper
 # live here (no JSON); the server JSON-encodes the option Dict. `capture.jl`
 # detects `value isa EChart` and ships back the raw Dict.
@@ -98,6 +103,125 @@ function __slate_project_deps()
     return out
 end
 
+"Read a project's direct deps as `[{name, version, uuid}]`. Versions come from the project's
+own `Manifest.toml` when present (best-effort), so this works for a project that isn't the
+active one (e.g. the parent). Returns `[]` on any failure."
+function _project_deps_at(projdir::AbstractString)
+    out = Dict{String,Any}[]
+    try
+        pf = joinpath(projdir, "Project.toml")
+        isfile(pf) || return out
+        proj = Pkg.TOML.parsefile(pf)
+        deps = get(proj, "deps", Dict{String,Any}())
+        # versions: parse the sibling Manifest if present (format differs across Julia, but
+        # each dep entry is a 1-elt array of tables carrying `version`).
+        vers = Dict{String,String}()
+        mf = joinpath(projdir, "Manifest.toml")
+        if isfile(mf)
+            man = Pkg.TOML.parsefile(mf)
+            mdeps = get(man, "deps", man)               # Julia ≥1.7 nests under "deps"
+            for (nm, entries) in mdeps
+                entries isa AbstractVector && !isempty(entries) && haskey(entries[1], "version") &&
+                    (vers[nm] = string(entries[1]["version"]))
+            end
+        end
+        for (name, uuid) in deps
+            push!(out, Dict{String,Any}("name" => name, "version" => get(vers, name, ""), "uuid" => string(uuid)))
+        end
+    catch
+    end
+    return out
+end
+
+"Environment provenance for the package viewer: the notebook's own direct deps (the active
+project — where `Pkg.add` lands) and, separately, the parent project's deps (inherited via
+LOAD_PATH stacking). Shape: `{notebook:{path,deps}, parent:{path,deps}|nothing}`."
+function __slate_env_info()
+    nb = Dict{String,Any}("path" => "", "deps" => Dict{String,Any}[])
+    try
+        nb["path"] = dirname(Pkg.project().path)
+        nb["deps"] = __slate_project_deps()
+    catch
+    end
+    parent = nothing
+    p = PARENT_PROJECT[]
+    if !isempty(p)
+        name = ""
+        ppf = joinpath(p, "Project.toml")
+        isfile(ppf) && (name = string(get(Pkg.TOML.parsefile(ppf), "name", "")))
+        parent = Dict{String,Any}("path" => p, "name" => name, "deps" => _project_deps_at(p))
+    end
+    return Dict{String,Any}("notebook" => nb, "parent" => parent)
+end
+
+# Seed a forked notebook env from `parent`: copy the parent's deps + compat (NOT its package
+# identity) and its Manifest as the resolution baseline, activate the env, then `dev` the
+# parent package in so `using ParentModule` works — all preserving the parent's pinned
+# versions, so anything already loaded in this worker stays valid. One consistent env.
+function _seed_notebook_env!(envdir::AbstractString, parent::AbstractString)
+    mkpath(envdir)
+    pname = ""
+    ppf = joinpath(parent, "Project.toml")
+    if isfile(ppf)
+        pt = Pkg.TOML.parsefile(ppf)
+        seed = Dict{String,Any}()
+        haskey(pt, "deps") && (seed["deps"] = pt["deps"])
+        haskey(pt, "compat") && (seed["compat"] = pt["compat"])
+        open(joinpath(envdir, "Project.toml"), "w") do io; Pkg.TOML.print(io, seed); end
+        pmf = joinpath(parent, "Manifest.toml")
+        isfile(pmf) && cp(pmf, joinpath(envdir, "Manifest.toml"); force = true)
+        (haskey(pt, "name") && haskey(pt, "uuid")) && (pname = String(pt["name"]))
+    else
+        write(joinpath(envdir, "Project.toml"), "")
+    end
+    Pkg.activate(envdir)
+    if !isempty(pname)
+        try
+            Pkg.develop(Pkg.PackageSpec(path = parent); preserve = Pkg.PRESERVE_ALL)
+        catch
+            try; Pkg.develop(Pkg.PackageSpec(path = parent)); catch; end
+        end
+    end
+    return pname
+end
+
+"Fork this notebook off its parent: materialise + activate the notebook env (`envdir`) as a
+single environment that extends the parent. Called the first time a package is added while
+running in base mode. Returns `{ok, message}`."
+function __slate_fork(envdir, parent)
+    try
+        _seed_notebook_env!(String(envdir), String(parent))
+        return Dict{String,Any}("ok" => true)
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
+"Re-resolve a forked notebook env against the CURRENT parent (called when the parent's
+Manifest changed): re-seed from the parent, then re-add the notebook's own packages so the
+two stay one consistent environment. Returns `{ok, adds}`."
+function __slate_sync_parent(envdir, parent)
+    try
+        e = String(envdir); p = String(parent)
+        fdeps = Set{String}()
+        fpf = joinpath(e, "Project.toml")
+        isfile(fpf) && (fdeps = Set(keys(get(Pkg.TOML.parsefile(fpf), "deps", Dict{String,Any}()))))
+        pdeps = Set{String}(); pname = ""
+        ppf = joinpath(p, "Project.toml")
+        if isfile(ppf)
+            pt = Pkg.TOML.parsefile(ppf)
+            pdeps = Set(keys(get(pt, "deps", Dict{String,Any}())))
+            pname = string(get(pt, "name", ""))
+        end
+        adds = sort(collect(setdiff(fdeps, pdeps, Set([pname, ""]))))   # the notebook's own packages
+        _seed_notebook_env!(e, p)
+        isempty(adds) || Pkg.add(adds; preserve = Pkg.PRESERVE_ALL)
+        return Dict{String,Any}("ok" => true, "adds" => adds)
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
 "Add or remove a package in the worker's OWN active project (the notebook's deps).
 `op` is \"add\" or \"rm\". Returns `{ok, message}`."
 function __slate_pkg(op, name)
@@ -124,6 +248,9 @@ function tools()
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_harvest_docs", __slate_harvest_docs),
         KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),
+        KaimonGate.GateTool("__slate_env_info", __slate_env_info),
+        KaimonGate.GateTool("__slate_fork", __slate_fork),
+        KaimonGate.GateTool("__slate_sync_parent", __slate_sync_parent),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
     ]
 end

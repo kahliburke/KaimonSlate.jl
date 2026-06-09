@@ -33,19 +33,57 @@ function _manager()
 end
 
 """
-    GateKernel(project) <: Kernel
+    GateKernel(project; parent="", envdir="") <: Kernel
 
-Evaluate cells in a `SlateWorker` subprocess pinned to `project`, over the gate.
-Lazily spawns + connects on first use (`prepare!`).
+Evaluate cells in a `SlateWorker` subprocess pinned to the single environment `project`.
+
+Environment model (fork-and-extend, never `LOAD_PATH`-stacked):
+- **Base mode** (`project == parent`): the notebook has no packages of its own, so it runs
+  *directly* in the enclosing `parent` project — zero overhead, exactly like a plain script.
+- **Forked mode** (`project == envdir`): once the notebook adds a package, it gets its OWN
+  env (`envdir`) seeded from the parent (parent package dev'd in, parent deps + Manifest
+  copied) and resolved as ONE consistent environment — so the notebook can override the
+  base and there are never two versions of a shared dep. Adds never touch the parent.
+- **Detached** (`parent == ""`): no enclosing project; the notebook env is everything.
+
+`envdir` is the fork target (the per-notebook env dir); `parent` is recorded for provenance
+and re-seeding. Lazily spawns + connects on first use (`prepare!`).
 """
 mutable struct GateKernel <: Kernel
-    project::String
+    project::String  # the single active environment (== parent in base mode, == envdir when forked)
+    parent::String   # enclosing project dir ("" = detached) — base + provenance source
+    envdir::String   # this notebook's own env dir (fork target); active once forked
     port::Int
     stream_port::Int
     proc::Any        # worker Base.Process
     conn::Any        # Main.Kaimon REPLConnection
     logpath::String  # worker stdout/stderr log
-    GateKernel(project::AbstractString) = new(String(project), 0, 0, nothing, nothing, "")
+    GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "") =
+        new(String(project), String(parent), String(envdir), 0, 0, nothing, nothing, "")
+end
+
+# True when the notebook is running directly in its parent (no own packages yet).
+_base_mode(k::GateKernel) = !isempty(k.parent) && k.project == k.parent
+
+# The notebook's OWN environment directory — a per-notebook env materialised under the
+# depot, keyed by the notebook's absolute path. It carries the notebook-specific package
+# adds (stacked on the parent project) and is the source for the reproducibility footer.
+# Reconstructable from that footer, so repos stay free of sidecar env dirs.
+function notebook_env_dir(path::AbstractString)
+    ap = abspath(String(path))
+    key = replace(splitext(basename(ap))[1], r"[^A-Za-z0-9_-]" => "_") *
+          "-" * string(hash(ap) % 0xffffffff; base = 16, pad = 8)
+    return joinpath(first(DEPOT_PATH), "environments", "kaimonslate", key)
+end
+
+# Ensure a notebook env exists on disk (an empty `Project.toml` is enough for the worker
+# to activate it and for `Pkg.add` to populate it). Seeds `[deps]` from `seed_toml` when
+# given (the reproducibility footer's embedded notebook Project.toml).
+function ensure_notebook_env!(dir::AbstractString; seed_toml::AbstractString = "")
+    mkpath(dir)
+    proj = joinpath(dir, "Project.toml")
+    isfile(proj) || write(proj, isempty(seed_toml) ? "" : seed_toml)
+    return dir
 end
 
 # Worker connection name → report id, for routing gate-stream `slate_refresh`
@@ -89,16 +127,21 @@ end
 
 # Worker boot: put KaimonGate on LOAD_PATH (via Kaimon's env), load the SlateWorker
 # capture payload, and serve its tools over TCP. Pinned to the notebook's project.
-function _worker_script(port::Int, stream_port::Int)
+function _worker_script(port::Int, stream_port::Int, parent::AbstractString = "")
     # Put ONLY KaimonGate (the ZMQ bridge) on the worker's LOAD_PATH — from its own
     # minimal project (ZMQ/Serialization/…, no HTTP), NOT Kaimon's full env. Kaimon's
     # Manifest pins the custom HTTP 2.0 (Reseau); prepending it would shadow a notebook
     # project's standard HTTP v1 and break packages that need it (WGLMakie→Bonito, …).
     kgate_dir = joinpath(Base.pkgdir(_kaimon()), "lib", "KaimonGate")
+    # No LOAD_PATH stacking: the notebook runs in a SINGLE active env (`@`, set by
+    # `--project`) — either the parent directly (base mode) or a forked env that already
+    # contains the parent's deps (forked mode). `PARENT_PROJECT` is recorded only so the
+    # worker can attribute package provenance (which deps are notebook adds vs parent).
     return """
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
     import KaimonGate
     include($(repr(_WORKER_JL)))
+    SlateWorker.PARENT_PROJECT[] = $(repr(String(parent)))
     SlateWorker.start(; host = "127.0.0.1", port = $port, stream_port = $stream_port)
     """
 end
@@ -108,7 +151,7 @@ function _spawn_worker!(k::GateKernel)
     k.port = port; k.stream_port = stream_port
     logdir = joinpath(tempdir(), "kaimonslate"); mkpath(logdir)
     k.logpath = joinpath(logdir, "worker-$port.log")
-    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no -e $(_worker_script(port, stream_port))`
+    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no -e $(_worker_script(port, stream_port, k.parent))`
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
     # each chunk, so the log is tailable in real time. A plain `stdout=<file>`
     # redirect is block-buffered and only lands on disk when the worker exits —
@@ -155,6 +198,7 @@ function prepare!(k::GateKernel, report::Report)
         _connect!(k)
         _GATE_SESSION[k.conn.name] = report.id   # route this worker's stream events back to the notebook
         _ensure_poller!()
+        _maybe_sync_parent!(k)                   # forked + parent drifted → re-resolve once, up front
     end
     return nothing
 end
@@ -241,9 +285,41 @@ function project_deps(k::GateKernel, report::Report)
     return Dict{String,Any}[Dict{String,Any}(String(k) => v for (k, v) in r) for r in wire]
 end
 
-# Add/remove a package in the worker's active project (notebook-local deps).
+# Environment provenance: the notebook's own deps + the parent project's deps (for the
+# package viewer). Returns `(notebook=(path, deps), parent=(path, deps)|nothing)`.
+function env_info(k::GateKernel, report::Report)
+    prepare!(k, report)
+    wire = try
+        _tool(k, "__slate_env_info", Dict{String,Any}())
+    catch
+        return (notebook = (path = "", deps = Dict{String,Any}[]), parent = nothing)
+    end
+    _grp(g) = g === nothing ? nothing :
+        (path = String(get(g, :path, get(g, "path", ""))),
+         name = String(get(g, :name, get(g, "name", ""))),
+         deps = Dict{String,Any}[Dict{String,Any}(String(kk) => v for (kk, v) in d)
+                                 for d in get(g, :deps, get(g, "deps", Any[]))])
+    nb = _grp(get(wire, :notebook, get(wire, "notebook", nothing)))
+    par = _grp(get(wire, :parent, get(wire, "parent", nothing)))
+    return (notebook = nb === nothing ? (path = "", name = "", deps = Dict{String,Any}[]) : nb, parent = par)
+end
+
+# Add/remove a package in the notebook's own env. Adding the FIRST package while in base
+# mode forks the notebook off its parent (seed + activate a single extended env) before the
+# add, so the parent's `Project.toml` is never touched and there's one consistent resolution.
 function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::AbstractString)
     prepare!(k, report)
+    if String(op) == "add" && _base_mode(k)
+        r = try
+            _tool(k, "__slate_fork", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent))
+        catch e
+            return Dict{String,Any}("ok" => false, "message" => "fork failed: " * sprint(showerror, e))
+        end
+        (r isa AbstractDict && get(r, :ok, get(r, "ok", false)) == false) &&
+            return Dict{String,Any}("ok" => false, "message" => "fork failed: " * string(get(r, :message, get(r, "message", "?"))))
+        k.project = k.envdir                        # the worker is now on the forked env
+        _write_parent_marker!(k)                    # record the parent baseline we seeded from
+    end
     try
         r = _tool(k, "__slate_pkg", Dict{String,Any}("op" => String(op), "name" => String(name)))
         r === nothing && return Dict{String,Any}("ok" => false, "message" => "no response from worker")
@@ -251,6 +327,32 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
+end
+
+# Hash of the parent's Manifest (its content) — the baseline a forked env was seeded from.
+# Stored in the env as a marker so we can detect parent drift and auto re-resolve on open.
+_parent_manifest_hash(parent::AbstractString) =
+    (isempty(parent) || !isfile(joinpath(parent, "Manifest.toml"))) ? "" :
+    string(hash(read(joinpath(parent, "Manifest.toml"), String)); base = 16)
+_parent_marker_path(k::GateKernel) = joinpath(k.envdir, ".slate_parent_manifest")
+function _write_parent_marker!(k::GateKernel)
+    try; isempty(k.envdir) || write(_parent_marker_path(k), _parent_manifest_hash(k.parent)); catch; end
+end
+
+# Auto re-resolve a forked notebook env when its parent's Manifest has changed since we
+# seeded it (keeps the one-env invariant: parent updates flow in, notebook adds preserved).
+function _maybe_sync_parent!(k::GateKernel)
+    (isempty(k.parent) || _base_mode(k)) && return
+    cur = _parent_manifest_hash(k.parent)
+    isempty(cur) && return
+    prev = try; isfile(_parent_marker_path(k)) ? read(_parent_marker_path(k), String) : ""; catch; ""; end
+    cur == prev && return
+    try
+        _tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent); timeout = 600.0)
+        _write_parent_marker!(k)
+    catch
+    end
+    return
 end
 
 function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)

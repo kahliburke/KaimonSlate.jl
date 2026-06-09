@@ -46,9 +46,20 @@ end
 function _select_kernel(path::AbstractString)
     if ReportEngine.gate_available()
         proj = Base.current_project(dirname(abspath(path)))
-        proj === nothing ?
-            (@warn "KaimonSlate: no enclosing project for $path — using in-process kernel") :
-            return GateKernel(dirname(proj))
+        parent = proj === nothing ? "" : dirname(proj)
+        envdir = ReportEngine.notebook_env_dir(path)
+        forked = isfile(joinpath(envdir, "Project.toml"))   # the fork is materialised only on first add
+        if parent == ""
+            # Detached: the notebook env IS the whole world (everything is a "notebook add").
+            ReportEngine.ensure_notebook_env!(envdir)
+            return GateKernel(envdir; parent = "", envdir = envdir)
+        elseif forked
+            # Already has its own packages → run in the forked env (extends the parent).
+            return GateKernel(envdir; parent = parent, envdir = envdir)
+        else
+            # Base mode: no notebook-specific packages yet → run directly in the parent.
+            return GateKernel(parent; parent = parent, envdir = envdir)
+        end
     end
     return InProcessKernel()
 end
@@ -1730,12 +1741,24 @@ function _make_router(h::Hub)
                             "Content-Disposition" => "attachment; filename=\"$fn\""], pdf)
     end))
     # ── Notebook packages ─────────────────────────────────────────────────────
-    # List the notebook project's direct deps; add/remove a package in that project
-    # (the worker's active env). `manageable` is false for an in-process kernel (no
-    # project). A successful op restales + re-runs so cells using the package update.
+    # Show the environment with provenance: `notebook` deps (the notebook's own env, where
+    # adds land — removable) and `parent` deps (inherited from the enclosing project via
+    # LOAD_PATH stacking — read-only). `detached` is true when there's no parent (the
+    # notebook env IS everything). `manageable` is false for an in-process kernel.
     HTTP.register!(router, "GET", "/api/{id}/packages", req -> _withnb(h, req, nb -> begin
-        deps = try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end
-        _json(Dict("packages" => deps, "manageable" => !(nb.kernel isa InProcessKernel)))
+        info = try; ReportEngine.env_info(nb.kernel, nb.report); catch; (notebook = (path = "", name = "", deps = Dict{String,Any}[]), parent = nothing); end
+        # The active env carries the parent's deps too (base mode = the parent itself; forked
+        # = seeded from it). "Notebook adds" is therefore the set difference: active deps that
+        # aren't a parent dep and aren't the parent package itself.
+        pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
+        pnames = Set(string(get(d, "name", "")) for d in pdeps)
+        info.parent === nothing || push!(pnames, info.parent.name)
+        adds = [d for d in info.notebook.deps if !(string(get(d, "name", "")) in pnames)]
+        _json(Dict("notebook" => adds,
+                   "parent" => pdeps,
+                   "parentPath" => info.parent === nothing ? "" : info.parent.path,
+                   "detached" => info.parent === nothing,
+                   "manageable" => !(nb.kernel isa InProcessKernel)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
         b = _body(req); op = String(get(b, "op", "")); name = String(get(b, "name", ""))

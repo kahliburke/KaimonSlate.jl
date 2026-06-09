@@ -281,6 +281,10 @@ li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
 .pkgname { font-family:'Cascadia Code',monospace; color:var(--text); font-size:.84rem; }
 .pkgver { color:var(--dim); font-size:.74rem; margin-left:auto; font-family:monospace; }
 .pkgrow .cdel { margin-left:4px; }
+.pkggrouphdr { display:flex; align-items:center; gap:8px; color:var(--accent); font-size:.7rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:.06em; margin:12px 4px 4px; padding-bottom:3px; border-bottom:1px solid var(--border); }
+.pkggrouphdr:first-child { margin-top:2px; }
+.pkgpath { color:var(--dim); font-weight:400; text-transform:none; letter-spacing:0; font-family:monospace; font-size:.72rem; }
 /* Topbar ☰ overflow menu */
 .menuwrap { position:relative; display:inline-block; }
 .topmenu { position:absolute; top:calc(100% + 5px); left:0; min-width:210px; background:var(--bg2);
@@ -2119,16 +2123,26 @@ function togglePackages() {
   if (p.classList.contains('open')) loadPackages();
 }
 async function loadPackages() {
-  const r = await api('GET', '/api/packages');
-  _pkgManageable = !!(r && r.manageable);
-  const pkgs = ((r && r.packages) || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  const r = await api('GET', '/api/packages') || {};
+  _pkgManageable = !!r.manageable;
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const nb = (r.notebook || []).slice().sort(byName);
+  const parent = (r.parent || []).slice().sort(byName);
   document.getElementById('pkgstatus').textContent =
-    pkgs.length + ' dep' + (pkgs.length === 1 ? '' : 's') + (_pkgManageable ? '' : ' · read-only (no project)');
+    nb.length + ' notebook' + (parent.length ? ' · ' + parent.length + ' from parent' : (r.detached ? ' · detached' : '')) +
+    (_pkgManageable ? '' : ' · read-only (no project)');
   const inp = document.getElementById('pkgin'); inp.disabled = !_pkgManageable;
-  document.getElementById('pkglist').innerHTML = pkgs.length ? pkgs.map(p =>
+  const row = (p, removable) =>
     `<div class="pkgrow"><span class="pkgname">${_esc(p.name)}</span><span class="pkgver">${_esc(p.version || '')}</span>` +
-    (_pkgManageable ? `<button class="cdel" onclick="pkgRm('${_esc(p.name)}')" title="remove">✕</button>` : '') + '</div>').join('')
-    : '<div class="phint">No declared dependencies.</div>';
+    (removable ? `<button class="cdel" onclick="pkgRm('${_esc(p.name)}')" title="remove">✕</button>` : '') + '</div>';
+  let html = '';
+  html += `<div class="pkggrouphdr">Notebook${r.detached ? ' (detached — all deps)' : ' adds'}</div>`;
+  html += nb.length ? nb.map(p => row(p, _pkgManageable)).join('') : '<div class="phint">No notebook-specific packages yet.</div>';
+  if (parent.length) {
+    html += `<div class="pkggrouphdr">Parent project <span class="pkgpath">${_esc((r.parentPath || '').replace(/^.*\//, ''))}</span></div>`;
+    html += parent.map(p => row(p, false)).join('');
+  }
+  document.getElementById('pkglist').innerHTML = html;
 }
 async function pkgAdd() {
   if (!_pkgManageable) return;

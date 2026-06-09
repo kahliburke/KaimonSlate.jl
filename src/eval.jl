@@ -153,6 +153,9 @@ distinct project, so it returns nothing (only `using`'d packages get indexed the
 """
 project_deps(::InProcessKernel, ::Report) = Dict{String,Any}[]
 
+# In-process has no notebook/parent split (cells run in the host's active project).
+env_info(::InProcessKernel, ::Report) = (notebook = (path = "", deps = Dict{String,Any}[]), parent = nothing)
+
 """
     pkg_op(kernel, report, op, name) -> Dict{String,Any}
 
