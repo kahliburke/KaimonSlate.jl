@@ -127,17 +127,38 @@ function expand(jl_path::AbstractString; target::AbstractString = "")
     write(tgz, Base64.base64decode(b64))
     run(`tar xzf $tgz -C $tdir`)
     @info "Expanded standalone notebook" target = tdir
+    repo = _attach_git_repo(tdir)                    # clone the embedded bundle + wire origin
     println("""
     Expanded to: $tdir
       • instantiate the environment:   julia --project=$tdir -e 'using Pkg; Pkg.instantiate()'
-      • local package source is under: $(joinpath(tdir, "local"))
-    """)
-    gb = joinpath(tdir, "repo.gitbundle")
-    if isfile(gb)
-        url = isfile(joinpath(tdir, "git-remote.txt")) ? strip(read(joinpath(tdir, "git-remote.txt"), String)) : ""
-        println("""    To get a git repo that maps to the original (matching SHAs):
-          git clone $gb $(joinpath(tdir, "repo"))""" *
-                (isempty(url) ? "" : "\n      cd $(joinpath(tdir, "repo")) && git remote set-url origin $url   # then branch & PR") * "\n")
-    end
+      • local package source is under: $(joinpath(tdir, "local"))""" *
+            (repo === nothing ? "" :
+             "\n      • git repo (matching origin SHAs, ready to branch & PR): $repo") * "\n")
     return tdir
+end
+
+# When an expanded tree carries `repo.gitbundle`, clone it into `target/repo` and point
+# `origin` at the recorded URL — handing back a real git repo whose tip SHA matches the
+# original, ready to branch and PR. Returns the repo path, or `nothing` (no bundle / no git
+# / already present / failure — the bundle file is left in place either way).
+function _attach_git_repo(tdir::AbstractString)
+    gb = joinpath(tdir, "repo.gitbundle")
+    (isfile(gb) && Sys.which("git") !== nothing) || return nothing
+    repo = joinpath(tdir, "repo")
+    ispath(repo) && return nothing
+    try
+        run(pipeline(`git clone -q $gb $repo`; stdout = devnull, stderr = devnull))
+        urlfile = joinpath(tdir, "git-remote.txt")
+        if isfile(urlfile)
+            url = strip(read(urlfile, String))
+            isempty(url) || try
+                run(pipeline(`git -C $repo remote set-url origin $url`; stdout = devnull, stderr = devnull))
+            catch
+                run(pipeline(`git -C $repo remote add origin $url`; stdout = devnull, stderr = devnull))
+            end
+        end
+        return repo
+    catch
+        return nothing
+    end
 end
