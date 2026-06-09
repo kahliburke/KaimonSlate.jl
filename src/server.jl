@@ -43,17 +43,23 @@ end
 
 # GateKernel when running as the Kaimon extension AND the notebook is inside a
 # Julia project (cells eval in a per-notebook worker); else in-process.
-function _select_kernel(path::AbstractString)
+function _select_kernel(path::AbstractString, report)
     if ReportEngine.gate_available()
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
         envdir = ReportEngine.notebook_env_dir(path)
-        forked = isfile(joinpath(envdir, "Project.toml"))   # the fork is materialised only on first add
-        if parent == ""
+        env_exists = isfile(joinpath(envdir, "Project.toml"))   # the fork is materialised on first add
+        delta = get(report.meta, "env", Dict{String,Any}[])     # footer-recorded notebook packages
+        if !env_exists && !isempty(delta)
+            # The `.jl` records package adds but the env dir is gone (e.g. a fresh git clone):
+            # reconstruct it from the footer on first use (pending).
+            ReportEngine.ensure_notebook_env!(envdir)
+            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta)
+        elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
             ReportEngine.ensure_notebook_env!(envdir)
             return GateKernel(envdir; parent = "", envdir = envdir)
-        elseif forked
+        elseif env_exists
             # Already has its own packages → run in the forked env (extends the parent).
             return GateKernel(envdir; parent = parent, envdir = envdir)
         else
@@ -71,7 +77,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     nbid = isempty(id) ? rid : String(id)
     r = parse_report(src; id = rid, title = base)
     build_dependencies!(r)
-    kernel = _select_kernel(path)
+    kernel = _select_kernel(path, r)
     eval_stale!(r, kernel)               # initial full run
     nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
@@ -178,6 +184,43 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
     nb.version += 1                               # every in-app commit advances the version (CAS basis)
     _history!(nb; source = source)
     return nb
+end
+
+# The notebook's OWN packages (the delta beyond the parent project) as sorted
+# `{name, version, uuid}` — the set difference active − parent − parent-package. Shared by
+# the package viewer's "notebook" group and the `.jl` reproducibility footer.
+function _notebook_adds(nb::LiveNotebook)
+    info = try
+        ReportEngine.env_info(nb.kernel, nb.report)
+    catch
+        return (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true)
+    end
+    pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
+    pnames = Set(string(get(d, "name", "")) for d in pdeps)
+    info.parent === nothing || push!(pnames, info.parent.name)
+    adds = sort([d for d in info.notebook.deps if !(string(get(d, "name", "")) in pnames)];
+                by = d -> string(get(d, "name", "")))
+    return (adds = adds, parent = pdeps,
+            parentpath = info.parent === nothing ? "" : info.parent.path,
+            detached = info.parent === nothing)
+end
+
+# Sync the `.jl` reproducibility footer (`report.meta["env"]`) to the notebook's current
+# package delta and persist if it changed. Called after package operations.
+function _refresh_env_meta!(nb::LiveNotebook)
+    env = Dict{String,Any}[Dict{String,Any}("name" => string(get(d, "name", "")),
+                                             "version" => string(get(d, "version", "")),
+                                             "uuid" => string(get(d, "uuid", "")))
+                           for d in _notebook_adds(nb).adds]
+    cur = get(nb.report.meta, "env", Dict{String,Any}[])
+    if isempty(env)
+        haskey(nb.report.meta, "env") || return nb
+        delete!(nb.report.meta, "env")
+    else
+        env == cur && return nb
+        nb.report.meta["env"] = env
+    end
+    return _persist!(nb; source = "packages")
 end
 
 # Restore the notebook to a recorded state (by content hash). Append-only and
@@ -1741,23 +1784,16 @@ function _make_router(h::Hub)
                             "Content-Disposition" => "attachment; filename=\"$fn\""], pdf)
     end))
     # ── Notebook packages ─────────────────────────────────────────────────────
-    # Show the environment with provenance: `notebook` deps (the notebook's own env, where
-    # adds land — removable) and `parent` deps (inherited from the enclosing project via
-    # LOAD_PATH stacking — read-only). `detached` is true when there's no parent (the
-    # notebook env IS everything). `manageable` is false for an in-process kernel.
+    # Show the environment with provenance: `notebook` deps (the notebook's own forked env,
+    # where adds land — removable) and `parent` deps (inherited from the enclosing project,
+    # which the forked env extends — read-only). `detached` is true when there's no parent
+    # (the notebook env IS everything). `manageable` is false for an in-process kernel.
     HTTP.register!(router, "GET", "/api/{id}/packages", req -> _withnb(h, req, nb -> begin
-        info = try; ReportEngine.env_info(nb.kernel, nb.report); catch; (notebook = (path = "", name = "", deps = Dict{String,Any}[]), parent = nothing); end
-        # The active env carries the parent's deps too (base mode = the parent itself; forked
-        # = seeded from it). "Notebook adds" is therefore the set difference: active deps that
-        # aren't a parent dep and aren't the parent package itself.
-        pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
-        pnames = Set(string(get(d, "name", "")) for d in pdeps)
-        info.parent === nothing || push!(pnames, info.parent.name)
-        adds = [d for d in info.notebook.deps if !(string(get(d, "name", "")) in pnames)]
-        _json(Dict("notebook" => adds,
-                   "parent" => pdeps,
-                   "parentPath" => info.parent === nothing ? "" : info.parent.path,
-                   "detached" => info.parent === nothing,
+        e = _notebook_adds(nb)
+        _json(Dict("notebook" => e.adds,
+                   "parent" => e.parent,
+                   "parentPath" => e.parentpath,
+                   "detached" => e.detached,
                    "manageable" => !(nb.kernel isa InProcessKernel)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
@@ -1768,6 +1804,7 @@ function _make_router(h::Hub)
             if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
                 for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
                 eval_stale!(nb.report, nb.kernel)
+                _refresh_env_meta!(nb)                   # update the .jl reproducibility footer
             end
             r
         end

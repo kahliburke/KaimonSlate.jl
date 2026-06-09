@@ -53,13 +53,15 @@ mutable struct GateKernel <: Kernel
     project::String  # the single active environment (== parent in base mode, == envdir when forked)
     parent::String   # enclosing project dir ("" = detached) — base + provenance source
     envdir::String   # this notebook's own env dir (fork target); active once forked
+    pending::Vector{Any}  # footer packages to reconstruct on first use (env dir absent on disk)
     port::Int
     stream_port::Int
     proc::Any        # worker Base.Process
     conn::Any        # Main.Kaimon REPLConnection
     logpath::String  # worker stdout/stderr log
-    GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "") =
-        new(String(project), String(parent), String(envdir), 0, 0, nothing, nothing, "")
+    GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
+               pending::Vector = Any[]) =
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "")
 end
 
 # True when the notebook is running directly in its parent (no own packages yet).
@@ -198,6 +200,7 @@ function prepare!(k::GateKernel, report::Report)
         _connect!(k)
         _GATE_SESSION[k.conn.name] = report.id   # route this worker's stream events back to the notebook
         _ensure_poller!()
+        _reconstruct_env!(k)                     # env dir absent but footer has a delta → rebuild it
         _maybe_sync_parent!(k)                   # forked + parent drifted → re-resolve once, up front
     end
     return nothing
@@ -337,6 +340,22 @@ _parent_manifest_hash(parent::AbstractString) =
 _parent_marker_path(k::GateKernel) = joinpath(k.envdir, ".slate_parent_manifest")
 function _write_parent_marker!(k::GateKernel)
     try; isempty(k.envdir) || write(_parent_marker_path(k), _parent_manifest_hash(k.parent)); catch; end
+end
+
+# Rebuild a notebook env from its `.jl` footer when the env dir is absent (e.g. a fresh
+# git clone of a notebook that records package adds) — seed from the parent and add the
+# footer's pinned packages. Runs once, before the first eval.
+function _reconstruct_env!(k::GateKernel)
+    isempty(k.pending) && return
+    try
+        _tool(k, "__slate_reconstruct",
+              Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending);
+              timeout = 900.0)
+        _write_parent_marker!(k)
+    catch
+    end
+    empty!(k.pending)
+    return
 end
 
 # Auto re-resolve a forked notebook env when its parent's Manifest has changed since we

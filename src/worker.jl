@@ -96,7 +96,7 @@ function __slate_project_deps()
         for (name, uuid) in proj.dependencies
             pi = get(info, uuid, nothing)
             ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
-            push!(out, Dict{String,Any}("name" => name, "version" => ver))
+            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid)))
         end
     catch
     end
@@ -222,6 +222,27 @@ function __slate_sync_parent(envdir, parent)
     end
 end
 
+"Reconstruct a notebook env from its `.jl` footer: seed from the parent, then add the
+notebook's own packages at the recorded versions. Called on open when the env dir is
+absent (e.g. a fresh git clone) but the footer records a delta. `pkgs` is a list of
+`{name, version, uuid}`. Returns `{ok, message}`."
+function __slate_reconstruct(envdir, parent, pkgs)
+    try
+        _seed_notebook_env!(String(envdir), String(parent))
+        specs = Pkg.PackageSpec[]
+        for p in pkgs
+            nm = String(get(p, "name", get(p, :name, "")))
+            isempty(nm) && continue
+            v = string(get(p, "version", get(p, :version, "")))
+            push!(specs, isempty(v) ? Pkg.PackageSpec(name = nm) : Pkg.PackageSpec(name = nm, version = VersionNumber(v)))
+        end
+        isempty(specs) || Pkg.add(specs)
+        return Dict{String,Any}("ok" => true)
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
 "Add or remove a package in the worker's OWN active project (the notebook's deps).
 `op` is \"add\" or \"rm\". Returns `{ok, message}`."
 function __slate_pkg(op, name)
@@ -251,6 +272,7 @@ function tools()
         KaimonGate.GateTool("__slate_env_info", __slate_env_info),
         KaimonGate.GateTool("__slate_fork", __slate_fork),
         KaimonGate.GateTool("__slate_sync_parent", __slate_sync_parent),
+        KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
     ]
 end

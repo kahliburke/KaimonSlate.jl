@@ -234,6 +234,9 @@ function update_source!(report::Report, new_source::AbstractString)
     end
 
     report.cells = newr.cells
+    # Carry over the reproducibility footer parsed from the new source (it lives in `meta`,
+    # not in a cell), so an external edit to it — or its absence — is reflected.
+    haskey(newr.meta, "env") ? (report.meta["env"] = newr.meta["env"]) : delete!(report.meta, "env")
     build_dependencies!(report)
     for id in dependents_of(report, changed)
         for c in report.cells
