@@ -60,6 +60,44 @@ using .ReportEngine
     end
 end
 
+# ── Notebook-environment model helpers (gate_kernel.jl, loaded via engine.jl) ─
+@testset "notebook env model" begin
+    @testset "env dir keying" begin
+        d1 = ReportEngine.notebook_env_dir("/tmp/a/para.jl")
+        d2 = ReportEngine.notebook_env_dir("/tmp/b/para.jl")   # same basename, different path
+        @test d1 != d2                                          # keyed by full path, not name
+        @test ReportEngine.notebook_env_dir("/tmp/a/para.jl") == d1   # stable
+        @test occursin("kaimonslate", d1)
+    end
+
+    @testset "ensure_notebook_env! materialises a Project.toml" begin
+        d = mktempdir()
+        env = joinpath(d, "nbenv")
+        ReportEngine.ensure_notebook_env!(env)
+        @test isfile(joinpath(env, "Project.toml"))
+    end
+
+    @testset "base/forked/detached mode detection" begin
+        base   = ReportEngine.GateKernel("/repo"; parent = "/repo", envdir = "/depot/env")
+        forked = ReportEngine.GateKernel("/depot/env"; parent = "/repo", envdir = "/depot/env")
+        detach = ReportEngine.GateKernel("/depot/env"; parent = "", envdir = "/depot/env")
+        @test ReportEngine._base_mode(base)
+        @test !ReportEngine._base_mode(forked)
+        @test !ReportEngine._base_mode(detach)
+    end
+
+    @testset "parent manifest hash" begin
+        d = mktempdir()
+        @test ReportEngine._parent_manifest_hash("") == ""
+        @test ReportEngine._parent_manifest_hash(d) == ""        # no Manifest yet
+        write(joinpath(d, "Manifest.toml"), "julia_version=\"1.12.0\"\n")
+        h1 = ReportEngine._parent_manifest_hash(d)
+        @test !isempty(h1)
+        write(joinpath(d, "Manifest.toml"), "julia_version=\"1.12.0\"\n[[deps.X]]\n")
+        @test ReportEngine._parent_manifest_hash(d) != h1        # changes with content
+    end
+end
+
 # ── Self-contained bundle (export_bundle.jl) ─────────────────────────────────
 # export_bundle.jl is a flat file meant for `module NotebookServer`; its only module
 # coupling is `LiveNotebook` (a signature annotation) and qualified `ReportEngine.*` calls.
