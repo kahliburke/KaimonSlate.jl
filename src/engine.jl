@@ -15,7 +15,7 @@ module ReportEngine
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
 export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
-export parse_report, serialize_report, source_text
+export parse_report, serialize_report, serialize_cells, source_text
 
 # ── Model ────────────────────────────────────────────────────────────────────
 

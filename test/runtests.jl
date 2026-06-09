@@ -12,3 +12,4 @@ using SafeTestsets
 @safetestset "complete" begin include("test_complete.jl") end
 @safetestset "history" begin include("test_history.jl") end
 @safetestset "agentops" begin include("test_agentops.jl") end
+@safetestset "repro" begin include("test_repro.jl") end
