@@ -52,8 +52,10 @@ function _select_kernel(path::AbstractString, report)
         delta = get(report.meta, "env", Dict{String,Any}[])     # footer-recorded notebook packages
         if !env_exists && !isempty(delta)
             # The `.jl` records package adds but the env dir is gone (e.g. a fresh git clone):
-            # reconstruct it from the footer on first use (pending).
-            ReportEngine.ensure_notebook_env!(envdir)
+            # reconstruct it from the footer on first use (pending). Only `mkdir` here — the
+            # Project.toml is written by the reconstruction itself, so a worker that never ran
+            # leaves the env "absent" and reconstruction retries on the next open.
+            mkpath(envdir)
             return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
