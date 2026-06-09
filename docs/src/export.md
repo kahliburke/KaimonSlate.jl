@@ -1,7 +1,8 @@
 # Export
 
-KaimonSlate produces a **self-contained HTML document** of a notebook — and, through the
-browser's print dialog, a PDF.
+KaimonSlate exports a notebook four ways: a self-contained **HTML** document, a
+publication-quality **PDF** (rendered server-side with Typst), browser **Print HTML**, and a
+fully reproducible **self-contained `.jl`**.
 
 ## Export HTML
 
@@ -13,25 +14,72 @@ browser's print dialog, a PDF.
   frozen to their latest snapshot PNG**.
 - Interactive tables flattened to static HTML.
 
-There are no scripts to boot and no server required — the file opens offline, with KaTeX
-pulled from a CDN to typeset math.
+No scripts to boot and no server required — the file opens offline, with KaTeX pulled from a
+CDN to typeset math. The route is `GET /api/<id>/export.html` (`?dl=1` to download,
+`?source=0` for an output-only document).
 
-The route is `GET /api/<id>/export.html`. Query options:
+## Publication PDF (Typst)
 
-- `?dl=1` — download as an attachment (the menu uses this).
-- `?source=0` — hide code cells (output-only document).
+**☰ → Export PDF (publication)** renders a typeset PDF **server-side via Typst** — not a
+browser print. A small dialog (remembered between exports) offers:
 
-## Print / Save PDF
+- **Theme** — *Light* (publication) or *Dark* (matches the live UI; a natural fit for figures
+  drawn with the Makie dark theme).
+- **Layout** — *Article* / *Report* × *single* / *two-column* (the title and abstract span the
+  full width above the columns).
+- **Body text** — *Auto* (compact for two-column), *Large*, *Normal*, *Compact*, *Small*.
+- **Code listings** — *Normal* / *Small* / *Smaller* / *Tiny* font, or *Hidden* (outputs only).
 
-**☰ → Print / Save PDF** opens the same static document in a new tab and triggers your
-browser's print dialog — choose "Save as PDF". The export stylesheet keeps backgrounds and
-figure colors in print (`print-color-adjust: exact`) and avoids breaking code blocks across
-pages.
+Highlights:
+
+- **Vector figures** — CairoMakie figures embed as **PDF** (fonts embedded, crisp at any
+  scale); ECharts charts embed as **SVG** captured in both light and dark themes. Rasters are
+  the fallback.
+- **Math** through LaTeX (`mitex`), with a shim preamble for commands `mitex` lacks.
+- **Frozen controls** — `@bind` widgets render as a compact *parameters* strip at their
+  current values (a PDF is a snapshot).
+- **Academic front matter** — if the first markdown cell opens with a `---`-fenced block, its
+  `title` / `subtitle` / `author` / `date` / `abstract` render as a title block (the title
+  overrides the filename) and the rest of that cell becomes body text.
+
+The route is `GET /api/<id>/export.pdf` with `?theme=`, `?style=`, `?columns=`, `?body=`,
+`?code=`. The bundled `Typst_jll` is used unless a system `typst` is on `PATH`.
+
+## Print HTML
+
+**☰ → Print HTML** opens the static HTML document in a new tab and triggers your browser's
+print dialog — a quick path to PDF when you don't need the Typst typesetting.
+
+## Self-contained single-source `.jl`
+
+**☰ → Export self-contained `.jl`** produces one `.jl` that carries the notebook **and** its
+full environment, for sharing or archiving. The runnable cells are followed by a `Slate.bundle`
+footer embedding (gzip + base64):
+
+- `Project.toml` + `Manifest.toml` of the active environment (fully pinned),
+- the **local / path-dependency source** (the parent module code) under `local/<pkg>/`,
+- when the project is a git repo, a **shallow git bundle** (`repo.gitbundle`) + the `origin`
+  URL — so an expanded copy can attach to the original remote with **matching SHAs**.
+
+A standalone `.jl` still opens as an ordinary notebook (the bundle footer is ignored on
+parse). To reinflate it into a project tree:
+
+```julia
+using KaimonSlate
+expand("notebook.standalone.jl")          # → notebook.standalone.expanded/
+```
+
+`expand` writes `Project.toml` + `Manifest.toml`, the local source under `local/`, the
+runnable notebook, and — when a git bundle is present — **auto-clones it into `repo/` with
+`origin` rewired**, handing back a git repo whose tip SHA matches the original (branch & PR
+straight away). It prints how to `Pkg.instantiate` the environment.
+
+The route is `GET /api/<id>/export.standalone.jl`.
 
 ## Notes
 
 - ECharts snapshots are captured from the live canvas as you view the notebook, so open a
-  cell's chart at least once before exporting to ensure its snapshot is current.
+  cell's chart at least once before exporting (HTML, PDF, or standalone) to ensure its snapshot
+  is current.
 - Markdown `{{ echart(…) }}` / `{{ slate_table(…) }}` interpolations are client-hydrated and
-  appear as static placeholders in the exported document; scalar and image interpolations
-  embed directly.
+  appear as static placeholders in HTML; scalar and image interpolations embed directly.
