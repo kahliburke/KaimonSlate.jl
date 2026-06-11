@@ -110,7 +110,10 @@ include(joinpath(@__DIR__, "..", "src", "export_bundle.jl"))
 
     proj = mktempdir()
     write(joinpath(proj, "Project.toml"), "name=\"Demo\"\n[deps]\nFoo = \"00000000-0000-0000-0000-000000000001\"\n")
-    write(joinpath(proj, "Manifest.toml"), "julia_version=\"1.12.0\"\n")
+    # Manifest carries Foo as a path-dep at the author's ABSOLUTE path — the bundle must
+    # rewrite this to `local/Foo` or an expanded copy fails to instantiate elsewhere.
+    write(joinpath(proj, "Manifest.toml"),
+        "julia_version=\"1.12.0\"\nmanifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"/authors/abs/path/Foo\"\nuuid = \"00000000-0000-0000-0000-000000000001\"\nversion = \"0.1.0\"\n")
     localpkg = mktempdir()
     mkpath(joinpath(localpkg, "src"))
     write(joinpath(localpkg, "Project.toml"), "name=\"Foo\"\n")
@@ -139,6 +142,12 @@ include(joinpath(@__DIR__, "..", "src", "export_bundle.jl"))
         @test isfile(joinpath(tdir, "demo.jl"))
         @test isfile(joinpath(tdir, "local", "Foo", "src", "Foo.jl"))
         @test occursin("module Foo", read(joinpath(tdir, "local", "Foo", "src", "Foo.jl"), String))
+
+        # The path-dep entry must now point at the bundled source (relative), not the
+        # author's absolute path — otherwise instantiate fails with "Missing source file".
+        man = read(joinpath(tdir, "Manifest.toml"), String)
+        @test occursin("path = \"local/Foo\"", man)
+        @test !occursin("/authors/abs/path/Foo", man)
     end
 end
 

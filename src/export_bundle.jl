@@ -60,6 +60,28 @@ function _maybe_git_bundle!(stage::AbstractString, projectdir::AbstractString)
     return
 end
 
+# Rewrite the staged `Manifest.toml` so each bundled path-dependency points at its copied
+# source under `local/<name>` (a path RELATIVE to the manifest's dir) instead of the author's
+# original absolute path — otherwise an expanded copy fails to instantiate with "Missing
+# source file" on a machine where that absolute path doesn't exist. Line-oriented so the
+# generated manifest's formatting is preserved untouched.
+function _rewrite_manifest_paths!(manifest::AbstractString, names)
+    isfile(manifest) || return
+    nameset = Set(String.(names))
+    lines = readlines(manifest)
+    cur = ""
+    for (i, l) in pairs(lines)
+        m = match(r"^\[\[deps\.(.+)\]\]$", strip(l))
+        if m !== nothing
+            cur = String(m.captures[1])
+        elseif cur in nameset && occursin(r"^\s*path\s*=", l)
+            lines[i] = "path = " * repr("local/" * cur)   # forward slash: Julia/TOML-portable
+        end
+    end
+    write(manifest, join(lines, "\n") * "\n")
+    return
+end
+
 # Build the base64 tarball from explicit coordinates (kernel-independent, so it's unit
 # testable): the active project dir, its path deps `[(name, source)]`, and the notebook.
 function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::AbstractString, cells::AbstractString)
@@ -68,11 +90,16 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
         s = joinpath(projectdir, f)
         isfile(s) && cp(s, joinpath(stage, f); force = true)
     end
+    bundled = String[]
     for pd in pathdeps
         src = pd isa NamedTuple ? pd.source : pd[2]
         nm = pd isa NamedTuple ? pd.name : pd[1]
-        isdir(src) && _copy_tree!(joinpath(stage, "local", nm), src)
+        if isdir(src)
+            _copy_tree!(joinpath(stage, "local", nm), src)
+            push!(bundled, String(nm))
+        end
     end
+    _rewrite_manifest_paths!(joinpath(stage, "Manifest.toml"), bundled)
     write(joinpath(stage, nbname), cells)
     _maybe_git_bundle!(stage, projectdir)
     tgz = joinpath(mktempdir(), "bundle.tgz")
