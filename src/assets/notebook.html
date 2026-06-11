@@ -1633,16 +1633,21 @@ function openSettings() {
   };
   mdl.value = agentModel();
   mdl.onchange = () => switchSetting(mdl, 'slateAgentModel', 'switch the model', 'model');
-  // Append locally-installed Ollama models (needs Ollama running + Kaimon's OllamaBackend).
+  // Append locally-served models (Ollama, and vmlx — the MLX server for Apple Silicon).
+  // Both need their server running + Kaimon's OllamaBackend, and are routed by prefix.
   // Rebuilt each open so the list stays fresh and never duplicates.
-  [...mdl.querySelectorAll('option[value^="ollama:"]')].forEach(o => o.remove());
-  api('GET', '/api/ollama-models').then(r => {
-    (r && r.models || []).forEach(name => {
-      const o = document.createElement('option');
-      o.value = 'ollama:' + name; o.textContent = 'Ollama · ' + name + ' (local)'; mdl.appendChild(o);
-    });
-    mdl.value = agentModel();   // re-apply: the saved choice may be one of these ollama models
-  }).catch(() => {});
+  const addLocalModels = (route, prefix, label) => {
+    [...mdl.querySelectorAll('option[value^="' + prefix + ':"]')].forEach(o => o.remove());
+    return api('GET', route).then(r => {
+      (r && r.models || []).forEach(name => {
+        const o = document.createElement('option');
+        o.value = prefix + ':' + name; o.textContent = label + ' · ' + name + ' (local)'; mdl.appendChild(o);
+      });
+      mdl.value = agentModel();   // re-apply: the saved choice may be one of these local models
+    }).catch(() => {});
+  };
+  addLocalModels('/api/ollama-models', 'ollama', 'Ollama');
+  addLocalModels('/api/vmlx-models', 'vmlx', 'vmlx');
   const perm = document.getElementById('setperm');
   perm.value = agentPerm();
   perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');

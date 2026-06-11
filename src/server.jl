@@ -1639,11 +1639,12 @@ function worker_log(nb::LiveNotebook; maxbytes::Int = 100_000)
     return String(take!(io))
 end
 
-# Locally-installed Ollama models (for the Settings dropdown), via Ollama's HTTP API.
+# Locally-served models for the Settings dropdown, via an Ollama-compatible `/api/tags`.
+# Both Ollama and vmlx (the MLX inference server for Apple Silicon) speak this protocol —
+# Kaimon's OllamaBackend drives either, routed by an `ollama:` / `vmlx:` model prefix.
 # Proxied through the server so the browser dodges cross-origin issues; best-effort —
-# returns [] if Ollama isn't running. Needs Kaimon's OllamaBackend to actually drive them.
-function _ollama_models()
-    host = get(ENV, "OLLAMA_HOST", "http://127.0.0.1:11434")
+# returns [] if that server isn't running.
+function _tags_models(host::AbstractString)
     startswith(host, "http") || (host = "http://" * host)
     try
         r = HTTP.get(rstrip(host, '/') * "/api/tags"; connect_timeout = 2, request_timeout = 4, retry = false)
@@ -1655,6 +1656,8 @@ function _ollama_models()
         return String[]
     end
 end
+_ollama_models() = _tags_models(get(ENV, "OLLAMA_HOST", "http://127.0.0.1:11434"))
+_vmlx_models()   = _tags_models(get(ENV, "VMLX_HOST", "http://127.0.0.1:8000"))
 
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
@@ -1908,9 +1911,11 @@ function _make_router(h::Hub)
         _clear_chat_log!(nb)                  # and the on-disk transcript
         _json(Dict("ok" => true, "cleared" => true))
     end))
-    # Locally-installed Ollama models → the Settings model dropdown (ollama:<name> entries).
+    # Locally-served models → the Settings model dropdown (ollama:<name> / vmlx:<name>).
     HTTP.register!(router, "GET", "/api/{id}/ollama-models", req -> _withnb(h, req, _ ->
         _json(Dict("models" => _ollama_models()))))
+    HTTP.register!(router, "GET", "/api/{id}/vmlx-models", req -> _withnb(h, req, _ ->
+        _json(Dict("models" => _vmlx_models()))))
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
