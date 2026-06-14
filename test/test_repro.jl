@@ -176,4 +176,42 @@ if Sys.which("git") !== nothing
         @test orig_sha == clone_sha                       # matching SHAs
         @test strip(read(`git -C $cloned remote get-url origin`, String)) == "https://example.com/demo.git"
     end
+
+    # A path-dep whose committed-clean source already lives inside the bundled repo is reused
+    # straight from the cloned repo/ (Manifest → repo/<rel>), with no redundant local/ copy.
+    # A dirty/uncommitted subtree stays conservative and ships its own local/ copy.
+    @testset "git-tracked path-dep dedups against repo/" begin
+        root = mktempdir()
+        mkpath(joinpath(root, "Foo", "src"))
+        write(joinpath(root, "Foo", "Project.toml"), "name=\"Foo\"\nuuid=\"00000000-0000-0000-0000-0000000000f0\"\nversion=\"0.1.0\"\n")
+        write(joinpath(root, "Foo", "src", "Foo.jl"), "module Foo\nend\n")
+        write(joinpath(root, "Project.toml"), "name=\"Demo\"\n[deps]\nFoo=\"00000000-0000-0000-0000-0000000000f0\"\n")
+        write(joinpath(root, "Manifest.toml"),
+            "manifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"$(joinpath(root, "Foo"))\"\nuuid = \"00000000-0000-0000-0000-0000000000f0\"\nversion = \"0.1.0\"\n")
+        run(pipeline(`git -C $root init -q`; stderr = devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        deps = [(name = "Foo", source = joinpath(root, "Foo"))]
+
+        @testset "clean subtree → reuse repo/, no local copy" begin
+            sj = joinpath(mktempdir(), "c.standalone.jl")
+            write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(root, deps, "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
+            tdir = expand(sj)
+            man = read(joinpath(tdir, "Manifest.toml"), String)
+            @test occursin("path = \"repo/Foo\"", man)                    # points into the cloned repo
+            @test !ispath(joinpath(tdir, "local"))                        # no redundant copy
+            @test isfile(joinpath(tdir, "repo", "Foo", "src", "Foo.jl"))  # source rides the git bundle
+        end
+
+        @testset "dirty subtree → conservative local copy" begin
+            write(joinpath(root, "Foo", "src", "Foo.jl"), "module Foo\n# uncommitted\nend\n")
+            sj = joinpath(mktempdir(), "d.standalone.jl")
+            write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(root, deps, "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
+            tdir = expand(sj)
+            man = read(joinpath(tdir, "Manifest.toml"), String)
+            @test occursin("path = \"local/Foo\"", man)                   # falls back to a copy
+            src = read(joinpath(tdir, "local", "Foo", "src", "Foo.jl"), String)
+            @test occursin("uncommitted", src)                           # working-tree bytes, not HEAD
+        end
+    end
 end

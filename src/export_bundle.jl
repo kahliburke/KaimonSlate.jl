@@ -36,46 +36,72 @@ function _copy_tree!(dest::AbstractString, src::AbstractString)
     return dest
 end
 
-# Add a shallow git bundle of the project's repo + its `origin` URL, so an expanded copy can
-# `git clone` it and attach to the original remote with MATCHING SHAs (branch & PR off the
-# real history). A self-contained shallow bundle can't be made with `bundle create --depth`
-# (that needs the parent as a prerequisite); the reliable recipe is a depth-1 working clone,
-# then bundle from THAT. Best-effort: skipped when git is absent or the project isn't a repo.
-function _maybe_git_bundle!(stage::AbstractString, projectdir::AbstractString)
-    Sys.which("git") === nothing && return
+# The realpath of the git work-tree root containing `dir`, or `nothing` (no git / not a repo).
+function _git_toplevel(dir::AbstractString)
+    Sys.which("git") === nothing && return nothing
     top = try
-        strip(read(pipeline(`git -C $projectdir rev-parse --show-toplevel`; stderr = devnull), String))
+        strip(read(pipeline(`git -C $dir rev-parse --show-toplevel`; stderr = devnull), String))
     catch
-        return
+        return nothing
     end
-    (isempty(top) || !isdir(top)) && return
+    (isempty(top) || !isdir(top)) && return nothing
+    return realpath(top)
+end
+
+# Add a shallow git bundle of `top` + its `origin` URL, so an expanded copy can `git clone`
+# it and attach to the original remote with MATCHING SHAs (branch & PR off the real history).
+# A self-contained shallow bundle can't be made with `bundle create --depth` (that needs the
+# parent as a prerequisite); the reliable recipe is a depth-1 working clone, then bundle from
+# THAT. Returns `true` on success (so the caller can point deduped path-deps at `repo/`).
+function _git_bundle!(stage::AbstractString, top::AbstractString)
     try
         sc = joinpath(mktempdir(), "s")
         run(pipeline(`git clone -q --depth=1 file://$top $sc`; stdout = devnull, stderr = devnull))
         run(pipeline(`git -C $sc bundle create $(joinpath(stage, "repo.gitbundle")) HEAD`; stdout = devnull, stderr = devnull))
         url = try; strip(read(pipeline(`git -C $top remote get-url origin`; stderr = devnull), String)); catch; ""; end
         isempty(url) || write(joinpath(stage, "git-remote.txt"), url)
+        return true
     catch
+        return false
     end
-    return
 end
 
-# Rewrite the staged `Manifest.toml` so each bundled path-dependency points at its copied
-# source under `local/<name>` (a path RELATIVE to the manifest's dir) instead of the author's
+# `src`'s path relative to `top` if it lies within `top` (or IS `top` ⇒ "."), else `nothing`.
+function _within(top::AbstractString, src::AbstractString)
+    rel = relpath(src, top)
+    (rel == "." || !startswith(rel, "..")) ? replace(rel, '\\' => '/') : nothing
+end
+
+# True only if the subtree at `top/relpath` has no uncommitted OR untracked changes — i.e. the
+# bundled repo's HEAD checkout is byte-identical to the live source, so pointing the env at the
+# cloned `repo/` instead of a `local/` copy loses nothing. `--porcelain` lists `??` untracked
+# too, so a dirty/partly-untracked package stays conservative (gets its own local copy).
+function _subtree_clean(top::AbstractString, relpath::AbstractString)
+    spec = relpath == "." ? "." : relpath
+    out = try
+        read(pipeline(`git -C $top status --porcelain -- $spec`; stderr = devnull), String)
+    catch
+        return false
+    end
+    return isempty(strip(out))
+end
+
+# Rewrite the staged `Manifest.toml` so each bundled path-dependency points at its in-bundle
+# source (a path RELATIVE to the manifest's dir — `local/<name>` for a copied tree, or
+# `repo/<rel>` when it's reused straight from the cloned git repo) instead of the author's
 # original absolute path — otherwise an expanded copy fails to instantiate with "Missing
-# source file" on a machine where that absolute path doesn't exist. Line-oriented so the
-# generated manifest's formatting is preserved untouched.
-function _rewrite_manifest_paths!(manifest::AbstractString, names)
+# source file" on a machine where that absolute path doesn't exist. `targets` maps dep name →
+# relative path. Line-oriented so the generated manifest's formatting is preserved untouched.
+function _rewrite_manifest_paths!(manifest::AbstractString, targets::AbstractDict)
     isfile(manifest) || return
-    nameset = Set(String.(names))
     lines = readlines(manifest)
     cur = ""
     for (i, l) in pairs(lines)
         m = match(r"^\[\[deps\.(.+)\]\]$", strip(l))
         if m !== nothing
             cur = String(m.captures[1])
-        elseif cur in nameset && occursin(r"^\s*path\s*=", l)
-            lines[i] = "path = " * repr("local/" * cur)   # forward slash: Julia/TOML-portable
+        elseif haskey(targets, cur) && occursin(r"^\s*path\s*=", l)
+            lines[i] = "path = " * repr(targets[cur])      # forward slash: Julia/TOML-portable
         end
     end
     write(manifest, join(lines, "\n") * "\n")
@@ -90,18 +116,26 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
         s = joinpath(projectdir, f)
         isfile(s) && cp(s, joinpath(stage, f); force = true)
     end
-    bundled = String[]
+    # Bundle the project's git repo first (if any) so a path-dep whose committed-clean source
+    # already lives inside it can be reused from the cloned `repo/` on expand — no redundant
+    # `local/<name>` copy. `top` is the repo root; `gitok` says the bundle was actually written.
+    top = _git_toplevel(projectdir)
+    gitok = top !== nothing && _git_bundle!(stage, top)
+    targets = Dict{String,String}()                  # dep name → in-bundle relative source path
     for pd in pathdeps
         src = pd isa NamedTuple ? pd.source : pd[2]
-        nm = pd isa NamedTuple ? pd.name : pd[1]
-        if isdir(src)
-            _copy_tree!(joinpath(stage, "local", nm), src)
-            push!(bundled, String(nm))
+        nm = String(pd isa NamedTuple ? pd.name : pd[1])
+        isdir(src) || continue
+        rel = gitok ? _within(top, realpath(src)) : nothing
+        if rel !== nothing && _subtree_clean(top, rel)
+            targets[nm] = rel == "." ? "repo" : "repo/" * rel    # reuse the cloned repo source
+        else
+            _copy_tree!(joinpath(stage, "local", nm), src)       # ship our own copy
+            targets[nm] = "local/" * nm
         end
     end
-    _rewrite_manifest_paths!(joinpath(stage, "Manifest.toml"), bundled)
+    _rewrite_manifest_paths!(joinpath(stage, "Manifest.toml"), targets)
     write(joinpath(stage, nbname), cells)
-    _maybe_git_bundle!(stage, projectdir)
     tgz = joinpath(mktempdir(), "bundle.tgz")
     # COPYFILE_DISABLE stops macOS BSD tar from emitting `._*` AppleDouble entries that would
     # otherwise litter the tree when extracted on another platform.
@@ -157,12 +191,12 @@ function expand(jl_path::AbstractString; target::AbstractString = "")
     run(`tar xzf $tgz -C $tdir`)
     @info "Expanded standalone notebook" target = tdir
     repo = _attach_git_repo(tdir)                    # clone the embedded bundle + wire origin
-    println("""
-    Expanded to: $tdir
-      • instantiate the environment:   julia --project=$tdir -e 'using Pkg; Pkg.instantiate()'
-      • local package source is under: $(joinpath(tdir, "local"))""" *
+    println("Expanded to: $tdir\n" *
+            "  • instantiate the environment:   julia --project=$tdir -e 'using Pkg; Pkg.instantiate()'" *
+            (isdir(joinpath(tdir, "local")) ?
+             "\n  • local package source is under: $(joinpath(tdir, "local"))" : "") *
             (repo === nothing ? "" :
-             "\n      • git repo (matching origin SHAs, ready to branch & PR): $repo") * "\n")
+             "\n  • git repo (matching origin SHAs, ready to branch & PR): $repo") * "\n")
     return tdir
 end
 
