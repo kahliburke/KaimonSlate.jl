@@ -20,6 +20,7 @@
   --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40; --text:#d4d8e8;
   --dim:#6a7090; --accent:#569cd6; --green:#56d364; --red:#e57575; --gold:#ffd700;
   --orange:#ce9178; --purple:#c586c0;
+  --page-pad:20px;   /* top/side gutter for the content column; reused by the agent drawer */
 }
 * { box-sizing:border-box; }
 body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif;
@@ -38,7 +39,7 @@ button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid v
          border-radius:6px; padding:4px 12px; cursor:pointer; font-size:.82rem;
          text-decoration:none; display:inline-block; }
 button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
-.page { max-width:980px; margin:0 auto; padding:20px 20px 160px; transition:margin-right .18s ease; }
+.page { max-width:980px; margin:0 auto; padding:var(--page-pad) var(--page-pad) 160px; transition:margin-right .18s ease; }
 body.fullwidth .page { max-width:none; }
 /* When the agent chat is open, slide the notebook column left of the panel so cells
    and the chat never overlap (the panel is a fixed 380px drawer on the right). */
@@ -201,13 +202,19 @@ input.toggle:checked::after { left:18px; }
   z-index:20; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.3); }
 .palette.open { transform:none; }
 /* Agent chat panel (consumer of Kaimon's agent service) */
-.agentpanel { position:fixed; top:0; right:0; height:100vh; width:380px; max-width:92vw; background:var(--bg2);
-  border-left:1px solid var(--border); transform:translateX(100%); transition:transform .18s ease;
+/* The drawer's top is aligned to the first content cell (--agent-top, measured in JS) so it
+   sits below the menu bar and lines up with the notebook. The topbar-height + page-gutter
+   expression is the first-paint fallback until JS measures the real cell. */
+.agentpanel { position:fixed; top:var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))); right:0;
+  height:calc(100vh - var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))));
+  width:380px; max-width:92vw; background:var(--bg2);
+  border:1px solid var(--border); border-right:none; border-radius:14px 0 0 14px;
+  transform:translateX(100%); transition:transform .18s ease; overflow:hidden;
   z-index:25; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.35); }
 .agentpanel.open { transform:none; }
-.aphead { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); }
+.aphead { display:flex; align-items:center; gap:8px; padding:16px 18px; border-bottom:1px solid var(--border); }
 .aphead strong { color:#fff; }
-.apmsgs { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.apmsgs { flex:1; overflow:auto; padding:16px 18px; display:flex; flex-direction:column; gap:10px; }
 .apmsg { font-size:.86rem; line-height:1.5; border-radius:8px; padding:8px 11px; max-width:92%; white-space:pre-wrap; word-break:break-word; }
 .apmsg.user { align-self:flex-end; background:var(--bg3); }
 .apmsg.assistant { align-self:flex-start; background:#11203a; }
@@ -295,7 +302,7 @@ li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
   border-radius:6px; cursor:pointer; font-size:.84rem; text-decoration:none; display:block; white-space:nowrap; }
 .topmenu button:hover, .topmenu a:hover { background:var(--bg3); color:var(--accent); }
 .topmenu hr { border:none; border-top:1px solid var(--bg3); margin:4px 6px; }
-.apinput { display:flex; flex-wrap:wrap; gap:8px; padding:10px; border-top:1px solid var(--border); }
+.apinput { display:flex; flex-wrap:wrap; gap:8px; padding:14px 18px; border-top:1px solid var(--border); }
 .apinput textarea { flex:1; min-width:0; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
   border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem;
   scrollbar-width:thin; scrollbar-color:var(--bg2) transparent; }
@@ -805,6 +812,24 @@ function typeset(el) {
 }
 // KaTeX may finish loading after the first render; typeset everything once it's in.
 window.addEventListener('load', () => typeset(document.getElementById('nb')));
+// Align the agent drawer's top with the first content cell (as positioned when scrolled
+// to the top), so the drawer never covers the menu bar and lines up with the notebook.
+// Measured off the real first cell — robust to topbar height, page padding, cell margins,
+// font size and zoom. --topbar-h is the pre-measure fallback (see .agentpanel CSS).
+function syncAgentTop() {
+  const tb = document.querySelector('.topbar');
+  if (tb) document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+  // Document-flow top of the first cell (rect.top + scrollY) == its viewport position at
+  // scroll 0, which is exactly the fixed drawer's `top`. Fall back to the cells container.
+  const ref = document.querySelector('#nb .cell') || document.getElementById('nb');
+  if (ref) {
+    const top = Math.round(ref.getBoundingClientRect().top + window.scrollY);
+    document.documentElement.style.setProperty('--agent-top', top + 'px');
+  }
+}
+window.addEventListener('load', syncAgentTop);
+window.addEventListener('resize', syncAgentTop);
+syncAgentTop();
 
 // Julia indexes source by UTF-8 *byte* offset (REPLCompletions), but CodeMirror
 // works in UTF-16 char positions. Convert both ways so completion stays correct
@@ -1146,6 +1171,7 @@ function renderAll(state) {
   collapseOutputs(nb);
   updateStaleBadge(state);
   renderPalette();
+  syncAgentTop();                              // re-align the agent drawer to the (now-rendered) first cell
   if (selectedId && !cellIds().includes(selectedId)) selectedId = null;   // dropped/renamed
   if (selectedId) selectCell(selectedId);                                 // re-apply command-mode ring
   // Restore scroll now, next frame, and after each figure decodes (base64 images
