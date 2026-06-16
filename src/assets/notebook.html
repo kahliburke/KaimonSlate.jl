@@ -223,6 +223,10 @@ input.toggle:checked::after { left:18px; }
 .apmsg.err { align-self:flex-start; color:var(--red); }
 .apmsg.note { align-self:center; background:none; color:var(--dim); font-size:.74rem; padding:2px 6px; max-width:100%; }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
+/* Show/hide the agent's thinking (💭 toggle in the header). Hidden bubbles are removed from
+   layout; the toggle dims to read as "off". */
+.agentpanel.hide-think .apmsg.think { display:none; }
+.agentpanel.hide-think #thinkbtn { opacity:.4; }
 .apmsg.img { align-self:flex-start; background:none; padding:0; max-width:100%; }
 .apmsg.img img { max-width:100%; border-radius:8px; display:block; }
 /* Multi-agent crew lanes: a stable hue (--ch) per crew member tints a left accent
@@ -421,7 +425,8 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 </aside>
 <aside id="agentpanel" class="agentpanel">
   <div class="aphead"><strong>🤖 Agent</strong><span id="apstatus" class="hint"></span>
-    <button onclick="clearChat()" title="clear chat history" style="margin-left:auto">🧹</button>
+    <button id="thinkbtn" onclick="toggleThink()" title="show/hide the agent's thinking" style="margin-left:auto">💭</button>
+    <button onclick="clearChat()" title="clear chat history" style="margin-left:6px">🧹</button>
     <button class="pclose" onclick="toggleAgent()" title="close" style="margin-left:6px">✕</button></div>
   <div id="apmsgs" class="apmsgs"></div>
   <div class="apinput">
@@ -1859,6 +1864,18 @@ function toggleAgent() {
   document.body.classList.toggle('agent-open', open);   // slide cells left of the panel
   if (open) { document.getElementById('apin').focus(); setWorking(agentWorking); }
 }
+// Show/hide the agent's streamed thinking (.apmsg.think) — a persisted view preference.
+// Pure CSS class toggle on the panel; the think bubbles stay in the transcript, just hidden.
+function applyThinkPref() {
+  const p = document.getElementById('agentpanel');
+  if (p) p.classList.toggle('hide-think', localStorage.getItem('slateHideThink') === '1');
+}
+function toggleThink() {
+  const hidden = localStorage.getItem('slateHideThink') === '1';
+  localStorage.setItem('slateHideThink', hidden ? '0' : '1');
+  applyThinkPref();
+}
+applyThinkPref();   // apply saved preference at load (before the panel is first opened)
 // Per-cell ✨ — scope chat turns to a cell; the server sends its source/output + upstream
 // dependency cone to the agent. Persists until cleared, so follow-ups stay focused.
 function askCell(id) {
