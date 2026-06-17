@@ -233,4 +233,25 @@ if Sys.which("git") !== nothing
         @test !ispath(joinpath(tdir, "repo"))
         @test isfile(joinpath(tdir, "Project.toml"))      # the project itself still travels
     end
+
+    # Package-as-project: the notebook runs in its OWN package's project (project root == repo
+    # root). The package's src/ must travel to the expanded project root so `using <Pkg>` resolves
+    # there, while repo/ still carries history for collaboration.
+    @testset "package-as-project carries its own src to the root" begin
+        root = mktempdir()
+        mkpath(joinpath(root, "src"))
+        write(joinpath(root, "Project.toml"), "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d0\"\nversion=\"0.1.0\"\n[deps]\n")
+        write(joinpath(root, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+        write(joinpath(root, "src", "Demo.jl"), "module Demo\ngreet() = \"hi from Demo\"\nend\n")
+        run(pipeline(`git -C $root init -q`; stderr = devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+
+        sj = joinpath(mktempdir(), "p.standalone.jl")
+        write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(root, NamedTuple[], "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
+        tdir = expand(sj)
+        @test isfile(joinpath(tdir, "src", "Demo.jl"))                       # source at the project root
+        @test occursin("module Demo", read(joinpath(tdir, "src", "Demo.jl"), String))
+        @test isfile(joinpath(tdir, "repo.gitbundle"))                       # repo still bundled too
+    end
 end

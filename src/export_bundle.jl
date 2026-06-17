@@ -144,6 +144,16 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
         end
     end
     _rewrite_manifest_paths!(joinpath(stage, "Manifest.toml"), targets)
+    # Package-as-project: when the active project carries its OWN package source (`src/`, plus
+    # `ext/` for extensions), that source must sit at the expanded project root or `using <Pkg>`
+    # fails there — Julia loads the active project's package from `<root>/src`, and otherwise it
+    # would ride only inside `repo/`. Independent of the git bundle (best-effort, collaboration
+    # only), so a package round-trips even when no `repo/` is shipped. A bare env project (the
+    # path-dep / monorepo case — no `src/` of its own) is a no-op here.
+    for d in ("src", "ext")
+        s = joinpath(projectdir, d)
+        isdir(s) && _copy_tree!(joinpath(stage, d), s)
+    end
     write(joinpath(stage, nbname), cells)
     tgz = joinpath(mktempdir(), "bundle.tgz")
     # COPYFILE_DISABLE stops macOS BSD tar from emitting `._*` AppleDouble entries that would
