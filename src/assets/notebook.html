@@ -77,6 +77,10 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cellacts button { padding:0 6px; font-size:.7rem; }
 .cellhead .drag { cursor:grab; color:var(--dim); padding:0 4px 0 0; user-select:none; font-size:.9rem; }
 .cellhead .drag:active { cursor:grabbing; } .cell:hover .cellhead .drag { color:var(--text); }
+.cellhead .collapse { background:none; border:none; color:var(--dim); cursor:pointer; padding:0 2px; font-size:.7rem; line-height:1; }
+.cellhead .collapse:hover { color:var(--accent); }
+.cell.collapsed > :not(.cellhead) { display:none; }                 /* fold to just the header */
+.cell.collapsed .cellhead { opacity:.78; }
 .badge { text-transform:uppercase; letter-spacing:.04em; font-size:.68rem; min-width:52px; text-align:right; color:var(--dim); }
 .cell.state-fresh   .badge { color:var(--accent); }
 .cell.state-stale   .badge { color:var(--gold); }
@@ -970,14 +974,17 @@ function cellHeader(c) {
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
   const run = isCode ? `<button class="run" data-run="${c.id}" title="run (⇧⏎)">▶</button>` : '';
+  const autoctl = (c.binduses && c.binduses.length)
+    ? `<button onclick="autoControls('${c.id}')" title="surface the @bind controls this cell uses (${c.binduses.join(', ')})">🎛</button>` : '';
   return '<div class="cellhead">' +
-    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' + run +
+    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
+    `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${isCollapsed(c.id) ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
-      (isCode ? `<button onclick="toggleDeps('${c.id}')" title="highlight this cell's upstream dependencies">🔗</button>` : '') +
+      (isCode ? `<button onclick="toggleDeps('${c.id}')" title="highlight this cell's upstream dependencies">🔗</button>` : '') + autoctl +
       editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
@@ -1019,6 +1026,7 @@ function cellEl(c) {
       '<div class="tables"></div>' +
       '<div class="echarts"></div>';
   }
+  if (isCollapsed(c.id)) div.classList.add('collapsed');   // per-browser collapse (localStorage)
   return div;
 }
 
@@ -2392,6 +2400,28 @@ async function hostControl(name, targetId, target, fromCell) {
 async function unhostControl(name, cellId) {
   if (!cellId) return;
   renderAll(await api('POST', '/api/controls', { map: { [cellId]: columnsOf(cellId).map(c => c.filter(n => n !== name)) } }));
+}
+// One-click "surface the @bind controls this cell USES" (the header 🎛 button). Toggles them
+// in/out of the cell's control strip; `binduses` (reads ∩ bound vars) comes from the server.
+async function autoControls(id) {
+  const c = _cellById(id); if (!c || !c.binduses || !c.binduses.length) return;
+  const cols = columnsOf(id), present = new Set([].concat(...cols));
+  const missing = c.binduses.filter(n => !present.has(n));
+  const map = missing.length
+    ? { [id]: cols.concat([missing]) }                                            // surface the not-shown ones
+    : { [id]: cols.map(col => col.filter(n => !c.binduses.includes(n))) };        // all shown → clear them
+  renderAll(await api('POST', '/api/controls', { map }));
+}
+// Per-browser cell collapse (localStorage, keyed by notebook). Toggling just flips a class +
+// the caret — no re-render — so a mounted editor survives.
+function _collapsedSet() { try { return new Set(JSON.parse(localStorage.getItem('slateCollapsed:' + NB_ID) || '[]')); } catch (e) { return new Set(); } }
+function isCollapsed(id) { return _collapsedSet().has(id); }
+function toggleCollapse(id) {
+  const s = _collapsedSet(), now = !s.has(id);
+  now ? s.add(id) : s.delete(id);
+  try { localStorage.setItem('slateCollapsed:' + NB_ID, JSON.stringify([...s])); } catch (e) {}
+  const el = document.getElementById('cell-' + id);
+  if (el) { el.classList.toggle('collapsed', now); const b = el.querySelector('.cellhead .collapse'); if (b) b.textContent = now ? '▸' : '▾'; }
 }
 // Insertion row within a column element, by cursor y (before the first control
 // whose midpoint is below the cursor; else at the end).

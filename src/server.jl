@@ -366,6 +366,13 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     if !isempty(c.binds)
         d["binds"] = [_bind_json(b, String(b.name) in hostednames) for b in c.binds]
     end
+    # `@bind` variables this cell READS (so the header can one-click surface their controls) —
+    # excluding any it defines itself.
+    if c.kind == CODE && !isempty(c.reads)
+        own = Set(String(b.name) for b in c.binds)
+        uses = sort!(unique!(String[String(s) for s in c.reads if haskey(bindref, String(s)) && !(String(s) in own)]))
+        isempty(uses) || (d["binduses"] = uses)
+    end
     return d
 end
 
