@@ -1,6 +1,6 @@
 # Reproducibility: the `.jl` env-delta footer (engine) and the self-contained bundle
 # (export_bundle). Run:  julia --startup-file=no test/test_repro.jl
-using Test, Base64
+using Test, Base64, JSON
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
@@ -285,4 +285,19 @@ end
 
     rm(r1.dir; recursive = true, force = true)           # don't litter the depot
     rm(r3.dir; recursive = true, force = true)
+end
+
+# Frozen-render preview: the rendered-cells payload round-trips (gzip+base64) and the footer
+# block is ignored by parse_report (it's terminal, after the cells / bundle).
+@testset "frozen-render preview round-trips" begin
+    cells = [Dict("id" => "a", "kind" => "code", "output" => "<pre>42</pre>", "echarts" => [], "tables" => []),
+             Dict("id" => "b", "kind" => "md", "output" => "<h1>Title</h1>")]
+    sj = "#%% code id=a\nx=1\n\n" * _bundle_footer("AAAA") * "\n" * _preview_footer(cells) * "\n"
+
+    @test [c.id for c in parse_report(sj).cells] == ["a"]     # footer region ignored as cells
+    got = _read_preview(sj)
+    @test got !== nothing && length(got) == 2
+    @test got[1]["id"] == "a" && got[1]["output"] == "<pre>42</pre>"
+    @test got[2]["kind"] == "md"
+    @test _read_preview("#%% code id=a\nx=1\n") === nothing   # absent → nothing
 end

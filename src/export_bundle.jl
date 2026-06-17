@@ -21,6 +21,48 @@ _bundle_footer(b64::AbstractString) = let io = IOBuffer()
     String(take!(io))
 end
 
+# ── Frozen render (preview) ───────────────────────────────────────────────────
+# A standalone `.jl` optionally embeds the cells' rendered outputs as of export time, so the
+# notebook can be shown instantly while its env reconstructs in the background (then swapped for
+# live cells). Stored like the bundle: a marked, base64'd (gzip'd) block, terminal so
+# `parse_report` strips it. gzip via the shell `gzip` (same external-tool approach as the tar
+# bundle) — no extra Julia dependency.
+const _PREVIEW_OPEN = "# ╔═╡ Slate.preview"
+const _PREVIEW_CLOSE = "# ╚═╡ Slate.preview"
+
+function _gzip_b64(data::AbstractString)
+    out = IOBuffer()
+    run(pipeline(IOBuffer(data), `gzip -c`, out))
+    return Base64.base64encode(take!(out))
+end
+function _gunzip_b64(b64::AbstractString)
+    out = IOBuffer()
+    run(pipeline(IOBuffer(Base64.base64decode(b64)), `gzip -dc`, out))
+    return String(take!(out))
+end
+
+# `cells` is the JSON-able rendered-cells array (`state_json(nb)["cells"]`).
+_preview_footer(cells) = let b64 = _gzip_b64(JSON.json(cells)), io = IOBuffer()
+    println(io, _PREVIEW_OPEN, " v1 · frozen render shown while the live env reconstructs")
+    for i in 1:100:lastindex(b64)
+        println(io, "# ", SubString(b64, i, min(i + 99, lastindex(b64))))
+    end
+    print(io, _PREVIEW_CLOSE)
+    String(take!(io))
+end
+
+# Pull the embedded frozen-render cells out of a standalone `.jl` (or `nothing` if absent).
+function _read_preview(text::AbstractString)
+    lines = split(text, '\n')
+    oi = findfirst(l -> startswith(l, _PREVIEW_OPEN), lines)
+    oi === nothing && return nothing
+    rest = @view lines[(oi + 1):end]
+    ci = findfirst(l -> startswith(l, _PREVIEW_CLOSE), rest)
+    body = ci === nothing ? rest : @view rest[1:(ci - 1)]
+    b64 = join((startswith(l, "# ") ? SubString(l, 3) : l for l in body))
+    return try; JSON.parse(_gunzip_b64(b64)); catch; nothing; end
+end
+
 # Copy a directory's contents into `dest`, skipping `.git` (history travels via the git
 # bundle, not as loose objects) — keeps the tarball lean and avoids nested-repo confusion.
 function _copy_tree!(dest::AbstractString, src::AbstractString)
@@ -163,21 +205,27 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
 end
 
 """
-    export_standalone(nb) -> String
+    export_standalone(nb; include_preview=true) -> String
 
-Render the notebook as a self-contained single-source `.jl`: the runnable cells followed by
-a `Slate.bundle` footer embedding the full environment (Project + Manifest), the local
-package source, and (if the project is a git repo) a shallow git bundle. Reinflate it with
-[`expand`](@ref).
+Render the notebook as a self-contained single-source `.jl`: the runnable cells, a
+`Slate.bundle` footer embedding the full environment (Project + Manifest), the local package
+source, and (if the project is a git repo) a shallow git bundle — and, when `include_preview`,
+a `Slate.preview` footer holding the cells' rendered outputs so the notebook displays instantly
+while its env reconstructs. Reinflate / run with [`expand`](@ref) or the open box.
 """
-function export_standalone(nb::LiveNotebook)
+function export_standalone(nb::LiveNotebook; include_preview::Bool = true)
     lock(nb.lock) do
         info = ReportEngine.bundle_info(nb.kernel, nb.report)
         isempty(info.projectdir) &&
             error("this notebook has no project environment to bundle (in-process kernel)")
         cells = ReportEngine.serialize_cells(nb.report)
         b64 = _make_bundle_b64(info.projectdir, info.pathdeps, basename(nb.path), cells)
-        return cells * "\n" * _bundle_footer(b64) * "\n"
+        out = cells * "\n" * _bundle_footer(b64)
+        include_preview && try
+            out *= "\n" * _preview_footer(state_json(nb)["cells"])   # frozen render for instant display
+        catch
+        end
+        return out * "\n"
     end
 end
 
