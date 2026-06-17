@@ -803,6 +803,93 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     return nothing
 end
 
+# ── Streaming import of a self-contained `.jl` (index page) ───────────────────
+# A self-contained notebook is a transport artifact: before it can run it must be `expand`ed
+# into a real project tree and its environment instantiated. `_sse_import` streams that whole
+# flow over SSE (same raw-Stream pattern as `_sse`) so the open box shows live progress —
+# expand → the actual package resolve/instantiate output → open.
+
+# True if `path`'s file carries a `Slate.bundle` footer. Scans for the open marker only; never
+# decodes the (potentially large) base64 payload.
+function _has_bundle_footer(path::AbstractString)
+    isfile(path) || return false
+    try
+        for line in eachline(path)
+            startswith(line, _BUNDLE_OPEN) && return true
+        end
+    catch
+    end
+    return false
+end
+
+# The single notebook `.jl` at the root of an expanded bundle (Project/Manifest/local/repo are
+# the only other root entries). "" if none found.
+function _expanded_notebook(tdir::AbstractString)
+    for f in readdir(tdir)
+        (endswith(f, ".jl") && isfile(joinpath(tdir, f))) && return joinpath(tdir, f)
+    end
+    return ""
+end
+
+# SSE handler for `GET /api/import-standalone?path=&target=`. Events:
+#   status <text>  — coarse phase label
+#   log    <line>  — one line of expand / instantiate output
+#   done   <json>  — {id,url,target}; the client redirects into the opened notebook
+#   failed <text>  — a handled error (named `failed`, not `error`, to avoid clashing with
+#                    EventSource's built-in transport `error` event on the client)
+# `h` is the `Hub` (untyped here only because its struct is defined later in this file).
+function _sse_import(stream::HTTP.Stream, h)
+    HTTP.setheader(stream, "Content-Type" => "text/event-stream")
+    HTTP.setheader(stream, "Cache-Control" => "no-cache")
+    HTTP.startwrite(stream)
+    # Returns false if the write failed (client disconnected / cancelled) so callers can stop.
+    function emit(ev::AbstractString, data::AbstractString)
+        io = IOBuffer()
+        println(io, "event: ", ev)
+        for ln in split(data, '\n'); println(io, "data: ", ln); end   # SSE: one data: per line
+        println(io)
+        try; write(stream, String(take!(io))); return true; catch; return false; end
+    end
+    q = HTTP.queryparams(HTTP.URI(stream.message.target))
+    path = expanduser(strip(get(q, "path", "")))
+    target = let t = strip(get(q, "target", "")); isempty(t) ? "" : expanduser(t); end
+    try
+        (isfile(path) && _has_bundle_footer(path)) ||
+            return emit("failed", "Not a self-contained notebook (no Slate.bundle footer):\n$path")
+        (!isempty(target) && isdir(target) && !isempty(readdir(target))) &&
+            return emit("failed", "Target directory already exists and isn't empty:\n$target")
+        emit("status", "Expanding bundle…")
+        tdir = expand(path; target = target)
+        emit("log", "Expanded to $tdir")
+        emit("status", "Resolving & instantiating packages — this can take a while…")
+        jl = Base.julia_cmd()[1]
+        out = Pipe()
+        proc = run(pipeline(`$jl --project=$tdir --color=no --startup-file=no -e 'using Pkg; Pkg.instantiate()'`;
+                            stdout = out, stderr = out); wait = false)
+        close(out.in)                       # parent's write end; lets eachline see EOF on exit
+        aborted = false
+        for line in eachline(out)
+            if !emit("log", line)           # client cancelled/disconnected → stop instantiating
+                aborted = true
+                try; kill(proc); catch; end
+                break
+            end
+        end
+        wait(proc)
+        aborted && return                   # nothing to open; the client is gone
+        proc.exitcode == 0 || return emit("failed",
+            "Package instantiation failed (exit $(proc.exitcode)).\nThe expanded project is at $tdir — open it and retry there.")
+        nbfile = _expanded_notebook(tdir)
+        isempty(nbfile) && return emit("failed", "Expanded, but found no notebook .jl in $tdir")
+        emit("status", "Opening notebook…")
+        id = open_notebook!(h, nbfile)
+        emit("done", JSON.json(Dict("id" => id, "url" => "/n/$id", "target" => tdir)))
+    catch e
+        emit("failed", sprint(showerror, e))
+    end
+    return nothing
+end
+
 # Watch the file for external edits (VS Code / agent) → sync → push instantly.
 # `watch_file` returns on change (instant) or after a 2s safety timeout (covers
 # editors that save via atomic rename). Server's own writes match canonically in
@@ -1470,19 +1557,23 @@ end
 # directory implied by the typed prefix, and returns full suggestions that PRESERVE
 # the user's `~` (directories suffixed `/`). Dirs and `.jl` files surface first;
 # dotfiles are hidden unless the prefix itself starts with a dot.
-function _path_completions(q::AbstractString; limit::Int = 40)
+# Path completions for the open box's file-picker dropdown. Returns `(items, truncated)` —
+# the (scrollable) dropdown shows every match in a directory; `limit` is a high guard against
+# pathological dirs (node_modules, …), and `truncated` lets the UI say "keep typing to filter"
+# rather than silently dropping entries. Directories sort first, then `.jl`, then the rest.
+function _path_completions(q::AbstractString; limit::Int = 500)
     s = String(q)
     isempty(s) && (s = "~/")
-    s == "~" && return ["~/"]
+    s == "~" && return (items = ["~/"], truncated = false)
     slash = findlast('/', s)
     prefix = slash === nothing ? "" : s[1:slash]
     leaf   = slash === nothing ? s : s[nextind(s, slash):end]
     base   = isempty(prefix) ? pwd() : expanduser(prefix)
-    isdir(base) || return String[]
+    isdir(base) || return (items = String[], truncated = false)
     entries = try
         readdir(base)
     catch
-        return String[]
+        return (items = String[], truncated = false)
     end
     keep = String[]
     for e in entries
@@ -1492,7 +1583,7 @@ function _path_completions(q::AbstractString; limit::Int = 40)
         push!(keep, isdir(full) ? prefix * e * "/" : prefix * e)
     end
     sort!(keep; by = p -> (endswith(p, "/") ? 0 : (endswith(p, ".jl") ? 1 : 2), lowercase(p)))
-    return first(keep, limit)
+    return (items = first(keep, limit), truncated = length(keep) > limit)
 end
 
 # ── Cell-local completion ─────────────────────────────────────────────────────
@@ -1688,13 +1779,17 @@ function _make_router(h::Hub)
     end)
     HTTP.register!(router, "GET", "/api/path-complete", req -> begin
         q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
-        _json(Dict("completions" => _path_completions(q)))
+        r = _path_completions(q)
+        _json(Dict("completions" => r.items, "truncated" => r.truncated))
     end)
     # Stat a path (with ~ expansion) so the open box can decide: open file / show
     # subpaths for a directory / confirm-create for a new path.
     HTTP.register!(router, "GET", "/api/path-info", req -> begin
         p = expanduser(strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))))
-        _json(Dict("path" => p, "exists" => ispath(p), "isdir" => isdir(p), "isfile" => isfile(p)))
+        # `standalone`: a self-contained `.jl` (Slate.bundle footer) → the open box offers the
+        # import-into-a-project helper instead of opening it bare.
+        _json(Dict("path" => p, "exists" => ispath(p), "isdir" => isdir(p), "isfile" => isfile(p),
+                   "standalone" => isfile(p) && _has_bundle_footer(p)))
     end)
     # Close a notebook by id (the index's per-session shutdown button).
     HTTP.register!(router, "POST", "/api/{id}/shutdown", req -> begin
@@ -1965,10 +2060,13 @@ function start_hub(; host = "127.0.0.1", port = 8765)
     h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock())
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
-        m = match(_EVENTS_RE, stream.message.target)
+        target = stream.message.target
+        m = match(_EVENTS_RE, target)
         if m !== nothing
             nb = lock(h.lock) do; get(h.notebooks, m.captures[1], nothing); end
             nb === nothing ? (HTTP.setstatus(stream, 404); HTTP.startwrite(stream)) : _sse(stream, nb)
+        elseif startswith(target, "/api/import-standalone")   # long-lived SSE; raw Stream, not router
+            _sse_import(stream, h)
         else
             handle(stream)
         end
