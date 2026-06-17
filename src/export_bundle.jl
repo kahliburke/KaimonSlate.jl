@@ -25,21 +25,13 @@ end
 # A standalone `.jl` optionally embeds the cells' rendered outputs as of export time, so the
 # notebook can be shown instantly while its env reconstructs in the background (then swapped for
 # live cells). Stored like the bundle: a marked, base64'd (gzip'd) block, terminal so
-# `parse_report` strips it. gzip via the shell `gzip` (same external-tool approach as the tar
-# bundle) — no extra Julia dependency.
+# `parse_report` strips it. gzip via CodecZlib (in-process; no `gzip` binary / PATH / Windows
+# dependency).
 const _PREVIEW_OPEN = "# ╔═╡ Slate.preview"
 const _PREVIEW_CLOSE = "# ╚═╡ Slate.preview"
 
-function _gzip_b64(data::AbstractString)
-    out = IOBuffer()
-    run(pipeline(IOBuffer(data), `gzip -c`, out))
-    return Base64.base64encode(take!(out))
-end
-function _gunzip_b64(b64::AbstractString)
-    out = IOBuffer()
-    run(pipeline(IOBuffer(Base64.base64decode(b64)), `gzip -dc`, out))
-    return String(take!(out))
-end
+_gzip_b64(data::AbstractString) = Base64.base64encode(transcode(GzipCompressor, Vector{UInt8}(data)))
+_gunzip_b64(b64::AbstractString) = String(transcode(GzipDecompressor, Base64.base64decode(b64)))
 
 # `cells` is the JSON-able rendered-cells array (`state_json(nb)["cells"]`).
 _preview_footer(cells) = let b64 = _gzip_b64(JSON.json(cells)), io = IOBuffer()

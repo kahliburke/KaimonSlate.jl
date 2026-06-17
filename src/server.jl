@@ -9,7 +9,7 @@ the engine (`ReportEngine`) and per-cell renderer (`ReportRender`).
 """
 module NotebookServer
 
-using HTTP, JSON, FileWatching
+using HTTP, JSON, FileWatching, CodecZlib
 import REPL, Base64
 import Typst_jll
 using ..ReportEngine

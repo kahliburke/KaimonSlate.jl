@@ -5,6 +5,7 @@ authors = ["Kahli Burke <kahli@kahliburke.com>"]
 
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 CommonMark = "a80b9123-70ca-4bc0-993e-6e3bcb318db6"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 ExpressionExplorer = "21656369-7473-754a-2065-74616d696c43"
@@ -19,6 +20,7 @@ Typst_jll = "eb4b1da6-20f6-5c66-9826-fdb8ad410d0e"
 
 [compat]
 Base64 = "1.11.0"
+CodecZlib = "0.7.8"
 CommonMark = "1.0.2"
 Dates = "1.11.0"
 ExpressionExplorer = "1.1.4"

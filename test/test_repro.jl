@@ -1,6 +1,6 @@
 # Reproducibility: the `.jl` env-delta footer (engine) and the self-contained bundle
 # (export_bundle). Run:  julia --startup-file=no test/test_repro.jl
-using Test, Base64, JSON
+using Test, Base64, JSON, CodecZlib
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
