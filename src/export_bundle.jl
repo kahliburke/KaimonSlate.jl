@@ -36,6 +36,10 @@ function _copy_tree!(dest::AbstractString, src::AbstractString)
     return dest
 end
 
+# Canonical path (symlinks resolved) so repo-root and project-dir comparisons line up; falls
+# back to `abspath` if the path can't be resolved.
+_safe_realpath(p::AbstractString) = try realpath(p) catch; abspath(p) end
+
 # The realpath of the git work-tree root containing `dir`, or `nothing` (no git / not a repo).
 function _git_toplevel(dir::AbstractString)
     Sys.which("git") === nothing && return nothing
@@ -116,10 +120,15 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
         s = joinpath(projectdir, f)
         isfile(s) && cp(s, joinpath(stage, f); force = true)
     end
-    # Bundle the project's git repo first (if any) so a path-dep whose committed-clean source
-    # already lives inside it can be reused from the cloned `repo/` on expand — no redundant
-    # `local/<name>` copy. `top` is the repo root; `gitok` says the bundle was actually written.
-    top = _git_toplevel(projectdir)
+    # Bundle the project's git repo ONLY when the project IS that repo's root — i.e. the
+    # notebook lives in a repo-as-project being shared for collaboration. When the project
+    # merely sits nested inside a larger, unrelated git checkout, walking up to that repo would
+    # drag in the whole thing (whose source isn't even a dependency), so skip it. When bundled,
+    # a path-dep whose committed-clean source lives inside the repo is reused from the cloned
+    # `repo/` on expand (no redundant `local/<name>` copy). `gitok` says the bundle was written.
+    top = let t = _git_toplevel(projectdir)
+        (t !== nothing && t == _safe_realpath(projectdir)) ? t : nothing
+    end
     gitok = top !== nothing && _git_bundle!(stage, top)
     targets = Dict{String,String}()                  # dep name → in-bundle relative source path
     for pd in pathdeps

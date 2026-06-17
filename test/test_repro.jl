@@ -214,4 +214,23 @@ if Sys.which("git") !== nothing
             @test occursin("uncommitted", src)                           # working-tree bytes, not HEAD
         end
     end
+
+    # The git bundle is gated to project-IS-repo-root: a project merely NESTED inside a larger
+    # repo must not drag that whole repo into the bundle (only the project itself travels).
+    @testset "nested project does not bundle the enclosing repo" begin
+        root = mktempdir()
+        sub = joinpath(root, "proj"); mkpath(sub)
+        write(joinpath(sub, "Project.toml"), "name=\"Nested\"\n[deps]\n")
+        write(joinpath(sub, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+        run(pipeline(`git -C $root init -q`; stderr = devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
+        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+
+        sj = joinpath(mktempdir(), "n.standalone.jl")
+        write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(sub, NamedTuple[], "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
+        tdir = expand(sj)
+        @test !isfile(joinpath(tdir, "repo.gitbundle"))   # enclosing repo NOT captured
+        @test !ispath(joinpath(tdir, "repo"))
+        @test isfile(joinpath(tdir, "Project.toml"))      # the project itself still travels
+    end
 end
