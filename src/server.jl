@@ -853,10 +853,14 @@ function _expanded_notebook(tdir::AbstractString)
     return ""
 end
 
-# SSE handler for `GET /api/import-standalone?path=&target=`. Events:
+# SSE handler for `GET /api/import-standalone?path=&mode=run|import&target=`. Two modes:
+#   run    — reconstruct the embedded env into the depot cache and open the notebook IN PLACE
+#            (temporary; nothing written next to the file). `target` ignored.
+#   import — expand into `target` (a real project the user owns) and open the expansion.
+# Both stream the same `Pkg.instantiate()` output. Events:
 #   status <text>  — coarse phase label
 #   log    <line>  — one line of expand / instantiate output
-#   done   <json>  — {id,url,target}; the client redirects into the opened notebook
+#   done   <json>  — {id,url,target,mode}; the client redirects into the opened notebook
 #   failed <text>  — a handled error (named `failed`, not `error`, to avoid clashing with
 #                    EventSource's built-in transport `error` event on the client)
 # `h` is the `Hub` (untyped here only because its struct is defined later in this file).
@@ -872,40 +876,52 @@ function _sse_import(stream::HTTP.Stream, h)
         println(io)
         try; write(stream, String(take!(io))); return true; catch; return false; end
     end
+    # Stream `Pkg.instantiate()` for `projdir`; returns :ok / :aborted / :failed.
+    function instantiate!(projdir)
+        emit("status", "Resolving & instantiating packages — this can take a while…")
+        jl = Base.julia_cmd()[1]
+        out = Pipe()
+        proc = run(pipeline(`$jl --project=$projdir --color=no --startup-file=no -e 'using Pkg; Pkg.instantiate()'`;
+                            stdout = out, stderr = out); wait = false)
+        close(out.in)                       # parent's write end; lets eachline see EOF on exit
+        for line in eachline(out)
+            emit("log", line) || (try; kill(proc); catch; end; return :aborted)
+        end
+        wait(proc)
+        return proc.exitcode == 0 ? :ok : :failed
+    end
     q = HTTP.queryparams(HTTP.URI(stream.message.target))
     path = expanduser(strip(get(q, "path", "")))
+    mode = get(q, "mode", "import")
     target = let t = strip(get(q, "target", "")); isempty(t) ? "" : expanduser(t); end
     try
         (isfile(path) && _has_bundle_footer(path)) ||
             return emit("failed", "Not a self-contained notebook (no Slate.bundle footer):\n$path")
-        (!isempty(target) && isdir(target) && !isempty(readdir(target))) &&
-            return emit("failed", "Target directory already exists and isn't empty:\n$target")
-        emit("status", "Expanding bundle…")
-        tdir = expand(path; target = target)
-        emit("log", "Expanded to $tdir")
-        emit("status", "Resolving & instantiating packages — this can take a while…")
-        jl = Base.julia_cmd()[1]
-        out = Pipe()
-        proc = run(pipeline(`$jl --project=$tdir --color=no --startup-file=no -e 'using Pkg; Pkg.instantiate()'`;
-                            stdout = out, stderr = out); wait = false)
-        close(out.in)                       # parent's write end; lets eachline see EOF on exit
-        aborted = false
-        for line in eachline(out)
-            if !emit("log", line)           # client cancelled/disconnected → stop instantiating
-                aborted = true
-                try; kill(proc); catch; end
-                break
-            end
+        local projdir, openpath, fresh
+        if mode == "run"
+            emit("status", "Reconstructing environment…")
+            rc = _reconstruct_bundle!(path)
+            projdir, openpath, fresh = rc.dir, path, rc.fresh   # open the ORIGINAL file in place
+            emit("log", "Environment ready at $(rc.dir)" * (rc.fresh ? "" : " (cached — reused)"))
+        else
+            (!isempty(target) && isdir(target) && !isempty(readdir(target))) &&
+                return emit("failed", "Target directory already exists and isn't empty:\n$target")
+            emit("status", "Expanding bundle…")
+            tdir = expand(path; target = target)
+            openpath = _expanded_notebook(tdir)
+            isempty(openpath) && return emit("failed", "Expanded, but found no notebook .jl in $tdir")
+            projdir, fresh = tdir, true
+            emit("log", "Expanded to $tdir")
         end
-        wait(proc)
-        aborted && return                   # nothing to open; the client is gone
-        proc.exitcode == 0 || return emit("failed",
-            "Package instantiation failed (exit $(proc.exitcode)).\nThe expanded project is at $tdir — open it and retry there.")
-        nbfile = _expanded_notebook(tdir)
-        isempty(nbfile) && return emit("failed", "Expanded, but found no notebook .jl in $tdir")
+        if fresh
+            r = instantiate!(projdir)
+            r === :aborted && return        # client gone
+            r === :failed && return emit("failed",
+                "Package instantiation failed.\nThe project is at $projdir — open it and retry there.")
+        end
         emit("status", "Opening notebook…")
-        id = open_notebook!(h, nbfile)
-        emit("done", JSON.json(Dict("id" => id, "url" => "/n/$id", "target" => tdir)))
+        id = open_notebook!(h, openpath)
+        emit("done", JSON.json(Dict("id" => id, "url" => "/n/$id", "target" => projdir, "mode" => mode)))
     catch e
         emit("failed", sprint(showerror, e))
     end
