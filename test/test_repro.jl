@@ -60,6 +60,23 @@ using .ReportEngine
     end
 end
 
+# The `collapsed` header token (cell folded in the UI) round-trips through the .jl via the
+# cell's `flags`, and composes with `controls=`.
+@testset "collapsed header token round-trips" begin
+    r = parse_report("#%% code id=a collapsed\nx = 1\n\n#%% code id=b\ny = 2\n")
+    @test :collapsed in first(c for c in r.cells if c.id == "a").flags
+    @test !(:collapsed in first(c for c in r.cells if c.id == "b").flags)
+
+    s = serialize_cells(r)
+    @test occursin("#%% code id=a collapsed", s)
+    @test occursin(r"#%% code id=b\b(?! collapsed)", s)            # b carries no token
+    @test :collapsed in first(c for c in parse_report(s).cells if c.id == "a").flags   # idempotent
+
+    r3 = parse_report("#%% code id=c controls=n collapsed\nz = n\n")   # composes with controls=
+    @test r3.cells[1].controls == [["n"]] && :collapsed in r3.cells[1].flags
+    @test occursin("controls=n collapsed", serialize_cells(r3))
+end
+
 # ── Notebook-environment model helpers (gate_kernel.jl, loaded via engine.jl) ─
 @testset "notebook env model" begin
     @testset "env dir keying" begin

@@ -204,18 +204,21 @@ function _parse_header(rest::AbstractString)
     kind = CODE
     id = nothing
     controls = Vector{String}[]
+    collapsed = false
     for tok in split(strip(rest))
         if startswith(tok, "id=")
             id = tok[4:end]
         elseif startswith(tok, "controls=")
             controls = _parse_controls(tok[10:end])
+        elseif tok == "collapsed"           # folded in the UI (view-only; travels in the .jl)
+            collapsed = true
         elseif tok == "md" || tok == "markdown"
             kind = MARKDOWN
         elseif tok == "code"
             kind = CODE
         end
     end
-    return kind, id, controls
+    return kind, id, controls, collapsed
 end
 
 "Deterministic short id from a cell's content + position (used when none given)."
@@ -273,6 +276,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     had_header = false                    # current cell came from an explicit header
     body = String[]
 
+    coll = false                          # `collapsed` flag of the current explicit header
     function flush!()
         trimmed = _strip_blank_edges(body)
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
@@ -281,18 +285,20 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             id_ = cid === nothing ? _auto_id(kind, src, idx) : cid
             cell = Cell(id_, kind, src)
             cell.controls = ctrls
+            coll && push!(cell.flags, :collapsed)
             push!(report.cells, cell)
         end
         empty!(body)
         had_header = false
         ctrls = Vector{String}[]
+        coll = false
     end
 
     for line in lines
         m = match(_HEADER, line)
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
-            kind, cid, ctrls = _parse_header(m.captures[1])
+            kind, cid, ctrls, coll = _parse_header(m.captures[1])
             explicit = true
             had_header = true
         elseif explicit                   # verbatim body of an explicit cell
@@ -364,6 +370,7 @@ _controls_str(cols) = join((length(col) == 1 ? col[1] : "[" * join(col, ",") * "
 function _cell_source(cell::Cell)
     header = "#%% $(_kind_token(cell.kind)) id=$(cell.id)"
     isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
+    (:collapsed in cell.flags) && (header *= " collapsed")
     return isempty(cell.source) ? header : "$header\n$(cell.source)"
 end
 

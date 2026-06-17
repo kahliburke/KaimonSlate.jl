@@ -978,7 +978,7 @@ function cellHeader(c) {
     ? `<button onclick="autoControls('${c.id}')" title="surface the @bind controls this cell uses (${c.binduses.join(', ')})">🎛</button>` : '';
   return '<div class="cellhead">' +
     '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
-    `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${isCollapsed(c.id) ? '▸' : '▾'}</button>` + run +
+    `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
@@ -1026,7 +1026,7 @@ function cellEl(c) {
       '<div class="tables"></div>' +
       '<div class="echarts"></div>';
   }
-  if (isCollapsed(c.id)) div.classList.add('collapsed');   // per-browser collapse (localStorage)
+  if (c.collapsed) div.classList.add('collapsed');         // folded (persisted in the .jl)
   return div;
 }
 
@@ -2412,16 +2412,11 @@ async function autoControls(id) {
     : { [id]: cols.map(col => col.filter(n => !c.binduses.includes(n))) };        // all shown → clear them
   renderAll(await api('POST', '/api/controls', { map }));
 }
-// Per-browser cell collapse (localStorage, keyed by notebook). Toggling just flips a class +
-// the caret — no re-render — so a mounted editor survives.
-function _collapsedSet() { try { return new Set(JSON.parse(localStorage.getItem('slateCollapsed:' + NB_ID) || '[]')); } catch (e) { return new Set(); } }
-function isCollapsed(id) { return _collapsedSet().has(id); }
-function toggleCollapse(id) {
-  const s = _collapsedSet(), now = !s.has(id);
-  now ? s.add(id) : s.delete(id);
-  try { localStorage.setItem('slateCollapsed:' + NB_ID, JSON.stringify([...s])); } catch (e) {}
-  const el = document.getElementById('cell-' + id);
-  if (el) { el.classList.toggle('collapsed', now); const b = el.querySelector('.cellhead .collapse'); if (b) b.textContent = now ? '▸' : '▾'; }
+// Fold / unfold a cell. Persisted in the .jl (header `collapsed` token) so it travels with the
+// notebook; the server returns fresh state and renderAll reflects it.
+async function toggleCollapse(id) {
+  const c = _cellById(id);
+  renderAll(await api('POST', '/api/collapse/' + id, { collapsed: !(c && c.collapsed) }));
 }
 // Insertion row within a column element, by cursor y (before the first control
 // whose midpoint is below the cursor; else at the end).
