@@ -255,3 +255,34 @@ if Sys.which("git") !== nothing
         @test isfile(joinpath(tdir, "repo.gitbundle"))                       # repo still bundled too
     end
 end
+
+# Content-addressed reconstruction into the depot cache (the "Run (temporary)" engine): same
+# bundle ⇒ same dir reused instantly; different bundle ⇒ fresh dir. No git needed.
+@testset "bundle reconstruction into the depot cache" begin
+    cells = "#%% code id=a\nusing Foo\n"
+    proj = mktempdir()
+    write(joinpath(proj, "Project.toml"), "name=\"Demo\"\n[deps]\n")
+    write(joinpath(proj, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+    sj = joinpath(mktempdir(), "demo.standalone.jl")
+    write(sj, cells * "\n" * _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "demo.jl", cells)) * "\n")
+
+    @test _has_bundle(read(sj, String))
+    @test !_has_bundle("#%% code id=a\nx=1\n")
+
+    r1 = _reconstruct_bundle!(sj)
+    @test r1.fresh                                       # first time: extracted
+    @test occursin("kaimonslate-bundles", r1.dir)        # depot cache, not a sibling dir
+    @test isfile(joinpath(r1.dir, "Project.toml"))
+    @test isfile(joinpath(r1.dir, "demo.jl"))
+
+    r2 = _reconstruct_bundle!(sj)
+    @test !r2.fresh && r2.dir == r1.dir                  # same content → cache hit, reused
+
+    sj2 = joinpath(mktempdir(), "other.standalone.jl")
+    write(sj2, cells * "y=2\n\n" * _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "other.jl", cells * "y=2\n")) * "\n")
+    r3 = _reconstruct_bundle!(sj2)
+    @test r3.dir != r1.dir                               # different content → different dir
+
+    rm(r1.dir; recursive = true, force = true)           # don't litter the depot
+    rm(r3.dir; recursive = true, force = true)
+end

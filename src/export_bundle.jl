@@ -192,6 +192,55 @@ function _read_bundle_b64(text::AbstractString)
     return join((startswith(l, "# ") ? SubString(l, 3) : l for l in body))
 end
 
+# True if `text` carries a `Slate.bundle` footer (cheap marker scan, no base64 decode).
+_has_bundle(text::AbstractString) = occursin(_BUNDLE_OPEN, text)
+
+# Extract a decoded bundle payload (Project/Manifest/src/local/notebook + git bundle) into
+# `dir`, then clone+wire the embedded git repo. Returns the cloned repo path or `nothing`.
+# Shared by `expand` (user-chosen dir) and `_reconstruct_bundle!` (depot cache).
+function _extract_bundle!(b64::AbstractString, dir::AbstractString)
+    mkpath(dir)
+    tgz = joinpath(mktempdir(), "bundle.tgz")
+    write(tgz, Base64.base64decode(b64))
+    run(`tar xzf $tgz -C $dir`)
+    return _attach_git_repo(dir)                     # clone repo.gitbundle + wire origin
+end
+
+# Content-addressed cache dir under the depot for a bundle payload, keyed by a hash of the
+# bundle bytes: identical content reuses the same extracted env (instant reopen), a changed
+# bundle lands in a fresh dir. Mirrors `notebook_env_dir`'s depot convention.
+function _bundle_cache_dir(b64::AbstractString)
+    key = string(hash(b64) % 0xffffffffffffffff; base = 16, pad = 16)
+    return joinpath(first(Base.DEPOT_PATH), "environments", "kaimonslate-bundles", key)
+end
+
+"""
+    _reconstruct_bundle!(jl_path) -> (dir, fresh)
+
+Reconstruct a standalone `.jl`'s embedded environment into the content-addressed depot cache
+(`_bundle_cache_dir`) and return `(dir, fresh)` — `fresh=false` when the cache was already
+populated (reused as-is, instantly). The notebook file is NOT moved; this just materialises a
+runnable project the kernel can activate in place. Does not instantiate (the caller does, so
+package download/precompile can be streamed/backgrounded). Extraction is staged in a sibling
+`.partial` dir and swapped in, so a crash mid-extract can't leave a half-populated cache.
+"""
+function _reconstruct_bundle!(jl_path::AbstractString)
+    b64 = _read_bundle_b64(read(jl_path, String))
+    dir = _bundle_cache_dir(b64)
+    isfile(joinpath(dir, "Project.toml")) && return (dir = dir, fresh = false)   # cache hit
+    mkpath(dirname(dir))
+    staging = dir * ".partial"
+    rm(staging; recursive = true, force = true)
+    _extract_bundle!(b64, staging)
+    if isfile(joinpath(dir, "Project.toml"))         # someone raced us → keep theirs
+        rm(staging; recursive = true, force = true)
+    else
+        rm(dir; recursive = true, force = true)
+        mv(staging, dir)
+    end
+    return (dir = dir, fresh = true)
+end
+
 """
     expand(jl_path; target="") -> String
 
@@ -204,12 +253,8 @@ function expand(jl_path::AbstractString; target::AbstractString = "")
     txt = read(jl_path, String)
     b64 = _read_bundle_b64(txt)
     tdir = isempty(target) ? splitext(abspath(jl_path))[1] * ".expanded" : abspath(target)
-    mkpath(tdir)
-    tgz = joinpath(mktempdir(), "bundle.tgz")
-    write(tgz, Base64.base64decode(b64))
-    run(`tar xzf $tgz -C $tdir`)
+    repo = _extract_bundle!(b64, tdir)               # tar extract + clone the embedded git bundle
     @info "Expanded standalone notebook" target = tdir
-    repo = _attach_git_repo(tdir)                    # clone the embedded bundle + wire origin
     println("Expanded to: $tdir\n" *
             "  • instantiate the environment:   julia --project=$tdir -e 'using Pkg; Pkg.instantiate()'" *
             (isdir(joinpath(tdir, "local")) ?
