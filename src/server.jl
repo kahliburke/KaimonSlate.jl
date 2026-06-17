@@ -101,6 +101,22 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     nbid = isempty(id) ? rid : String(id)
     r = parse_report(src; id = rid, title = base)
     build_dependencies!(r)
+    # A self-contained `.jl` carrying an embedded frozen render: show that preview INSTANTLY and
+    # reconstruct + run the env in the BACKGROUND (hydrate), so a heavy bundle never blocks the
+    # open. Strictly gated — without a preview, fall through to the normal synchronous path
+    # (which, for a bundle, still reconstructs+runs in place via `_select_kernel`).
+    preview = (ReportEngine.gate_available() && _has_bundle(src)) ? _read_preview(src) : nothing
+    if preview !== nothing
+        r.meta["preview"] = preview
+        r.meta["hydrating"] = true
+        nb = LiveNotebook(nbid, String(path), r, InProcessKernel(), 0, String[], String[],
+                          ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
+                          Dict{String,String}())
+        register_refresh!(r.id, vars -> server_refresh(nb, vars))
+        _load_chat_log!(nb)
+        @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
+        return nb
+    end
     kernel = _select_kernel(path, r, src)
     eval_stale!(r, kernel)               # initial full run
     nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
@@ -114,6 +130,35 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     _autoindex!(nb)                      # background: index project deps + used packages' docs
     return nb
+end
+
+# Background env reconstruction for a preview-standalone (see load_notebook): reconstruct the
+# bundle into the depot cache, instantiate, swap in the real gate kernel, run the cells live,
+# then push — the client swaps the frozen preview for live cells. On failure, surface it and
+# drop the hydrating state (the preview stays visible as the last-known render).
+function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
+    try
+        rc = _reconstruct_bundle!(path)
+        rc.fresh && _instantiate_env!(rc.dir)
+        kernel = GateKernel(rc.dir; parent = "", envdir = rc.dir)
+        lock(nb.lock) do
+            nb.kernel = kernel
+            delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
+            delete!(nb.report.meta, "hydrating")
+            eval_stale!(nb.report, kernel)           # run everything in the reconstructed env
+            nb.version += 1
+        end
+        _history!(nb; source = "open")
+        _autoindex!(nb)
+    catch e
+        lock(nb.lock) do
+            nb.report.meta["hydrate_error"] = sprint(showerror, e)
+            delete!(nb.report.meta, "hydrating")
+            nb.version += 1
+        end
+    end
+    try; _broadcast(nb, string(nb.version)); catch; end
+    return nothing
 end
 
 # Reactive push triggered by a cell's async task (`slate_refresh(:data, …)`):
@@ -377,13 +422,20 @@ _kernel_status(k::GateKernel) = Dict{String,Any}("kind" => "gate", "port" => k.p
 _kernel_status(::Kernel) = Dict{String,Any}("kind" => "inproc", "port" => 0, "connected" => true)
 
 function state_json(nb::LiveNotebook)
+    meta = Dict{String,Any}(
+        "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
+        "version" => nb.version, "worker" => _kernel_status(nb.kernel))
+    if get(nb.report.meta, "hydrating", false) === true
+        # Show the embedded frozen render (already cell_json-shaped) until the background hydrate
+        # finishes and pushes live cells.
+        meta["cells"] = nb.report.meta["preview"]
+        meta["hydrating"] = true
+        return meta
+    end
     bindref, hostednames = _bind_index(nb.report)
-    return Dict("id"      => nb.id,
-                "title"   => nb.report.title,
-                "path"    => abspath(nb.path),
-                "version" => nb.version,
-                "worker"  => _kernel_status(nb.kernel),
-                "cells"   => [cell_json(c, bindref, hostednames) for c in nb.report.cells])
+    meta["cells"] = [cell_json(c, bindref, hostednames) for c in nb.report.cells]
+    haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
+    return meta
 end
 
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →

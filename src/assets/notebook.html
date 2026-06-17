@@ -45,6 +45,13 @@ body.fullwidth .page { max-width:none; }
    and the chat never overlap (the panel is a fixed 380px drawer on the right). */
 body.agent-open .page { margin-right:392px; }
 @media (max-width:900px) { body.agent-open .page { margin-right:0; } }
+/* Banner while a self-contained notebook's env reconstructs in the background; the cells below
+   show the embedded frozen render until live cells are pushed in. */
+.hydbanner { position:sticky; top:var(--topbar-h,49px); z-index:9; display:flex; align-items:center; gap:10px;
+  padding:8px 18px; font-size:.84rem; color:#7cc0ff; background:linear-gradient(90deg,var(--bg2),var(--bg)); border-bottom:1px solid var(--border); }
+.hydbanner.err { color:var(--red); }
+.hydbanner .hydspin { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--bg3); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+body.hydrating #nb { opacity:.92; }
 /* Dependency-cone highlight (the 🔗 button on a cell): the focused cell + its
    transitive upstream precursors light up, so you can see/navigate what feeds a cell. */
 .cell.dep-focus { outline:2px solid var(--accent); outline-offset:-2px; }
@@ -416,6 +423,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <button onclick="toggleHistory()" title="edit history — time machine">🕘</button>
   <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬</button>
 </div>
+<div id="hydbanner" class="hydbanner" style="display:none"></div>
 <div class="page"><div id="nb"></div></div>
 <aside id="palette" class="palette">
   <div class="phead"><strong>Controls</strong><span id="palette-count" class="hint"></span>
@@ -1159,6 +1167,19 @@ function renderAll(state) {
     dot.title = w.kind === 'gate' ? ('worker :' + w.port + (w.connected ? ' · connected' : ' · disconnected')) : 'in-process kernel';
   }
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
+  // Hydrating banner: a standalone is showing its frozen preview while the env reconstructs.
+  const hb = document.getElementById('hydbanner');
+  if (state.hydrating) {
+    hb.className = 'hydbanner'; hb.style.display = 'flex';
+    hb.innerHTML = '<span class="hydspin"></span>Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…';
+    document.body.classList.add('hydrating');
+  } else if (state.hydrateError) {
+    hb.className = 'hydbanner err'; hb.style.display = 'flex';
+    hb.textContent = '⚠ Environment reconstruction failed: ' + state.hydrateError;
+    document.body.classList.remove('hydrating');
+  } else {
+    hb.style.display = 'none'; document.body.classList.remove('hydrating');
+  }
   const nb = document.getElementById('nb');
   nb.innerHTML = '';
   for (const k of Object.keys(editors)) delete editors[k];
