@@ -25,7 +25,7 @@
 * { box-sizing:border-box; }
 body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif;
        margin:0; line-height:1.6; }
-.topbar { position:sticky; top:0; z-index:10; background:var(--bg2); border-bottom:1px solid var(--border);
+.topbar { position:sticky; top:0; z-index:30; background:var(--bg2); border-bottom:1px solid var(--border);
           padding:10px 20px; display:flex; align-items:center; gap:12px; }
 .topbar h1 { font-size:1.1rem; margin:0; color:#fff; flex:1; }
 .wdot { width:9px; height:9px; border-radius:50%; background:var(--dim); display:inline-block; flex:0 0 auto; }
@@ -58,8 +58,12 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cell.dep-focus { outline:2px solid var(--accent); outline-offset:-2px; }
 .cell.dep-up { border-left-color:var(--gold) !important; box-shadow:0 0 0 1px rgba(255,215,0,.25) inset; }
 .cell { position:relative; }
-.depflag { position:absolute; top:-9px; left:10px; z-index:4; background:var(--gold); color:#1a1400;
-  font-size:.62rem; font-weight:700; padding:1px 6px; border-radius:6px; letter-spacing:.03em; cursor:pointer; }
+.depflag { position:absolute; top:-9px; left:10px; z-index:6; background:var(--gold); color:#1a1400;
+  font-size:.62rem; font-weight:700; padding:1px 6px; border-radius:6px; letter-spacing:.03em; cursor:pointer;
+  box-shadow:0 1px 4px #0007; }
+/* While the dependency cone is shown, let the flagged cells' tab protrude past the
+   cell box (cells normally clip to their rounded corners via overflow:hidden). */
+.cell.dep-up, .cell.dep-focus { overflow:visible; }
 .cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
         margin:14px 0; background:var(--bg2); overflow:hidden; }
 .cell.state-fresh   { border-left-color:var(--accent); }
@@ -81,6 +85,10 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cellhead .collapse:hover { color:var(--accent); }
 .cell.collapsed > :not(.cellhead) { display:none; }                 /* fold to just the header */
 .cell.collapsed .cellhead { opacity:.78; }
+/* Hide-code: editor hidden, output/figure (and any @bind control strip) shown — clean,
+   interactive plots without the source. */
+.cell.codehidden > textarea, .cell.codehidden .CodeMirror { display:none; }
+.cellhead .hidecode.on { color:var(--accent); }
 .badge { text-transform:uppercase; letter-spacing:.04em; font-size:.68rem; min-width:52px; text-align:right; color:var(--dim); }
 .cell.state-fresh   .badge { color:var(--accent); }
 .cell.state-stale   .badge { color:var(--gold); }
@@ -974,8 +982,9 @@ function cellHeader(c) {
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
   const run = isCode ? `<button class="run" data-run="${c.id}" title="run (⇧⏎)">▶</button>` : '';
-  const autoctl = (c.binduses && c.binduses.length)
-    ? `<button onclick="autoControls('${c.id}')" title="surface the @bind controls this cell uses (${c.binduses.join(', ')})">🎛</button>` : '';
+  const bu = transBinduses(c);
+  const autoctl = bu.length
+    ? `<button onclick="autoControls('${c.id}')" title="surface the @bind controls that affect this cell (${bu.join(', ')})">🎛</button>` : '';
   return '<div class="cellhead">' +
     '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
@@ -985,6 +994,7 @@ function cellHeader(c) {
     '<span class="cellacts">' +
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
       (isCode ? `<button onclick="toggleDeps('${c.id}')" title="highlight this cell's upstream dependencies">🔗</button>` : '') + autoctl +
+      (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
@@ -1027,6 +1037,7 @@ function cellEl(c) {
       '<div class="echarts"></div>';
   }
   if (c.collapsed) div.classList.add('collapsed');         // folded (persisted in the .jl)
+  if (c.codeHidden) div.classList.add('codehidden');       // code editor hidden, output shown
   return div;
 }
 
@@ -1380,8 +1391,17 @@ function updateStates(state) {
 async function runCell(id) {
   if (_hydrating) return;                      // env still reconstructing — preview is read-only
   const ed = editors[id];
+  const before = _cellById(id);                // shape BEFORE the run (from the live state)
   setState(id, 'running');
-  updateStates(await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' }));
+  const state = await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' });
+  const after = (state.cells || []).find(c => c.id === id);
+  // A code cell that gains (or loses) @bind widgets — or flips kind — changes its DOM
+  // *structure*: the in-place patch (updateStates) can't inject the widget rows, so the
+  // controls wouldn't appear. Rebuild fully in that case; otherwise patch in place.
+  if (before && after && (hasBinds(before) !== hasBinds(after) || before.kind !== after.kind))
+    renderAll(state);
+  else
+    updateStates(state);
 }
 async function addCell(after, kind, before, edit) {
   if (_hydrating) return;
@@ -1465,6 +1485,21 @@ function _upstreamCone(id) {
   }
   return up;
 }
+// Transitive @bind controls a cell is affected by: not just the ones it reads directly
+// (server-computed `binduses` = reads ∩ bound vars), but any whose value flows into it
+// through the dependency graph — e.g. a plot of `data` where `data = f(N)` and `N` is an
+// @bind. Union each upstream cell's direct binduses over the cell's dependency cone, so a
+// control can be surfaced on a downstream plot even though the plot never names it.
+function transBinduses(c) {
+  if (!c) return [];
+  const own = new Set((c.binds || []).map(b => b.name));
+  const acc = new Set((c.binduses || []).filter(n => !own.has(n)));
+  for (const up of _upstreamCone(c.id)) {
+    const u = _cellById(up);
+    ((u && u.binduses) || []).forEach(n => { if (!own.has(n)) acc.add(n); });
+  }
+  return [...acc].sort();
+}
 function _depFlag(el, text, title) {
   const f = document.createElement('span'); f.className = 'depflag';
   f.textContent = text; if (title) f.title = title; f.onclick = clearDeps; el.appendChild(f);
@@ -1514,7 +1549,17 @@ document.addEventListener('keydown', e => {
 }, true);
 document.addEventListener('mousedown', e => { if (e.target && e.target.id === 'modalbg') _modalClose(false); });
 
-async function runAll()  { if (_hydrating) return; updateStates(await api('POST', '/api/run')); }
+async function runAll()  {
+  if (_hydrating) return;
+  const shape = c => (hasBinds(c) ? 'b' : c.kind);          // structural signature
+  const before = new Map(((nbState && nbState.cells) || []).map(c => [c.id, shape(c)]));
+  const state = await api('POST', '/api/run');
+  // If any cell changed structural shape (gained/lost @bind widgets, flipped kind, or the
+  // cell set changed), patch-in-place can't restructure — rebuild fully.
+  const changed = (state.cells || []).length !== before.size
+    || (state.cells || []).some(c => before.get(c.id) !== shape(c));
+  changed ? renderAll(state) : updateStates(state);
+}
 async function resetAll(){ updateStates(await api('POST', '/api/reset')); }
 async function restartWorker(){
   if (!await confirmDark("Restart this notebook's worker? Its process is killed and cells re-run from a fresh namespace.", 'Restart')) return;
@@ -1762,6 +1807,8 @@ function paletteCommands() {
     { label: 'Merge selected cell with below', run: () => { if (selectedId) mergeBelow(selectedId); } },
     { label: 'Search docs… (⌘⇧K)', run: openDocs },
     { label: 'Toggle controls palette', run: togglePalette },
+    { label: 'Hide code for all plot cells', run: () => hideAllPlotCode(true) },
+    { label: 'Show code for all plot cells', run: () => hideAllPlotCode(false) },
     ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },
@@ -1870,7 +1917,10 @@ function collapseOutputs(root) {
     const nx = out.nextElementSibling;
     if (nx && nx.classList.contains('outmore')) nx.remove();
     out.classList.remove('clip');
-    if (out.scrollHeight > 480) {                       // tall output → clip + reveal toggle
+    // Figures (plots) show in full — only clip tall *text* dumps (long arrays, dataframe
+    // prints), which are the ones that actually benefit from a "show more" fold.
+    const isFigure = !!out.querySelector('img, svg, canvas');
+    if (!isFigure && out.scrollHeight > 480) {          // tall text output → clip + reveal toggle
       out.classList.add('clip');
       const btn = document.createElement('button'); btn.className = 'outmore'; btn.textContent = '⌄ show more';
       btn.onclick = () => { const c = out.classList.toggle('clip'); btn.textContent = c ? '⌄ show more' : '⌃ show less'; };
@@ -2401,15 +2451,17 @@ async function unhostControl(name, cellId) {
   if (!cellId) return;
   renderAll(await api('POST', '/api/controls', { map: { [cellId]: columnsOf(cellId).map(c => c.filter(n => n !== name)) } }));
 }
-// One-click "surface the @bind controls this cell USES" (the header 🎛 button). Toggles them
-// in/out of the cell's control strip; `binduses` (reads ∩ bound vars) comes from the server.
+// One-click "surface the @bind controls that AFFECT this cell" (the header 🎛 button). Toggles
+// them in/out of the cell's control strip; the set is `transBinduses` — the cell's direct
+// binduses plus those of every cell in its upstream dependency cone (so a downstream plot can
+// host a control whose value reaches it indirectly).
 async function autoControls(id) {
-  const c = _cellById(id); if (!c || !c.binduses || !c.binduses.length) return;
+  const c = _cellById(id); const bu = transBinduses(c); if (!bu.length) return;
   const cols = columnsOf(id), present = new Set([].concat(...cols));
-  const missing = c.binduses.filter(n => !present.has(n));
+  const missing = bu.filter(n => !present.has(n));
   const map = missing.length
     ? { [id]: cols.concat([missing]) }                                            // surface the not-shown ones
-    : { [id]: cols.map(col => col.filter(n => !c.binduses.includes(n))) };        // all shown → clear them
+    : { [id]: cols.map(col => col.filter(n => !bu.includes(n))) };                // all shown → clear them
   renderAll(await api('POST', '/api/controls', { map }));
 }
 // Fold / unfold a cell. Persisted in the .jl (header `collapsed` token) so it travels with the
@@ -2417,6 +2469,27 @@ async function autoControls(id) {
 async function toggleCollapse(id) {
   const c = _cellById(id);
   renderAll(await api('POST', '/api/collapse/' + id, { collapsed: !(c && c.collapsed) }));
+}
+// Hide / show a code cell's editor (output stays visible). Persisted in the .jl (`hidecode`
+// token) so it travels with the notebook.
+async function toggleHideCode(id) {
+  const c = _cellById(id);
+  renderAll(await api('POST', '/api/hidecode/' + id, { hidden: !(c && c.codeHidden) }));
+}
+// Does this code cell render a plot? An ECharts spec, or a figure (img/svg/canvas) in its output.
+function _cellHasPlot(c) {
+  if (!c || c.kind !== 'code') return false;
+  if (Array.isArray(c.echarts) && c.echarts.length) return true;
+  const el = document.getElementById('cell-' + c.id), out = el && el.querySelector('.output');
+  return !!(out && out.querySelector('img, svg, canvas'));
+}
+// Bulk hide/show the code of every plot cell at once (command palette). One file write per
+// changed cell; only renders once, at the end.
+async function hideAllPlotCode(hidden) {
+  const targets = ((nbState && nbState.cells) || []).filter(_cellHasPlot).filter(c => !!c.codeHidden !== hidden);
+  let last;
+  for (const c of targets) last = await api('POST', '/api/hidecode/' + c.id, { hidden });
+  if (last) renderAll(last);
 }
 // Insertion row within a column element, by cursor y (before the first control
 // whose midpoint is below the cursor; else at the end).
