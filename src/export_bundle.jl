@@ -6,7 +6,7 @@
 # tree that instantiates and runs. The heavy bundle lives ONLY in the exported file; the
 # working notebook keeps just the lightweight `Slate.env` delta footer.
 #
-# Footer layout (terminal, like `Slate.env`): an open marker, the gzip'd tarball as base64
+# Footer layout (terminal, like `Slate.env`): an open marker, the gzip'd archive as base64
 # wrapped into commented lines, then a close marker. `parse_report` strips any `Slate.*`
 # block, so a standalone `.jl` still opens as an ordinary notebook.
 const _BUNDLE_OPEN = "# ╔═╡ Slate.bundle"
@@ -146,7 +146,39 @@ function _rewrite_manifest_paths!(manifest::AbstractString, targets::AbstractDic
     return
 end
 
-# Build the base64 tarball from explicit coordinates (kernel-independent, so it's unit
+# ── Archive: a trivial (path, bytes) container, gzip'd ────────────────────────
+# We don't need tar — there are no symlinks (staging follows them), no exec bits or other
+# metadata that matter, and we own both ends. So pack the staged tree as a flat stream of
+# [pathlen:u32][path][len:u64][bytes] entries (network byte order) and gzip it (CodecZlib).
+# In-process, cross-platform, no `tar`/`gzip` binary and no macOS AppleDouble `._*` cruft.
+function _pack_tree(dir::AbstractString)
+    io = IOBuffer()
+    for (root, _, files) in walkdir(dir), f in files
+        full = joinpath(root, f)
+        isfile(full) || continue
+        relb = Vector{UInt8}(replace(relpath(full, dir), '\\' => '/'))   # portable forward slashes
+        data = read(full)
+        write(io, hton(UInt32(length(relb))), relb, hton(UInt64(length(data))), data)
+    end
+    return transcode(GzipCompressor, take!(io))
+end
+
+function _unpack_tree(packed::Vector{UInt8}, dest::AbstractString)
+    mkpath(dest)
+    base = normpath(dest)
+    io = IOBuffer(transcode(GzipDecompressor, packed))
+    while !eof(io)
+        rel = String(read(io, ntoh(read(io, UInt32))))
+        data = read(io, ntoh(read(io, UInt64)))
+        out = normpath(joinpath(dest, rel))
+        startswith(out, base * (endswith(base, "/") ? "" : "/")) || continue   # no path-escape
+        mkpath(dirname(out))
+        write(out, data)
+    end
+    return dest
+end
+
+# Build the base64 archive from explicit coordinates (kernel-independent, so it's unit
 # testable): the active project dir, its path deps `[(name, source)]`, and the notebook.
 function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::AbstractString, cells::AbstractString)
     stage = mktempdir()
@@ -189,11 +221,7 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
         isdir(s) && _copy_tree!(joinpath(stage, d), s)
     end
     write(joinpath(stage, nbname), cells)
-    tgz = joinpath(mktempdir(), "bundle.tgz")
-    # COPYFILE_DISABLE stops macOS BSD tar from emitting `._*` AppleDouble entries that would
-    # otherwise litter the tree when extracted on another platform.
-    run(addenv(`tar czf $tgz -C $stage .`, "COPYFILE_DISABLE" => "1"))
-    return Base64.base64encode(read(tgz))
+    return Base64.base64encode(_pack_tree(stage))
 end
 
 """
@@ -239,10 +267,7 @@ _has_bundle(text::AbstractString) = occursin(_BUNDLE_OPEN, text)
 # `dir`, then clone+wire the embedded git repo. Returns the cloned repo path or `nothing`.
 # Shared by `expand` (user-chosen dir) and `_reconstruct_bundle!` (depot cache).
 function _extract_bundle!(b64::AbstractString, dir::AbstractString)
-    mkpath(dir)
-    tgz = joinpath(mktempdir(), "bundle.tgz")
-    write(tgz, Base64.base64decode(b64))
-    run(`tar xzf $tgz -C $dir`)
+    _unpack_tree(Base64.base64decode(b64), dir)
     return _attach_git_repo(dir)                     # clone repo.gitbundle + wire origin
 end
 
@@ -293,7 +318,7 @@ function expand(jl_path::AbstractString; target::AbstractString = "")
     txt = read(jl_path, String)
     b64 = _read_bundle_b64(txt)
     tdir = isempty(target) ? splitext(abspath(jl_path))[1] * ".expanded" : abspath(target)
-    repo = _extract_bundle!(b64, tdir)               # tar extract + clone the embedded git bundle
+    repo = _extract_bundle!(b64, tdir)               # unpack + clone the embedded git bundle
     @info "Expanded standalone notebook" target = tdir
     println("Expanded to: $tdir\n" *
             "  • instantiate the environment:   julia --project=$tdir -e 'using Pkg; Pkg.instantiate()'" *
