@@ -141,12 +141,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     _imBusy(false);imCancel.textContent='Cancel';importBg.classList.add('show');}
   function closeImport(){if(_imES){_imES.close();_imES=null;}importBg.classList.remove('show');}
   function _imLine(s){imLog.style.display='block';imLog.textContent+=s+'\n';imLog.scrollTop=imLog.scrollHeight;}
-  // mode 'run' → reconstruct into the cache + open in place; 'import' → expand into the target dir.
-  function startFlow(mode){
-    _imDone=false;_imBusy(true);imStatus.className='imstatus';
-    imStatus.textContent=(mode==='run'?'Starting…':'Importing…');
-    var url='/api/import-standalone?mode='+mode+'&path='+encodeURIComponent(_imPath)+
-            (mode==='import'?'&target='+encodeURIComponent(imTarget.value.trim()):'');
+  // Import → expand into the target dir (streamed). Run is a plain open (below): the notebook
+  // reconstructs + runs its env in the background, showing the embedded preview meanwhile.
+  function startImport(){
+    _imDone=false;_imBusy(true);imStatus.className='imstatus';imStatus.textContent='Importing…';
+    var url='/api/import-standalone?path='+encodeURIComponent(_imPath)+'&target='+encodeURIComponent(imTarget.value.trim());
     var es=new EventSource(url);_imES=es;
     es.addEventListener('status',function(e){imStatus.className='imstatus';imStatus.textContent=e.data;});
     es.addEventListener('log',function(e){_imLine(e.data);});
@@ -158,10 +157,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       imStatus.className='imstatus err';imStatus.textContent=e.data;_imBusy(false);imCancel.textContent='Close';});
     es.onerror=function(){if(_imDone)return;          // ignore the stream-close after done/failed
       imStatus.className='imstatus err';imStatus.textContent='Connection lost — is the server running?';_imBusy(false);};}
-  imRun.onclick=function(){startFlow('run');};
-  imImport.onclick=function(){startFlow('import');};
+  imRun.onclick=function(){pushRecent(_imPath);closeImport();openPath(_imPath);};   // open in place → hydrates
+  imImport.onclick=startImport;
   imCancel.onclick=closeImport;
-  imTarget.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();if(!imImport.disabled)startFlow('import');}});
+  imTarget.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();if(!imImport.disabled)startImport();}});
   importBg.addEventListener('mousedown',function(e){if(e.target===importBg)closeImport();});
   document.addEventListener('keydown',function(e){if(e.key==='Escape'&&importBg.classList.contains('show'))closeImport();});
   function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');

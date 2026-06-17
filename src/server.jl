@@ -43,9 +43,9 @@ end
 
 # GateKernel when running as the Kaimon extension AND the notebook is inside a
 # Julia project (cells eval in a per-notebook worker); else in-process.
-# Instantiate an env in a subprocess (isolated; best-effort). Blocking — only paid on a fresh
-# bundle reconstruction (the content-addressed cache makes every later open instant). The
-# preview-and-hydrate flow (roadmap step 4) will move this off the open path.
+# Instantiate an env in a subprocess (isolated; best-effort). Blocking — used by the background
+# hydrate on a fresh bundle reconstruction (the content-addressed cache makes every later open
+# instant), so it never sits on the open path.
 function _instantiate_env!(envdir::AbstractString)
     jl = Base.julia_cmd()[1]
     try
@@ -56,17 +56,10 @@ function _instantiate_env!(envdir::AbstractString)
     return envdir
 end
 
-function _select_kernel(path::AbstractString, report, src::AbstractString = "")
+# Self-contained `.jl`s are intercepted earlier in `load_notebook` (background hydrate against
+# the depot cache), so this only handles ordinary notebooks: base / forked / detached.
+function _select_kernel(path::AbstractString, report)
     if ReportEngine.gate_available()
-        # Self-contained `.jl` (carries a Slate.bundle footer): reconstruct its embedded
-        # environment into the depot cache and run the notebook IN PLACE against it — no expand,
-        # no sidecar project. Content-addressed, so only the first open of a given bundle pays the
-        # extract + instantiate; reopen is instant.
-        if !isempty(src) && _has_bundle(src)
-            rc = _reconstruct_bundle!(path)
-            rc.fresh && _instantiate_env!(rc.dir)        # ready the env before the initial run
-            return GateKernel(rc.dir; parent = "", envdir = rc.dir)   # the cache IS the world
-        end
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
         envdir = ReportEngine.notebook_env_dir(path)
@@ -101,13 +94,13 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     nbid = isempty(id) ? rid : String(id)
     r = parse_report(src; id = rid, title = base)
     build_dependencies!(r)
-    # A self-contained `.jl` carrying an embedded frozen render: show that preview INSTANTLY and
-    # reconstruct + run the env in the BACKGROUND (hydrate), so a heavy bundle never blocks the
-    # open. Strictly gated — without a preview, fall through to the normal synchronous path
-    # (which, for a bundle, still reconstructs+runs in place via `_select_kernel`).
-    preview = (ReportEngine.gate_available() && _has_bundle(src)) ? _read_preview(src) : nothing
-    if preview !== nothing
-        r.meta["preview"] = preview
+    # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
+    # (hydrate), so a heavy bundle never blocks the open. If it embeds a frozen render that's
+    # shown meanwhile; otherwise the cells show un-run until they go live. This is the single
+    # path for opening a standalone — "Run (temporary)" is just a normal open.
+    if ReportEngine.gate_available() && _has_bundle(src)
+        p = _read_preview(src)
+        p === nothing || (r.meta["preview"] = p)
         r.meta["hydrating"] = true
         nb = LiveNotebook(nbid, String(path), r, InProcessKernel(), 0, String[], String[],
                           ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
@@ -117,7 +110,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb
     end
-    kernel = _select_kernel(path, r, src)
+    kernel = _select_kernel(path, r)
     eval_stale!(r, kernel)               # initial full run
     nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
@@ -426,9 +419,14 @@ function state_json(nb::LiveNotebook)
         "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
         "version" => nb.version, "worker" => _kernel_status(nb.kernel))
     if get(nb.report.meta, "hydrating", false) === true
-        # Show the embedded frozen render (already cell_json-shaped) until the background hydrate
-        # finishes and pushes live cells.
-        meta["cells"] = nb.report.meta["preview"]
+        # While the env reconstructs: show the embedded frozen render if present (already
+        # cell_json-shaped), else the parsed cells un-run. Live cells replace these on hydrate.
+        meta["cells"] = if haskey(nb.report.meta, "preview")
+            nb.report.meta["preview"]
+        else
+            bindref, hostednames = _bind_index(nb.report)
+            [cell_json(c, bindref, hostednames) for c in nb.report.cells]
+        end
         meta["hydrating"] = true
         return meta
     end
@@ -905,14 +903,13 @@ function _expanded_notebook(tdir::AbstractString)
     return ""
 end
 
-# SSE handler for `GET /api/import-standalone?path=&mode=run|import&target=`. Two modes:
-#   run    — reconstruct the embedded env into the depot cache and open the notebook IN PLACE
-#            (temporary; nothing written next to the file). `target` ignored.
-#   import — expand into `target` (a real project the user owns) and open the expansion.
-# Both stream the same `Pkg.instantiate()` output. Events:
+# SSE handler for `GET /api/import-standalone?path=&target=` — the **Import** flow: expand the
+# bundle into `target` (a real project the user owns) and open it, streaming progress. ("Run
+# (temporary)" is a plain open instead: load_notebook hydrates against the depot cache, so it
+# needs no streamed instantiate here.) Events:
 #   status <text>  — coarse phase label
 #   log    <line>  — one line of expand / instantiate output
-#   done   <json>  — {id,url,target,mode}; the client redirects into the opened notebook
+#   done   <json>  — {id,url,target}; the client redirects into the opened notebook
 #   failed <text>  — a handled error (named `failed`, not `error`, to avoid clashing with
 #                    EventSource's built-in transport `error` event on the client)
 # `h` is the `Hub` (untyped here only because its struct is defined later in this file).
@@ -944,36 +941,24 @@ function _sse_import(stream::HTTP.Stream, h)
     end
     q = HTTP.queryparams(HTTP.URI(stream.message.target))
     path = expanduser(strip(get(q, "path", "")))
-    mode = get(q, "mode", "import")
     target = let t = strip(get(q, "target", "")); isempty(t) ? "" : expanduser(t); end
     try
         (isfile(path) && _has_bundle_footer(path)) ||
             return emit("failed", "Not a self-contained notebook (no Slate.bundle footer):\n$path")
-        local projdir, openpath, fresh
-        if mode == "run"
-            emit("status", "Reconstructing environment…")
-            rc = _reconstruct_bundle!(path)
-            projdir, openpath, fresh = rc.dir, path, rc.fresh   # open the ORIGINAL file in place
-            emit("log", "Environment ready at $(rc.dir)" * (rc.fresh ? "" : " (cached — reused)"))
-        else
-            (!isempty(target) && isdir(target) && !isempty(readdir(target))) &&
-                return emit("failed", "Target directory already exists and isn't empty:\n$target")
-            emit("status", "Expanding bundle…")
-            tdir = expand(path; target = target)
-            openpath = _expanded_notebook(tdir)
-            isempty(openpath) && return emit("failed", "Expanded, but found no notebook .jl in $tdir")
-            projdir, fresh = tdir, true
-            emit("log", "Expanded to $tdir")
-        end
-        if fresh
-            r = instantiate!(projdir)
-            r === :aborted && return        # client gone
-            r === :failed && return emit("failed",
-                "Package instantiation failed.\nThe project is at $projdir — open it and retry there.")
-        end
+        (!isempty(target) && isdir(target) && !isempty(readdir(target))) &&
+            return emit("failed", "Target directory already exists and isn't empty:\n$target")
+        emit("status", "Expanding bundle…")
+        tdir = expand(path; target = target)
+        openpath = _expanded_notebook(tdir)
+        isempty(openpath) && return emit("failed", "Expanded, but found no notebook .jl in $tdir")
+        emit("log", "Expanded to $tdir")
+        r = instantiate!(tdir)
+        r === :aborted && return            # client gone
+        r === :failed && return emit("failed",
+            "Package instantiation failed.\nThe project is at $tdir — open it and retry there.")
         emit("status", "Opening notebook…")
         id = open_notebook!(h, openpath)
-        emit("done", JSON.json(Dict("id" => id, "url" => "/n/$id", "target" => projdir, "mode" => mode)))
+        emit("done", JSON.json(Dict("id" => id, "url" => "/n/$id", "target" => tdir)))
     catch e
         emit("failed", sprint(showerror, e))
     end

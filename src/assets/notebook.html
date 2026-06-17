@@ -51,7 +51,8 @@ body.agent-open .page { margin-right:392px; }
   padding:8px 18px; font-size:.84rem; color:#7cc0ff; background:linear-gradient(90deg,var(--bg2),var(--bg)); border-bottom:1px solid var(--border); }
 .hydbanner.err { color:var(--red); }
 .hydbanner .hydspin { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--bg3); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
-body.hydrating #nb { opacity:.92; }
+body.hydrating #nb { opacity:.9; pointer-events:none; }   /* frozen preview — not interactive yet */
+body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-events:none; }
 /* Dependency-cone highlight (the 🔗 button on a cell): the focused cell + its
    transitive upstream precursors light up, so you can see/navigate what feeds a cell. */
 .cell.dep-focus { outline:2px solid var(--accent); outline-offset:-2px; }
@@ -395,7 +396,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title">Notebook</h1>
   <span class="hint">⇧⏎ run · ⌘⇧⏎ run+new · ⇧↑↓ move cell · ⇥ complete · ⌘K commands</span>
-  <button onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
+  <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
   <button id="runstale" onclick="runAll()">▶ Run stale</button>
   <div class="menuwrap">
     <button onclick="toggleTopMenu(event)" title="more actions">☰</button>
@@ -571,6 +572,7 @@ const srcMap = {};            // cell id -> raw source (for markdown editing)
 const outMap = {};            // cell id -> last injected output HTML (skip redundant re-swaps)
 const mdMap = {};             // cell id -> last injected markdown HTML (skip redundant re-renders)
 let nbState = null;           // latest notebook state (drives the controls palette)
+let _hydrating = false;       // true while a standalone's env reconstructs (read-only preview)
 // Min delay (ms) between live recomputes while dragging a control. Persisted.
 let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
 let lastVersion = -1;
@@ -1169,6 +1171,7 @@ function renderAll(state) {
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   // Hydrating banner: a standalone is showing its frozen preview while the env reconstructs.
   const hb = document.getElementById('hydbanner');
+  _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
   if (state.hydrating) {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
     hb.innerHTML = '<span class="hydspin"></span>Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…';
@@ -1368,11 +1371,13 @@ function updateStates(state) {
 }
 
 async function runCell(id) {
+  if (_hydrating) return;                      // env still reconstructing — preview is read-only
   const ed = editors[id];
   setState(id, 'running');
   updateStates(await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' }));
 }
 async function addCell(after, kind, before, edit) {
+  if (_hydrating) return;
   const oldIds = new Set(cellIds());
   const state = await api('POST', '/api/cell-add', { after, kind, before: !!before });
   renderAll(state);
@@ -1502,7 +1507,7 @@ document.addEventListener('keydown', e => {
 }, true);
 document.addEventListener('mousedown', e => { if (e.target && e.target.id === 'modalbg') _modalClose(false); });
 
-async function runAll()  { updateStates(await api('POST', '/api/run')); }
+async function runAll()  { if (_hydrating) return; updateStates(await api('POST', '/api/run')); }
 async function resetAll(){ updateStates(await api('POST', '/api/reset')); }
 async function restartWorker(){
   if (!await confirmDark("Restart this notebook's worker? Its process is killed and cells re-run from a fresh namespace.", 'Restart')) return;
