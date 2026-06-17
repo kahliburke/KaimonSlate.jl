@@ -43,8 +43,30 @@ end
 
 # GateKernel when running as the Kaimon extension AND the notebook is inside a
 # Julia project (cells eval in a per-notebook worker); else in-process.
-function _select_kernel(path::AbstractString, report)
+# Instantiate an env in a subprocess (isolated; best-effort). Blocking — only paid on a fresh
+# bundle reconstruction (the content-addressed cache makes every later open instant). The
+# preview-and-hydrate flow (roadmap step 4) will move this off the open path.
+function _instantiate_env!(envdir::AbstractString)
+    jl = Base.julia_cmd()[1]
+    try
+        run(pipeline(`$jl --project=$envdir --startup-file=no -e 'using Pkg; Pkg.instantiate()'`;
+                     stdout = devnull, stderr = devnull))
+    catch
+    end
+    return envdir
+end
+
+function _select_kernel(path::AbstractString, report, src::AbstractString = "")
     if ReportEngine.gate_available()
+        # Self-contained `.jl` (carries a Slate.bundle footer): reconstruct its embedded
+        # environment into the depot cache and run the notebook IN PLACE against it — no expand,
+        # no sidecar project. Content-addressed, so only the first open of a given bundle pays the
+        # extract + instantiate; reopen is instant.
+        if !isempty(src) && _has_bundle(src)
+            rc = _reconstruct_bundle!(path)
+            rc.fresh && _instantiate_env!(rc.dir)        # ready the env before the initial run
+            return GateKernel(rc.dir; parent = "", envdir = rc.dir)   # the cache IS the world
+        end
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
         envdir = ReportEngine.notebook_env_dir(path)
@@ -79,7 +101,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     nbid = isempty(id) ? rid : String(id)
     r = parse_report(src; id = rid, title = base)
     build_dependencies!(r)
-    kernel = _select_kernel(path, r)
+    kernel = _select_kernel(path, r, src)
     eval_stale!(r, kernel)               # initial full run
     nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
