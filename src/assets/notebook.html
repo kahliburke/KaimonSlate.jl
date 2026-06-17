@@ -151,6 +151,22 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .addmenu button { display:block; width:100%; text-align:left; padding:5px 16px 5px 10px; border:none; background:none;
                   color:var(--text); cursor:pointer; font-size:.8rem; border-radius:5px; white-space:nowrap; }
 .addmenu button:hover { background:var(--bg3); color:var(--accent); }
+/* 🎛 control picker: a checkbox list of the @bind controls that affect a cell. */
+.ctlpop { position:fixed; z-index:56; min-width:190px; max-height:60vh; overflow:auto; background:var(--bg2);
+          border:1px solid var(--border); border-radius:9px; padding:5px; box-shadow:0 10px 28px rgba(0,0,0,.55); display:none; }
+.ctlpop.show { display:block; }
+.ctlpop .ctlhead { display:flex; align-items:center; gap:8px; justify-content:space-between; padding:4px 8px 6px;
+                   font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); }
+.ctlpop .ctlquick { display:flex; gap:4px; }
+.ctlpop .ctlquick button { border:1px solid var(--bg3); background:none; color:var(--dim); cursor:pointer;
+                           font-size:.66rem; padding:1px 6px; border-radius:5px; }
+.ctlpop .ctlquick button:hover { color:var(--accent); border-color:var(--accent); }
+.ctlpop .ctlrow { display:flex; align-items:center; gap:8px; padding:5px 10px; border-radius:5px; cursor:pointer;
+                  font-size:.82rem; font-family:'Cascadia Code',ui-monospace,monospace; color:var(--text); }
+.ctlpop .ctlrow:hover { background:var(--bg3); }
+.ctlpop .ctlrow input { accent-color:var(--accent); cursor:pointer; }
+.cellhead .autoctl { color:var(--dim); }
+.cellhead .autoctl.on { color:var(--accent); }
 #nb { position:relative; }
 .dropline { position:absolute; left:0; right:0; height:3px; background:var(--purple); border-radius:2px;
             box-shadow:0 0 8px var(--purple); display:none; z-index:5; pointer-events:none; }
@@ -392,6 +408,10 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
              display:flex; justify-content:space-between; gap:12px; }
 .cmdpal li.on { background:var(--accent); color:var(--bg); }
 .cmdpal li .k { color:var(--dim); font-size:.76rem; } .cmdpal li.on .k { color:var(--bg); }
+.cmdpal li .cright { display:flex; align-items:center; gap:6px; flex:0 0 auto; }
+.cmdpal li .kb { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.72rem; color:var(--dim);
+                 border:1px solid var(--bg3); border-radius:5px; padding:1px 6px; white-space:nowrap; }
+.cmdpal li.on .kb { color:var(--bg); border-color:var(--bg); }
 /* Collapsible long outputs */
 .output.clip { max-height:440px; overflow:hidden; position:relative; }
 .output.clip::after { content:''; position:absolute; left:0; right:0; bottom:0; height:52px;
@@ -480,6 +500,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
 <div class="addmenu" id="addmenu"></div>
+<div class="ctlpop" id="ctlpop"></div>
 <div class="modal-bg" id="setbg"><div class="modal setmodal">
   <div class="msg"><strong>Settings</strong></div>
   <div class="setrow"><label>Live-update debounce</label>
@@ -983,8 +1004,10 @@ function cellHeader(c) {
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
   const run = isCode ? `<button class="run" data-run="${c.id}" title="run (⇧⏎)">▶</button>` : '';
   const bu = transBinduses(c);
+  const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
+  const _someOn = bu.some(n => _present.has(n));
   const autoctl = bu.length
-    ? `<button onclick="autoControls('${c.id}')" title="surface the @bind controls that affect this cell (${bu.join(', ')})">🎛</button>` : '';
+    ? `<button class="autoctl${_someOn ? ' on' : ''}" onclick="openControlPicker('${c.id}', event)" title="pick which @bind controls to surface on this cell (${bu.join(', ')})">🎛</button>` : '';
   return '<div class="cellhead">' +
     '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
@@ -1443,6 +1466,8 @@ function addMenu(e, cellId) {
 }
 function hideAddMenu() { document.getElementById('addmenu').classList.remove('show'); }
 document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') && !e.target.closest('.addbtn')) hideAddMenu(); });
+document.addEventListener('mousedown', e => { if (!e.target.closest('#ctlpop') && !e.target.closest('.autoctl')) hideControlPicker(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideControlPicker(); });
 // Split a code cell at the editor cursor into two cells.
 async function splitCell(id, cm) {
   const idx = cm.indexFromPos(cm.getCursor()), val = cm.getValue();
@@ -1796,17 +1821,31 @@ async function insertBind(snippet) {
 }
 // ── Command palette (⌘K) ──────────────────────────────────────────────────────
 function paletteCommands() {
+  // `key` is the shortcut hint shown on the right of each row. Single-letter / ⇧-keys are
+  // command-mode (a cell is selected and you're NOT editing it); ⌘-keys are global.
+  const sel = selectedId;
   const cmds = [
-    { label: 'Add code cell', run: () => addCell(selectedId || '', 'code') },
-    { label: 'Add markdown cell', run: () => addCell(selectedId || '', 'md') },
-    { label: 'Run stale cells', run: runAll },
+    { label: 'Run stale cells', key: '⌘↵', run: runAll },
+    { label: 'Command palette', key: '⌘K', run: openPalette },
+    { label: 'Search docs…', key: '⌘⇧K', run: openDocs },
+    { label: 'Toggle agent panel', key: '⌘⇧A', run: toggleAgent },
+    { label: 'Toggle controls palette', key: '⌘⇧F', run: togglePalette },
+    { label: 'Undo', key: '⌘Z', run: undoNb },
+    { label: 'Redo', key: '⌘⇧Z', run: redoNb },
+    { label: 'Add code cell below', key: 'b', run: () => addCell(sel || '', 'code') },
+    { label: 'Add code cell above', key: 'a', run: () => addCell(sel || '', 'code', true) },
+    { label: 'Add markdown cell', run: () => addCell(sel || '', 'md') },
+    { label: 'Edit selected cell', key: '↵', run: () => { if (sel) enterEdit(sel); } },
+    { label: 'Delete selected cell', key: 'd d', run: () => { if (sel) delCell(sel); } },
+    { label: 'Move selected cell up', key: '⇧↑', run: () => { if (sel) moveCell(sel, 'up'); } },
+    { label: 'Move selected cell down', key: '⇧↓', run: () => { if (sel) moveCell(sel, 'down'); } },
+    { label: 'Convert selected to markdown', key: 'm', run: () => { if (sel) toggleType(sel, 'md'); } },
+    { label: 'Convert selected to code', key: 'y', run: () => { if (sel) toggleType(sel, 'code'); } },
+    { label: 'Merge selected cell with below', key: '⇧M', run: () => { if (sel) mergeBelow(sel); } },
+    { label: 'Split selected cell at cursor', run: () => { if (sel && editors[sel]) splitCell(sel, editors[sel]); } },
     { label: 'Rebuild (fresh namespace)', run: resetAll },
     { label: 'Restart worker', run: restartWorker },
     { label: 'Reload from disk', run: reload },
-    { label: 'Split selected cell at cursor', run: () => { if (selectedId && editors[selectedId]) splitCell(selectedId, editors[selectedId]); } },
-    { label: 'Merge selected cell with below', run: () => { if (selectedId) mergeBelow(selectedId); } },
-    { label: 'Search docs… (⌘⇧K)', run: openDocs },
-    { label: 'Toggle controls palette', run: togglePalette },
     { label: 'Hide code for all plot cells', run: () => hideAllPlotCode(true) },
     { label: 'Show code for all plot cells', run: () => hideAllPlotCode(false) },
     ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
@@ -1829,8 +1868,10 @@ function renderPaletteList(filter) {
   const f = filter.trim().toLowerCase();
   _cmd = paletteCommands().filter(c => c.label.toLowerCase().includes(f));
   _cmdSel = 0;
-  document.getElementById('cmdlist').innerHTML = _cmd.map((c, i) =>
-    `<li class="${i === 0 ? 'on' : ''}" data-i="${i}"><span>${_escc(c.label)}</span>${c.tag ? `<span class="k">${c.tag}</span>` : ''}</li>`).join('');
+  document.getElementById('cmdlist').innerHTML = _cmd.map((c, i) => {
+    const right = (c.key ? `<span class="kb">${_escc(c.key)}</span>` : '') + (c.tag ? `<span class="k">${_escc(c.tag)}</span>` : '');
+    return `<li class="${i === 0 ? 'on' : ''}" data-i="${i}"><span>${_escc(c.label)}</span><span class="cright">${right}</span></li>`;
+  }).join('');
 }
 function _paintCmd() {
   const ul = document.getElementById('cmdlist');
@@ -1907,8 +1948,14 @@ document.getElementById('docin').addEventListener('keydown', e => {
 });
 document.getElementById('docbg').addEventListener('mousedown', e => { if (e.target.id === 'docbg') closeDocs(); });
 
+// Global ⌘/Ctrl shortcuts (work everywhere, including inside the editor — CodeMirror
+// doesn't bind these). Mirrored in the command palette's shortcut hints.
 document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); e.shiftKey ? openDocs() : openPalette(); }
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); e.shiftKey ? openDocs() : openPalette(); }
+  else if (mod && e.key === 'Enter') { e.preventDefault(); runAll(); }                       // ⌘↵  run stale
+  else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
+  else if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); togglePalette(); } // ⌘⇧F controls
 });
 
 // ── Collapsible long outputs + stale-count badge ──────────────────────────────
@@ -2451,19 +2498,48 @@ async function unhostControl(name, cellId) {
   if (!cellId) return;
   renderAll(await api('POST', '/api/controls', { map: { [cellId]: columnsOf(cellId).map(c => c.filter(n => n !== name)) } }));
 }
-// One-click "surface the @bind controls that AFFECT this cell" (the header 🎛 button). Toggles
-// them in/out of the cell's control strip; the set is `transBinduses` — the cell's direct
-// binduses plus those of every cell in its upstream dependency cone (so a downstream plot can
-// host a control whose value reaches it indirectly).
-async function autoControls(id) {
-  const c = _cellById(id); const bu = transBinduses(c); if (!bu.length) return;
-  const cols = columnsOf(id), present = new Set([].concat(...cols));
-  const missing = bu.filter(n => !present.has(n));
-  const map = missing.length
-    ? { [id]: cols.concat([missing]) }                                            // surface the not-shown ones
-    : { [id]: cols.map(col => col.filter(n => !bu.includes(n))) };                // all shown → clear them
-  renderAll(await api('POST', '/api/controls', { map }));
+// The header 🎛 button opens a picker (checkbox list) of the @bind controls that AFFECT this
+// cell — `transBinduses`: the cell's direct binduses plus those of every cell in its upstream
+// dependency cone (so a downstream plot can host a control whose value reaches it indirectly).
+// Check/uncheck to surface/hide each in the cell's control strip; All / None for the whole set.
+function openControlPicker(id, ev) {
+  if (ev) ev.stopPropagation();
+  const c = _cellById(id), bu = transBinduses(c);
+  if (!bu.length) return;
+  const present = new Set([].concat(...columnsOf(id)));
+  const pop = document.getElementById('ctlpop');
+  pop.dataset.cell = id;
+  pop.innerHTML =
+    '<div class="ctlhead">Controls<span class="ctlquick">' +
+      '<button data-all="1">All</button><button data-all="0">None</button></span></div>' +
+    bu.map(n => `<label class="ctlrow"><input type="checkbox" data-n="${_escc(n)}"${present.has(n) ? ' checked' : ''}>` +
+                `<span>${_escc(n)}</span></label>`).join('');
+  pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.onchange = applyControlPicker);
+  pop.querySelectorAll('.ctlquick button').forEach(b => b.onclick = () => {
+    pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = b.dataset.all === '1');
+    applyControlPicker();
+  });
+  // Anchor below-right of the 🎛 button (clamped to the viewport).
+  const r = (ev && ev.currentTarget ? ev.currentTarget : document.querySelector(`#cell-${id} .autoctl`)).getBoundingClientRect();
+  pop.classList.add('show');
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  pop.style.top = Math.min(r.bottom + 5, window.innerHeight - h - 8) + 'px';
 }
+// Build the cell's control columns from the picker's checked set: drop unchecked *affecting*
+// names, keep any other (manually-placed) controls, append newly-checked ones as a new column.
+// #ctlpop lives outside #nb, so it survives renderAll and stays open for multiple toggles.
+async function applyControlPicker() {
+  const pop = document.getElementById('ctlpop'), id = pop.dataset.cell;
+  const sel = new Set([...pop.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.dataset.n));
+  const bu = new Set(transBinduses(_cellById(id)));
+  let cols = columnsOf(id).map(col => col.filter(n => sel.has(n) || !bu.has(n))).filter(col => col.length);
+  const present = new Set([].concat(...cols));
+  const toAdd = [...sel].filter(n => !present.has(n));
+  if (toAdd.length) cols.push(toAdd);
+  renderAll(await api('POST', '/api/controls', { map: { [id]: cols } }));
+}
+function hideControlPicker() { document.getElementById('ctlpop').classList.remove('show'); }
 // Fold / unfold a cell. Persisted in the .jl (header `collapsed` token) so it travels with the
 // notebook; the server returns fresh state and renderAll reflects it.
 async function toggleCollapse(id) {
