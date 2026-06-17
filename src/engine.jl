@@ -205,6 +205,7 @@ function _parse_header(rest::AbstractString)
     id = nothing
     controls = Vector{String}[]
     collapsed = false
+    hidecode = false
     for tok in split(strip(rest))
         if startswith(tok, "id=")
             id = tok[4:end]
@@ -212,13 +213,15 @@ function _parse_header(rest::AbstractString)
             controls = _parse_controls(tok[10:end])
         elseif tok == "collapsed"           # folded in the UI (view-only; travels in the .jl)
             collapsed = true
+        elseif tok == "hidecode"            # code editor hidden, output shown (clean plots)
+            hidecode = true
         elseif tok == "md" || tok == "markdown"
             kind = MARKDOWN
         elseif tok == "code"
             kind = CODE
         end
     end
-    return kind, id, controls, collapsed
+    return kind, id, controls, collapsed, hidecode
 end
 
 "Deterministic short id from a cell's content + position (used when none given)."
@@ -277,6 +280,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     body = String[]
 
     coll = false                          # `collapsed` flag of the current explicit header
+    hidec = false                         # `hidecode` flag of the current explicit header
     function flush!()
         trimmed = _strip_blank_edges(body)
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
@@ -286,19 +290,21 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             cell = Cell(id_, kind, src)
             cell.controls = ctrls
             coll && push!(cell.flags, :collapsed)
+            hidec && push!(cell.flags, :hidecode)
             push!(report.cells, cell)
         end
         empty!(body)
         had_header = false
         ctrls = Vector{String}[]
         coll = false
+        hidec = false
     end
 
     for line in lines
         m = match(_HEADER, line)
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
-            kind, cid, ctrls, coll = _parse_header(m.captures[1])
+            kind, cid, ctrls, coll, hidec = _parse_header(m.captures[1])
             explicit = true
             had_header = true
         elseif explicit                   # verbatim body of an explicit cell
@@ -371,6 +377,7 @@ function _cell_source(cell::Cell)
     header = "#%% $(_kind_token(cell.kind)) id=$(cell.id)"
     isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
     (:collapsed in cell.flags) && (header *= " collapsed")
+    (:hidecode in cell.flags) && (header *= " hidecode")
     return isempty(cell.source) ? header : "$header\n$(cell.source)"
 end
 

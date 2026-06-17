@@ -367,6 +367,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         d["binds"] = [_bind_json(b, String(b.name) in hostednames) for b in c.binds]
     end
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
+    (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
     # `@bind` variables this cell READS (so the header can one-click surface their controls) —
     # excluding any it defines itself.
     if c.kind == CODE && !isempty(c.reads)
@@ -821,6 +822,18 @@ function set_collapsed!(nb::LiveNotebook, id::AbstractString, collapsed::Bool)
         i = _index_of(nb.report.cells, id); i === nothing && return nb
         f = nb.report.cells[i].flags
         collapsed ? push!(f, :collapsed) : delete!(f, :collapsed)
+        _persist!(nb)
+    end
+    return nb
+end
+
+# Hide / show a cell's code editor (view-only; persisted in the `.jl` header as the `hidecode`
+# token). The output (plot) stays visible — for clean, presentation-style cells. No re-eval.
+function set_code_hidden!(nb::LiveNotebook, id::AbstractString, hidden::Bool)
+    lock(nb.lock) do
+        i = _index_of(nb.report.cells, id); i === nothing && return nb
+        f = nb.report.cells[i].flags
+        hidden ? push!(f, :hidecode) : delete!(f, :hidecode)
         _persist!(nb)
     end
     return nb
@@ -1951,6 +1964,9 @@ function _make_router(h::Hub)
     end))
     HTTP.register!(router, "POST", "/api/{id}/collapse/{cid}", req -> _withnb(h, req, nb -> begin
         set_collapsed!(nb, HTTP.getparam(req, "cid"), get(_body(req), "collapsed", true) === true); _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/hidecode/{cid}", req -> _withnb(h, req, nb -> begin
+        set_code_hidden!(nb, HTTP.getparam(req, "cid"), get(_body(req), "hidden", true) === true); _json(state_json(nb))
     end))
     # Static export: a self-contained HTML document of the notebook (also the print →
     # PDF path — the browser's print dialog saves it as PDF). `?dl=1` downloads; `?source=0`

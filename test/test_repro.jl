@@ -77,6 +77,24 @@ end
     @test occursin("controls=n collapsed", serialize_cells(r3))
 end
 
+# The `hidecode` header token (editor hidden, output shown — clean plots) round-trips via
+# `flags`, independent of and composing with `collapsed`.
+@testset "hidecode header token round-trips" begin
+    r = parse_report("#%% code id=a hidecode\nplot(x)\n\n#%% code id=b\ny = 2\n")
+    @test :hidecode in first(c for c in r.cells if c.id == "a").flags
+    @test !(:hidecode in first(c for c in r.cells if c.id == "b").flags)
+
+    s = serialize_cells(r)
+    @test occursin("#%% code id=a hidecode", s)
+    @test occursin(r"#%% code id=b\b(?! hidecode)", s)
+    @test :hidecode in first(c for c in parse_report(s).cells if c.id == "a").flags   # idempotent
+
+    r2 = parse_report("#%% code id=c collapsed hidecode\nplot(x)\n")    # composes with collapsed
+    @test :collapsed in r2.cells[1].flags && :hidecode in r2.cells[1].flags
+    s2 = serialize_cells(r2)
+    @test occursin("collapsed", s2) && occursin("hidecode", s2)
+end
+
 # ── Notebook-environment model helpers (gate_kernel.jl, loaded via engine.jl) ─
 @testset "notebook env model" begin
     @testset "env dir keying" begin
