@@ -167,7 +167,10 @@ async function _enrichDetail(r) {
 }
 function _helpRecordHtml(r, showBack) {
   const kind = r.kind && r.kind !== 'unknown' ? `<span class="dockind">${_escc(r.kind)}</span>` : '';
-  const title = (r.module && r.module !== r.name) ? `${_escc(r.module)}.<b>${_escc(r.name)}</b>` : `<b>${_escc(r.name)}</b>`;
+  const mod = r.module || '';
+  let nm = r.name;
+  if (mod && nm.startsWith(mod + '.')) nm = nm.slice(mod.length + 1);   // de-dup "Mod.Mod.x" on drill-in
+  const title = (mod && mod !== nm) ? `${_escc(mod)}.<b>${_escc(nm)}</b>` : `<b>${_escc(nm)}</b>`;
   const back = showBack ? `<button class="docback" onclick="helpBack()" title="back">‹ back</button>` : '';
   const body = r.docHtml ? `<div class="docmd">${r.docHtml}</div>` : '<div class="docmd dim">No documentation found.</div>';
   let exports = '';

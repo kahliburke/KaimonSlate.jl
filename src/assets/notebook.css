@@ -427,6 +427,8 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .docmd p { margin: 6px 0; } .docmd.dim { color: #8190a8; }
   .docmd h1, .docmd h2, .docmd h3 { font-size: 13px; color: #cfe0ff; margin: 12px 0 4px; }
   .docmd ul, .docmd ol { margin: 6px 0; padding-left: 20px; }
+  .docmd li { display: list-item; }   /* not the shared .cmdpal li flex (would split each item) */
+  .docmd table { border-collapse: collapse; margin: 8px 0; } .docmd td, .docmd th { padding: 2px 10px 2px 0; text-align: left; vertical-align: top; }
   .docmd code { font-family: 'Cascadia Code', ui-monospace, monospace; font-size: 11.5px;
                 background: var(--bg3); border-radius: 4px; padding: 0 4px; color: #cfe0ff; }
   .docmd pre { background: #0d1120; border: 1px solid var(--bg3); border-radius: 6px; padding: 8px 10px;
