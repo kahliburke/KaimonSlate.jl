@@ -1162,6 +1162,23 @@ function search_docs(query::AbstractString; limit::Int = 8)
     return out
 end
 
+# A docstring (markdown) → safe HTML for the help viewer. Empty in → empty out.
+_doc_esc(s) = replace(String(s), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;")
+_doc_html(doc) = (s = strip(String(doc)); isempty(s) ? "" : (try; markdown_html(s); catch; "<pre>" * _doc_esc(s) * "</pre>"; end))
+
+# Live help lookup for `name` (a binding or module), resolved where cells eval. Returns the
+# module_help record + a rendered `docHtml`. Powers the docs palette's ?Module drill-down +
+# cross-reference links. Best-effort: a missing kernel/binding yields an empty-ish record.
+function help_lookup(nb::LiveNotebook, name::AbstractString)
+    rec = try
+        ReportEngine.module_help(nb.kernel, nb.report, String(name))
+    catch
+        Dict{String,Any}("name" => String(name), "module" => "", "doc" => "", "kind" => "unknown", "exports" => Dict{String,Any}[])
+    end
+    rec["docHtml"] = _doc_html(get(rec, "doc", ""))
+    return rec
+end
+
 # ── Auto-indexing ─────────────────────────────────────────────────────────────
 # Index docs WITHOUT the agent asking: on open, eagerly index the notebook's project
 # deps; incrementally pick up any package a cell `using`s. Runs in the background and
@@ -2141,7 +2158,14 @@ function _make_router(h::Hub)
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
-        _json(Dict("results" => isempty(q) ? Dict{String,Any}[] : search_docs(String(q))))
+        results = isempty(q) ? Dict{String,Any}[] : search_docs(String(q))
+        for r in results; r["docHtml"] = _doc_html(get(r, "doc", "")); end   # rendered markdown for the detail pane
+        _json(Dict("results" => results))
+    end))
+    # Live help lookup (?Module / cross-reference link) — doc + (for a module) its exports.
+    HTTP.register!(router, "GET", "/api/{id}/help", req -> _withnb(h, req, nb -> begin
+        name = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "name", ""))
+        _json(isempty(name) ? Dict{String,Any}() : help_lookup(nb, String(name)))
     end))
     # Client-rendered figure snapshot (ECharts canvas → PNG) — feeds slate_view + PDF.
     HTTP.register!(router, "POST", "/api/{id}/snapshot", req -> _withnb(h, req, nb -> begin

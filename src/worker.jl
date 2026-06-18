@@ -87,6 +87,15 @@ function __slate_harvest_docs(mod_names::Vector{String})
     return harvest_module_docs(m, mod_names)
 end
 
+"Resolve `name` (loading its head module if needed) and return its help record
+`{name,module,doc,kind,exports}` — powers the docs palette's `?Module` drill-down."
+function __slate_module_help(name::String)
+    m = _doc_scan()
+    head = String(first(split(name, '.')))
+    try; Core.eval(m, Meta.parse("import " * head)); catch; end   # load the package if needed
+    return module_help(m, name)
+end
+
 "The worker project's direct dependencies as `{name, version}` (for eager docs auto-index)."
 function __slate_project_deps()
     out = Dict{String,Any}[]
@@ -286,6 +295,7 @@ function tools()
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_harvest_docs", __slate_harvest_docs),
+        KaimonGate.GateTool("__slate_module_help", __slate_module_help),
         KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),
         KaimonGate.GateTool("__slate_env_info", __slate_env_info),
         KaimonGate.GateTool("__slate_fork", __slate_fork),

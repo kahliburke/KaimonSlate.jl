@@ -414,6 +414,38 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .docdetail h4 { margin: 4px 0 8px; font-size: 13.5px; color: #cfe0ff; }
   .docdetail pre { white-space: pre-wrap; font-size: 12px; line-height: 1.45; color: #c2cee0; margin: 0; }
   .docdetail .hint { margin-top: 10px; color: #8190a8; font-size: 11.5px; }
+  /* Help viewer: rendered docstring + clickable refs + module-exports drill-down. */
+  .docdetail .dochead { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; }
+  .docdetail .dochead h4 { margin: 0; }
+  .docback { background: none; border: 1px solid var(--bg3); color: var(--dim); border-radius: 6px;
+             font-size: 11.5px; padding: 1px 8px; cursor: pointer; }
+  .docback:hover { color: var(--accent); border-color: var(--accent); }
+  .dockind { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: #1a1400;
+             background: var(--gold); border-radius: 5px; padding: 1px 6px; }
+  .docmd { font-size: 12.5px; line-height: 1.5; color: #c8d2e4; }
+  .docmd p { margin: 6px 0; } .docmd.dim { color: #8190a8; }
+  .docmd h1, .docmd h2, .docmd h3 { font-size: 13px; color: #cfe0ff; margin: 12px 0 4px; }
+  .docmd ul, .docmd ol { margin: 6px 0; padding-left: 20px; }
+  .docmd code { font-family: 'Cascadia Code', ui-monospace, monospace; font-size: 11.5px;
+                background: var(--bg3); border-radius: 4px; padding: 0 4px; color: #cfe0ff; }
+  .docmd pre { background: #0d1120; border: 1px solid var(--bg3); border-radius: 6px; padding: 8px 10px;
+               overflow-x: auto; white-space: pre; margin: 8px 0; }
+  .docmd pre code { background: none; padding: 0; }
+  .doclink { color: var(--accent); cursor: pointer; border-bottom: 1px dotted var(--accent);
+             font-family: 'Cascadia Code', ui-monospace, monospace; font-size: 11.5px; }
+  .doclink:hover { background: rgba(120,160,255,.14); }
+  .k.exact { color: var(--accent) !important; opacity: 1 !important; font-weight: 600; }
+  .docexports { margin-top: 14px; border-top: 1px solid rgba(255,255,255,.08); padding-top: 8px; }
+  .docexhdr { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin-bottom: 6px; }
+  .docexgrid { display: flex; flex-wrap: wrap; gap: 5px; }
+  .docexport { font-family: 'Cascadia Code', ui-monospace, monospace; font-size: 11.5px; cursor: pointer;
+               background: var(--bg3); color: #c8d2e4; border: 1px solid transparent; border-radius: 5px;
+               padding: 2px 7px; border-left-width: 2px; }
+  .docexport:hover { border-color: var(--accent); color: var(--accent); }
+  .docexport.kind-module { border-left-color: var(--gold); }
+  .docexport.kind-type { border-left-color: #56d364; }
+  .docexport.kind-function { border-left-color: var(--accent); }
+  .docexport.kind-const { border-left-color: var(--dim); }
   .askai { opacity: .7; } .askai:hover { opacity: 1; }
   .chattarget { flex: 0 0 100%; box-sizing: border-box; display: flex; align-items: center; gap: 6px;
                 font-size: 12px; color: #9fb0c8; padding: 5px 6px 5px 10px;

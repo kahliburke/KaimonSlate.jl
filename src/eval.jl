@@ -145,6 +145,17 @@ harvest_docs(::InProcessKernel, report::Report, mod_names) =
     harvest_module_docs(report_module(report), mod_names)
 
 """
+    module_help(kernel, report, name) -> Dict
+
+Live help lookup for `name` (a binding or module), resolved WHERE cells evaluate —
+`{name, module, doc, kind, exports}`. Powers the docs palette's `?Module` drill-down
+(list a package's exports) + cross-reference links. The gate kernel forwards to its
+worker, where the notebook's packages live.
+"""
+module_help(::InProcessKernel, report::Report, name::AbstractString) =
+    module_help(report_module(report), name)
+
+"""
     project_deps(kernel, report) -> Vector{Dict}
 
 The notebook project's direct dependencies as `{name, version}` (for eager docs

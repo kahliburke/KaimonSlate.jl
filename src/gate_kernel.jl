@@ -277,6 +277,17 @@ function harvest_docs(k::GateKernel, report::Report, mod_names)
     return Dict{String,Any}[Dict{String,Any}(String(k) => v for (k, v) in r) for r in wire]
 end
 
+function module_help(k::GateKernel, report::Report, name::AbstractString)
+    prepare!(k, report)
+    wire = try
+        _tool(k, "__slate_module_help", Dict("name" => String(name)))
+    catch
+        return Dict{String,Any}()
+    end
+    wire === nothing && return Dict{String,Any}()
+    return Dict{String,Any}(String(k2) => v for (k2, v) in wire)
+end
+
 function project_deps(k::GateKernel, report::Report)
     prepare!(k, report)
     wire = try

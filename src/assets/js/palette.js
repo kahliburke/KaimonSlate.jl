@@ -92,63 +92,128 @@ document.getElementById('cmdin').addEventListener('keydown', e => {
 });
 document.getElementById('cmdbg').addEventListener('mousedown', e => { if (e.target.id === 'cmdbg') closePalette(); });
 
-// ── Docs search palette (⌘⇧K) — semantic search of the notebook's package docs ──
+// ── Docs / help palette (⌘⇧K) — semantic search + live `?name` help browser ──
+// Semantic search of the notebook's package docs, PLUS a REPL-style help viewer: the
+// detail pane renders the docstring as markdown, links its `refs`, and — for a module —
+// lists its exports so you can drill into a package. Typing an exact name resolves it live.
 let _doc = [], _docSel = 0;
+let _helpStack = [];                 // drill-down nav within the detail pane (refs / exports)
+const _IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_!]*)*$/;
+const _NOLINK = new Set(['true','false','nothing','missing','end','function','for','while','if','x','i','n','a','b']);
 function openDocs() {
   document.getElementById('docbg').classList.add('show');
-  const inp = document.getElementById('docin'); inp.value = ''; _doc = []; _docSel = 0;
-  document.getElementById('doclist').innerHTML = '<li class="dochint">Describe an API in plain words — e.g. “draw a heatmap”, “group rows and aggregate”.</li>';
+  const inp = document.getElementById('docin'); inp.value = ''; _doc = []; _docSel = 0; _helpStack = [];
+  document.getElementById('doclist').innerHTML = '<li class="dochint">Describe an API in plain words — e.g. “draw a heatmap” — or type an exact name / module (e.g. <code>LinearAlgebra</code>) to browse it.</li>';
+  document.getElementById('docdetail').innerHTML = '';
   inp.oninput = _docSearch; inp.focus();
 }
 function closeDocs() { document.getElementById('docbg').classList.remove('show'); }
 const _docSearch = debounce(async () => {
   const q = document.getElementById('docin').value.trim();
   const ul = document.getElementById('doclist');
-  if (!q) { ul.innerHTML = '<li class="dochint">Describe an API in plain words…</li>'; _doc = []; return; }
+  if (!q) { ul.innerHTML = '<li class="dochint">Describe an API in plain words…</li>'; _doc = []; _helpStack = []; document.getElementById('docdetail').innerHTML = ''; return; }
   ul.innerHTML = '<li class="dochint">Searching…</li>';
   let res = [];
   try { const r = await api('GET', '/api/docsearch?q=' + encodeURIComponent(q)); res = (r && r.results) || []; } catch (_) {}
-  _doc = res; _docSel = 0; _renderDocs();
+  // Exact lookup: a single identifier / dotted path resolves live — handles `?Module`
+  // (→ its exports) and exact names that semantic search ranks low. Pinned at the top.
+  if (_IDENT_RE.test(q)) {
+    try {
+      const hr = await api('GET', '/api/help?name=' + encodeURIComponent(q));
+      if (hr && hr.name && (hr.docHtml || (hr.exports && hr.exports.length) || hr.kind !== 'unknown')) {
+        res = [{ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml,
+                 exports: hr.exports || [], kind: hr.kind, exact: true },
+               ...res.filter(r => !(r.name === hr.name && (r.module || '') === (hr.module || '')))];
+      }
+    } catch (_) {}
+  }
+  _doc = res; _docSel = 0; _helpStack = []; _renderDocs();
 }, 200);
 function _renderDocs() {
   const ul = document.getElementById('doclist');
   if (!_doc.length) { ul.innerHTML = '<li class="docempty">No matches — try different words.</li>'; document.getElementById('docdetail').innerHTML = ''; return; }
-  ul.innerHTML = _doc.map((r, i) =>
-    `<li class="${i === _docSel ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>` +
-    `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span></span></li>`).join('');
+  ul.innerHTML = _doc.map((r, i) => {
+    const right = r.exact ? '<span class="k exact">exact</span>'
+                          : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
+    return `<li class="${i === _docSel ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>${right}</span></li>`;
+  }).join('');
   _renderDetail();
 }
-// Full docstring of the highlighted result — the "show me the details" pane.
+// The detail pane: the active help record (a drill-down view if any, else the selected
+// search result), rendered as markdown with clickable refs + (for a module) its exports.
 function _renderDetail() {
-  const r = _doc[_docSel], d = document.getElementById('docdetail');
+  const r = _helpStack.length ? _helpStack[_helpStack.length - 1] : _doc[_docSel];
+  const d = document.getElementById('docdetail');
   if (!r) { d.innerHTML = ''; return; }
-  d.innerHTML = `<h4>${_escc(r.module)}.${_escc(r.name)}</h4>` +
-    `<pre>${_escc(String(r.doc || '').trim() || 'No docstring.')}</pre>` +
-    `<div class="hint">↵ insert name · double-click a result · esc to close</div>`;
+  d.innerHTML = _helpRecordHtml(r, _helpStack.length > 0);
+  _linkifyDoc(d);
   d.scrollTop = 0;
 }
+function _helpRecordHtml(r, showBack) {
+  const kind = r.kind && r.kind !== 'unknown' ? `<span class="dockind">${_escc(r.kind)}</span>` : '';
+  const title = (r.module && r.module !== r.name) ? `${_escc(r.module)}.<b>${_escc(r.name)}</b>` : `<b>${_escc(r.name)}</b>`;
+  const back = showBack ? `<button class="docback" onclick="helpBack()" title="back">‹ back</button>` : '';
+  const body = r.docHtml ? `<div class="docmd">${r.docHtml}</div>` : '<div class="docmd dim">No documentation found.</div>';
+  let exports = '';
+  if (r.exports && r.exports.length) {
+    const base = r.module || r.name;
+    exports = `<div class="docexports"><div class="docexhdr">Exports · ${r.exports.length}</div><div class="docexgrid">` +
+      r.exports.map(e => `<button class="docexport kind-${_escc(e.kind)}" data-name="${_escc(base + '.' + e.name)}" title="${_escc(e.kind)} — click to open">${_escc(e.name)}</button>`).join('') +
+      '</div></div>';
+  }
+  return `<div class="dochead">${back}<h4>${title}</h4>${kind}</div>${body}${exports}` +
+    '<div class="hint">↵ insert name · click a <code>ref</code> or export to drill in · esc to close</div>';
+}
+// Make inline-code identifiers in a docstring clickable → look them up in place.
+function _linkifyDoc(root) {
+  root.querySelectorAll('.docmd code').forEach(c => {
+    const t = c.textContent.trim();
+    if (t.length > 1 && _IDENT_RE.test(t) && !_NOLINK.has(t)) {
+      const a = document.createElement('a'); a.className = 'doclink'; a.textContent = c.textContent;
+      a.onclick = () => helpLookup(t); c.replaceWith(a);
+    }
+  });
+}
+// Drill into a name (a clicked ref or export). Pushes onto the nav stack; if nothing
+// useful resolves, fall back to a fresh semantic search on the bare name.
+async function helpLookup(name) {
+  let hr;
+  try { hr = await api('GET', '/api/help?name=' + encodeURIComponent(name)); } catch (_) { return; }
+  if (!hr || !hr.name) return;
+  if (!hr.docHtml && !(hr.exports && hr.exports.length)) {
+    const inp = document.getElementById('docin'); inp.value = name.replace(/^.*\./, ''); _helpStack = []; _docSearch(); return;
+  }
+  _helpStack.push({ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind });
+  _renderDetail();
+}
+function helpBack() { _helpStack.pop(); _renderDetail(); }
 function _paintDocs() {
   const ul = document.getElementById('doclist');
   [...ul.children].forEach((li, i) => li.classList.toggle('on', i === _docSel));
   const on = ul.children[_docSel]; if (on) on.scrollIntoView({ block: 'nearest' });
+  _helpStack = [];                   // selecting a list row resets any drill-down
   _renderDetail();
 }
-// Pick a result → insert the bare name at the selected cell's cursor, else copy it.
-function _docPick(i) {
-  const r = _doc[i]; if (!r) return;
+// The record currently shown (drill-down view, else the selected search result).
+function _currentDoc() { return _helpStack.length ? _helpStack[_helpStack.length - 1] : _doc[_docSel]; }
+// Insert the bare name at the selected cell's cursor, else copy the qualified name.
+function _docPick() {
+  const r = _currentDoc(); if (!r) return;
   closeDocs();
   const ed = editors[selectedId];
-  if (ed) { ed.replaceSelection(r.name); ed.focus(); }
-  else if (navigator.clipboard) { navigator.clipboard.writeText(r.module + '.' + r.name); }
+  if (ed) { ed.replaceSelection(r.name.replace(/^.*\./, '')); ed.focus(); }
+  else if (navigator.clipboard) { navigator.clipboard.writeText((r.module ? r.module + '.' : '') + r.name); }
 }
 // Click selects (shows the docstring); double-click / Enter inserts.
 document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _docSel = +li.dataset.i; _paintDocs(); document.getElementById('docin').focus(); } });
-document.getElementById('doclist').addEventListener('dblclick', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) _docPick(+li.dataset.i); });
+document.getElementById('doclist').addEventListener('dblclick', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { _docSel = +li.dataset.i; _helpStack = []; _docPick(); } });
+// Drill into an export chip in the detail pane.
+document.getElementById('docdetail').addEventListener('click', e => { const ex = e.target.closest('.docexport'); if (ex) helpLookup(ex.dataset.name); });
 document.getElementById('docin').addEventListener('keydown', e => {
   if (e.key === 'ArrowDown') { e.preventDefault(); _docSel = Math.min(_docSel + 1, _doc.length - 1); _paintDocs(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); _docSel = Math.max(_docSel - 1, 0); _paintDocs(); }
-  else if (e.key === 'Enter') { e.preventDefault(); _docPick(_docSel); }
-  else if (e.key === 'Escape') { e.preventDefault(); closeDocs(); }
+  else if (e.key === 'Enter') { e.preventDefault(); _docPick(); }
+  else if (e.key === 'Escape') { e.preventDefault(); _helpStack.length ? helpBack() : closeDocs(); }
 });
 document.getElementById('docbg').addEventListener('mousedown', e => { if (e.target.id === 'docbg') closeDocs(); });
 

@@ -37,3 +37,40 @@ function harvest_module_docs(where::Module, mod_names)
     end
     return recs
 end
+
+"""
+    module_help(where, name) -> Dict
+
+Resolve `name` in module `where` (the package must already be `using`'d / `import`ed
+there) and return a help record: `{name, module, doc, kind, exports}`. `kind` is
+"module", "function", "type", "const", or "unknown". For a Module, `exports` lists
+its exported bindings as `{name, kind}` (sorted) for drill-down; empty otherwise.
+`doc` is the raw `@doc` text (markdown). Pure (Base.Docs + reflection only) so it
+loads into the dependency-light worker, exactly like `harvest_module_docs`.
+"""
+function module_help(where::Module, name::AbstractString)
+    nm = String(name)
+    ex = try; Meta.parse(nm); catch; nothing; end
+    val = ex === nothing ? nothing : (try; Core.eval(where, ex); catch; nothing; end)
+    _kind(v) = v isa Module ? "module" :
+               v isa Type ? "type" :
+               (v isa Function || v isa Base.Callable) ? "function" :
+               v === nothing ? "unknown" : "const"
+    doc = ex === nothing ? "" : (try; strip(string(Core.eval(where, :(@doc($ex))))); catch; ""; end)
+    occursin("No documentation found", doc) && (doc = "")        # undocumented / undefined → no doc
+    exports = Dict{String,Any}[]
+    modname = ""
+    if val isa Module
+        modname = string(nameof(val))
+        self = nameof(val)
+        for s in sort!(names(val); by = string)
+            (s === self || !isdefined(val, s)) && continue
+            v = try; getfield(val, s); catch; nothing; end
+            push!(exports, Dict{String,Any}("name" => string(s), "kind" => _kind(v)))
+        end
+    elseif val !== nothing
+        modname = try; string(parentmodule(val)); catch; ""; end
+    end
+    return Dict{String,Any}("name" => nm, "module" => modname,
+                            "doc" => doc, "kind" => _kind(val), "exports" => exports)
+end

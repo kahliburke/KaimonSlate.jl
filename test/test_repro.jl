@@ -133,6 +133,25 @@ end
     end
 end
 
+# Live help lookup (docs palette ?Module drill-down + cross-reference links).
+@testset "module_help" begin
+    mh = ReportEngine.module_help
+    m = mh(@__MODULE__, "Base")                 # a module → exports list
+    @test m["kind"] == "module"
+    @test !isempty(m["exports"])
+    @test all(haskey(e, "name") && haskey(e, "kind") for e in m["exports"])
+    @test any(e["name"] == "sum" for e in m["exports"])           # Base exports sum
+    @test any(e["kind"] == "function" for e in m["exports"])
+
+    f = mh(@__MODULE__, "sum")                  # a function → doc, no exports
+    @test f["kind"] == "function"
+    @test isempty(f["exports"])
+    @test occursin("sum", lowercase(f["doc"]))
+
+    bad = mh(@__MODULE__, "no_such_binding_xyz")
+    @test bad["kind"] == "unknown" && isempty(bad["exports"]) && bad["doc"] == ""
+end
+
 # ── Self-contained bundle (export_bundle.jl) ─────────────────────────────────
 # export_bundle.jl is a flat file meant for `module NotebookServer`; its only module
 # coupling is `LiveNotebook` (a signature annotation) and qualified `ReportEngine.*` calls.
