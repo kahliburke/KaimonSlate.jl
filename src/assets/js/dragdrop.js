@@ -1,0 +1,271 @@
+
+// ── Drag-to-host: arrange controls into cells' strips ─────────────────────────
+// Update one or more cells' `controls=` lists (the caller sends each affected
+// cell's *full desired* list). `hostControl` moves a control to a cell at an
+// index (removing it from any prior host); `unhostControl` removes it everywhere.
+const _cellById = id => ((nbState && nbState.cells) || []).find(c => c.id === id);
+// A cell's control layout as columns of names (deep copy, safe to mutate).
+const columnsOf = id => { const c = _cellById(id); return ((c && c.controls) || []).map(col => col.map(s => s.name)); };
+
+// Place `name` into cell `targetId` per a drop `target` ({newCol, colIndex,
+// rowIndex}). A control may live in multiple cells: from the palette (`fromCell`
+// null) it *copies*; dragging an existing grip (`fromCell` set) *moves* it. Within
+// a cell a name stays unique (so dropping where it already is reorders/re-columns).
+// Server drops any empty columns left behind, so we don't prune here.
+async function hostControl(name, targetId, target, fromCell) {
+  const map = {};
+  if (fromCell && fromCell !== targetId) map[fromCell] = columnsOf(fromCell).map(c => c.filter(n => n !== name));
+  const orig = columnsOf(targetId);
+  let row = target.rowIndex;                          // correct for self-removal shift within the target column
+  if (!target.newCol) {
+    const r0 = (orig[target.colIndex] || []).indexOf(name);
+    if (r0 !== -1 && r0 < (row ?? Infinity)) row = (row ?? (orig[target.colIndex] || []).length) - 1;
+  }
+  const cols = orig.map(c => c.filter(n => n !== name));   // remove dragged occurrence(s) in target
+  if (target.newCol) {
+    cols.splice(target.colIndex == null ? cols.length : target.colIndex, 0, [name]);
+  } else {
+    const col = cols[target.colIndex] || (cols[target.colIndex] = []);
+    col.splice(row == null || row > col.length ? col.length : row, 0, name);
+  }
+  map[targetId] = cols;
+  renderAll(await api('POST', '/api/controls', { map }));
+}
+// Remove just this instance (the control in cell `cellId`); other hosts remain.
+async function unhostControl(name, cellId) {
+  if (!cellId) return;
+  renderAll(await api('POST', '/api/controls', { map: { [cellId]: columnsOf(cellId).map(c => c.filter(n => n !== name)) } }));
+}
+// The header 🎛 button opens a picker (checkbox list) of the @bind controls that AFFECT this
+// cell — `transBinduses`: the cell's direct binduses plus those of every cell in its upstream
+// dependency cone (so a downstream plot can host a control whose value reaches it indirectly).
+// Check/uncheck to surface/hide each in the cell's control strip; All / None for the whole set.
+function openControlPicker(id, ev) {
+  if (ev) ev.stopPropagation();
+  const c = _cellById(id), bu = transBinduses(c);
+  if (!bu.length) return;
+  const present = new Set([].concat(...columnsOf(id)));
+  const pop = document.getElementById('ctlpop');
+  pop.dataset.cell = id;
+  pop.innerHTML =
+    '<div class="ctlhead">Controls<span class="ctlquick">' +
+      '<button data-all="1">All</button><button data-all="0">None</button></span></div>' +
+    bu.map(n => `<label class="ctlrow"><input type="checkbox" data-n="${_escc(n)}"${present.has(n) ? ' checked' : ''}>` +
+                `<span>${_escc(n)}</span></label>`).join('');
+  pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.onchange = applyControlPicker);
+  pop.querySelectorAll('.ctlquick button').forEach(b => b.onclick = () => {
+    pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = b.dataset.all === '1');
+    applyControlPicker();
+  });
+  // Anchor below-right of the 🎛 button (clamped to the viewport).
+  const r = (ev && ev.currentTarget ? ev.currentTarget : document.querySelector(`#cell-${id} .autoctl`)).getBoundingClientRect();
+  pop.classList.add('show');
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  pop.style.top = Math.min(r.bottom + 5, window.innerHeight - h - 8) + 'px';
+}
+// Build the cell's control columns from the picker's checked set: drop unchecked *affecting*
+// names, keep any other (manually-placed) controls, append newly-checked ones as a new column.
+// #ctlpop lives outside #nb, so it survives renderAll and stays open for multiple toggles.
+async function applyControlPicker() {
+  const pop = document.getElementById('ctlpop'), id = pop.dataset.cell;
+  const sel = new Set([...pop.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.dataset.n));
+  const bu = new Set(transBinduses(_cellById(id)));
+  let cols = columnsOf(id).map(col => col.filter(n => sel.has(n) || !bu.has(n))).filter(col => col.length);
+  const present = new Set([].concat(...cols));
+  const toAdd = [...sel].filter(n => !present.has(n));
+  if (toAdd.length) cols.push(toAdd);
+  renderAll(await api('POST', '/api/controls', { map: { [id]: cols } }));
+}
+function hideControlPicker() { document.getElementById('ctlpop').classList.remove('show'); }
+// Fold / unfold a cell. Persisted in the .jl (header `collapsed` token) so it travels with the
+// notebook; the server returns fresh state and renderAll reflects it.
+async function toggleCollapse(id) {
+  const c = _cellById(id);
+  renderAll(await api('POST', '/api/collapse/' + id, { collapsed: !(c && c.collapsed) }));
+}
+// Hide / show a code cell's editor (output stays visible). Persisted in the .jl (`hidecode`
+// token) so it travels with the notebook.
+async function toggleHideCode(id) {
+  const c = _cellById(id);
+  renderAll(await api('POST', '/api/hidecode/' + id, { hidden: !(c && c.codeHidden) }));
+}
+// Does this code cell render a plot? An ECharts spec, or a figure (img/svg/canvas) in its output.
+function _cellHasPlot(c) {
+  if (!c || c.kind !== 'code') return false;
+  if (Array.isArray(c.echarts) && c.echarts.length) return true;
+  const el = document.getElementById('cell-' + c.id), out = el && el.querySelector('.output');
+  return !!(out && out.querySelector('img, svg, canvas'));
+}
+// Bulk hide/show the code of every plot cell at once (command palette). One file write per
+// changed cell; only renders once, at the end.
+async function hideAllPlotCode(hidden) {
+  const targets = ((nbState && nbState.cells) || []).filter(_cellHasPlot).filter(c => !!c.codeHidden !== hidden);
+  let last;
+  for (const c of targets) last = await api('POST', '/api/hidecode/' + c.id, { hidden });
+  if (last) renderAll(last);
+}
+// Insertion row within a column element, by cursor y (before the first control
+// whose midpoint is below the cursor; else at the end).
+function rowInCol(col, y) {
+  const items = [...col.querySelectorAll('.control')];
+  for (let j = 0; j < items.length; j++) {
+    const r = items[j].getBoundingClientRect();
+    if (y < r.top + r.height / 2) return j;
+  }
+  return items.length;
+}
+// Resolve the drop element under the cursor to a layout target. A `.coldrop` →
+// new column at its index; a `.ccol` → into that column at a row; otherwise append
+// a new column at the end.
+function dropTargetFor(el, cell, y) {
+  const dz = el.closest('.coldrop');
+  if (dz) return { newCol: true, colIndex: +dz.dataset.colindex };
+  const col = el.closest('.ccol');
+  if (col) return { newCol: false, colIndex: +col.dataset.colindex, rowIndex: rowInCol(col, y) };
+  return { newCol: true, colIndex: columnsOf(cell.dataset.cid).length };
+}
+
+// Drag-to-reorder cells (⠿ handle) AND drag-to-host controls (palette chip / strip
+// grip) share these handlers. `dragId` = a cell being reordered; `ctrlDrag` = a
+// control name being hosted. Only ⠿/grip/chip are draggable, so editor text and
+// sliders stay interactive.
+// ctrlDrag = { name, fromCell } — fromCell null when sourced from the palette
+// (copy), or the cell id when dragging an existing strip control's grip (move).
+let dragId = null, dropTarget = null, ctrlDrag = null;
+const nbEl = document.getElementById('nb');
+// A single purple insertion line, floated in the gap where the cell will land.
+let dropline = null;
+function _dropline() {
+  if (!dropline) { dropline = document.createElement('div'); dropline.className = 'dropline'; }
+  if (!dropline.isConnected) nbEl.appendChild(dropline);   // renderAll wipes #nb — re-attach
+  return dropline;
+}
+function clearDrop() { if (dropline) dropline.style.display = 'none'; }
+function clearCtrlDrop() { nbEl.querySelectorAll('.cdrop, .cdup').forEach(x => x.classList.remove('cdrop', 'cdup')); }
+function startControlDrag(e, name, fromCell) {
+  ctrlDrag = { name, fromCell: fromCell || null };
+  e.dataTransfer.effectAllowed = 'copyMove';   // allow either dropEffect, so duplicate (move) drops aren't rejected
+  try { e.dataTransfer.setData('text/plain', name); } catch (_) {}
+  // Reveal drop-zones on the NEXT tick: toggling `cdnd` now reflows the strip the
+  // grip lives in, and a source element that moves during `dragstart` makes Chrome
+  // abort the drag. Deferring lets the drag lock in first.
+  setTimeout(() => { if (ctrlDrag) document.body.classList.add('cdnd'); }, 0);
+}
+nbEl.addEventListener('dragstart', e => {
+  const grip = e.target.closest('.cgrip');
+  if (grip) { startControlDrag(e, grip.dataset.name, grip.closest('.cell').dataset.cid); return; }  // existing → move
+  const h = e.target.closest('.drag');
+  if (!h) { e.preventDefault(); return; }
+  dragId = h.closest('.cell').dataset.cid;
+  e.dataTransfer.effectAllowed = 'move';
+});
+nbEl.addEventListener('dragover', e => {
+  if (ctrlDrag) {                                  // hosting a control
+    clearCtrlDrop();
+    const cell = e.target.closest('.cell.code');
+    if (!cell) return;
+    e.preventDefault();
+    // If this cell already hosts the control, dropping just repositions it (no
+    // duplicate) — flag the existing instance so that's visible, and signal "move".
+    const dup = cell.querySelector('.control[data-cname="' + ctrlDrag.name + '"]');
+    e.dataTransfer.dropEffect = (ctrlDrag.fromCell || dup) ? 'move' : 'copy';
+    if (dup) dup.classList.add('cdup');
+    const dz = e.target.closest('.coldrop'), col = e.target.closest('.ccol');
+    if (dz) dz.classList.add('cdrop');
+    else if (col) col.classList.add('cdrop');
+    else { const last = cell.querySelector('.controls .coldrop:last-child'); if (last) last.classList.add('cdrop'); }
+    return;
+  }
+  e.preventDefault();                              // reordering a cell
+  if (!dragId) { clearDrop(); dropTarget = null; return; }
+  // Pick the insertion point by cursor Y across all cells, so releasing in the
+  // gap (right on the drop line) still lands — not only when over a cell.
+  let target = null, before = true;
+  for (const c of nbEl.querySelectorAll('.cell')) {
+    if (c.dataset.cid === dragId) continue;
+    const r = c.getBoundingClientRect();
+    if (e.clientY < r.top + r.height / 2) { target = c; before = true; break; }
+    target = c; before = false;                    // past this cell's midpoint → after it
+  }
+  if (!target) { clearDrop(); dropTarget = null; return; }
+  const dl = _dropline();                                  // float the line mid-gap, above or below the target
+  dl.style.top = ((before ? target.offsetTop - 7 : target.offsetTop + target.offsetHeight + 7) - 1) + 'px';
+  dl.style.display = 'block';
+  dropTarget = { id: target.dataset.cid, before };
+});
+nbEl.addEventListener('drop', e => {
+  e.preventDefault();
+  if (ctrlDrag) {
+    const cell = e.target.closest('.cell.code'), { name, fromCell } = ctrlDrag, el = e.target;
+    ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop();
+    if (cell) hostControl(name, cell.dataset.cid, dropTargetFor(el, cell, e.clientY), fromCell);
+    return;
+  }
+  clearDrop();
+  const dt = dropTarget, id = dragId;
+  dragId = dropTarget = null;
+  if (dt && id) moveCellRel(id, dt.id, dt.before);
+});
+nbEl.addEventListener('dragend', () => { clearDrop(); clearCtrlDrop(); dragId = dropTarget = ctrlDrag = null; document.body.classList.remove('cdnd'); });
+// ✕ on a strip control → remove this instance (other hosts, if any, remain).
+nbEl.addEventListener('click', e => {
+  const del = e.target.closest('.cdel');
+  if (del) { e.stopPropagation(); unhostControl(del.dataset.name, del.closest('.cell').dataset.cid); }
+});
+
+// ⌘Z / ⌘⇧Z notebook undo/redo — but defer to CodeMirror's text undo when an editor is focused.
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    if (document.activeElement && document.activeElement.closest('.CodeMirror')) return;
+    e.preventDefault();
+    e.shiftKey ? redoNb() : undoNb();
+  }
+});
+
+// (Live-update debounce now lives in the Settings modal — see openSettings.)
+
+// Palette chips: click → jump to defining cell; drag → host into a cell's strip.
+const paletteList = document.getElementById('palette-list');
+paletteList.onclick = e => {
+  const ch = e.target.closest('.chip'); if (!ch) return;
+  const el = document.getElementById('cell-' + ch.dataset.def);
+  if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); editSource(ch.dataset.def, 'julia'); }
+};
+paletteList.addEventListener('dragstart', e => {
+  const chip = e.target.closest('.chip'); if (!chip) return;
+  startControlDrag(e, chip.dataset.pname);
+});
+// Drag a control out of a strip and drop it on the palette to remove that instance.
+paletteList.addEventListener('dragover', e => { if (ctrlDrag && ctrlDrag.fromCell) { e.preventDefault(); paletteList.classList.add('premove'); } });
+paletteList.addEventListener('dragleave', e => { if (!paletteList.contains(e.relatedTarget)) paletteList.classList.remove('premove'); });
+paletteList.addEventListener('drop', e => {
+  if (!ctrlDrag || !ctrlDrag.fromCell) return;
+  e.preventDefault();
+  const { name, fromCell } = ctrlDrag;
+  ctrlDrag = null; document.body.classList.remove('cdnd'); paletteList.classList.remove('premove'); clearCtrlDrop();
+  unhostControl(name, fromCell);
+});
+// A control drag can end outside the notebook (e.g. palette-sourced) — clear here.
+document.addEventListener('dragend', () => {
+  if (ctrlDrag !== null) { ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop(); }
+});
+
+// Populate the notebook switcher from the hub registry (a hub-level route, so
+// fetched raw — not through the nb-scoped `api()`).
+async function loadSwitcher() {
+  try {
+    const nbs = await (await fetch('/api/notebooks')).json();
+    const sel = document.getElementById('nbswitch');
+    sel.innerHTML = nbs.map(n => `<option value="${n.id}" ${n.id === NB_ID ? 'selected' : ''}>${n.title}</option>`).join('');
+    sel.onchange = () => { if (sel.value !== NB_ID) location.href = '/n/' + sel.value; };
+  } catch (e) {}
+}
+
+if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
+loadSwitcher();
+reload();
+// Replay the buffered agent conversation first, then start live SSE — so a live
+// event can't be wiped by the replay's clear.
+loadAgentLog().finally(connectLive);
+

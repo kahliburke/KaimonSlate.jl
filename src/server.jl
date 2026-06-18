@@ -25,7 +25,7 @@ export cell_image, set_snapshot!
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 const _INDEX_ASSET = joinpath(@__DIR__, "assets", "index.html")
 const _CSS_ASSET = joinpath(@__DIR__, "assets", "notebook.css")   # extracted from notebook.html
-const _JS_ASSET = joinpath(@__DIR__, "assets", "notebook.js")     # extracted from notebook.html
+const _JS_DIR = joinpath(@__DIR__, "assets", "js")                # notebook UI, split into modules
 
 mutable struct LiveNotebook
     id::String                           # hub id (unique; used in /n/<id> + /api/<id>/…)
@@ -1868,7 +1868,13 @@ function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
-    HTTP.register!(router, "GET", "/assets/notebook.js", _ -> _asset(read(_JS_ASSET, String), "application/javascript; charset=utf-8"))
+    HTTP.register!(router, "GET", "/assets/js/{file}", req -> begin
+        f = HTTP.getparam(req, "file")
+        # path-safety: a bare `name.js` only — no separators, no traversal.
+        (occursin('/', f) || occursin('\\', f) || occursin("..", f) || !endswith(f, ".js")) && return HTTP.Response(404)
+        p = joinpath(_JS_DIR, f)
+        isfile(p) ? _asset(read(p, String), "application/javascript; charset=utf-8") : HTTP.Response(404)
+    end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
