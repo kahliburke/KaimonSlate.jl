@@ -1,0 +1,431 @@
+:root {
+  --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40; --text:#d4d8e8;
+  --dim:#6a7090; --accent:#569cd6; --green:#56d364; --red:#e57575; --gold:#ffd700;
+  --orange:#ce9178; --purple:#c586c0;
+  --page-pad:20px;   /* top/side gutter for the content column; reused by the agent drawer */
+}
+* { box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif;
+       margin:0; line-height:1.6; }
+.topbar { position:sticky; top:0; z-index:30; background:var(--bg2); border-bottom:1px solid var(--border);
+          padding:10px 20px; display:flex; align-items:center; gap:12px; }
+.topbar h1 { font-size:1.1rem; margin:0; color:#fff; flex:1; }
+.wdot { width:9px; height:9px; border-radius:50%; background:var(--dim); display:inline-block; flex:0 0 auto; }
+.wdot.up { background:var(--green); } .wdot.inproc { background:var(--accent); } .wdot.down { background:var(--red); }
+.nbswitch { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
+            padding:4px 8px; font-size:.82rem; max-width:220px; }
+.nbswitch:hover { border-color:var(--accent); }
+button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
+         padding:4px 12px; cursor:pointer; font-size:.82rem; }
+button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid var(--border);
+         border-radius:6px; padding:4px 12px; cursor:pointer; font-size:.82rem;
+         text-decoration:none; display:inline-block; }
+button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
+.page { max-width:980px; margin:0 auto; padding:var(--page-pad) var(--page-pad) 160px; transition:margin-right .18s ease; }
+body.fullwidth .page { max-width:none; }
+/* When the agent chat is open, slide the notebook column left of the panel so cells
+   and the chat never overlap (the panel is a fixed 380px drawer on the right). */
+body.agent-open .page { margin-right:392px; }
+@media (max-width:900px) { body.agent-open .page { margin-right:0; } }
+/* Banner while a self-contained notebook's env reconstructs in the background; the cells below
+   show the embedded frozen render until live cells are pushed in. */
+.hydbanner { position:sticky; top:var(--topbar-h,49px); z-index:9; display:flex; align-items:center; gap:10px;
+  padding:8px 18px; font-size:.84rem; color:#7cc0ff; background:linear-gradient(90deg,var(--bg2),var(--bg)); border-bottom:1px solid var(--border); }
+.hydbanner.err { color:var(--red); }
+.hydbanner .hydspin { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--bg3); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+body.hydrating #nb { opacity:.9; pointer-events:none; }   /* frozen preview — not interactive yet */
+body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-events:none; }
+/* Dependency-cone highlight (the 🔗 button on a cell): the focused cell + its
+   transitive upstream precursors light up, so you can see/navigate what feeds a cell. */
+.cell.dep-focus { outline:2px solid var(--accent); outline-offset:-2px; }
+.cell.dep-up { border-left-color:var(--gold) !important; box-shadow:0 0 0 1px rgba(255,215,0,.25) inset; }
+.cell { position:relative; }
+.depflag { position:absolute; top:-9px; left:10px; z-index:6; background:var(--gold); color:#1a1400;
+  font-size:.62rem; font-weight:700; padding:1px 6px; border-radius:6px; letter-spacing:.03em; cursor:pointer;
+  box-shadow:0 1px 4px #0007; }
+/* While the dependency cone is shown, let the flagged cells' tab protrude past the
+   cell box (cells normally clip to their rounded corners via overflow:hidden). */
+.cell.dep-up, .cell.dep-focus { overflow:visible; }
+.cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
+        margin:14px 0; background:var(--bg2); overflow:hidden; }
+.cell.state-fresh   { border-left-color:var(--accent); }
+.cell.state-stale   { border-left-color:var(--gold); }
+.cell.state-edited  { border-left-color:var(--orange); }
+.cell.state-running { border-left-color:var(--green); animation:pulse 1s infinite; }
+.cell.state-errored { border-left-color:var(--red); }
+@keyframes pulse { 50% { border-left-color:var(--bg2); } }
+.cellhead { display:flex; align-items:center; gap:8px; padding:3px 10px; background:var(--bg3);
+            border-bottom:1px solid var(--border); font-size:.74rem; min-height:27px; }
+.cellhead .run { padding:0 7px; font-size:.72rem; }
+.cellhead .hspace { flex:1; }
+.cellacts { display:flex; gap:3px; align-items:center; opacity:0; transition:opacity .12s; }
+.cell:hover .cellacts, .cell.selected .cellacts { opacity:1; }
+.cellacts button { padding:0 6px; font-size:.7rem; }
+.cellhead .drag { cursor:grab; color:var(--dim); padding:0 4px 0 0; user-select:none; font-size:.9rem; }
+.cellhead .drag:active { cursor:grabbing; } .cell:hover .cellhead .drag { color:var(--text); }
+.cellhead .collapse { background:none; border:none; color:var(--dim); cursor:pointer; padding:0 2px; font-size:.7rem; line-height:1; }
+.cellhead .collapse:hover { color:var(--accent); }
+.cell.collapsed > :not(.cellhead) { display:none; }                 /* fold to just the header */
+.cell.collapsed .cellhead { opacity:.78; }
+/* Hide-code: editor hidden, output/figure (and any @bind control strip) shown — clean,
+   interactive plots without the source. */
+.cell.codehidden > textarea, .cell.codehidden .CodeMirror { display:none; }
+.cellhead .hidecode.on { color:var(--accent); }
+.badge { text-transform:uppercase; letter-spacing:.04em; font-size:.68rem; min-width:52px; text-align:right; color:var(--dim); }
+.cell.state-fresh   .badge { color:var(--accent); }
+.cell.state-stale   .badge { color:var(--gold); }
+.cell.state-edited  .badge { color:var(--orange); }
+.cell.state-errored .badge { color:var(--red); }
+.cid { color:var(--dim); font-family:monospace; }
+.CodeMirror { height:auto; font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
+.output { font-size:.84rem; }
+.output .out, .output .val, .output .err { padding:8px 12px; border-top:1px solid var(--border); }
+.output pre { margin:0; white-space:pre-wrap; overflow-x:auto; }
+.output .out { color:var(--dim); } .output .val { color:var(--green); }
+.output .err { color:var(--red); background:rgba(229,117,117,.06); }
+.dispwrap { padding:10px 12px; border-top:1px solid var(--border); }
+.echarts:not(:empty) { padding:8px 6px; border-top:1px solid var(--border); }
+.echart { height:340px; width:100%; }
+/* Interactive data table (slate_table / DataFrame auto-render) */
+.tables:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
+.slatetable { margin:4px 0 8px; }
+.slatetable .st-bar { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.slatetable .st-filter { background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:3px 8px; font-size:.8rem; min-width:160px; }
+.slatetable .st-filter:focus { outline:none; border-color:var(--accent); }
+.slatetable .st-info { color:var(--dim); font-size:.74rem; margin-left:auto; }
+.slatetable .st-table { border-collapse:collapse; width:100%; font-size:.8rem; }
+.slatetable th, .slatetable td { border:1px solid var(--border); padding:3px 9px; text-align:left;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:340px; }
+.slatetable th { background:var(--bg3); color:var(--dim); cursor:pointer; user-select:none;
+  position:sticky; top:0; font-weight:600; }
+.slatetable th:hover { color:var(--accent); }
+.slatetable tbody tr:nth-child(even) { background:rgba(255,255,255,.02); }
+.slatetable tbody tr:hover { background:rgba(86,156,214,.08); }
+.slatetable td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--green); }
+.slatetable .st-pag { display:flex; align-items:center; gap:8px; margin-top:6px; }
+.slatetable .st-pag button { padding:2px 9px; font-size:.76rem; }
+.slatetable .st-page { color:var(--dim); font-size:.74rem; }
+.disp.img img { max-width:100%; height:auto; border-radius:4px; display:block; }
+.disp.html table { border-collapse:collapse; } .disp.html td,.disp.html th { border:1px solid var(--border); padding:3px 8px; }
+.disp.latex { overflow-x:auto; padding:6px 2px; } .disp.latex .katex-display { margin:.3em 0; }
+.disp.latex .katex { font-size:1.3em; }                 /* output equations: match markdown display math */
+.md .katex { font-size:1.12em; }                        /* markdown math: a touch above body text */
+.md .katex-display { overflow-x:auto; overflow-y:hidden; }
+.md .katex-display .katex { font-size:1.3em; }
+.md { padding:14px 16px; }
+.md h1 { font-size:1.7rem; border-bottom:1px solid var(--border); padding-bottom:.2em; }
+.md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
+.md code { background:var(--bg3); padding:1px 5px; border-radius:4px; }
+.md .phantom { color:var(--dim); }
+.md .ival { color:var(--green); font-family:'Cascadia Code',monospace; }   /* {{ }} scalar */
+.md .interr { color:var(--red); font-family:'Cascadia Code',monospace; }   /* {{ }} error */
+.md .disp.img img { max-width:100%; height:auto; border-radius:4px; }       /* {{ plot }} */
+.md .ichart { height:300px; margin:8px 0; }                                 /* {{ echart(…) }} */
+.md .itable { margin:8px 0; display:block; }                                /* {{ slate_table(…) }} */
+.srcedit { padding:4px 6px; }
+.mdhint { color:var(--dim); font-size:.7rem; padding:3px 4px 0; }
+.cdur { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.7rem; }
+.hint { color:var(--dim); font-size:.72rem; }
+.addmenu { position:fixed; z-index:55; background:var(--bg2); border:1px solid var(--border); border-radius:8px;
+           padding:4px; box-shadow:0 8px 24px rgba(0,0,0,.5); display:none; }
+.addmenu.show { display:block; }
+.addmenu button { display:block; width:100%; text-align:left; padding:5px 16px 5px 10px; border:none; background:none;
+                  color:var(--text); cursor:pointer; font-size:.8rem; border-radius:5px; white-space:nowrap; }
+.addmenu button:hover { background:var(--bg3); color:var(--accent); }
+/* 🎛 control picker: a checkbox list of the @bind controls that affect a cell. */
+.ctlpop { position:fixed; z-index:56; min-width:190px; max-height:60vh; overflow:auto; background:var(--bg2);
+          border:1px solid var(--border); border-radius:9px; padding:5px; box-shadow:0 10px 28px rgba(0,0,0,.55); display:none; }
+.ctlpop.show { display:block; }
+.ctlpop .ctlhead { display:flex; align-items:center; gap:8px; justify-content:space-between; padding:4px 8px 6px;
+                   font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); }
+.ctlpop .ctlquick { display:flex; gap:4px; }
+.ctlpop .ctlquick button { border:1px solid var(--bg3); background:none; color:var(--dim); cursor:pointer;
+                           font-size:.66rem; padding:1px 6px; border-radius:5px; }
+.ctlpop .ctlquick button:hover { color:var(--accent); border-color:var(--accent); }
+.ctlpop .ctlrow { display:flex; align-items:center; gap:8px; padding:5px 10px; border-radius:5px; cursor:pointer;
+                  font-size:.82rem; font-family:'Cascadia Code',ui-monospace,monospace; color:var(--text); }
+.ctlpop .ctlrow:hover { background:var(--bg3); }
+.ctlpop .ctlrow input { accent-color:var(--accent); cursor:pointer; }
+.cellhead .autoctl { color:var(--dim); }
+.cellhead .autoctl.on { color:var(--accent); }
+#nb { position:relative; }
+.dropline { position:absolute; left:0; right:0; height:3px; background:var(--purple); border-radius:2px;
+            box-shadow:0 0 8px var(--purple); display:none; z-index:5; pointer-events:none; }
+.cell.bind { border-left-color:var(--purple); }
+.widget { display:flex; align-items:center; gap:12px; padding:12px 14px; }
+.wname { font-family:'Cascadia Code',monospace; color:var(--accent); min-width:64px; }
+.widget input[type=range] { flex:1; accent-color:var(--purple); }
+.widget input[type=text], .widget input[type=number], .widget select {
+  background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
+.wval { font-family:'Cascadia Code',monospace; color:var(--green); min-width:48px; text-align:right; }
+/* Control strip: bound widgets surfaced *with* a cell's output (presentation layer). */
+.controls { display:flex; flex-wrap:wrap; align-items:stretch; gap:8px; padding:10px 14px;
+            border-top:1px solid var(--border); background:linear-gradient(var(--bg3),var(--bg2)); }
+.ccol { display:flex; flex-direction:column; gap:8px; flex:0 1 auto; min-width:220px; }
+/* Thin drop zones between/around columns — collapsed until a control drag starts. */
+.coldrop { flex:0 0 0; align-self:stretch; border-radius:6px; }
+body.cdnd .coldrop { flex:0 0 16px; outline:2px dashed var(--border); outline-offset:-4px; }
+.coldrop.cdrop { background:rgba(86,156,214,.22); outline-color:var(--accent); }
+.ccol.cdrop { outline:2px dashed var(--accent); outline-offset:-4px; border-radius:6px; }
+/* The dragged control is already in this cell → its existing instance will just move. */
+.control.cdup { outline:2px solid var(--gold); outline-offset:2px; border-radius:6px; }
+/* Empty strips are hidden, except while dragging a control (then a dropzone). */
+.controls.empty { display:none; }
+body.cdnd .controls.empty { display:flex; }
+body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--dim); font-size:.74rem;
+  padding:8px; align-self:center; }
+.control { display:flex; align-items:center; gap:8px; }
+.control .wname { min-width:auto; }
+.cgrip { cursor:grab; color:var(--dim); user-select:none; font-size:.9rem; padding:3px 6px;
+         border-radius:4px; display:flex; align-items:center; }
+.cgrip:hover { background:var(--bg); color:var(--accent); }
+.cgrip:active { cursor:grabbing; }
+/* Expanded widget types (shared by standalone .widget rows and .control strips). */
+.widget textarea, .control textarea { flex:1; min-width:0; background:var(--bg3); color:var(--text);
+  border:1px solid var(--border); border-radius:5px; padding:4px 8px; font-family:inherit; resize:vertical; }
+.control textarea { background:var(--bg); }
+.widget input[type=color], .control input[type=color] { width:42px; height:26px; padding:0; cursor:pointer;
+  border:1px solid var(--border); border-radius:5px; background:transparent; }
+.widget input[type=date], .widget input[type=time],
+.control input[type=date], .control input[type=time] { background:var(--bg3); color:var(--text);
+  border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
+.control input[type=date], .control input[type=time] { background:var(--bg); }
+.widget select[multiple], .control select[multiple] { flex:1; min-width:0; min-height:64px; }
+.radiogroup { display:flex; gap:12px; flex-wrap:wrap; flex:1; }
+.radiogroup label { display:flex; align-items:center; gap:4px; cursor:pointer; }
+.actionbtn { background:var(--accent); color:#fff; border:none; border-radius:5px; padding:4px 14px; cursor:pointer; }
+.actionbtn:hover { filter:brightness(1.12); }
+input.toggle { appearance:none; -webkit-appearance:none; width:34px; height:18px; border-radius:10px;
+  background:var(--border); position:relative; cursor:pointer; transition:background .15s; }
+input.toggle:checked { background:var(--purple); }
+input.toggle::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px;
+  border-radius:50%; background:#fff; transition:left .15s; }
+input.toggle:checked::after { left:18px; }
+.cdel { padding:0 5px; font-size:.7rem; line-height:1; color:var(--dim); border-color:transparent; background:transparent; }
+.cdel:hover { color:var(--red); border-color:var(--red); }
+.control input[type=range] { flex:1; accent-color:var(--purple); }
+.control input[type=text], .control input[type=number], .control select {
+  background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
+.control .wval { min-width:40px; }
+/* A bind/control-group cell stacks one row per bound variable. */
+.binds > .widget + .widget, .binds > .widget + .hostedph, .binds > .hostedph + .widget,
+.binds > .hostedph + .hostedph { border-top:1px solid var(--border); }
+/* A bound control surfaced in a strip elsewhere collapses to this slim chip. */
+.hostedph { display:flex; align-items:center; gap:8px; padding:6px 14px; color:var(--dim); font-size:.78rem; }
+.hostedph .wname { min-width:auto; }
+/* Controls palette — a side drawer listing every declared @bind across the notebook. */
+.palette { position:fixed; top:0; right:0; height:100vh; width:300px; background:var(--bg2);
+  border-left:1px solid var(--border); transform:translateX(100%); transition:transform .18s ease;
+  z-index:20; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.3); }
+.palette.open { transform:none; }
+/* Agent chat panel (consumer of Kaimon's agent service) */
+/* The drawer's top is aligned to the first content cell (--agent-top, measured in JS) so it
+   sits below the menu bar and lines up with the notebook. The topbar-height + page-gutter
+   expression is the first-paint fallback until JS measures the real cell. */
+.agentpanel { position:fixed; top:var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))); right:0;
+  height:calc(100vh - var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))));
+  width:380px; max-width:92vw; background:var(--bg2);
+  border:1px solid var(--border); border-right:none; border-radius:14px 0 0 14px;
+  transform:translateX(100%); transition:transform .18s ease; overflow:hidden;
+  z-index:25; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.35); }
+.agentpanel.open { transform:none; }
+.aphead { display:flex; align-items:center; gap:8px; padding:16px 18px; border-bottom:1px solid var(--border); }
+.aphead strong { color:#fff; }
+.apmsgs { flex:1; overflow:auto; padding:16px 18px; display:flex; flex-direction:column; gap:10px; }
+.apmsg { font-size:.86rem; line-height:1.5; border-radius:8px; padding:8px 11px; max-width:92%; white-space:pre-wrap; word-break:break-word; }
+.apmsg.user { align-self:flex-end; background:var(--bg3); }
+.apmsg.assistant { align-self:flex-start; background:#11203a; }
+.apmsg.tool { align-self:flex-start; background:none; color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.76rem; padding:2px 4px; max-width:100%; }
+.apmsg.tool .toolcode { margin:4px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#cdd3e6; }
+.apmsg.err { align-self:flex-start; color:var(--red); }
+.apmsg.note { align-self:center; background:none; color:var(--dim); font-size:.74rem; padding:2px 6px; max-width:100%; }
+.apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
+/* Show/hide the agent's thinking (💭 toggle in the header). Hidden bubbles are removed from
+   layout; the toggle dims to read as "off". */
+.agentpanel.hide-think .apmsg.think { display:none; }
+.agentpanel.hide-think #thinkbtn { opacity:.4; }
+.apmsg.img { align-self:flex-start; background:none; padding:0; max-width:100%; }
+.apmsg.img img { max-width:100%; border-radius:8px; display:block; }
+/* Multi-agent crew lanes: a stable hue (--ch) per crew member tints a left accent
+   bar; the badge names the speaker. Solo/default agent ('' crew) renders unchanged. */
+.apmsg.lane { border-left:2px solid hsl(var(--ch,210) 60% 55%); }
+.apmsg.img.lane, .apmsg.tool.lane { padding-left:9px; }
+.crewbadge { display:inline-block; margin-right:6px; padding:0 6px; border-radius:5px;
+  font-size:.66rem; font-weight:600; letter-spacing:.02em; vertical-align:1px;
+  color:hsl(var(--ch,210) 70% 82%); background:hsl(var(--ch,210) 55% 22%); }
+.apworking { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.8rem; padding:6px 2px; }
+.apworking .dots { display:inline-flex; }
+.apworking .dots i { width:6px; height:6px; border-radius:50%; background:var(--accent); margin:0 2px; animation:breathe 1.2s ease-in-out infinite; }
+.apworking .dots i:nth-child(2) { animation-delay:.2s; } .apworking .dots i:nth-child(3) { animation-delay:.4s; }
+@keyframes breathe { 0%,100%{opacity:.25;transform:scale(.6);} 50%{opacity:1;transform:scale(1);} }
+#agentbtn.pulse { animation:btnpulse 1.3s ease-in-out infinite; color:var(--accent); }
+@keyframes btnpulse { 0%,100%{box-shadow:0 0 0 0 rgba(86,156,214,.55);} 50%{box-shadow:0 0 0 5px rgba(86,156,214,0);} }
+/* Top-bar kernel dot breathes while the worker is executing (any compute request in flight). */
+.wdot.busy { animation:btnpulse 1.1s ease-in-out infinite; }
+/* Completion popup — match the dark theme (CodeMirror show-hint defaults to bright white). */
+.CodeMirror-hints { background:var(--bg2); border:1px solid var(--border); border-radius:7px; box-shadow:0 8px 24px #000a;
+  font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; padding:3px; z-index:120; max-height:260px; }
+.CodeMirror-hint { color:var(--fg); padding:3px 9px; border-radius:4px; }
+li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
+/* History panel (time machine) */
+.histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
+  border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
+  transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
+.histpanel.open { transform:none; }
+.hbtn { background:var(--bg3); border:none; color:var(--fg); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
+.hbtn:hover { background:var(--accent); }
+.hbtn.stop { background:var(--red); }
+.histlist { overflow:auto; padding:6px; display:flex; flex-direction:column; gap:2px; max-height:45%; flex:0 0 auto; border-bottom:1px solid var(--bg3); }
+.hrow { display:flex; align-items:baseline; gap:8px; padding:5px 8px; border-radius:6px; cursor:pointer; font-size:.82rem; border-left:2px solid transparent; }
+.hrow:hover { background:var(--bg3); }
+.hrow.sel { background:var(--bg3); border-left-color:var(--accent); }
+.hrow.cur { font-weight:600; }
+.hrow .hsrc { flex:0 0 1.2em; text-align:center; }
+.hrow .hlabel { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hrow .htime { color:var(--dim); font-size:.72rem; flex:0 0 auto; }
+.hrow.draft { opacity:.6; }
+.hrow.draft .hlabel { font-style:italic; }
+.histprev { flex:1; overflow:auto; padding:10px 12px; font-family:'Cascadia Code',monospace; font-size:.76rem; line-height:1.45; white-space:pre-wrap; }
+.histprev .pvhead { font-family:inherit; display:flex; gap:8px; align-items:center; margin-bottom:8px; position:sticky; top:0; background:var(--bg2); padding-bottom:6px; }
+.histprev .dl { display:block; padding:0 4px; border-radius:2px; }
+.histprev .dl.add { background:#11351c; color:#9fe6b0; }
+.histprev .dl.del { background:#3a1414; color:#e6a0a0; }
+.histprev .dl.ctx { color:var(--dim); }
+/* Worker log panel */
+.logpanel { position:fixed; top:0; right:0; height:100vh; width:480px; max-width:96vw; background:var(--bg2);
+  border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
+  transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
+.logpanel.open { transform:none; }
+.logbox { flex:1; overflow:auto; padding:10px 12px; font-family:'Cascadia Code',monospace; font-size:.74rem;
+  line-height:1.4; white-space:pre-wrap; word-break:break-word; color:#c8cde0; }
+/* Packages panel */
+.pkgadd { display:flex; gap:8px; padding:10px 12px; border-bottom:1px solid var(--bg3); }
+.pkgadd input { flex:1; min-width:0; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:6px 9px; font-size:.84rem; }
+.pkgadd input:focus { outline:none; border-color:var(--accent); }
+.pkgadd input:disabled { opacity:.5; }
+.pkglist { flex:1; overflow:auto; padding:6px 10px; }
+.pkgrow { display:flex; align-items:center; gap:10px; padding:6px 4px; border-bottom:1px solid var(--bg3); }
+.pkgname { font-family:'Cascadia Code',monospace; color:var(--text); font-size:.84rem; }
+.pkgver { color:var(--dim); font-size:.74rem; margin-left:auto; font-family:monospace; }
+.pkgrow .cdel { margin-left:4px; }
+.pkggrouphdr { display:flex; align-items:center; gap:8px; color:var(--accent); font-size:.7rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:.06em; margin:12px 4px 4px; padding-bottom:3px; border-bottom:1px solid var(--border); }
+.pkggrouphdr:first-child { margin-top:2px; }
+.pkgpath { color:var(--dim); font-weight:400; text-transform:none; letter-spacing:0; font-family:monospace; font-size:.72rem; }
+/* Topbar ☰ overflow menu */
+.menuwrap { position:relative; display:inline-block; }
+.topmenu { position:absolute; top:calc(100% + 5px); right:0; min-width:210px; background:var(--bg2);
+  border:1px solid var(--bg3); border-radius:8px; box-shadow:0 10px 28px #0009; padding:4px; z-index:70;
+  display:none; flex-direction:column; }
+.topmenu.open { display:flex; }
+.topmenu button, .topmenu a { background:none; border:none; color:var(--fg); text-align:left; padding:7px 12px;
+  border-radius:6px; cursor:pointer; font-size:.84rem; text-decoration:none; display:block; white-space:nowrap; }
+.topmenu button:hover, .topmenu a:hover { background:var(--bg3); color:var(--accent); }
+.topmenu hr { border:none; border-top:1px solid var(--bg3); margin:4px 6px; }
+.apinput { display:flex; flex-wrap:wrap; gap:8px; padding:14px 18px; border-top:1px solid var(--border); }
+.apinput textarea { flex:1; min-width:0; resize:none; height:54px; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:8px; padding:8px 10px; font-family:inherit; font-size:.86rem;
+  scrollbar-width:thin; scrollbar-color:var(--bg2) transparent; }
+.apinput textarea:focus { outline:none; border-color:var(--accent); }
+.apinput textarea::-webkit-scrollbar { width:9px; }
+.apinput textarea::-webkit-scrollbar-track { background:transparent; }
+.apinput textarea::-webkit-scrollbar-thumb { background:var(--bg2); border-radius:5px; border:2px solid var(--bg3); }
+.apinput textarea::-webkit-scrollbar-thumb:hover { background:var(--border); }
+.phead { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); }
+.phead strong { color:#fff; } .pclose { margin-left:auto; }
+.plist { flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:6px; }
+.plist.premove { outline:2px dashed var(--red); outline-offset:-6px; background:rgba(229,117,117,.08); }
+body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-size:.72rem; text-align:center; padding:6px; }
+.phint { color:var(--dim); font-size:.8rem; padding:10px; }
+.pfoot { padding:10px 14px; border-top:1px solid var(--border); font-size:.72rem; }
+.chip { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg3);
+  border:1px solid var(--border); border-left:3px solid var(--purple); border-radius:6px;
+  cursor:pointer; font-size:.82rem; }
+.chip:hover { border-color:var(--accent); }
+.chip .cname { font-family:'Cascadia Code',monospace; color:var(--accent); }
+.chip .ctype { color:var(--dim); font-size:.72rem; }
+.chip .cright { margin-left:auto; display:flex; align-items:center; gap:8px; }
+.chip .chost { color:var(--gold); font-size:.72rem; }
+.chip .pval { color:var(--green); font-family:'Cascadia Code',monospace; }
+.chip.hosted { opacity:.7; }
+.modal-bg { position:fixed; inset:0; background:rgba(5,8,16,.66); display:none; align-items:center; justify-content:center; z-index:50; }
+.modal-bg.show { display:flex; }
+.modal { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:18px 20px; max-width:520px; width:90%;
+         box-shadow:0 16px 48px rgba(0,0,0,.55); }
+.modal .msg { color:var(--text); font-size:.92rem; line-height:1.5; margin-bottom:16px; white-space:pre-wrap; word-break:break-word; }
+.modal .row { display:flex; justify-content:flex-end; gap:10px; }
+.modal button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:7px 16px; cursor:pointer; font-size:.85rem; }
+.modal button:hover { border-color:var(--accent); color:var(--accent); }
+.modal button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+.modal button.danger { color:var(--red); border-color:#3a2030; } .modal button.danger:hover { background:rgba(229,117,117,.12); border-color:var(--red); color:var(--red); }
+.loading { position:fixed; inset:0; background:rgba(5,8,16,.72); display:none; flex-direction:column; align-items:center; justify-content:center; gap:14px; z-index:60; }
+.loading.show { display:flex; }
+.spinner { width:38px; height:38px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.loading .lmsg { color:var(--text); font-size:.9rem; }
+.cell.selected { outline:3px solid var(--purple); outline-offset:-2px;       /* command mode */
+                 box-shadow:0 0 12px rgba(197,134,192,.4); }
+.cell.editing  { outline:3px solid var(--green); outline-offset:-2px; }       /* edit mode */
+.cid { cursor:pointer; } .cid:hover { color:var(--accent); }
+.cidedit { background:var(--bg3); color:var(--text); border:1px solid var(--accent); border-radius:4px;
+           font-family:monospace; font-size:.76rem; padding:0 4px; width:14ch; }
+/* Settings modal */
+.setmodal .setrow { display:flex; align-items:center; justify-content:space-between; gap:18px; margin:14px 0; }
+.setmodal label { color:var(--text); font-size:.86rem; }
+.setmodal .rt { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.82rem; }
+.setmodal input[type=range] { accent-color:var(--accent); }
+.setmodal select { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-size:.84rem; }
+.setmodal .sethint { display:block; color:var(--dim); font-size:.76rem; margin:-6px 0 4px; }
+/* Command palette (⌘K) */
+.palette-bg { position:fixed; inset:0; background:rgba(5,8,16,.5); display:none; justify-content:center; align-items:flex-start; z-index:65; }
+.palette-bg.show { display:flex; }
+.cmdpal { margin-top:12vh; width:min(560px,92%); background:var(--bg2); border:1px solid var(--border); border-radius:10px;
+          box-shadow:0 16px 48px rgba(0,0,0,.55); overflow:hidden; }
+.cmdpal input { width:100%; padding:12px 16px; background:var(--bg2); color:var(--text); border:none;
+                border-bottom:1px solid var(--border); font-size:.95rem; outline:none; }
+.cmdpal ul { list-style:none; margin:0; padding:6px; max-height:50vh; overflow:auto; }
+.cmdpal li { padding:7px 12px; border-radius:6px; cursor:pointer; font-size:.86rem; color:var(--text);
+             display:flex; justify-content:space-between; gap:12px; }
+.cmdpal li.on { background:var(--accent); color:var(--bg); }
+.cmdpal li .k { color:var(--dim); font-size:.76rem; } .cmdpal li.on .k { color:var(--bg); }
+.cmdpal li .cright { display:flex; align-items:center; gap:6px; flex:0 0 auto; }
+.cmdpal li .kb { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.72rem; color:var(--dim);
+                 border:1px solid var(--bg3); border-radius:5px; padding:1px 6px; white-space:nowrap; }
+.cmdpal li.on .kb { color:var(--bg); border-color:var(--bg); }
+/* Collapsible long outputs */
+.output.clip { max-height:440px; overflow:hidden; position:relative; }
+.output.clip::after { content:''; position:absolute; left:0; right:0; bottom:0; height:52px;
+  background:linear-gradient(transparent, var(--bg2)); pointer-events:none; }
+.outmore { display:block; width:100%; text-align:center; font-size:.74rem; color:var(--accent);
+  background:var(--bg3); border:none; border-top:1px solid var(--border); padding:4px; cursor:pointer; }
+.outmore:hover { background:var(--bg2); }
+
+  .docpal { max-width: 880px; width: 92vw; }
+  .docbody { display: flex; gap: 10px; max-height: 62vh; min-height: 220px; }
+  .doclist { flex: 0 0 290px; overflow: auto; }
+  .doclist li { padding: 6px 10px; cursor: pointer; border-radius: 6px; font-size: 13px; }
+  .doclist li.on, .doclist li:hover { background: rgba(120,160,255,.14); }
+  .doclist .docname b { color: #cfe0ff; }
+  .doclist .docname .k { float: right; opacity: .45; font-size: 11px; }
+  .doclist .docempty, .doclist .dochint { padding: 10px; color: #8190a8; font-size: 13px; }
+  .docdetail { flex: 1 1 auto; overflow: auto; padding: 2px 12px 10px; border-left: 1px solid rgba(255,255,255,.08); }
+  .docdetail h4 { margin: 4px 0 8px; font-size: 13.5px; color: #cfe0ff; }
+  .docdetail pre { white-space: pre-wrap; font-size: 12px; line-height: 1.45; color: #c2cee0; margin: 0; }
+  .docdetail .hint { margin-top: 10px; color: #8190a8; font-size: 11.5px; }
+  .askai { opacity: .7; } .askai:hover { opacity: 1; }
+  .chattarget { flex: 0 0 100%; box-sizing: border-box; display: flex; align-items: center; gap: 6px;
+                font-size: 12px; color: #9fb0c8; padding: 5px 6px 5px 10px;
+                background: rgba(120,160,255,.12); border: 1px solid rgba(120,160,255,.22); border-radius: 7px; }
+  .chattarget b { color: #cfe0ff; font-weight: 600; }
+  .chattarget .x { margin-left: auto; cursor: pointer; opacity: .55; line-height: 1;
+                   padding: 2px 6px; border-radius: 5px; font-size: 11px; }
+  .chattarget .x:hover { opacity: 1; background: rgba(255,255,255,.08); }
+  /* @id mention autocomplete in the chat input (floats above the textarea). */
+  .mentionbox { position: fixed; z-index: 130; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 8px 24px #000a; display: none; overflow: auto; max-height: 184px; }
+  .mentionbox ul { list-style: none; margin: 0; padding: 4px; }
+  .mentionbox li { padding: 5px 10px; border-radius: 5px; cursor: pointer;
+    font-family: 'Cascadia Code', monospace; font-size: .82rem; color: var(--text); }
+  .mentionbox li.on, .mentionbox li:hover { background: var(--accent); color: var(--bg); }

@@ -24,6 +24,8 @@ export cell_image, set_snapshot!
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
 const _INDEX_ASSET = joinpath(@__DIR__, "assets", "index.html")
+const _CSS_ASSET = joinpath(@__DIR__, "assets", "notebook.css")   # extracted from notebook.html
+const _JS_ASSET = joinpath(@__DIR__, "assets", "notebook.js")     # extracted from notebook.html
 
 mutable struct LiveNotebook
     id::String                           # hub id (unique; used in /n/<id> + /api/<id>/…)
@@ -1652,6 +1654,7 @@ _worker_label(nb::LiveNotebook) =
 
 
 _html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store"], body)
+_asset(body, ctype) = HTTP.Response(200, ["Content-Type" => ctype, "Cache-Control" => "no-store"], body)
 
 # Run `f(nb)` for the notebook named by the request's `id` path param, else 404.
 function _withnb(h::Hub, req, f)
@@ -1864,6 +1867,8 @@ include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-conta
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
+    HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
+    HTTP.register!(router, "GET", "/assets/notebook.js", _ -> _asset(read(_JS_ASSET, String), "application/javascript; charset=utf-8"))
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors

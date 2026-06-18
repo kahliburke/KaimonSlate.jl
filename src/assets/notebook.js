@@ -1,0 +1,2137 @@
+// This notebook's hub id, from the /n/<id> URL; all API/SSE paths are scoped to it.
+const NB_ID = decodeURIComponent((location.pathname.match(/^\/n\/([^\/]+)/) || ['', ''])[1]);
+const _apipath = p => p.replace(/^\/api\//, '/api/' + NB_ID + '/');
+
+const editors = {};
+const charts = {};            // cell id -> [echarts instances]
+const tableState = {};        // cell id -> [{sort,filter,page,pageSize} per table] (view prefs, sticky)
+const srcMap = {};            // cell id -> raw source (for markdown editing)
+const outMap = {};            // cell id -> last injected output HTML (skip redundant re-swaps)
+const mdMap = {};             // cell id -> last injected markdown HTML (skip redundant re-renders)
+let nbState = null;           // latest notebook state (drives the controls palette)
+let _hydrating = false;       // true while a standalone's env reconstructs (read-only preview)
+// Min delay (ms) between live recomputes while dragging a control. Persisted.
+let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
+let lastVersion = -1;
+
+const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
+const srcEditHTML = () => '<div class="srcedit" style="display:none"><textarea></textarea>' +
+  '<div class="mdhint">⇧⏎ commit · esc cancel</div></div>';
+
+// Capture a cell's (first) ECharts canvas as a PNG and stash it server-side, so the
+// agent's slate_view — and future PDF export — get a uniform image for client-rendered
+// charts, the same way CairoMakie figures come through. Debounced so animation settles
+// and reactive ticks don't spam; raw fetch so it doesn't pulse the busy indicator.
+const _snapPending = {};
+function _snapCell(cellId, insts, spec) {
+  clearTimeout(_snapPending[cellId]);
+  _snapPending[cellId] = setTimeout(() => {
+    const inst = insts[0]; if (!inst) return;
+    let png = '', svg = '', svgDark = '';
+    // PNG (dark theme) → matches the live UI for the agent's slate_view.
+    try { png = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#0e1116' }) || '').split(',')[1] || ''; } catch (_) {}
+    // Vector SVG for publication PDF: re-render the spec offscreen with the SVG renderer,
+    // once for a light page (default theme, white bg) and once for a dark page (dark
+    // theme, dark bg), so each PDF theme gets a chart that reads on its background.
+    // Best-effort; the server prefers these over the raster PNG when present.
+    const renderSvg = (themeName, bg) => {
+      try {
+        const w = inst.getWidth() || 640, h = inst.getHeight() || 400;
+        const div = document.createElement('div');
+        div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
+        document.body.appendChild(div);
+        const off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
+        off.setOption(Object.assign({ animation: false, backgroundColor: bg }, spec));
+        const out = off.renderToSVGString();
+        off.dispose(); div.remove();
+        return out;
+      } catch (_) { return ''; }
+    };
+    if (spec) { svg = renderSvg(null, '#ffffff'); svgDark = renderSvg('dark', '#12141c'); }
+    if (png) fetch(_apipath('/api/snapshot'), { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cell: cellId, image: png, svg: svg || undefined, svgDark: svgDark || undefined }) }).catch(() => {});
+  }, 700);
+}
+
+// Render/refresh a cell's ECharts. Instances persist across reactive updates, so
+// data changes animate in place (setOption) instead of swapping an image.
+function renderCharts(c) {
+  const specs = c.echarts || [];
+  const host = document.querySelector('#cell-' + c.id + ' .echarts');
+  if (host) {                                   // code-cell echarts host
+    if (!charts[c.id]) charts[c.id] = [];
+    const insts = charts[c.id];
+    while (host.children.length < specs.length) {
+      const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
+      insts.push(echarts.init(d, 'dark'));
+    }
+    while (host.children.length > specs.length) { host.removeChild(host.lastChild); insts.pop().dispose(); }
+    specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
+    if (insts.length) _snapCell(c.id, insts, specs[0]);   // PNG (slate_view) + SVG (vector PDF) → server
+  }
+  // Inline `{{ echart(…) }}` placeholders in a markdown cell.
+  document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
+    const spec = specs[+el.dataset.i]; if (!spec) return;
+    if (!el._inst) el._inst = echarts.init(el, 'dark');
+    try { el._inst.setOption(spec); } catch (e) {}
+  });
+}
+window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
+
+// ── Interactive data tables (hand-rolled; no CDN dep) ────────────────────────
+// A cell's `c.tables` is a list of {columns, rows, opts}; rows hold JSON-safe
+// scalars (numbers stay numeric → numeric sort). Sort / filter / page are pure
+// client state kept per (cell id, table index) in `tableState`, so they survive
+// reactive recomputes — only the row data is re-filled when data changes.
+function _cmp(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return -1; if (b == null) return 1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true });
+}
+// Columns are strings (eager) or {name,type,sortable,filterable} objects (paged).
+const _colName = c => (typeof c === 'string' ? c : c.name);
+function renderTables(c) {
+  const specs = c.tables || [];
+  const host = document.querySelector('#cell-' + c.id + ' .tables');
+  if (host) {                                   // code-cell tables host
+    if (!specs.length) { host.innerHTML = ''; delete tableState[c.id]; }
+    else {
+      const states = tableState[c.id] || (tableState[c.id] = []);
+      states.length = specs.length;             // drop view-state for removed tables
+      while (host.children.length > specs.length) host.removeChild(host.lastChild);
+      specs.forEach((spec, i) => {
+        if (!states[i]) states[i] = { sort: null, filter: '', page: 0, pageSize: spec.paged ? (spec.pageSize || 50) : 25 };
+        let wrap = host.children[i];
+        if (!wrap) { wrap = document.createElement('div'); wrap.className = 'slatetable'; host.appendChild(wrap); }
+        drawTable(wrap, spec, states[i]);
+      });
+    }
+  }
+  // Inline `{{ slate_table(…) / df }}` placeholders in a markdown cell.
+  document.querySelectorAll('#cell-' + c.id + ' .itable').forEach(el => {
+    const spec = specs[+el.dataset.i]; if (!spec) return;
+    el.classList.add('slatetable');
+    el._st = el._st || { sort: null, filter: '', page: 0, pageSize: spec.paged ? (spec.pageSize || 50) : 25 };
+    drawTable(el, spec, el._st);
+  });
+}
+// Build the persistent shell once per column-signature; refresh fills the body.
+function drawTable(wrap, spec, st) {
+  const cols = spec.columns || [];
+  const sig = (spec.paged ? 'p:' : 'e:') + cols.map(_colName).join('');
+  if (wrap._sig !== sig) { _buildShell(wrap, cols, spec, st); wrap._sig = sig; }
+  _refreshTable(wrap, spec, st);
+}
+function _buildShell(wrap, cols, spec, st) {
+  wrap.innerHTML = '';
+  const bar = document.createElement('div'); bar.className = 'st-bar';
+  const fi = document.createElement('input');
+  fi.type = 'text'; fi.className = 'st-filter';
+  fi.placeholder = spec.paged ? 'search…' : 'filter…'; fi.value = st.filter;
+  const doFilter = () => { st.filter = fi.value; st.page = 0; _refreshTable(wrap, spec, st); };
+  fi.oninput = spec.paged ? debounce(doFilter, 250) : doFilter;   // paged hits the server → debounce
+  const info = document.createElement('span'); info.className = 'st-info';
+  bar.appendChild(fi); bar.appendChild(info); wrap.appendChild(bar);
+  const tbl = document.createElement('table'); tbl.className = 'st-table';
+  const thead = document.createElement('thead'); const htr = document.createElement('tr');
+  const ths = cols.map((c, ci) => {
+    const th = document.createElement('th'); th.dataset.label = _colName(c);
+    const sortable = typeof c === 'string' || c.sortable !== false;
+    if (sortable) th.onclick = () => {
+      if (st.sort && st.sort.col === ci) st.sort.dir = st.sort.dir === 'asc' ? 'desc' : 'asc';
+      else st.sort = { col: ci, dir: 'asc' };
+      _refreshTable(wrap, spec, st);
+    }; else th.style.cursor = 'default';
+    htr.appendChild(th); return th;
+  });
+  thead.appendChild(htr); tbl.appendChild(thead);
+  const tbody = document.createElement('tbody'); tbl.appendChild(tbody); wrap.appendChild(tbl);
+  const pag = document.createElement('div'); pag.className = 'st-pag'; wrap.appendChild(pag);
+  wrap._refs = { fi, info, ths, tbody, pag };
+}
+function _drawArrows(wrap, st) {
+  wrap._refs.ths.forEach((th, ci) => {
+    const arr = st.sort && st.sort.col === ci ? (st.sort.dir === 'desc' ? ' ▾' : ' ▴') : '';
+    th.textContent = th.dataset.label + arr;
+  });
+}
+// Dispatch: eager tables compute locally; paged tables fetch a page from the server.
+function _refreshTable(wrap, spec, st) {
+  if (spec.paged) return _refreshPaged(wrap, spec, st);
+  const allRows = spec.rows || [];
+  const f = st.filter.trim().toLowerCase();
+  let rows = !f ? allRows
+    : allRows.filter(r => r.some(v => v != null && String(v).toLowerCase().includes(f)));
+  if (st.sort) {
+    const col = st.sort.col, mul = st.sort.dir === 'desc' ? -1 : 1;
+    rows = rows.slice().sort((a, b) => _cmp(a[col], b[col]) * mul);
+  }
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / st.pageSize));
+  st.page = Math.min(Math.max(0, st.page), pages - 1);
+  const start = st.page * st.pageSize;
+  _fillTable(wrap, spec, st, rows.slice(start, start + st.pageSize), total, allRows.length);
+}
+// Server-paged: POST the request; a request token discards superseded responses.
+function _refreshPaged(wrap, spec, st) {
+  const token = (wrap._tok = (wrap._tok || 0) + 1);
+  _drawArrows(wrap, st);                          // immediate feedback while the fetch is in flight
+  const body = {
+    table_id: spec.tableId, page: st.page + 1, page_size: st.pageSize,
+    sort_col: st.sort ? st.sort.col + 1 : 0,
+    sort_desc: !!(st.sort && st.sort.dir === 'desc'),
+    search: st.filter.trim(),
+  };
+  api('POST', '/api/table-page', body).then(res => {
+    if (token !== wrap._tok) return;              // a newer request already went out
+    const total = res.total || 0;
+    const pages = Math.max(1, Math.ceil(total / st.pageSize));
+    if (st.page > pages - 1) { st.page = pages - 1; _refreshPaged(wrap, spec, st); return; }
+    _fillTable(wrap, spec, st, res.rows || [], total, spec.opts ? spec.opts.nrows : total);
+  }).catch(() => {});
+}
+// Shared render of one page into the shell (body rows, info line, pagination).
+function _fillTable(wrap, spec, st, pageRows, total, baseCount) {
+  const { info, tbody, pag } = wrap._refs;
+  _drawArrows(wrap, st);
+  const start = st.page * st.pageSize;
+  tbody.innerHTML = '';
+  pageRows.forEach(r => {
+    const tr = document.createElement('tr');
+    r.forEach(v => {
+      const td = document.createElement('td');
+      if (typeof v === 'number') td.className = 'num';
+      td.textContent = v == null ? '' : v;
+      td.title = td.textContent;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  let txt = `${total ? start + 1 : 0}–${start + pageRows.length} of ${total}`;
+  if (baseCount != null && total !== baseCount) txt += ` (filtered from ${baseCount})`;
+  if (spec.opts && spec.opts.truncated) txt += ` · capped at ${(spec.rows || []).length} of ${spec.opts.nrows}`;
+  info.textContent = txt;
+  const pages = Math.max(1, Math.ceil(total / st.pageSize));
+  pag.innerHTML = '';
+  if (pages > 1) {
+    const mk = (label, to, disabled) => {
+      const b = document.createElement('button'); b.textContent = label; b.disabled = disabled;
+      b.onclick = () => { st.page = to; _refreshTable(wrap, spec, st); }; return b;
+    };
+    pag.appendChild(mk('‹ prev', st.page - 1, st.page <= 0));
+    const lbl = document.createElement('span'); lbl.className = 'st-page';
+    lbl.textContent = `page ${st.page + 1} / ${pages}`; pag.appendChild(lbl);
+    pag.appendChild(mk('next ›', st.page + 1, st.page >= pages - 1));
+  }
+}
+
+// Typeset any LaTeX ($…$ / $$…$$ / \(…\) / \[…\]) inside `el` with KaTeX. Safe to
+// call before KaTeX has loaded (no-op) and re-call (auto-render skips done spans).
+// CodeMirror source lives in <pre>/<textarea>, both in KaTeX's default ignore list,
+// so editor `$` is never touched.
+function typeset(el) {
+  if (!el) return;
+  // Output `text/latex` blocks render in DISPLAY mode so they match markdown
+  // `$$…$$` sizing (a LaTeXString arrives as inline `$…$`, which KaTeX would
+  // otherwise typeset cramped). Render them explicitly first; cache the raw TeX
+  // on the node so re-typeset (every /state poll) stays idempotent.
+  if (typeof katex !== 'undefined' && el.querySelectorAll) {
+    const blocks = el.matches && el.matches('.disp.latex') ? [el] : [...el.querySelectorAll('.disp.latex')];
+    blocks.forEach(d => {
+      if (d.dataset.tex === undefined) d.dataset.tex = d.textContent;
+      let t = d.dataset.tex.trim();
+      if (t.startsWith('$$') && t.endsWith('$$')) t = t.slice(2, -2);
+      else if (t.startsWith('$') && t.endsWith('$')) t = t.slice(1, -1);
+      else if (t.startsWith('\\[') && t.endsWith('\\]')) t = t.slice(2, -2);
+      else if (t.startsWith('\\(') && t.endsWith('\\)')) t = t.slice(2, -2);
+      try { katex.render(t, d, { displayMode: true, throwOnError: false }); } catch (e) {}
+    });
+  }
+  if (typeof renderMathInElement !== 'function') return;
+  try {
+    renderMathInElement(el, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '$', right: '$', display: false },
+        { left: '\\(', right: '\\)', display: false },
+      ],
+      throwOnError: false,
+    });
+  } catch (e) {}
+}
+// KaTeX may finish loading after the first render; typeset everything once it's in.
+window.addEventListener('load', () => typeset(document.getElementById('nb')));
+// Align the agent drawer's top with the first content cell (as positioned when scrolled
+// to the top), so the drawer never covers the menu bar and lines up with the notebook.
+// Measured off the real first cell — robust to topbar height, page padding, cell margins,
+// font size and zoom. --topbar-h is the pre-measure fallback (see .agentpanel CSS).
+function syncAgentTop() {
+  const tb = document.querySelector('.topbar');
+  if (tb) document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+  // Document-flow top of the first cell (rect.top + scrollY) == its viewport position at
+  // scroll 0, which is exactly the fixed drawer's `top`. Fall back to the cells container.
+  const ref = document.querySelector('#nb .cell') || document.getElementById('nb');
+  if (ref) {
+    const top = Math.round(ref.getBoundingClientRect().top + window.scrollY);
+    document.documentElement.style.setProperty('--agent-top', top + 'px');
+  }
+}
+window.addEventListener('load', syncAgentTop);
+window.addEventListener('resize', syncAgentTop);
+syncAgentTop();
+
+// Julia indexes source by UTF-8 *byte* offset (REPLCompletions), but CodeMirror
+// works in UTF-16 char positions. Convert both ways so completion stays correct
+// once the cell contains unicode (π, etc.) — otherwise the replace range drifts.
+const _enc = new TextEncoder(), _dec = new TextDecoder();
+const _byteLen = s => _enc.encode(s).length;
+const _charFromByte = (code, b) => _dec.decode(_enc.encode(code).slice(0, b)).length;
+
+// Context-aware completion via the live session (Julia REPLCompletions). Includes
+// LaTeX/emoji symbols — typing `\pi` and accepting inserts π.
+function juliaHint(cm, callback) {
+  const code = cm.getValue();
+  const pos = _byteLen(code.slice(0, cm.indexFromPos(cm.getCursor())));
+  fetch(_apipath('/api/complete'), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ code, pos })
+  }).then(r => r.json()).then(d => {
+    callback({
+      list: d.completions || [],
+      from: cm.posFromIndex(_charFromByte(code, d.from)),
+      to: cm.posFromIndex(_charFromByte(code, d.to))
+    });
+  }).catch(() => callback({ list: [], from: cm.getCursor(), to: cm.getCursor() }));
+}
+juliaHint.async = true;
+
+// Pulse the kernel dot while a compute-triggering request is in flight. POSTs that
+// don't run cells (chat, completion, rename, agent log) are excluded.
+let _busy = 0;
+const _noBusy = /\/(chat|agent-log|complete|cell-rename)/;
+const setBusy = () => document.getElementById('wdot').classList.toggle('busy', _busy > 0);
+async function api(method, path, body) {
+  const track = method === 'POST' && !_noBusy.test(path);
+  if (track) { _busy++; setBusy(); }
+  try {
+    const r = await fetch(_apipath(path), {
+      method, headers: {'Content-Type': 'application/json'},
+      body: body ? JSON.stringify(body) : undefined
+    });
+    return r.json();
+  } finally { if (track) { _busy--; setBusy(); } }
+}
+
+// Inner markup for one bound control. `bindId` is the *defining* bind cell's id
+// (the /api/bind POST target); `b` is its spec ({name,widget,params,value}). Used
+// by both the standalone @bind cell and any cell's control strip — wherever a
+// widget renders, changing it drives recompute the same way.
+const _esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
+
+function controlMarkup(bindId, b) {
+  const p = b.params || {}, w = b.widget;
+  const a = `data-bind="${bindId}" data-name="${b.name}" data-widget="${w}"`;
+  const opts = (p.options || []);
+  let ctrl = '', wval = `<span class="wval">${_esc(_showVal(b.value))}</span>`;
+  if (w === 'slider')
+    ctrl = `<input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${b.value}" ${a}/>`;
+  else if (w === 'number')
+    ctrl = `<input type="number" value="${b.value}" ${p.min != null ? `min="${p.min}"` : ''} ${p.max != null ? `max="${p.max}"` : ''} ${a}/>`;
+  else if (w === 'checkbox' || w === 'toggle')
+    ctrl = `<input type="checkbox" class="${w}" ${b.value ? 'checked' : ''} ${a}/>`;
+  else if (w === 'text')
+    ctrl = `<input type="text" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'textarea')
+    ctrl = `<textarea rows="${p.rows || 3}" ${a}>${_esc(b.value)}</textarea>`;
+  else if (w === 'color')
+    ctrl = `<input type="color" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'date')
+    ctrl = `<input type="date" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'time')
+    ctrl = `<input type="time" value="${_esc(b.value)}" ${a}/>`;
+  else if (w === 'select')
+    ctrl = `<select ${a}>` + opts.map(o => `<option ${o == b.value ? 'selected' : ''}>${_esc(o)}</option>`).join('') + '</select>';
+  else if (w === 'multiselect')
+    ctrl = `<select multiple ${a}>` +
+      opts.map(o => `<option ${(b.value || []).includes(o) ? 'selected' : ''}>${_esc(o)}</option>`).join('') + '</select>';
+  else if (w === 'radio')
+    ctrl = `<span class="radiogroup" ${a}>` + opts.map((o, i) =>
+      `<label><input type="radio" name="r-${bindId}-${b.name}" value="${_esc(o)}" ${o == b.value ? 'checked' : ''}/>${_esc(o)}</label>`).join('') + '</span>';
+  else if (w === 'button') {
+    ctrl = `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
+    wval = `<span class="wval">×${b.value}</span>`;       // show the click count
+  }
+  return `<span class="wname">${b.name}</span>${ctrl}${wval}`;
+}
+
+// One row inside a bind/group cell: the live widget, or — when its control is
+// surfaced in a strip elsewhere — a slim chip (the variable stays live).
+const bindRow = (cellId, b) => b.hosted
+  ? `<div class="hostedph">⊞ <span class="wname">${b.name}</span>` +
+    '<span class="hint">— surfaced in a control strip</span></div>'
+  : `<div class="widget">${controlMarkup(cellId, b)}</div>`;
+
+// The body of a bind/group cell: one row per bound variable it defines.
+const bindsHTML = c => `<div class="binds">${(c.binds || []).map(b => bindRow(c.id, b)).join('')}</div>`;
+
+const hasBinds = c => c.binds && c.binds.length;
+
+// The control strip for a code cell: each surfaced bound control, wired to its
+// own defining bind cell. Rendered OUTSIDE `.output` so value-only updates
+// (which replace `.output`) never tear down a widget mid-drag. Always present
+// (even empty) so any code cell is a drop target for the palette. Each control
+// carries a drag grip (move/reorder) and a ✕ (un-host).
+function controlStrip(c) {
+  const cols = c.controls || [];                 // array of columns; each column an array of specs
+  const ctrl = s => `<div class="control" data-cname="${s.name}">` +
+    `<span class="cgrip" draggable="true" data-name="${s.name}" title="drag to move / reorder">⠿</span>` +
+    controlMarkup(s.id, s) +
+    `<button class="cdel" data-name="${s.name}" title="remove from strip">✕</button></div>`;
+  // Interleave thin column-drop zones (revealed while dragging) so a control can
+  // be dropped *between* columns to create a new one. `data-colindex` is the
+  // insertion index into the columns array.
+  const dz = i => `<div class="coldrop" data-colindex="${i}"></div>`;
+  let inner = dz(0);
+  cols.forEach((col, i) => { inner += `<div class="ccol" data-colindex="${i}">${col.map(ctrl).join('')}</div>` + dz(i + 1); });
+  return `<div class="controls${cols.length ? '' : ' empty'}" data-cell="${c.id}">${inner}</div>`;
+}
+
+// One compact header line per cell: run + id (left), then duration, hover-revealed
+// actions, and the state badge (right). Replaces the old two-row bar+head.
+function cellHeader(c) {
+  const isCode = c.kind === 'code' && !hasBinds(c);
+  const other = c.kind === 'md' ? 'code' : 'md';
+  const editSrc = (c.kind === 'md' || hasBinds(c))
+    ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
+  const run = isCode ? `<button class="run" data-run="${c.id}" title="run (⇧⏎)">▶</button>` : '';
+  const bu = transBinduses(c);
+  const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
+  const _someOn = bu.some(n => _present.has(n));
+  const autoctl = bu.length
+    ? `<button class="autoctl${_someOn ? ' on' : ''}" onclick="openControlPicker('${c.id}', event)" title="pick which @bind controls to surface on this cell (${bu.join(', ')})">🎛</button>` : '';
+  return '<div class="cellhead">' +
+    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
+    `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
+    `<span class="cid" title="double-click to rename">${c.id}</span>` +
+    '<span class="hspace"></span>' +
+    `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
+    '<span class="cellacts">' +
+      `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
+      (isCode ? `<button onclick="toggleDeps('${c.id}')" title="highlight this cell's upstream dependencies">🔗</button>` : '') + autoctl +
+      (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
+      editSrc +
+      `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
+      `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
+      `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
+      `<button class="addbtn" onclick="addCell('${c.id}','code')" oncontextmenu="addMenu(event,'${c.id}');return false" title="add below · right-click for type">＋</button>` +
+      `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
+    '</span>' +
+    `<span class="badge">${c.state}</span>` +
+    '</div>';
+}
+
+function cellEl(c) {
+  const div = document.createElement('div');
+  div.id = 'cell-' + c.id;
+  div.dataset.cid = c.id;
+  srcMap[c.id] = c.source;
+  if (c.kind === 'md') {
+    div.className = 'cell md state-' + c.state;
+    div.innerHTML = cellHeader(c) +
+      `<div class="md" ondblclick="editSource('${c.id}','markdown')" title="double-click to edit">${mdHtml(c)}</div>` +
+      srcEditHTML();
+  } else if (hasBinds(c)) {
+    // A bind cell: one row per variable (live widget or hosted chip), PLUS an output
+    // area so a MIXED cell (binds + code) shows its result too. The output/tables/
+    // echarts hosts sit OUTSIDE the widgets, so value-only updates never tear a widget
+    // down mid-drag. Empty (invisible) for a pure bind cell.
+    div.className = 'cell bind state-' + c.state;
+    div.innerHTML = cellHeader(c) + bindsHTML(c) +
+      '<div class="output">' + c.output + '</div>' +
+      '<div class="tables"></div>' +
+      '<div class="echarts"></div>' +
+      srcEditHTML();
+  } else {
+    div.className = 'cell code state-' + c.state;
+    div.innerHTML = cellHeader(c) +
+      '<textarea></textarea>' +
+      controlStrip(c) +
+      '<div class="output">' + c.output + '</div>' +
+      '<div class="tables"></div>' +
+      '<div class="echarts"></div>';
+  }
+  if (c.collapsed) div.classList.add('collapsed');         // folded (persisted in the .jl)
+  if (c.codeHidden) div.classList.add('codehidden');       // code editor hidden, output shown
+  return div;
+}
+
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+// Wire one widget input → its defining bind cell. `data-bind` is the bind cell
+// id (POST target); `data-widget` its type. The value mirror (`.wval`) is found
+// relative to the input, so strip and standalone widgets never collide on ids.
+//
+// Send policy while dragging: rate-limit to one recompute per `updateMs`, AND
+// coalesce in-flight (never queue a backlog — hold only the latest value while a
+// recompute runs). Releasing the control (`change`) flushes the final value
+// immediately, so the end state is always correct regardless of the rate limit.
+function wireControl(el) {
+  const id = el.dataset.bind, name = el.dataset.name, widget = el.dataset.widget;
+  let inflight = false, pending = null, lastSent = 0, timer = null;
+  const fire = v => {
+    lastSent = performance.now(); inflight = true; pending = null;
+    clearTimeout(timer); timer = null;
+    api('POST', '/api/bind/' + id, { name, value: v })
+      .then(updateStates)
+      .finally(() => { inflight = false; if (pending !== null) schedule(pending); });
+  };
+  const schedule = v => {                       // throttled, coalescing
+    pending = v;
+    if (inflight) return;
+    const wait = Math.max(0, updateMs - (performance.now() - lastSent));
+    if (wait <= 0) fire(v);
+    else if (!timer) timer = setTimeout(() => fire(pending), wait);
+  };
+  const flush = v => { inflight ? (pending = v) : fire(v); };   // release → send now
+  const mirror = v => { const w = el.closest('.widget, .control'); const m = w && w.querySelector('.wval');
+    if (m) m.textContent = widget === 'button' ? '×' + v : _showVal(v); };
+  // Mark the control as just-touched so background refreshes (async live updates)
+  // don't yank its value out from under the user mid-interaction.
+  const touch = () => { el._touched = performance.now(); };
+  el.addEventListener('pointerdown', touch);
+  el.addEventListener('focus', touch, true);
+  if (widget === 'button') {                       // action button → increments a counter
+    el.onclick = () => { touch(); const n = (parseInt(el.dataset.count, 10) || 0) + 1; el.dataset.count = n; mirror(n); flush(n); };
+    return;
+  }
+  const readVal = () => {
+    if (widget === 'checkbox' || widget === 'toggle') return el.checked;
+    if (widget === 'slider' || widget === 'number') return parseFloat(el.value);
+    if (widget === 'multiselect') return [...el.selectedOptions].map(o => o.value);
+    if (widget === 'radio') { const c = el.querySelector('input:checked'); return c ? c.value : null; }
+    return el.value;
+  };
+  el.oninput  = () => { touch(); const v = readVal(); mirror(v); schedule(v); };
+  el.onchange = () => { touch(); const v = readVal(); mirror(v); flush(v); };
+}
+
+// Wire every bound widget in a cell — its own @bind widget and/or control strip.
+function mountControls(c) {
+  const cell = document.getElementById('cell-' + c.id);
+  if (cell) cell.querySelectorAll('[data-bind]').forEach(wireControl);
+}
+
+function mountEditor(c) {
+  if (c.kind !== 'code' || hasBinds(c)) return;
+  const ta = document.querySelector('#cell-' + c.id + ' textarea');
+  const ed = CodeMirror.fromTextArea(ta, {
+    mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity
+  });
+  ed.setValue(c.source);
+  let primed = false;
+  ed.on('change', () => { if (primed) setState(c.id, 'edited'); });
+  setTimeout(() => primed = true, 0);
+  const complete = cm => cm.showHint({ hint: juliaHint, completeSingle: false });
+  const tabComplete = cm => {                  // complete after a word/`.`, else indent
+    const cur = cm.getCursor();
+    const before = cm.getRange({ line: cur.line, ch: Math.max(0, cur.ch - 1) }, cur);
+    if (cm.somethingSelected() || !/[\w.]/.test(before)) return CodeMirror.Pass;
+    complete(cm);
+  };
+  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Esc': () => ed.getInputField().blur(),
+                              'Shift-Cmd-Enter': () => runAndAddBelow(c.id), 'Shift-Ctrl-Enter': () => runAndAddBelow(c.id),
+                              'Shift-Ctrl--': () => splitCell(c.id, ed), 'Shift-Cmd--': () => splitCell(c.id, ed) });
+  ed.on('inputRead', (cm, ev) => { if (ev.text[0] === '.') complete(cm); });   // auto on field access
+  ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
+  ed.on('blur', () => setEditing(c.id, false));
+  document.querySelector('#cell-' + c.id + ' [data-run]').onclick = () => runCell(c.id);
+  editors[c.id] = ed;
+}
+
+// Source editing for non-code cells (markdown + @bind widgets): reveal a raw
+// source editor; ⇧⏎ commits (re-parsing/re-rendering the cell), esc cancels.
+const _disp = cell => cell.querySelector('.md') || cell.querySelector('.binds');
+
+// The `</>` button toggles a md/bind cell between its rendered form and raw
+// source. Opening when rendered; when already editing, commit if the source
+// changed (don't lose work) or just cancel back to rendered if it didn't.
+function toggleSource(id, mode) {
+  const cell = document.getElementById('cell-' + id); if (!cell) return;
+  const sed = cell.querySelector('.srcedit');
+  if (sed && sed.style.display !== 'none') {
+    const cm = editors[id];
+    (cm && cm.getValue() !== (srcMap[id] || '')) ? commitSource(id) : cancelSource(id);
+  } else {
+    editSource(id, mode);
+  }
+}
+
+function editSource(id, mode) {
+  const cell = document.getElementById('cell-' + id);
+  if (!cell) return;
+  const d = _disp(cell); if (d) d.style.display = 'none';
+  cell.querySelector('.srcedit').style.display = '';
+  if (!editors[id]) {
+    const ta = cell.querySelector('.srcedit textarea');
+    const cm = CodeMirror.fromTextArea(ta, {
+      mode, theme: 'material-darker', lineNumbers: false,
+      viewportMargin: Infinity, lineWrapping: mode === 'markdown'
+    });
+    cm.setValue(srcMap[id] || '');
+    cm.setOption('extraKeys', { 'Shift-Enter': () => commitSource(id), 'Esc': () => cancelSource(id),
+                                'Shift-Cmd-Enter': () => commitAndAddBelow(id), 'Shift-Ctrl-Enter': () => commitAndAddBelow(id) });
+    cm.on('focus', () => setEditing(id, true));
+    cm.on('blur', () => setEditing(id, false));
+    editors[id] = cm;
+  }
+  editors[id].refresh(); editors[id].focus();
+}
+async function commitSource(id) {
+  const cm = editors[id], src = cm ? cm.getValue() : srcMap[id];
+  if (cm) { cm.toTextArea(); delete editors[id]; }
+  srcMap[id] = src;
+  renderAll(await api('POST', '/api/cell/' + id, { source: src }));   // re-render in its new form
+}
+function cancelSource(id) {
+  const cm = editors[id]; if (cm) { cm.toTextArea(); delete editors[id]; }
+  const cell = document.getElementById('cell-' + id); if (!cell) return;
+  cell.querySelector('.srcedit').style.display = 'none';
+  const d = _disp(cell); if (d) d.style.display = '';
+}
+
+function renderAll(state) {
+  nbState = state;
+  _depFocus = null;                            // #nb is wiped below — drop any dep-cone highlight
+  const se = document.scrollingElement || document.documentElement;
+  const top = se.scrollTop;                    // preserve scroll across the full rebuild (structural ops)
+  document.getElementById('title').textContent = state.title || 'Notebook';
+  const w = state.worker || {}, dot = document.getElementById('wdot');
+  if (dot) {
+    dot.className = 'wdot ' + (w.kind === 'inproc' ? 'inproc' : (w.connected ? 'up' : 'down')) + (_busy > 0 ? ' busy' : '');
+    dot.title = w.kind === 'gate' ? ('worker :' + w.port + (w.connected ? ' · connected' : ' · disconnected')) : 'in-process kernel';
+  }
+  if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
+  // Hydrating banner: a standalone is showing its frozen preview while the env reconstructs.
+  const hb = document.getElementById('hydbanner');
+  _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
+  if (state.hydrating) {
+    hb.className = 'hydbanner'; hb.style.display = 'flex';
+    hb.innerHTML = '<span class="hydspin"></span>Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…';
+    document.body.classList.add('hydrating');
+  } else if (state.hydrateError) {
+    hb.className = 'hydbanner err'; hb.style.display = 'flex';
+    hb.textContent = '⚠ Environment reconstruction failed: ' + state.hydrateError;
+    document.body.classList.remove('hydrating');
+  } else {
+    hb.style.display = 'none'; document.body.classList.remove('hydrating');
+  }
+  const nb = document.getElementById('nb');
+  nb.innerHTML = '';
+  for (const k of Object.keys(editors)) delete editors[k];
+  Object.keys(charts).forEach(k => { charts[k].forEach(i => i.dispose()); delete charts[k]; });
+  state.cells.forEach(c => nb.appendChild(cellEl(c)));
+  // Seed change-tracking from this fresh build so the next /state poll won't
+  // redundantly re-swap (and re-init) outputs, then boot any embedded scripts.
+  state.cells.forEach(c => { outMap[c.id] = c.output; if (c.kind === 'md') mdMap[c.id] = mdHtml(c); });
+  runScripts(nb);
+  state.cells.forEach(mountEditor);
+  state.cells.forEach(mountControls);
+  state.cells.forEach(renderCharts);
+  state.cells.forEach(renderTables);
+  typeset(nb);
+  collapseOutputs(nb);
+  updateStaleBadge(state);
+  renderPalette();
+  syncAgentTop();                              // re-align the agent drawer to the (now-rendered) first cell
+  if (selectedId && !cellIds().includes(selectedId)) selectedId = null;   // dropped/renamed
+  if (selectedId) selectCell(selectedId);                                 // re-apply command-mode ring
+  // Restore scroll now, next frame, and after each figure decodes (base64 images
+  // change height late — Safari otherwise clamps scrollTop and the view jumps).
+  const restore = () => { se.scrollTop = top; };
+  restore();
+  requestAnimationFrame(restore);
+  nb.querySelectorAll('img').forEach(im => im.complete || im.addEventListener('load', restore, { once: true }));
+}
+
+// ── Controls palette ─────────────────────────────────────────────────────────
+// A side drawer listing every @bind declared across the notebook, where each is
+// hosted (surfaced in a cell's control strip), and its live value. Read-only here;
+// drag-to-host is wired in a later pass.
+function paletteChips() {
+  const cells = (nbState && nbState.cells) || [];
+  const hosts = {};                                    // var name → [host cell ids] (a control may be in several)
+  cells.forEach(h => (h.controls || []).flat().forEach(s => { (hosts[s.name] ||= []).push(h.id); }));
+  const chips = [];
+  cells.forEach(c => (c.binds || []).forEach(b =>
+    chips.push({ name: b.name, widget: b.widget, value: b.value, def: c.id, hosts: hosts[b.name] || [] })));
+  return chips;
+}
+function togglePalette() { document.getElementById('palette').classList.toggle('open'); }
+function renderPalette() {
+  const list = document.getElementById('palette-list'); if (!list) return;
+  const chips = paletteChips();
+  document.getElementById('palette-count').textContent = chips.length ? chips.length + ' declared' : '';
+  if (!chips.length) { list.innerHTML = '<div class="phint">No <code>@bind</code> controls declared yet.</div>'; return; }
+  list.innerHTML = chips.map(c => {
+    const host = c.hosts.length ? '→ ' + c.hosts.join(', ') : '';
+    return `<div class="chip${c.hosts.length ? ' hosted' : ''}" draggable="true" data-pname="${c.name}" data-def="${c.def}"` +
+      ` title="drag into a cell to surface it · click to jump to ‘${c.def}’${c.hosts.length ? ' · surfaced in ' + c.hosts.map(h => '‘' + h + '’').join(', ') : ''}">` +
+      `<span class="cname">${c.name}</span><span class="ctype">${c.widget}</span>` +
+      `<span class="cright">${host ? `<span class="chost">${host}</span>` : ''}` +
+      `<span class="pval" data-pname="${c.name}">${c.value}</span></span></div>`;
+  }).join('');
+}
+function updatePaletteValues(state) {
+  state.cells.forEach(c => (c.binds || []).forEach(b => {
+    const v = document.querySelector('#palette-list .pval[data-pname="' + b.name + '"]');
+    if (v) v.textContent = b.value;
+  }));
+}
+
+// Keep every widget bound to a variable in lockstep (a control may be surfaced in
+// multiple cells). Skips the element being actively dragged so we never fight it.
+const _sameList = (a, b) => a.length === b.length && a.every((x, i) => String(x) === String(b[i]));
+
+function syncControlValues(state) {
+  const val = {}, par = {};
+  state.cells.forEach(c => {
+    (c.binds || []).forEach(b => { val[b.name] = b.value; par[b.name] = b.params || {}; });
+    (c.controls || []).flat().forEach(s => { val[s.name] = s.value; par[s.name] = s.params || {}; });   // controls is columns-of-specs
+  });
+  const now = performance.now();
+  document.querySelectorAll('#nb [data-bind][data-name]').forEach(el => {
+    // Don't fight live interaction: skip the focused/contained element, and any
+    // control touched in the last 1.2s (covers a drag that isn't the activeElement).
+    if (el === document.activeElement || el.contains(document.activeElement)) return;
+    if (el._touched && now - el._touched < 1200) return;
+    const v = val[el.dataset.name]; if (v === undefined) return;
+    const w = el.dataset.widget;
+    // Keep the widget's RANGE/options in sync, not just its value — a dynamic widget
+    // (e.g. `Slider(1:hi)`) re-reports new params when `hi` changes. Apply range
+    // BEFORE the value so the browser doesn't clamp against the stale bounds.
+    const p = par[el.dataset.name] || {};
+    if (w === 'slider') {
+      if (p.min != null) el.min = p.min;
+      if (p.max != null) el.max = p.max;
+      if (p.step != null) el.step = p.step;
+    } else if (w === 'number') {
+      p.min != null ? (el.min = p.min) : el.removeAttribute('min');
+      p.max != null ? (el.max = p.max) : el.removeAttribute('max');
+    } else if ((w === 'select' || w === 'multiselect') && Array.isArray(p.options)) {
+      // Dynamic options: rebuild the <option> list only if it changed (the value-set
+      // below re-applies the selection). Avoids tearing the menu down every sync.
+      const cur = [...el.options].map(o => o.value);
+      if (!_sameList(cur, p.options)) el.innerHTML = p.options.map(o => `<option>${_esc(o)}</option>`).join('');
+    } else if (w === 'radio' && Array.isArray(p.options)) {
+      const cur = [...el.querySelectorAll('input[type=radio]')].map(i => i.value);
+      if (!_sameList(cur, p.options)) {
+        const nm = 'r-' + el.dataset.bind + '-' + el.dataset.name;
+        el.innerHTML = p.options.map(o =>
+          `<label><input type="radio" name="${nm}" value="${_esc(o)}"/>${_esc(o)}</label>`).join('');
+      }
+    }
+    if (w === 'checkbox' || w === 'toggle') el.checked = !!v;
+    else if (w === 'multiselect') [...el.options].forEach(o => { o.selected = Array.isArray(v) && v.includes(o.value); });
+    else if (w === 'radio') { const c = el.querySelector('input[value="' + v + '"]'); if (c) c.checked = true; }
+    else if (w === 'button') el.dataset.count = v;
+    else el.value = v;
+    const wrap = el.closest('.widget, .control'); const m = wrap && wrap.querySelector('.wval');
+    if (m) m.textContent = w === 'button' ? '×' + v : _showVal(v);
+  });
+}
+
+function setState(id, s) {
+  const el = document.getElementById('cell-' + id);
+  if (!el) return;
+  el.className = 'cell code state-' + s;
+  const b = el.querySelector('.badge'); if (b) b.textContent = s;
+}
+
+// Replace a cell's output, reserving its current height until the new content
+// (notably a base64 <img>, which has no size until it decodes) lays out. Without
+// this the output collapses to ~0 height mid-swap; Safari then clamps scrollTop to
+// the now-shorter page and the figure scrolls out of view (the P2 scroll bug).
+function _swapOutput(out, html) {
+  out.style.minHeight = out.offsetHeight + 'px';
+  out.innerHTML = html;
+  runScripts(out);   // <script> set via innerHTML is inert — re-create so figures boot
+  const imgs = out.querySelectorAll('img');
+  const release = () => { out.style.minHeight = ''; };
+  if (!imgs.length) { requestAnimationFrame(release); return; }
+  let n = imgs.length;
+  const done = () => { if (--n <= 0) release(); };
+  imgs.forEach(im => im.complete ? done() : (im.onload = im.onerror = done));
+}
+
+// A <script> assigned via innerHTML is parsed but never executed. Rich output
+// (notably a WGLMakie/Bonito figure: a module bundle <script src> that defines
+// `Bonito`, then an inline module that calls `Bonito.init_session(…)`) only boots
+// if those scripts actually run. Re-create each as a live element so the browser
+// executes it; await external/`src` scripts so the bundle finishes (and `Bonito`
+// is defined) before the inline init module that depends on it runs. (Inline
+// scripts execute on insert and aren't awaited — inline module `load` is unreliable.)
+async function runScripts(root) {
+  if (!root) return;
+  for (const old of Array.from(root.querySelectorAll('script'))) {
+    const s = document.createElement('script');
+    for (const a of old.attributes) s.setAttribute(a.name, a.value);
+    if (old.textContent) s.textContent = old.textContent;
+    const loaded = s.src ? new Promise(res => { s.onload = s.onerror = res; }) : null;
+    old.replaceWith(s);
+    if (loaded) await loaded;
+  }
+}
+
+// Update outputs + states in place (preserves editor instances/cursors + scroll).
+function updateStates(state) {
+  nbState = state;
+  const se = document.scrollingElement || document.documentElement;
+  const top = se.scrollTop;
+  state.cells.forEach(c => {
+    const el = document.getElementById('cell-' + c.id);
+    if (!el) return;
+    srcMap[c.id] = c.source;
+    el.className = 'cell ' + (hasBinds(c) ? 'bind' : c.kind) + ' state-' + c.state;
+    const b = el.querySelector('.badge'); if (b) b.textContent = c.state;
+    const dur = el.querySelector('.cdur'); if (dur) dur.textContent = c.duration != null ? c.duration + ' ms' : '';
+    // Only re-inject when the HTML actually changed: an unconditional swap on every
+    // /state poll would tear down and re-init a live figure (e.g. Bonito), spawning
+    // duplicate sessions/WebSockets and flicker.
+    const out = el.querySelector('.output');
+    if (out && c.output !== outMap[c.id]) { outMap[c.id] = c.output; _swapOutput(out, c.output); typeset(out); }
+    const md = el.querySelector('.md');
+    if (md) { const h = mdHtml(c); if (h !== mdMap[c.id]) { mdMap[c.id] = h; md.innerHTML = h; runScripts(md); typeset(md); } }
+    renderCharts(c);   // setOption in place — animates data changes
+    renderTables(c);   // refill rows in place — keeps sort/filter/page
+  });
+  se.scrollTop = top;                          // hold scroll across the patch …
+  requestAnimationFrame(() => { se.scrollTop = top; });   // … and after Safari's deferred reflow
+  syncControlValues(state);
+  updatePaletteValues(state);
+  collapseOutputs();
+  updateStaleBadge(state);
+}
+
+async function runCell(id) {
+  if (_hydrating) return;                      // env still reconstructing — preview is read-only
+  const ed = editors[id];
+  const before = _cellById(id);                // shape BEFORE the run (from the live state)
+  setState(id, 'running');
+  const state = await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' });
+  const after = (state.cells || []).find(c => c.id === id);
+  // A code cell that gains (or loses) @bind widgets — or flips kind — changes its DOM
+  // *structure*: the in-place patch (updateStates) can't inject the widget rows, so the
+  // controls wouldn't appear. Rebuild fully in that case; otherwise patch in place.
+  if (before && after && (hasBinds(before) !== hasBinds(after) || before.kind !== after.kind))
+    renderAll(state);
+  else
+    updateStates(state);
+}
+async function addCell(after, kind, before, edit) {
+  if (_hydrating) return;
+  const oldIds = new Set(cellIds());
+  const state = await api('POST', '/api/cell-add', { after, kind, before: !!before });
+  renderAll(state);
+  const neu = (state.cells || []).map(c => c.id).find(id => !oldIds.has(id));
+  // renderAll restores the prior scroll on the next frame, so scroll to the new
+  // cell a frame later (otherwise the restore wins and it doesn't move).
+  // `nearest` jams a bottom-added cell against the viewport edge; nudge it up so a
+  // small gap stays below it (the .page bottom padding gives the room to scroll).
+  if (neu) requestAnimationFrame(() => requestAnimationFrame(() => {
+    selectCell(neu, false);
+    if (edit) enterEdit(neu);
+    const el = document.getElementById('cell-' + neu);
+    if (el) {
+      el.scrollIntoView({ block: 'nearest' });
+      const gap = 90, overflow = el.getBoundingClientRect().bottom - (window.innerHeight - gap);
+      if (overflow > 0) window.scrollBy({ top: overflow, behavior: 'smooth' });
+    }
+  }));
+  return neu;
+}
+// ⌘/Ctrl-⇧-Enter in edit mode: run (or commit) the cell, then open a fresh code
+// cell below and drop into it — the keyboard-driven "next cell" flow.
+async function runAndAddBelow(id)    { await runCell(id);       await addCell(id, 'code', false, true); }
+async function commitAndAddBelow(id) { await commitSource(id);  await addCell(id, 'code', false, true); }
+// Right-click on a ＋ add button → a tiny code/markdown chooser at the cursor.
+function addMenu(e, cellId) {
+  const m = document.getElementById('addmenu');
+  m.innerHTML = '';
+  [['code', '＋ code below'], ['md', '＋ markdown below']].forEach(([k, label]) => {
+    const b = document.createElement('button'); b.textContent = label;
+    b.onclick = () => { hideAddMenu(); addCell(cellId, k); }; m.appendChild(b);
+  });
+  m.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
+  m.style.top = Math.min(e.clientY, window.innerHeight - 80) + 'px';
+  m.classList.add('show');
+}
+function hideAddMenu() { document.getElementById('addmenu').classList.remove('show'); }
+document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') && !e.target.closest('.addbtn')) hideAddMenu(); });
+document.addEventListener('mousedown', e => { if (!e.target.closest('#ctlpop') && !e.target.closest('.autoctl')) hideControlPicker(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideControlPicker(); });
+// Split a code cell at the editor cursor into two cells.
+async function splitCell(id, cm) {
+  const idx = cm.indexFromPos(cm.getCursor()), val = cm.getValue();
+  renderAll(await api('POST', '/api/cell-split/' + id, { before: val.slice(0, idx), after: val.slice(idx) }));
+}
+// Merge a cell with the one below it (same kind only); sends current editor text.
+async function mergeBelow(id) {
+  const ids = cellIds(), i = ids.indexOf(id);
+  if (i < 0 || i >= ids.length - 1) return;
+  const a = _cellById(id), b = _cellById(ids[i + 1]);
+  if (!a || !b || a.kind !== b.kind || hasBinds(a) || hasBinds(b)) return;
+  const sa = editors[id] ? editors[id].getValue() : (srcMap[id] || '');
+  const sb = editors[ids[i + 1]] ? editors[ids[i + 1]].getValue() : (srcMap[ids[i + 1]] || '');
+  renderAll(await api('POST', '/api/cell-merge/' + id, { source: sa.replace(/\s+$/, '') + '\n' + sb.replace(/^\s+/, '') }));
+  selectCell(id, true);
+}
+async function delCell(id) {
+  const idx = cellIds().indexOf(id);
+  renderAll(await api('POST', '/api/cell-delete/' + id));
+  const after = cellIds();
+  after.length ? selectCell(after[Math.min(Math.max(0, idx), after.length - 1)], true) : (selectedId = null);
+}
+async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
+// ── Upstream-dependency navigation (🔗) ───────────────────────────────────────
+// Light up a cell's transitive upstream cone — every precursor cell whose code it
+// (transitively) reads from, computed client-side from each cell's `deps` (shipped in
+// state_json). Lets you SEE what feeds a cell and click a precursor to jump to it.
+let _depFocus = null;
+function clearDeps() {
+  _depFocus = null;
+  document.querySelectorAll('.cell.dep-focus, .cell.dep-up').forEach(el => el.classList.remove('dep-focus', 'dep-up'));
+  document.querySelectorAll('.depflag').forEach(el => el.remove());
+}
+function _upstreamCone(id) {
+  const byId = {}; ((nbState && nbState.cells) || []).forEach(c => byId[c.id] = c);
+  const up = new Set(), stack = [id];
+  while (stack.length) {
+    const c = byId[stack.pop()]; if (!c) continue;
+    for (const d of (c.deps || [])) { if (d === id || up.has(d)) continue; up.add(d); stack.push(d); }
+  }
+  return up;
+}
+// Transitive @bind controls a cell is affected by: not just the ones it reads directly
+// (server-computed `binduses` = reads ∩ bound vars), but any whose value flows into it
+// through the dependency graph — e.g. a plot of `data` where `data = f(N)` and `N` is an
+// @bind. Union each upstream cell's direct binduses over the cell's dependency cone, so a
+// control can be surfaced on a downstream plot even though the plot never names it.
+function transBinduses(c) {
+  if (!c) return [];
+  const own = new Set((c.binds || []).map(b => b.name));
+  const acc = new Set((c.binduses || []).filter(n => !own.has(n)));
+  for (const up of _upstreamCone(c.id)) {
+    const u = _cellById(up);
+    ((u && u.binduses) || []).forEach(n => { if (!own.has(n)) acc.add(n); });
+  }
+  return [...acc].sort();
+}
+function _depFlag(el, text, title) {
+  const f = document.createElement('span'); f.className = 'depflag';
+  f.textContent = text; if (title) f.title = title; f.onclick = clearDeps; el.appendChild(f);
+}
+function toggleDeps(id) {
+  if (_depFocus === id) { clearDeps(); return; }   // 🔗 again on the same cell → off
+  clearDeps(); _depFocus = id;
+  const focus = document.getElementById('cell-' + id);
+  const up = _upstreamCone(id);
+  if (focus) focus.classList.add('dep-focus');
+  if (!up.size) { if (focus) _depFlag(focus, 'no upstream deps', 'click to clear'); return; }
+  up.forEach(d => { const el = document.getElementById('cell-' + d);
+    if (el) { el.classList.add('dep-up'); _depFlag(el, '⬆ feeds ' + id, 'a precursor of ' + id + ' — click to clear'); } });
+  const first = [...up].map(d => document.getElementById('cell-' + d)).filter(Boolean)
+    .sort((a, b) => a.offsetTop - b.offsetTop)[0];
+  if (first) first.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && _depFocus) clearDeps(); });
+async function moveCellRel(id, target, before) { renderAll(await api('POST', '/api/cell-move/' + id, { target, before })); }
+async function toggleType(id, kind)  { renderAll(await api('POST', '/api/cell-type/' + id, { kind })); }
+async function undoNb() { renderAll(await api('POST', '/api/undo')); }
+async function redoNb() { renderAll(await api('POST', '/api/redo')); }
+// ── Dark modal + loading overlay (shared confirm/alert + wait UX) ─────────────
+let _modalResolve = null;
+function _modalClose(v) {
+  if (_modalResolve) { const r = _modalResolve; _modalResolve = null;
+    document.getElementById('modalbg').classList.remove('show'); r(v); }
+}
+function dlg(message, buttons) {
+  return new Promise(resolve => {
+    _modalResolve = resolve;
+    const row = document.getElementById('modalrow');
+    document.getElementById('modalmsg').textContent = message; row.innerHTML = '';
+    buttons.forEach(b => { const el = document.createElement('button'); el.textContent = b.label;
+      if (b.cls) el.className = b.cls; el.onclick = () => _modalClose(b.value); row.appendChild(el); });
+    document.getElementById('modalbg').classList.add('show');
+    const pr = row.querySelector('.primary') || row.lastChild; if (pr) pr.focus();
+  });
+}
+const confirmDark = (msg, ok, cls) => dlg(msg, [{ label: 'Cancel', value: false }, { label: ok || 'OK', value: true, cls: cls || 'primary' }]);
+const alertDark = msg => dlg(msg, [{ label: 'OK', value: true, cls: 'primary' }]);
+function showLoading(m) { document.getElementById('lmsg').textContent = m || 'Working…'; document.getElementById('loading').classList.add('show'); }
+function hideLoading() { document.getElementById('loading').classList.remove('show'); }
+document.addEventListener('keydown', e => {
+  const bg = document.getElementById('modalbg');
+  if (bg && bg.classList.contains('show') && e.key === 'Escape') { e.stopPropagation(); _modalClose(false); }
+}, true);
+document.addEventListener('mousedown', e => { if (e.target && e.target.id === 'modalbg') _modalClose(false); });
+
+async function runAll()  {
+  if (_hydrating) return;
+  const shape = c => (hasBinds(c) ? 'b' : c.kind);          // structural signature
+  const before = new Map(((nbState && nbState.cells) || []).map(c => [c.id, shape(c)]));
+  const state = await api('POST', '/api/run');
+  // If any cell changed structural shape (gained/lost @bind widgets, flipped kind, or the
+  // cell set changed), patch-in-place can't restructure — rebuild fully.
+  const changed = (state.cells || []).length !== before.size
+    || (state.cells || []).some(c => before.get(c.id) !== shape(c));
+  changed ? renderAll(state) : updateStates(state);
+}
+async function resetAll(){ updateStates(await api('POST', '/api/reset')); }
+async function restartWorker(){
+  if (!await confirmDark("Restart this notebook's worker? Its process is killed and cells re-run from a fresh namespace.", 'Restart')) return;
+  showLoading('Restarting worker — respawning the process and re-running cells…');
+  try { renderAll(await api('POST', '/api/restart')); } finally { hideLoading(); }
+}
+async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); }
+// ── Static export (HTML / print → PDF) ────────────────────────────────────────
+// Download a self-contained HTML document of the notebook (figures embedded, math via
+// KaTeX). PDF goes through the browser's own print dialog on that same static doc.
+function exportHtml() {
+  const a = document.createElement('a');
+  a.href = _apipath('/api/export.html?dl=1'); a.download = (nbState && nbState.title || 'notebook') + '.html';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function printNotebook() {
+  const w = window.open(_apipath('/api/export.html'), '_blank');
+  if (w) w.addEventListener('load', () => setTimeout(() => w.print(), 300));
+}
+// Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a git
+// bundle when the project is a repo). Can take a moment (tars the env + source).
+async function exportStandalone() {
+  showLoading('Bundling environment + source…');
+  try {
+    const r = await fetch(_apipath('/api/export.standalone.jl'));
+    if (!r.ok) { await alertDark('Standalone export failed:\n' + (await r.text())); return; }
+    const blob = await r.blob(), url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = (nbState && nbState.title || 'notebook') + '.standalone.jl';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { await alertDark('Standalone export failed: ' + e); }
+  finally { hideLoading(); }
+}
+// Publication-quality PDF, rendered server-side via Typst. Options (theme, layout, code
+// size) come from a small modal; the last choices are remembered. Can take a few seconds
+// (first run also fetches the Typst packages), so show the loading overlay + blob-download.
+// Figures embed as vector (CairoMakie PDF / ECharts SVG) when available.
+let _pdfResolve = null;
+function closePdfDialog(go) {
+  document.getElementById('pdfbg').classList.remove('show');
+  if (_pdfResolve) { const r = _pdfResolve; _pdfResolve = null; r(go); }
+}
+function _pdfPick() {
+  return new Promise(resolve => {
+    _pdfResolve = resolve;
+    ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
+      const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
+    });
+    document.getElementById('pdfbg').classList.add('show');
+  });
+}
+async function exportPdf() {
+  const go = await _pdfPick();
+  if (!go) return;
+  const theme = document.getElementById('pdftheme').value;
+  const [style, columns] = document.getElementById('pdflayout').value.split('|');
+  const body = document.getElementById('pdfbody').value;
+  const code = document.getElementById('pdfcode').value;
+  ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
+  showLoading('Rendering PDF with Typst…');
+  try {
+    const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code;
+    const r = await fetch(_apipath('/api/export.pdf') + qs);
+    if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
+    const blob = await r.blob(), url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = (nbState && nbState.title || 'notebook') + '.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) { await alertDark('PDF export failed: ' + e); }
+  finally { hideLoading(); }
+}
+
+// ── Command/edit mode + Jupyter-style keyboard shortcuts ──────────────────────
+// Command mode: a cell is "selected" (accent ring) and single keys act on it —
+// j/k or ↑/↓ to move, a/b to insert above/below, dd to delete, m/y to set
+// markdown/code, Enter to edit. Edit mode: focus inside the CodeMirror (green
+// ring); Esc returns to command mode.
+let selectedId = null, _dPending = false, _dTimer = null;
+const cellIds = () => ((nbState && nbState.cells) || []).map(c => c.id);
+function selectCell(id, scroll) {
+  selectedId = id;
+  document.querySelectorAll('.cell').forEach(el => el.classList.toggle('selected', el.dataset.cid === id));
+  const el = id && document.getElementById('cell-' + id);
+  if (el && scroll) el.scrollIntoView({ block: 'nearest' });
+}
+function setEditing(id, on) {
+  const el = document.getElementById('cell-' + id); if (el) el.classList.toggle('editing', on);
+  if (on) selectCell(id);
+}
+function enterEdit(id) {
+  const c = _cellById(id); if (!c) return;
+  if (c.kind === 'code' && !hasBinds(c)) { const ed = editors[id]; if (ed) ed.focus(); }
+  else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
+}
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (document.getElementById('modalbg').classList.contains('show')) return;
+  const inField = e.target.closest('.CodeMirror') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  if (inField) return;                                  // edit mode / typing → leave keys alone
+  const ids = cellIds(); if (!ids.length) return;
+  if (!selectedId || !ids.includes(selectedId)) {
+    if (e.key === 'ArrowDown' || e.key === 'j' || e.key === 'Enter') { selectCell(ids[0], true); e.preventDefault(); }
+    return;
+  }
+  const idx = ids.indexOf(selectedId), k = e.key;
+  // Shift+↑/↓ (or Shift+K/J) MOVE the selected cell; plain keys just navigate. The
+  // shift branches must precede the plain arrows so the modifier wins.
+  if (e.shiftKey && (k === 'ArrowUp' || k === 'K')) { e.preventDefault(); moveCell(selectedId, 'up'); }
+  else if (e.shiftKey && (k === 'ArrowDown' || k === 'J')) { e.preventDefault(); moveCell(selectedId, 'down'); }
+  else if (k === 'Enter') { e.preventDefault(); enterEdit(selectedId); }
+  else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); if (idx < ids.length - 1) selectCell(ids[idx + 1], true); }
+  else if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); if (idx > 0) selectCell(ids[idx - 1], true); }
+  else if (k === 'a') { e.preventDefault(); addCell(selectedId, 'code', true); }
+  else if (k === 'b') { e.preventDefault(); addCell(selectedId, 'code', false); }
+  else if (k === 'm') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'md') toggleType(selectedId, 'md'); }
+  else if (k === 'y') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'code') toggleType(selectedId, 'code'); }
+  else if (k === 'M') { e.preventDefault(); mergeBelow(selectedId); }    // Shift-M: merge with cell below
+  else if (k === 'd') { e.preventDefault();
+    if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }
+    else { _dPending = true; _dTimer = setTimeout(() => _dPending = false, 650); } }
+});
+// Click selects (mousedown precedes editor focus); double-click the id label renames it.
+document.getElementById('nb').addEventListener('mousedown', e => {
+  const cell = e.target.closest('.cell'); if (cell) selectCell(cell.dataset.cid);
+});
+document.getElementById('nb').addEventListener('dblclick', e => {
+  const span = e.target.closest('.cid'); if (span) startRename(span);
+});
+function startRename(span) {
+  const oldid = span.closest('.cell').dataset.cid;
+  const inp = document.createElement('input'); inp.className = 'cidedit'; inp.value = oldid;
+  span.replaceWith(inp); inp.focus(); inp.select();
+  // Ids must be header-safe — fold spaces/punctuation to underscores as you type
+  // (1:1, so the caret doesn't jump).
+  inp.oninput = () => { const p = inp.selectionStart; inp.value = inp.value.replace(/[^A-Za-z0-9_]/g, '_'); inp.setSelectionRange(p, p); };
+  let done = false;
+  const finish = async commit => {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (commit && v && v !== oldid) {
+      const r = await fetch(_apipath('/api/cell-rename/' + oldid),
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ newid: v }) });
+      if (r.ok) { renderAll(await r.json()); selectCell(v); }
+      else { await alertDark('Rename failed: ' + (await r.text())); renderAll(nbState); }
+    } else { renderAll(nbState); }   // cancel → rebuild the label
+  };
+  inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+  inp.onblur = () => finish(true);
+}
+
+// ── Settings modal ────────────────────────────────────────────────────────────
+function openSettings() {
+  const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
+  deb.value = updateMs; v.textContent = updateMs;
+  deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
+  const wide = document.getElementById('setwide');
+  wide.checked = document.body.classList.contains('fullwidth');
+  wide.onchange = () => { document.body.classList.toggle('fullwidth', wide.checked); localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0'); };
+  const th = document.getElementById('settheme');
+  th.value = localStorage.getItem('slateTheme') || 'dark';
+  th.onchange = () => localStorage.setItem('slateTheme', th.value);   // real themes land later
+  const mdl = document.getElementById('setmodel'), mhint = document.getElementById('setmodelhint');
+  // Model and permission both bind only at spawn — changing either reaps the running
+  // agent (chat-kill keeps the transcript) so the next turn respawns on the new setting.
+  const reapAgent = async () => { mhint.style.display = ''; try { await api('POST', '/api/chat-kill', {}); } catch (_) {} setWorking(false); };
+  // Confirm if a turn is in flight (the reap interrupts it), persist, reap, and drop a
+  // visible note in the chat. Reverts the <select> if the user backs out mid-turn.
+  const _selText = sel => sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value;
+  const switchSetting = async (sel, key, verb, noun) => {
+    if (agentWorking && !await confirmDark('A turn is in progress — ' + verb + ' and stop it?', 'Switch & stop', 'danger')) {
+      sel.value = localStorage.getItem(key) || '';   // back out → restore the prior selection
+      return;
+    }
+    localStorage.setItem(key, sel.value);
+    await reapAgent();
+    _agentNote('⚙ ' + noun + ' → ' + _selText(sel) + ' · applies to your next message');
+  };
+  mdl.value = agentModel();
+  mdl.onchange = () => switchSetting(mdl, 'slateAgentModel', 'switch the model', 'model');
+  // Append locally-served models (Ollama, and vmlx — the MLX server for Apple Silicon).
+  // Both need their server running + Kaimon's OllamaBackend, and are routed by prefix.
+  // Rebuilt each open so the list stays fresh and never duplicates.
+  const addLocalModels = (route, prefix, label) => {
+    [...mdl.querySelectorAll('option[value^="' + prefix + ':"]')].forEach(o => o.remove());
+    return api('GET', route).then(r => {
+      (r && r.models || []).forEach(name => {
+        const o = document.createElement('option');
+        o.value = prefix + ':' + name; o.textContent = label + ' · ' + name + ' (local)'; mdl.appendChild(o);
+      });
+      mdl.value = agentModel();   // re-apply: the saved choice may be one of these local models
+    }).catch(() => {});
+  };
+  addLocalModels('/api/ollama-models', 'ollama', 'Ollama');
+  addLocalModels('/api/vmlx-models', 'vmlx', 'vmlx');
+  const perm = document.getElementById('setperm');
+  perm.value = agentPerm();
+  perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
+  document.getElementById('setbg').classList.add('show');
+}
+// The chosen agent model ('' = server default = sonnet), sent with every chat turn.
+function agentModel() { return localStorage.getItem('slateAgentModel') || ''; }
+// The chosen permission preset ('' = lab default), sent with every chat turn.
+function agentPerm() { return localStorage.getItem('slateAgentPerm') || ''; }
+function closeSettings() { document.getElementById('setbg').classList.remove('show'); }
+document.getElementById('setbg').addEventListener('mousedown', e => { if (e.target.id === 'setbg') closeSettings(); });
+
+// ── @bind control snippets ────────────────────────────────────────────────────
+// One-click insert of a reactive control. Drops the snippet into the selected code
+// cell's editor at the cursor, else seeds a fresh code cell below — then the user
+// renames the variable and runs it. Surfaced both in ⌘K and the ☰ menu.
+const BIND_SNIPPETS = [
+  ['Slider',      '@bind n Slider(1:100)'],
+  ['NumberField', '@bind x NumberField(0)'],
+  ['Toggle',      '@bind flag Toggle(false)'],
+  ['Checkbox',    '@bind on Checkbox(false)'],
+  ['TextField',   '@bind s TextField("")'],
+  ['TextArea',    '@bind txt TextArea("")'],
+  ['Select',      '@bind choice Select(["a", "b", "c"])'],
+  ['Radio',       '@bind pick Radio(["a", "b", "c"])'],
+  ['MultiSelect', '@bind picks MultiSelect(["a", "b", "c"])'],
+  ['ColorPicker', '@bind col ColorPicker("#56d364")'],
+  ['DateField',   '@bind d DateField()'],
+  ['TimeField',   '@bind t TimeField()'],
+  ['Button',      '@bind go Button("Run")'],
+];
+async function insertBind(snippet) {
+  const ed = selectedId && editors[selectedId];
+  if (ed) { const cur = ed.getValue(); ed.replaceSelection((cur.trim() ? '\n' : '') + snippet); ed.focus(); return; }
+  const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
+  if (id && editors[id]) { editors[id].setValue(snippet); editors[id].focus(); }
+}
+// ── Command palette (⌘K) ──────────────────────────────────────────────────────
+function paletteCommands() {
+  // `key` is the shortcut hint shown on the right of each row. Single-letter / ⇧-keys are
+  // command-mode (a cell is selected and you're NOT editing it); ⌘-keys are global.
+  const sel = selectedId;
+  const cmds = [
+    { label: 'Run stale cells', key: '⌘↵', run: runAll },
+    { label: 'Command palette', key: '⌘K', run: openPalette },
+    { label: 'Search docs…', key: '⌘⇧K', run: openDocs },
+    { label: 'Toggle agent panel', key: '⌘⇧A', run: toggleAgent },
+    { label: 'Toggle controls palette', key: '⌘⇧F', run: togglePalette },
+    { label: 'Undo', key: '⌘Z', run: undoNb },
+    { label: 'Redo', key: '⌘⇧Z', run: redoNb },
+    { label: 'Add code cell below', key: 'b', run: () => addCell(sel || '', 'code') },
+    { label: 'Add code cell above', key: 'a', run: () => addCell(sel || '', 'code', true) },
+    { label: 'Add markdown cell', run: () => addCell(sel || '', 'md') },
+    { label: 'Edit selected cell', key: '↵', run: () => { if (sel) enterEdit(sel); } },
+    { label: 'Delete selected cell', key: 'd d', run: () => { if (sel) delCell(sel); } },
+    { label: 'Move selected cell up', key: '⇧↑', run: () => { if (sel) moveCell(sel, 'up'); } },
+    { label: 'Move selected cell down', key: '⇧↓', run: () => { if (sel) moveCell(sel, 'down'); } },
+    { label: 'Convert selected to markdown', key: 'm', run: () => { if (sel) toggleType(sel, 'md'); } },
+    { label: 'Convert selected to code', key: 'y', run: () => { if (sel) toggleType(sel, 'code'); } },
+    { label: 'Merge selected cell with below', key: '⇧M', run: () => { if (sel) mergeBelow(sel); } },
+    { label: 'Split selected cell at cursor', run: () => { if (sel && editors[sel]) splitCell(sel, editors[sel]); } },
+    { label: 'Rebuild (fresh namespace)', run: resetAll },
+    { label: 'Restart worker', run: restartWorker },
+    { label: 'Reload from disk', run: reload },
+    { label: 'Hide code for all plot cells', run: () => hideAllPlotCode(true) },
+    { label: 'Show code for all plot cells', run: () => hideAllPlotCode(false) },
+    ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
+    { label: 'Settings…', run: openSettings },
+    { label: 'All notebooks', run: () => { location.href = '/'; } },
+  ];
+  cellIds().forEach(id => cmds.push({ tag: 'cell', label: 'Jump to cell: ' + id, run: () => selectCell(id, true) }));
+  return cmds;
+}
+let _cmd = [], _cmdSel = 0;
+const _escc = s => s.replace(/[&<>"]/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[x]));
+function openPalette() {
+  document.getElementById('cmdbg').classList.add('show');
+  const inp = document.getElementById('cmdin'); inp.value = '';
+  inp.oninput = () => renderPaletteList(inp.value);
+  renderPaletteList(''); inp.focus();
+}
+function closePalette() { document.getElementById('cmdbg').classList.remove('show'); }
+function renderPaletteList(filter) {
+  const f = filter.trim().toLowerCase();
+  _cmd = paletteCommands().filter(c => c.label.toLowerCase().includes(f));
+  _cmdSel = 0;
+  document.getElementById('cmdlist').innerHTML = _cmd.map((c, i) => {
+    const right = (c.key ? `<span class="kb">${_escc(c.key)}</span>` : '') + (c.tag ? `<span class="k">${_escc(c.tag)}</span>` : '');
+    return `<li class="${i === 0 ? 'on' : ''}" data-i="${i}"><span>${_escc(c.label)}</span><span class="cright">${right}</span></li>`;
+  }).join('');
+}
+function _paintCmd() {
+  const ul = document.getElementById('cmdlist');
+  [...ul.children].forEach((li, i) => li.classList.toggle('on', i === _cmdSel));
+  const on = ul.children[_cmdSel]; if (on) on.scrollIntoView({ block: 'nearest' });
+}
+function _cmdRun(i) { const c = _cmd[i]; closePalette(); if (c) c.run(); }
+document.getElementById('cmdlist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li) { e.preventDefault(); _cmdRun(+li.dataset.i); } });
+document.getElementById('cmdin').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); _cmdSel = Math.min(_cmdSel + 1, _cmd.length - 1); _paintCmd(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); _cmdSel = Math.max(_cmdSel - 1, 0); _paintCmd(); }
+  else if (e.key === 'Enter') { e.preventDefault(); _cmdRun(_cmdSel); }
+  else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
+});
+document.getElementById('cmdbg').addEventListener('mousedown', e => { if (e.target.id === 'cmdbg') closePalette(); });
+
+// ── Docs search palette (⌘⇧K) — semantic search of the notebook's package docs ──
+let _doc = [], _docSel = 0;
+function openDocs() {
+  document.getElementById('docbg').classList.add('show');
+  const inp = document.getElementById('docin'); inp.value = ''; _doc = []; _docSel = 0;
+  document.getElementById('doclist').innerHTML = '<li class="dochint">Describe an API in plain words — e.g. “draw a heatmap”, “group rows and aggregate”.</li>';
+  inp.oninput = _docSearch; inp.focus();
+}
+function closeDocs() { document.getElementById('docbg').classList.remove('show'); }
+const _docSearch = debounce(async () => {
+  const q = document.getElementById('docin').value.trim();
+  const ul = document.getElementById('doclist');
+  if (!q) { ul.innerHTML = '<li class="dochint">Describe an API in plain words…</li>'; _doc = []; return; }
+  ul.innerHTML = '<li class="dochint">Searching…</li>';
+  let res = [];
+  try { const r = await api('GET', '/api/docsearch?q=' + encodeURIComponent(q)); res = (r && r.results) || []; } catch (_) {}
+  _doc = res; _docSel = 0; _renderDocs();
+}, 200);
+function _renderDocs() {
+  const ul = document.getElementById('doclist');
+  if (!_doc.length) { ul.innerHTML = '<li class="docempty">No matches — try different words.</li>'; document.getElementById('docdetail').innerHTML = ''; return; }
+  ul.innerHTML = _doc.map((r, i) =>
+    `<li class="${i === _docSel ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>` +
+    `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span></span></li>`).join('');
+  _renderDetail();
+}
+// Full docstring of the highlighted result — the "show me the details" pane.
+function _renderDetail() {
+  const r = _doc[_docSel], d = document.getElementById('docdetail');
+  if (!r) { d.innerHTML = ''; return; }
+  d.innerHTML = `<h4>${_escc(r.module)}.${_escc(r.name)}</h4>` +
+    `<pre>${_escc(String(r.doc || '').trim() || 'No docstring.')}</pre>` +
+    `<div class="hint">↵ insert name · double-click a result · esc to close</div>`;
+  d.scrollTop = 0;
+}
+function _paintDocs() {
+  const ul = document.getElementById('doclist');
+  [...ul.children].forEach((li, i) => li.classList.toggle('on', i === _docSel));
+  const on = ul.children[_docSel]; if (on) on.scrollIntoView({ block: 'nearest' });
+  _renderDetail();
+}
+// Pick a result → insert the bare name at the selected cell's cursor, else copy it.
+function _docPick(i) {
+  const r = _doc[i]; if (!r) return;
+  closeDocs();
+  const ed = editors[selectedId];
+  if (ed) { ed.replaceSelection(r.name); ed.focus(); }
+  else if (navigator.clipboard) { navigator.clipboard.writeText(r.module + '.' + r.name); }
+}
+// Click selects (shows the docstring); double-click / Enter inserts.
+document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _docSel = +li.dataset.i; _paintDocs(); document.getElementById('docin').focus(); } });
+document.getElementById('doclist').addEventListener('dblclick', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) _docPick(+li.dataset.i); });
+document.getElementById('docin').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); _docSel = Math.min(_docSel + 1, _doc.length - 1); _paintDocs(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); _docSel = Math.max(_docSel - 1, 0); _paintDocs(); }
+  else if (e.key === 'Enter') { e.preventDefault(); _docPick(_docSel); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeDocs(); }
+});
+document.getElementById('docbg').addEventListener('mousedown', e => { if (e.target.id === 'docbg') closeDocs(); });
+
+// Global ⌘/Ctrl shortcuts (work everywhere, including inside the editor — CodeMirror
+// doesn't bind these). Mirrored in the command palette's shortcut hints.
+document.addEventListener('keydown', e => {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); e.shiftKey ? openDocs() : openPalette(); }
+  else if (mod && e.key === 'Enter') { e.preventDefault(); runAll(); }                       // ⌘↵  run stale
+  else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
+  else if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); togglePalette(); } // ⌘⇧F controls
+});
+
+// ── Collapsible long outputs + stale-count badge ──────────────────────────────
+function collapseOutputs(root) {
+  (root || document).querySelectorAll('.cell .output').forEach(out => {
+    const nx = out.nextElementSibling;
+    if (nx && nx.classList.contains('outmore')) nx.remove();
+    out.classList.remove('clip');
+    // Figures (plots) show in full — only clip tall *text* dumps (long arrays, dataframe
+    // prints), which are the ones that actually benefit from a "show more" fold.
+    const isFigure = !!out.querySelector('img, svg, canvas');
+    if (!isFigure && out.scrollHeight > 480) {          // tall text output → clip + reveal toggle
+      out.classList.add('clip');
+      const btn = document.createElement('button'); btn.className = 'outmore'; btn.textContent = '⌄ show more';
+      btn.onclick = () => { const c = out.classList.toggle('clip'); btn.textContent = c ? '⌄ show more' : '⌃ show less'; };
+      out.after(btn);
+    }
+  });
+}
+function updateStaleBadge(state) {
+  const n = ((state && state.cells) || []).filter(c => c.kind === 'code' && (c.state === 'stale' || c.state === 'edited')).length;
+  const b = document.getElementById('runstale');
+  if (b) { b.textContent = `▶ Run stale (${n})`; b.style.display = n ? '' : 'none'; }   // contextual: only when work is pending
+}
+
+// ── Agent chat ────────────────────────────────────────────────────────────────
+// Consumer of Kaimon's agent service (see Kaimon/AGENT_SESSION_SERVICE_PLAN.md):
+// send a turn → POST /api/<id>/chat; the agent's streamed events arrive over SSE as
+// "agent:<json>" envelopes ({kind, turn, data}) and the agent edits cells via the
+// slate.* tools (so the cells update through the normal SSE path).
+let agentMsgs = [];   // {role:'user'|'assistant'|'tool'|'err', text, done?}
+let agentWorking = false, agentT0 = 0, _agentTick = null, _stopArmed = false;
+let _chatTarget = null;   // per-cell ✨: chat turns scoped to this cell id (+ its dep cone)
+function toggleAgent() {
+  const p = document.getElementById('agentpanel'); p.classList.toggle('open');
+  const open = p.classList.contains('open');
+  document.body.classList.toggle('agent-open', open);   // slide cells left of the panel
+  if (open) { document.getElementById('apin').focus(); setWorking(agentWorking); }
+}
+// Show/hide the agent's streamed thinking (.apmsg.think) — a persisted view preference.
+// Pure CSS class toggle on the panel; the think bubbles stay in the transcript, just hidden.
+function applyThinkPref() {
+  const p = document.getElementById('agentpanel');
+  if (p) p.classList.toggle('hide-think', localStorage.getItem('slateHideThink') === '1');
+}
+function toggleThink() {
+  const hidden = localStorage.getItem('slateHideThink') === '1';
+  localStorage.setItem('slateHideThink', hidden ? '0' : '1');
+  applyThinkPref();
+}
+applyThinkPref();   // apply saved preference at load (before the panel is first opened)
+// Per-cell ✨ — scope chat turns to a cell; the server sends its source/output + upstream
+// dependency cone to the agent. Persists until cleared, so follow-ups stay focused.
+function askCell(id) {
+  _chatTarget = id;
+  document.getElementById('agentpanel').classList.contains('open') || toggleAgent();
+  _updateChatTarget();
+  document.getElementById('apin').focus();
+}
+function clearChatTarget() { _chatTarget = null; _updateChatTarget(); }
+function _updateChatTarget() {
+  const el = document.getElementById('chattarget'); if (!el) return;
+  if (_chatTarget) {
+    el.style.display = '';
+    el.innerHTML = '↳ focused on cell <b>' + _esca(_chatTarget) + '</b><span class="x" onclick="clearChatTarget()" title="unfocus">✕</span>';
+  } else { el.style.display = 'none'; el.innerHTML = ''; }
+}
+// Drive the breathing "working" indicator + elapsed timer. Pulses the closed
+// pane's 💬 button so activity is visible even when the panel isn't open.
+function setWorking(on) {
+  if (on && !_agentTick) _agentTick = setInterval(renderAgentMsgs, 1000);
+  if (!on && _agentTick) { clearInterval(_agentTick); _agentTick = null; }
+  if (on && !agentWorking) agentT0 = Date.now();
+  if (!on) _stopArmed = false;     // turn ended → reset STOP escalation
+  agentWorking = on;
+  const b = document.getElementById('agentbtn');
+  const open = document.getElementById('agentpanel').classList.contains('open');
+  if (b) b.classList.toggle('pulse', on && !open);
+  renderAgentMsgs();
+}
+const _esca = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+// Deterministic hue per crew label so each agent gets a stable lane color.
+function _crewHue(name) { let h = 0; for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
+// A small colored chip naming the speaking crew member (omitted for the solo agent).
+function _crewBadge(crew) {
+  if (!crew) return '';
+  const h = _crewHue(crew);
+  return `<span class="crewbadge" style="--ch:${h}">${_esca(crew)}</span>`;
+}
+// Turn a raw tool identifier (e.g. "mcp__kaimon__slate_add_cell") into a friendly,
+// icon-prefixed label for the chat. Known tools get a hand-picked icon + name; any
+// other tool falls back to its prefix-stripped, de-underscored form.
+const _TOOL_LABEL = {
+  slate_read:'📖 read notebook', slate_add_cell:'➕ add cell', slate_edit_cell:'✏️ edit cell',
+  slate_run:'▶ run cell', slate_delete_cell:'🗑 delete cell', slate_view:'🖼 view figure',
+  slate_search_docs:'🔎 search docs', slate_index_docs:'📇 index docs',
+  slate_acquire_floor:'🔒 acquire floor', slate_release_floor:'🔓 release floor',
+  slate_list:'📚 list notebooks', slate_open:'📂 open notebook', slate_close:'📕 close notebook',
+  ex:'λ eval', qdrant_search_code:'🔎 search code', goto_definition:'↪ goto def',
+  search_methods:'🔎 search methods', format_code:'✨ format', run_tests:'✅ run tests',
+  Read:'📄 read file', Edit:'✏️ edit file', Write:'📝 write file', Bash:'⌨ shell',
+  Grep:'🔎 grep', Glob:'🔎 glob', TodoWrite:'📋 todo', WebFetch:'🌐 fetch', WebSearch:'🌐 web',
+};
+function _prettyTool(name) {
+  let s = String(name || 'tool').replace(/^mcp__[a-z0-9_]+__/i, '');   // drop the MCP server prefix
+  if (_TOOL_LABEL[s]) return _TOOL_LABEL[s];
+  // Already-friendly title (has a space / capital) → keep as-is; else de-snake_case it.
+  if (/[ A-Z]/.test(s) && !s.includes('_')) return s;
+  return s.replace(/_/g, ' ');
+}
+function renderAgentMsgs() {
+  const el = document.getElementById('apmsgs');
+  let html = agentMsgs.map(m => {
+    const lane = m.crew ? ` lane` : '';
+    const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
+    return (
+      m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
+    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}</div>`
+    :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
+  }).join('');
+  if (agentWorking) {
+    const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
+    html += `<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` +
+      `<button class="apstop" style="margin-left:10px;cursor:pointer" onclick="agentStop()">${_stopArmed ? '⛔ Force stop' : '⏹ Stop'}</button></div>`;
+  }
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+}
+// Replay the buffered conversation after a page reload (in-memory agentMsgs is
+// gone, but the server kept every relayed envelope). Idempotent — clears first.
+async function loadAgentLog() {
+  try {
+    const r = await api('GET', '/api/agent-log');
+    if (!r || !r.events || !r.events.length) return;
+    agentMsgs = []; setWorking(false);
+    for (const line of r.events) { try { agentEvent(JSON.parse(line)); } catch (_) {} }
+  } catch (_) {}
+}
+const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
+// A centered, dim system line in the transcript (e.g. "⚙ model → … applies next message").
+function _agentNote(text) { agentMsgs.push({ role: 'note', text }); renderAgentMsgs(); }
+// STOP escalates: first press interrupts the in-flight turn (graceful); if the agent
+// is wedged and still working, a second press hard-kills it (terminates the process,
+// clears the agent — the next message spawns a fresh one).
+async function agentStop() {
+  if (!_stopArmed) {
+    _stopArmed = true; agentStatus('stopping…'); renderAgentMsgs();
+    try { await api('POST', '/api/chat-interrupt', {}); } catch (_) {}
+    return;
+  }
+  agentStatus('killing…');
+  try { await api('POST', '/api/chat-kill', {}); } catch (_) {}
+  setWorking(false); agentStatus('stopped');
+  agentMsgs.push({ role: 'err', text: '⛔ agent stopped' }); renderAgentMsgs();
+}
+// Wipe the whole conversation (memory + disk) and stop the agent. The next message
+// starts fresh on the current model/permission settings.
+async function clearChat() {
+  if (!await confirmDark("Clear this notebook's chat history and stop the agent?", 'Clear', 'danger')) return;
+  try { await api('POST', '/api/chat-clear', {}); } catch (_) {}
+  agentMsgs = []; setWorking(false); agentStatus(''); renderAgentMsgs();
+}
+async function agentSend() {
+  const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
+  inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
+  try {
+    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: agentModel(), permission: agentPerm() });
+    if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
+  } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); agentStatus(''); setWorking(false); }
+}
+// Map a Kaimon agent event ({kind,turn,data}) — shapes per AGENT_SESSION_SERVICE_STATUS.md
+// — onto the chat transcript. Text streams as complete messages (not token deltas).
+// Tolerant-extract the field being written from a (possibly truncated) partial-JSON
+// args blob — the first of these keys present, decoding string escapes as far as the
+// buffer goes. Lets the agent's code render as it streams in.
+function _extractCode(s) {
+  const ESC = { n: '\n', t: '\t', r: '\r', '"': '"', '\\': '\\', '/': '/' };
+  for (const key of ['source', 'code', 'new_string', 'content', 'command', 'text']) {
+    const i = s.indexOf('"' + key + '"'); if (i < 0) continue;
+    let j = s.indexOf(':', i + key.length + 1); if (j < 0) continue;
+    j++; while (j < s.length && /\s/.test(s[j])) j++;
+    if (s[j] !== '"') continue;
+    let out = '', p = j + 1;
+    while (p < s.length) {
+      const ch = s[p];
+      if (ch === '\\') { const n = s[p + 1]; out += n in ESC ? ESC[n] : (n || ''); p += 2; }
+      else if (ch === '"') break;
+      else { out += ch; p++; }
+    }
+    return out;
+  }
+  return '';
+}
+function agentEvent(env) {
+  if (!env) return;
+  const d = env.data || {};
+  const k = env.kind;
+  const crew = env.crew || '';   // crew label of the speaking agent ('' = solo/default)
+  if (k === 'assistant_text' || k === 'thought') {
+    // Streaming: delta:true chunks APPEND live; the final delta:false copy REPLACES
+    // the streamed block (self-healing any dropped delta). Non-streaming services
+    // send only complete blocks → the else branch (back-compat).
+    const role = k === 'thought' ? 'think' : 'assistant';
+    const txt = (d.content && d.content.text) || '';
+    let last = agentMsgs[agentMsgs.length - 1];
+    const openSame = last && last.role === role && !last.done;
+    if (d.delta === true) {
+      if (!txt) return;
+      if (!openSame) { last = { role, text: '', streamed: true, crew }; agentMsgs.push(last); }
+      last.text += txt; last.streamed = true;
+    } else if (openSame && last.streamed) {
+      last.text = txt; last.done = true;                 // authoritative copy
+    } else {
+      if (!txt) return;
+      agentMsgs.push({ role, text: txt, done: true, crew });
+    }
+  } else if (k === 'tool_use') {
+    // Upsert by toolCallId — `tool_use` fires at call-begin (in_progress) and may
+    // be re-emitted; don't duplicate. Authoritative input (if present) wins.
+    const c = d.call || {};
+    let tm = agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
+    if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
+    tm.title = _prettyTool(c.title || c.kind || tm.title || 'tool');
+    tm.text = tm.title;
+    if (c.rawInput) tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code;
+  } else if (k === 'tool_input_delta') {
+    // The call's arguments stream as raw JSON fragments — concatenate, then
+    // tolerant-extract the field being written (source/code/new_string/…) so the
+    // agent's code "types in" live. (Liveness only; not buffered for replay.)
+    const tm = agentMsgs.find(m => m.role === 'tool' && m.id === d.toolCallId);
+    if (tm) { tm.inputBuf = (tm.inputBuf || '') + (d.partialJson || ''); tm.code = _extractCode(tm.inputBuf); }
+  } else if (k === 'tool_result') {
+    // Every tool_result is terminal — Kaimon rides the authoritative input as a 2nd
+    // `tool_use` (rawInput), not an in_progress tool_result (consumed in tool_use
+    // above). So finalize the call and surface any image blocks.
+    const u = d.update || {};
+    const tm = agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
+    if (tm) { tm.done = true; if (u.status === 'failed') tm.role = 'err'; }
+    for (const b of (u.content || [])) {
+      const inner = b && b.content;
+      if (inner && inner.type === 'image' && inner.data)
+        agentMsgs.push({ role: 'img', src: `data:${inner.mimeType || 'image/png'};base64,${inner.data}`, crew });
+    }
+  } else if (k === 'plan') {
+    const lines = (d.entries || []).map(e => `• ${e.content}${e.status === 'completed' ? ' ✓' : ''}`).join('\n');
+    if (lines) agentMsgs.push({ role: 'tool', text: '📋 plan\n' + lines, done: true, crew });
+  } else if (k === 'status') {
+    agentStatus(d.status === 'working' ? 'working…' : (d.status || ''));
+    return;
+  } else if (k === 'turn_started') {
+    agentStatus('working…'); setWorking(true); return;
+  } else if (k === 'result') {
+    const last = agentMsgs[agentMsgs.length - 1]; if (last && last.role === 'assistant') last.done = true;
+    agentStatus(''); setWorking(false);
+  } else if (k === 'error') {
+    agentMsgs.push({ role: 'err', text: d.message || 'error' }); agentStatus(''); setWorking(false);
+  } else { return; }
+  renderAgentMsgs();
+}
+// ── @id mention autocomplete (chat input) ─────────────────────────────────────
+// Typing `@` in the chat offers the notebook's cell ids; picking one inserts `@id `.
+// The server expands each @id mention into that cell's source + result (_mention_context),
+// so you can point the agent at specific cells without it surveying the whole notebook.
+let _mention = { open: false, items: [], sel: 0, start: -1 };
+function _mentionBox() {
+  let b = document.getElementById('mentionbox');
+  if (!b) { b = document.createElement('div'); b.id = 'mentionbox'; b.className = 'mentionbox'; document.body.appendChild(b);
+    b.addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li) { e.preventDefault(); _insertMention(+li.dataset.i); } }); }
+  return b;
+}
+function _closeMention() { _mention.open = false; const b = document.getElementById('mentionbox'); if (b) b.style.display = 'none'; }
+// The `@word` token immediately left of the caret (no whitespace), or null.
+function _mentionToken(ta) {
+  const m = ta.value.slice(0, ta.selectionStart).match(/@([A-Za-z0-9_]*)$/);
+  return m ? { start: ta.selectionStart - m[0].length, prefix: m[1] } : null;
+}
+function updateMention() {
+  const ta = document.getElementById('apin'), tok = _mentionToken(ta), box = _mentionBox();
+  if (!tok) { _closeMention(); return; }
+  const p = tok.prefix.toLowerCase();
+  const ids = cellIds().filter(id => id.toLowerCase().startsWith(p)).slice(0, 8);
+  if (!ids.length) { _closeMention(); return; }
+  _mention = { open: true, items: ids, sel: 0, start: tok.start };
+  _paintMention();
+  const r = ta.getBoundingClientRect();
+  box.style.left = r.left + 'px'; box.style.width = r.width + 'px';
+  box.style.display = 'block';
+  box.style.top = (r.top - box.offsetHeight - 6) + 'px';   // float just above the textarea
+}
+function _paintMention() {
+  _mentionBox().innerHTML = '<ul>' + _mention.items.map((id, i) =>
+    `<li class="${i === _mention.sel ? 'on' : ''}" data-i="${i}">@${_escc(id)}</li>`).join('') + '</ul>';
+}
+function _insertMention(i) {
+  const ta = document.getElementById('apin'), id = _mention.items[i]; if (!id) return;
+  const v = ta.value, c = ta.selectionStart;
+  ta.value = v.slice(0, _mention.start) + '@' + id + ' ' + v.slice(c);
+  const np = _mention.start + id.length + 2;
+  _closeMention(); ta.focus(); ta.setSelectionRange(np, np);
+}
+document.getElementById('apin').addEventListener('input', updateMention);
+document.getElementById('apin').addEventListener('blur', () => setTimeout(_closeMention, 150));
+document.getElementById('apin').addEventListener('keydown', e => {
+  if (_mention.open) {                                  // mention menu intercepts nav keys
+    if (e.key === 'ArrowDown') { e.preventDefault(); _mention.sel = Math.min(_mention.sel + 1, _mention.items.length - 1); _paintMention(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); _mention.sel = Math.max(_mention.sel - 1, 0); _paintMention(); return; }
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); _insertMention(_mention.sel); return; }
+    if (e.key === 'Escape') { e.preventDefault(); _closeMention(); return; }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSend(); }
+});
+
+// ── History (time machine) ──────────────────────────────────────────────────
+// Durable, append-only edit history. The rail lists every checkpoint (👤 human /
+// 🤖 agent / 📝 external / ↩ restore / 🌱 open / · auto-draft); selecting one shows
+// a line-diff of that step against its parent, and you can restore (non-destructive)
+// or ▶ replay the whole buildup. Sources are fetched lazily and cached by hash.
+let histEntries = [], histCurrent = '', histSel = '', histReplaying = false;
+const _histSrcCache = {};
+const _histIcon = { browser:'👤', agent:'🤖', external:'📝', restore:'↩', open:'🌱', auto:'·' };
+function _reltime(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+// ── Worker log ────────────────────────────────────────────────────────────────
+// Tail the gate worker's stdout/stderr — what the kernel is doing when it evaluates.
+let _logPoll = null, _logTail = true;
+function toggleLog() {
+  const p = document.getElementById('logpanel'); p.classList.toggle('open');
+  if (p.classList.contains('open')) { loadLog(); _logPoll = _logPoll || setInterval(loadLog, 1500); }
+  else if (_logPoll) { clearInterval(_logPoll); _logPoll = null; }
+}
+function toggleTail() {
+  _logTail = !_logTail;
+  document.getElementById('logtail').classList.toggle('stop', !_logTail);
+  if (_logTail) { const b = document.getElementById('logbox'); b.scrollTop = b.scrollHeight; }
+}
+async function loadLog() {
+  try {
+    const r = await api('GET', '/api/worker-log'); if (!r) return;
+    const box = document.getElementById('logbox');
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.textContent = r.log || '(empty)';
+    const w = r.worker || {};
+    document.getElementById('logstatus').textContent =
+      w.kind === 'gate' ? `worker :${w.port} · ${w.connected ? 'connected' : 'down'}` : (w.kind || '');
+    if (_logTail || atBottom) box.scrollTop = box.scrollHeight;
+  } catch (_) {}
+}
+
+// ── Packages panel ────────────────────────────────────────────────────────────
+// List + add/remove the notebook project's dependencies (the worker's active env).
+// Add/remove installs/uninstalls then re-runs cells, so a `using` lights up live.
+let _pkgManageable = false;
+function togglePackages() {
+  const p = document.getElementById('pkgpanel'); p.classList.toggle('open');
+  if (p.classList.contains('open')) loadPackages();
+}
+async function loadPackages() {
+  const r = await api('GET', '/api/packages') || {};
+  _pkgManageable = !!r.manageable;
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const nb = (r.notebook || []).slice().sort(byName);
+  const parent = (r.parent || []).slice().sort(byName);
+  document.getElementById('pkgstatus').textContent =
+    nb.length + ' notebook' + (parent.length ? ' · ' + parent.length + ' from parent' : (r.detached ? ' · detached' : '')) +
+    (_pkgManageable ? '' : ' · read-only (no project)');
+  const inp = document.getElementById('pkgin'); inp.disabled = !_pkgManageable;
+  const row = (p, removable) =>
+    `<div class="pkgrow"><span class="pkgname">${_esc(p.name)}</span><span class="pkgver">${_esc(p.version || '')}</span>` +
+    (removable ? `<button class="cdel" onclick="pkgRm('${_esc(p.name)}')" title="remove">✕</button>` : '') + '</div>';
+  let html = '';
+  html += `<div class="pkggrouphdr">Notebook${r.detached ? ' (detached — all deps)' : ' adds'}</div>`;
+  html += nb.length ? nb.map(p => row(p, _pkgManageable)).join('') : '<div class="phint">No notebook-specific packages yet.</div>';
+  if (parent.length) {
+    html += `<div class="pkggrouphdr">Parent project <span class="pkgpath">${_esc((r.parentPath || '').replace(/^.*\//, ''))}</span></div>`;
+    html += parent.map(p => row(p, false)).join('');
+  }
+  document.getElementById('pkglist').innerHTML = html;
+}
+async function pkgAdd() {
+  if (!_pkgManageable) return;
+  const inp = document.getElementById('pkgin'), name = inp.value.trim(); if (!name) return;
+  if (!await confirmDark('Add package “' + name + '” to this notebook’s project? It is installed (may precompile) and the notebook re-runs.', 'Add')) return;
+  inp.value = ''; document.getElementById('pkgstatus').textContent = 'adding ' + name + '…';
+  const r = await api('POST', '/api/package', { op: 'add', name });
+  if (r && r.ok === false) await alertDark('Add failed:\n' + (r.message || '?'));
+  loadPackages();
+}
+async function pkgRm(name) {
+  if (!await confirmDark('Remove package “' + name + '” from this notebook’s project?', 'Remove', 'danger')) return;
+  document.getElementById('pkgstatus').textContent = 'removing ' + name + '…';
+  const r = await api('POST', '/api/package', { op: 'rm', name });
+  if (r && r.ok === false) await alertDark('Remove failed:\n' + (r.message || '?'));
+  loadPackages();
+}
+document.getElementById('pkgin').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); pkgAdd(); } });
+
+// ── Topbar ☰ overflow menu ──────────────────────────────────────────────────
+function toggleTopMenu(e) { if (e) e.stopPropagation(); document.getElementById('topmenu').classList.toggle('open'); }
+function closeTopMenu() { document.getElementById('topmenu').classList.remove('open'); }
+document.addEventListener('click', e => { if (!e.target.closest('.menuwrap')) closeTopMenu(); });
+
+let _histPoll = null;
+async function toggleHistory() {
+  const p = document.getElementById('histpanel'); p.classList.toggle('open');
+  if (p.classList.contains('open')) {
+    await loadHistory();
+    // Light poll so the rail also reflects the user's own browser edits (which
+    // don't fire SSE). Cheap GET; paused during replay.
+    _histPoll = _histPoll || setInterval(() => { if (!histReplaying) loadHistory(); }, 3000);
+  } else if (_histPoll) { clearInterval(_histPoll); _histPoll = null; }
+}
+async function loadHistory() {
+  const r = await api('GET', '/api/history');
+  histEntries = (r && r.entries) || []; histCurrent = (r && r.current) || '';
+  document.getElementById('histcount').textContent = histEntries.length + ' steps';
+  renderHistList();
+}
+function renderHistList() {
+  const el = document.getElementById('histlist');
+  // newest first
+  el.innerHTML = histEntries.slice().reverse().map(e => {
+    const cur = e.hash === histCurrent ? ' cur' : '', sel = e.hash === histSel ? ' sel' : '';
+    const draft = e.kind === 'draft' ? ' draft' : '';
+    const icon = _histIcon[e.source] || '•';
+    return `<div class="hrow${cur}${sel}${draft}" onclick="histSelect('${e.hash}')">
+      <span class="hsrc">${icon}</span>
+      <span class="hlabel">${_esc(e.label)}${cur ? ' · now' : ''}</span>
+      <span class="htime">${_reltime(e.ts)}</span></div>`;
+  }).join('');
+}
+async function _histSrc(hash) {
+  if (_histSrcCache[hash] != null) return _histSrcCache[hash];
+  const r = await api('GET', '/api/history/' + hash);
+  return (_histSrcCache[hash] = (r && r.source) || '');
+}
+// Minimal LCS line-diff → array of {t:'add'|'del'|'ctx', s}.
+function _lineDiff(a, b) {
+  const A = a.split('\n'), B = b.split('\n'), n = A.length, m = B.length;
+  const C = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    C[i][j] = A[i] === B[j] ? C[i + 1][j + 1] + 1 : Math.max(C[i + 1][j], C[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push({ t: 'ctx', s: A[i] }); i++; j++; }
+    else if (C[i + 1][j] >= C[i][j + 1]) { out.push({ t: 'del', s: A[i] }); i++; }
+    else { out.push({ t: 'add', s: B[j] }); j++; }
+  }
+  while (i < n) out.push({ t: 'del', s: A[i++] });
+  while (j < m) out.push({ t: 'add', s: B[j++] });
+  return out;
+}
+async function histSelect(hash) {
+  histSel = hash; renderHistList();
+  const idx = histEntries.findIndex(e => e.hash === hash);
+  const e = histEntries[idx]; if (!e) return;
+  const cur = await _histSrc(hash);
+  const parent = idx > 0 ? await _histSrc(histEntries[idx - 1].hash) : '';
+  const diff = _lineDiff(parent, cur).map(d =>
+    `<span class="dl ${d.t === 'add' ? 'add' : d.t === 'del' ? 'del' : 'ctx'}">${d.t === 'add' ? '+' : d.t === 'del' ? '-' : ' '} ${_esc(d.s)}</span>`).join('');
+  const isCur = hash === histCurrent;
+  document.getElementById('histprev').innerHTML =
+    `<div class="pvhead"><span>${_histIcon[e.source] || '•'} ${_esc(e.label)}</span>
+       ${isCur ? '<span class="hint">current state</span>'
+               : `<button class="hbtn" onclick="histRestore('${hash}')">↩ Restore this version</button>`}</div>${diff}`;
+}
+async function histRestore(hash) {
+  const st = await api('POST', '/api/history/restore', { hash });
+  if (st && st.cells) { renderAll(st); lastVersion = st.version; }
+  _histSrcCache[hash] = _histSrcCache[hash];          // keep cache
+  await loadHistory(); histSelect(histCurrent);
+}
+async function histReplay() {
+  const btn = document.getElementById('histplay');
+  if (histReplaying) { histReplaying = false; return; }
+  if (!histEntries.length) return;
+  histReplaying = true; btn.textContent = '⏹ Stop'; btn.classList.add('stop');
+  for (const e of histEntries) {
+    if (!histReplaying) break;
+    await histSelect(e.hash);
+    document.querySelector('.hrow.sel')?.scrollIntoView({ block: 'nearest' });
+    await new Promise(r => setTimeout(r, 850));
+  }
+  histReplaying = false; btn.textContent = '▶ Replay'; btn.classList.remove('stop');
+}
+
+// Instant push: the server streams the version over SSE and bumps it only on
+// external (file) changes, so the browser's own edits never trigger a re-render.
+function connectLive() {
+  const es = new EventSource(_apipath('/api/events'));
+  es.onmessage = async (e) => {
+    if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
+    if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // async live update — patch in place
+    const v = parseInt(e.data, 10);
+    if (!isNaN(v) && v !== lastVersion) { lastVersion = v; renderAll(await api('GET', '/api/state')); }
+    // Keep the history rail fresh while it's open (agent turns, external edits).
+    if (document.getElementById('histpanel').classList.contains('open') && !histReplaying) loadHistory();
+  };
+  // EventSource auto-reconnects on error.
+}
+
+// ── Drag-to-host: arrange controls into cells' strips ─────────────────────────
+// Update one or more cells' `controls=` lists (the caller sends each affected
+// cell's *full desired* list). `hostControl` moves a control to a cell at an
+// index (removing it from any prior host); `unhostControl` removes it everywhere.
+const _cellById = id => ((nbState && nbState.cells) || []).find(c => c.id === id);
+// A cell's control layout as columns of names (deep copy, safe to mutate).
+const columnsOf = id => { const c = _cellById(id); return ((c && c.controls) || []).map(col => col.map(s => s.name)); };
+
+// Place `name` into cell `targetId` per a drop `target` ({newCol, colIndex,
+// rowIndex}). A control may live in multiple cells: from the palette (`fromCell`
+// null) it *copies*; dragging an existing grip (`fromCell` set) *moves* it. Within
+// a cell a name stays unique (so dropping where it already is reorders/re-columns).
+// Server drops any empty columns left behind, so we don't prune here.
+async function hostControl(name, targetId, target, fromCell) {
+  const map = {};
+  if (fromCell && fromCell !== targetId) map[fromCell] = columnsOf(fromCell).map(c => c.filter(n => n !== name));
+  const orig = columnsOf(targetId);
+  let row = target.rowIndex;                          // correct for self-removal shift within the target column
+  if (!target.newCol) {
+    const r0 = (orig[target.colIndex] || []).indexOf(name);
+    if (r0 !== -1 && r0 < (row ?? Infinity)) row = (row ?? (orig[target.colIndex] || []).length) - 1;
+  }
+  const cols = orig.map(c => c.filter(n => n !== name));   // remove dragged occurrence(s) in target
+  if (target.newCol) {
+    cols.splice(target.colIndex == null ? cols.length : target.colIndex, 0, [name]);
+  } else {
+    const col = cols[target.colIndex] || (cols[target.colIndex] = []);
+    col.splice(row == null || row > col.length ? col.length : row, 0, name);
+  }
+  map[targetId] = cols;
+  renderAll(await api('POST', '/api/controls', { map }));
+}
+// Remove just this instance (the control in cell `cellId`); other hosts remain.
+async function unhostControl(name, cellId) {
+  if (!cellId) return;
+  renderAll(await api('POST', '/api/controls', { map: { [cellId]: columnsOf(cellId).map(c => c.filter(n => n !== name)) } }));
+}
+// The header 🎛 button opens a picker (checkbox list) of the @bind controls that AFFECT this
+// cell — `transBinduses`: the cell's direct binduses plus those of every cell in its upstream
+// dependency cone (so a downstream plot can host a control whose value reaches it indirectly).
+// Check/uncheck to surface/hide each in the cell's control strip; All / None for the whole set.
+function openControlPicker(id, ev) {
+  if (ev) ev.stopPropagation();
+  const c = _cellById(id), bu = transBinduses(c);
+  if (!bu.length) return;
+  const present = new Set([].concat(...columnsOf(id)));
+  const pop = document.getElementById('ctlpop');
+  pop.dataset.cell = id;
+  pop.innerHTML =
+    '<div class="ctlhead">Controls<span class="ctlquick">' +
+      '<button data-all="1">All</button><button data-all="0">None</button></span></div>' +
+    bu.map(n => `<label class="ctlrow"><input type="checkbox" data-n="${_escc(n)}"${present.has(n) ? ' checked' : ''}>` +
+                `<span>${_escc(n)}</span></label>`).join('');
+  pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.onchange = applyControlPicker);
+  pop.querySelectorAll('.ctlquick button').forEach(b => b.onclick = () => {
+    pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = b.dataset.all === '1');
+    applyControlPicker();
+  });
+  // Anchor below-right of the 🎛 button (clamped to the viewport).
+  const r = (ev && ev.currentTarget ? ev.currentTarget : document.querySelector(`#cell-${id} .autoctl`)).getBoundingClientRect();
+  pop.classList.add('show');
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  pop.style.top = Math.min(r.bottom + 5, window.innerHeight - h - 8) + 'px';
+}
+// Build the cell's control columns from the picker's checked set: drop unchecked *affecting*
+// names, keep any other (manually-placed) controls, append newly-checked ones as a new column.
+// #ctlpop lives outside #nb, so it survives renderAll and stays open for multiple toggles.
+async function applyControlPicker() {
+  const pop = document.getElementById('ctlpop'), id = pop.dataset.cell;
+  const sel = new Set([...pop.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.dataset.n));
+  const bu = new Set(transBinduses(_cellById(id)));
+  let cols = columnsOf(id).map(col => col.filter(n => sel.has(n) || !bu.has(n))).filter(col => col.length);
+  const present = new Set([].concat(...cols));
+  const toAdd = [...sel].filter(n => !present.has(n));
+  if (toAdd.length) cols.push(toAdd);
+  renderAll(await api('POST', '/api/controls', { map: { [id]: cols } }));
+}
+function hideControlPicker() { document.getElementById('ctlpop').classList.remove('show'); }
+// Fold / unfold a cell. Persisted in the .jl (header `collapsed` token) so it travels with the
+// notebook; the server returns fresh state and renderAll reflects it.
+async function toggleCollapse(id) {
+  const c = _cellById(id);
+  renderAll(await api('POST', '/api/collapse/' + id, { collapsed: !(c && c.collapsed) }));
+}
+// Hide / show a code cell's editor (output stays visible). Persisted in the .jl (`hidecode`
+// token) so it travels with the notebook.
+async function toggleHideCode(id) {
+  const c = _cellById(id);
+  renderAll(await api('POST', '/api/hidecode/' + id, { hidden: !(c && c.codeHidden) }));
+}
+// Does this code cell render a plot? An ECharts spec, or a figure (img/svg/canvas) in its output.
+function _cellHasPlot(c) {
+  if (!c || c.kind !== 'code') return false;
+  if (Array.isArray(c.echarts) && c.echarts.length) return true;
+  const el = document.getElementById('cell-' + c.id), out = el && el.querySelector('.output');
+  return !!(out && out.querySelector('img, svg, canvas'));
+}
+// Bulk hide/show the code of every plot cell at once (command palette). One file write per
+// changed cell; only renders once, at the end.
+async function hideAllPlotCode(hidden) {
+  const targets = ((nbState && nbState.cells) || []).filter(_cellHasPlot).filter(c => !!c.codeHidden !== hidden);
+  let last;
+  for (const c of targets) last = await api('POST', '/api/hidecode/' + c.id, { hidden });
+  if (last) renderAll(last);
+}
+// Insertion row within a column element, by cursor y (before the first control
+// whose midpoint is below the cursor; else at the end).
+function rowInCol(col, y) {
+  const items = [...col.querySelectorAll('.control')];
+  for (let j = 0; j < items.length; j++) {
+    const r = items[j].getBoundingClientRect();
+    if (y < r.top + r.height / 2) return j;
+  }
+  return items.length;
+}
+// Resolve the drop element under the cursor to a layout target. A `.coldrop` →
+// new column at its index; a `.ccol` → into that column at a row; otherwise append
+// a new column at the end.
+function dropTargetFor(el, cell, y) {
+  const dz = el.closest('.coldrop');
+  if (dz) return { newCol: true, colIndex: +dz.dataset.colindex };
+  const col = el.closest('.ccol');
+  if (col) return { newCol: false, colIndex: +col.dataset.colindex, rowIndex: rowInCol(col, y) };
+  return { newCol: true, colIndex: columnsOf(cell.dataset.cid).length };
+}
+
+// Drag-to-reorder cells (⠿ handle) AND drag-to-host controls (palette chip / strip
+// grip) share these handlers. `dragId` = a cell being reordered; `ctrlDrag` = a
+// control name being hosted. Only ⠿/grip/chip are draggable, so editor text and
+// sliders stay interactive.
+// ctrlDrag = { name, fromCell } — fromCell null when sourced from the palette
+// (copy), or the cell id when dragging an existing strip control's grip (move).
+let dragId = null, dropTarget = null, ctrlDrag = null;
+const nbEl = document.getElementById('nb');
+// A single purple insertion line, floated in the gap where the cell will land.
+let dropline = null;
+function _dropline() {
+  if (!dropline) { dropline = document.createElement('div'); dropline.className = 'dropline'; }
+  if (!dropline.isConnected) nbEl.appendChild(dropline);   // renderAll wipes #nb — re-attach
+  return dropline;
+}
+function clearDrop() { if (dropline) dropline.style.display = 'none'; }
+function clearCtrlDrop() { nbEl.querySelectorAll('.cdrop, .cdup').forEach(x => x.classList.remove('cdrop', 'cdup')); }
+function startControlDrag(e, name, fromCell) {
+  ctrlDrag = { name, fromCell: fromCell || null };
+  e.dataTransfer.effectAllowed = 'copyMove';   // allow either dropEffect, so duplicate (move) drops aren't rejected
+  try { e.dataTransfer.setData('text/plain', name); } catch (_) {}
+  // Reveal drop-zones on the NEXT tick: toggling `cdnd` now reflows the strip the
+  // grip lives in, and a source element that moves during `dragstart` makes Chrome
+  // abort the drag. Deferring lets the drag lock in first.
+  setTimeout(() => { if (ctrlDrag) document.body.classList.add('cdnd'); }, 0);
+}
+nbEl.addEventListener('dragstart', e => {
+  const grip = e.target.closest('.cgrip');
+  if (grip) { startControlDrag(e, grip.dataset.name, grip.closest('.cell').dataset.cid); return; }  // existing → move
+  const h = e.target.closest('.drag');
+  if (!h) { e.preventDefault(); return; }
+  dragId = h.closest('.cell').dataset.cid;
+  e.dataTransfer.effectAllowed = 'move';
+});
+nbEl.addEventListener('dragover', e => {
+  if (ctrlDrag) {                                  // hosting a control
+    clearCtrlDrop();
+    const cell = e.target.closest('.cell.code');
+    if (!cell) return;
+    e.preventDefault();
+    // If this cell already hosts the control, dropping just repositions it (no
+    // duplicate) — flag the existing instance so that's visible, and signal "move".
+    const dup = cell.querySelector('.control[data-cname="' + ctrlDrag.name + '"]');
+    e.dataTransfer.dropEffect = (ctrlDrag.fromCell || dup) ? 'move' : 'copy';
+    if (dup) dup.classList.add('cdup');
+    const dz = e.target.closest('.coldrop'), col = e.target.closest('.ccol');
+    if (dz) dz.classList.add('cdrop');
+    else if (col) col.classList.add('cdrop');
+    else { const last = cell.querySelector('.controls .coldrop:last-child'); if (last) last.classList.add('cdrop'); }
+    return;
+  }
+  e.preventDefault();                              // reordering a cell
+  if (!dragId) { clearDrop(); dropTarget = null; return; }
+  // Pick the insertion point by cursor Y across all cells, so releasing in the
+  // gap (right on the drop line) still lands — not only when over a cell.
+  let target = null, before = true;
+  for (const c of nbEl.querySelectorAll('.cell')) {
+    if (c.dataset.cid === dragId) continue;
+    const r = c.getBoundingClientRect();
+    if (e.clientY < r.top + r.height / 2) { target = c; before = true; break; }
+    target = c; before = false;                    // past this cell's midpoint → after it
+  }
+  if (!target) { clearDrop(); dropTarget = null; return; }
+  const dl = _dropline();                                  // float the line mid-gap, above or below the target
+  dl.style.top = ((before ? target.offsetTop - 7 : target.offsetTop + target.offsetHeight + 7) - 1) + 'px';
+  dl.style.display = 'block';
+  dropTarget = { id: target.dataset.cid, before };
+});
+nbEl.addEventListener('drop', e => {
+  e.preventDefault();
+  if (ctrlDrag) {
+    const cell = e.target.closest('.cell.code'), { name, fromCell } = ctrlDrag, el = e.target;
+    ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop();
+    if (cell) hostControl(name, cell.dataset.cid, dropTargetFor(el, cell, e.clientY), fromCell);
+    return;
+  }
+  clearDrop();
+  const dt = dropTarget, id = dragId;
+  dragId = dropTarget = null;
+  if (dt && id) moveCellRel(id, dt.id, dt.before);
+});
+nbEl.addEventListener('dragend', () => { clearDrop(); clearCtrlDrop(); dragId = dropTarget = ctrlDrag = null; document.body.classList.remove('cdnd'); });
+// ✕ on a strip control → remove this instance (other hosts, if any, remain).
+nbEl.addEventListener('click', e => {
+  const del = e.target.closest('.cdel');
+  if (del) { e.stopPropagation(); unhostControl(del.dataset.name, del.closest('.cell').dataset.cid); }
+});
+
+// ⌘Z / ⌘⇧Z notebook undo/redo — but defer to CodeMirror's text undo when an editor is focused.
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    if (document.activeElement && document.activeElement.closest('.CodeMirror')) return;
+    e.preventDefault();
+    e.shiftKey ? redoNb() : undoNb();
+  }
+});
+
+// (Live-update debounce now lives in the Settings modal — see openSettings.)
+
+// Palette chips: click → jump to defining cell; drag → host into a cell's strip.
+const paletteList = document.getElementById('palette-list');
+paletteList.onclick = e => {
+  const ch = e.target.closest('.chip'); if (!ch) return;
+  const el = document.getElementById('cell-' + ch.dataset.def);
+  if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); editSource(ch.dataset.def, 'julia'); }
+};
+paletteList.addEventListener('dragstart', e => {
+  const chip = e.target.closest('.chip'); if (!chip) return;
+  startControlDrag(e, chip.dataset.pname);
+});
+// Drag a control out of a strip and drop it on the palette to remove that instance.
+paletteList.addEventListener('dragover', e => { if (ctrlDrag && ctrlDrag.fromCell) { e.preventDefault(); paletteList.classList.add('premove'); } });
+paletteList.addEventListener('dragleave', e => { if (!paletteList.contains(e.relatedTarget)) paletteList.classList.remove('premove'); });
+paletteList.addEventListener('drop', e => {
+  if (!ctrlDrag || !ctrlDrag.fromCell) return;
+  e.preventDefault();
+  const { name, fromCell } = ctrlDrag;
+  ctrlDrag = null; document.body.classList.remove('cdnd'); paletteList.classList.remove('premove'); clearCtrlDrop();
+  unhostControl(name, fromCell);
+});
+// A control drag can end outside the notebook (e.g. palette-sourced) — clear here.
+document.addEventListener('dragend', () => {
+  if (ctrlDrag !== null) { ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop(); }
+});
+
+// Populate the notebook switcher from the hub registry (a hub-level route, so
+// fetched raw — not through the nb-scoped `api()`).
+async function loadSwitcher() {
+  try {
+    const nbs = await (await fetch('/api/notebooks')).json();
+    const sel = document.getElementById('nbswitch');
+    sel.innerHTML = nbs.map(n => `<option value="${n.id}" ${n.id === NB_ID ? 'selected' : ''}>${n.title}</option>`).join('');
+    sel.onchange = () => { if (sel.value !== NB_ID) location.href = '/n/' + sel.value; };
+  } catch (e) {}
+}
+
+if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
+loadSwitcher();
+reload();
+// Replay the buffered agent conversation first, then start live SSE — so a live
+// event can't be wiped by the replay's clear.
+loadAgentLog().finally(connectLive);
