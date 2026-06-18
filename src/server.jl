@@ -96,6 +96,8 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     nbid = isempty(id) ? rid : String(id)
     r = parse_report(src; id = rid, title = base)
     build_dependencies!(r)
+    _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
+                                                          # tick reading it must not "revert" to it
     # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
     # (hydrate), so a heavy bundle never blocks the open. If it embeds a frozen render that's
     # shown meanwhile; otherwise the cells show un-run until they go live. This is the single
@@ -243,8 +245,8 @@ _is_server_write(report_id, h::UInt64) =
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
 function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
     s = serialize_report(nb.report)
-    write(nb.path, s)
-    _note_server_write!(nb.report.id, hash(s))   # so the watcher won't revert it
+    _note_server_write!(nb.report.id, hash(s))   # register BEFORE writing: a watcher tick fired by
+    write(nb.path, s)                             # this write must recognize it as OURS, not external
     nb.version += 1                               # every in-app commit advances the version (CAS basis)
     _history!(nb; source = source)
     return nb
