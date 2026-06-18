@@ -200,7 +200,11 @@ async function helpLookup(name) {
   try { hr = await api('GET', '/api/help?name=' + encodeURIComponent(name)); } catch (_) { return; }
   if (!hr || !hr.name) return;
   if (!hr.docHtml && !(hr.exports && hr.exports.length)) {
-    const inp = document.getElementById('docin'); inp.value = name.replace(/^.*\./, ''); _helpStack = []; _docSearch(); return;
+    // Unresolvable (e.g. a name not loaded in this env) — show a navigable "not found"
+    // page instead of hijacking the search box, so the user's state is preserved.
+    _helpStack.push({ name, module: '', kind: 'unknown', exports: [], _enriched: true,
+      docHtml: `<div class="dim">No documentation found for <code>${_escc(name)}</code> — it may not be loaded in this notebook's environment.</div>` });
+    _renderDetail(); return;
   }
   _helpStack.push({ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind, _enriched: true });
   _renderDetail();
@@ -232,9 +236,16 @@ document.getElementById('docin').addEventListener('keydown', e => {
   if (e.key === 'ArrowDown') { e.preventDefault(); _docSel = Math.min(_docSel + 1, _doc.length - 1); _paintDocs(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); _docSel = Math.max(_docSel - 1, 0); _paintDocs(); }
   else if (e.key === 'Enter') { e.preventDefault(); _docPick(); }
-  else if (e.key === 'Escape') { e.preventDefault(); _helpStack.length ? helpBack() : closeDocs(); }
 });
 document.getElementById('docbg').addEventListener('mousedown', e => { if (e.target.id === 'docbg') closeDocs(); });
+// Esc anywhere in the open docs palette: step back a drill, else close. (Bound on the
+// document so it works after focus leaves the search box — e.g. clicking the detail pane.)
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('docbg').classList.contains('show')) {
+    e.preventDefault(); e.stopPropagation();
+    _helpStack.length ? helpBack() : closeDocs();
+  }
+}, true);
 
 // Global ⌘/Ctrl shortcuts (work everywhere, including inside the editor — CodeMirror
 // doesn't bind these). Mirrored in the command palette's shortcut hints.
