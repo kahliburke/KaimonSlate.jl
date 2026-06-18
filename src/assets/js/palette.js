@@ -122,7 +122,7 @@ const _docSearch = debounce(async () => {
       const hr = await api('GET', '/api/help?name=' + encodeURIComponent(q));
       if (hr && hr.name && (hr.docHtml || (hr.exports && hr.exports.length) || hr.kind !== 'unknown')) {
         res = [{ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml,
-                 exports: hr.exports || [], kind: hr.kind, exact: true },
+                 exports: hr.exports || [], kind: hr.kind, exact: true, _enriched: true },
                ...res.filter(r => !(r.name === hr.name && (r.module || '') === (hr.module || '')))];
       }
     } catch (_) {}
@@ -148,6 +148,22 @@ function _renderDetail() {
   d.innerHTML = _helpRecordHtml(r, _helpStack.length > 0);
   _linkifyDoc(d);
   d.scrollTop = 0;
+  r._enriched || _enrichDetail(r);             // upgrade with live exports/doc on first view
+}
+const _lookupName = r => (r.module && r.module !== r.name) ? r.module + '.' + r.name : r.name;
+// Lazily upgrade a selected result with a LIVE help lookup — fills in a module's exports
+// (the drill-down grid) and a fresh docstring, so ANY module/binding becomes browseable,
+// not just an exactly-typed query. One lookup per record (cached on the record).
+async function _enrichDetail(r) {
+  if (r._enriched || !r.name) return;
+  r._enriched = true;
+  let hr;
+  try { hr = await api('GET', '/api/help?name=' + encodeURIComponent(_lookupName(r))); } catch (_) { return; }
+  if (!hr || !hr.name) return;
+  if (hr.docHtml) r.docHtml = hr.docHtml;
+  if (hr.exports && hr.exports.length) r.exports = hr.exports;
+  if (hr.kind && hr.kind !== 'unknown') r.kind = hr.kind;
+  if (_currentDoc() === r) _renderDetail();    // still showing this one → repaint with exports
 }
 function _helpRecordHtml(r, showBack) {
   const kind = r.kind && r.kind !== 'unknown' ? `<span class="dockind">${_escc(r.kind)}</span>` : '';
@@ -183,7 +199,7 @@ async function helpLookup(name) {
   if (!hr.docHtml && !(hr.exports && hr.exports.length)) {
     const inp = document.getElementById('docin'); inp.value = name.replace(/^.*\./, ''); _helpStack = []; _docSearch(); return;
   }
-  _helpStack.push({ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind });
+  _helpStack.push({ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind, _enriched: true });
   _renderDetail();
 }
 function helpBack() { _helpStack.pop(); _renderDetail(); }

@@ -405,10 +405,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .docpal { max-width: 880px; width: 92vw; }
   .docbody { display: flex; gap: 10px; max-height: 62vh; min-height: 220px; }
   .doclist { flex: 0 0 290px; overflow: auto; }
-  .doclist li { padding: 6px 10px; cursor: pointer; border-radius: 6px; font-size: 13px; }
+  .doclist li { display: block; padding: 6px 10px; cursor: pointer; border-radius: 6px; font-size: 13px; }  /* not the shared .cmdpal li flex (would scatter the hint's nodes) */
+  .doclist .dochint code, .doclist .docempty code { background: var(--bg3); padding: 0 4px; border-radius: 4px; }
   .doclist li.on, .doclist li:hover { background: rgba(120,160,255,.14); }
   .doclist .docname b { color: #cfe0ff; }
-  .doclist .docname .k { float: right; opacity: .45; font-size: 11px; }
+  .doclist .docname .k { float: right; opacity: .45; font-size: 11px; margin-left: 12px; }
   .doclist .docempty, .doclist .dochint { padding: 10px; color: #8190a8; font-size: 13px; }
   .docdetail { flex: 1 1 auto; overflow: auto; padding: 2px 12px 10px; border-left: 1px solid rgba(255,255,255,.08); }
   .docdetail h4 { margin: 4px 0 8px; font-size: 13.5px; color: #cfe0ff; }
