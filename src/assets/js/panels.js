@@ -217,6 +217,12 @@ function connectLive() {
   es.onmessage = async (e) => {
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // async live update — patch in place
+    if (e.data.startsWith('srcreload:')) {   // parent /src hot-reload (Revise) → cells marked stale
+      const n = parseInt(e.data.slice(10), 10) || 0;
+      updateStates(await api('GET', '/api/state'));
+      toast(`🔁 Source reloaded — ${n} cell${n === 1 ? '' : 's'} now stale. ⌘↵ to run.`);
+      return;
+    }
     const v = parseInt(e.data, 10);
     if (!isNaN(v) && v !== lastVersion) { lastVersion = v; renderAll(await api('GET', '/api/state')); }
     // Keep the history rail fresh while it's open (agent turns, external edits).

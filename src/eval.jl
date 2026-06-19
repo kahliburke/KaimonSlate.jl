@@ -8,7 +8,7 @@
 
 export eval_report!, eval_cell!, report_module, reset_module!
 export Kernel, InProcessKernel, run_capture, shutdown!
-export register_refresh!, unregister_refresh!
+export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
 #
@@ -23,6 +23,18 @@ unregister_refresh!(report_id::AbstractString) = (delete!(_REFRESH_REGISTRY, Str
 function _do_refresh(report_id::AbstractString, vars)
     cb = get(_REFRESH_REGISTRY, report_id, nothing)
     cb === nothing || cb(Symbol[Symbol(v) for v in vars])
+    return nothing
+end
+
+# Parent-project /src hot-reload: the worker's Revise watcher fires `files_changed`; the
+# server registers a per-report callback (out-of-band, like refresh) that applies the
+# revisions and invalidates the cells that read the changed definitions.
+const _SRCCHANGE_REGISTRY = Dict{String,Any}()
+register_srcchange!(report_id::AbstractString, cb) = (_SRCCHANGE_REGISTRY[String(report_id)] = cb; nothing)
+unregister_srcchange!(report_id::AbstractString) = (delete!(_SRCCHANGE_REGISTRY, String(report_id)); nothing)
+function _do_src_changed(report_id::AbstractString)
+    cb = get(_SRCCHANGE_REGISTRY, String(report_id), nothing)
+    cb === nothing || cb()
     return nothing
 end
 

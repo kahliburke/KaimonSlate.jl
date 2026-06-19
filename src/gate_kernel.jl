@@ -9,6 +9,10 @@
 export GateKernel
 
 const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
+# Slate-owned env carrying ONLY Revise (+ its deps), so the worker can hot-reload the
+# notebook's parent-project /src without adding Revise to the user's project. Stacked AFTER
+# the notebook project on LOAD_PATH so the notebook's own deps always win.
+const _REVISE_ENV = joinpath(@__DIR__, "worker_revise")
 
 # Per-worker TCP ports. A simple counter (no Sockets dep); collisions are unlikely
 # and surface as a worker bind error rather than silent crosstalk.
@@ -107,17 +111,24 @@ function _ensure_poller!()
                 # of one per message — otherwise a tight async loop floods every SSE
                 # client with redundant re-renders.
                 pending = Dict{String,Set{String}}()
+                srcchanged = Set{String}()
                 for m in K.drain_stream_messages!(_manager())
-                    m.channel == "slate_refresh" || continue
                     rid = get(_GATE_SESSION, m.session_name, nothing)
                     rid === nothing && continue
-                    s = get!(pending, rid, Set{String}())
-                    for v in split(m.data, ","; keepempty = false)
-                        push!(s, String(v))
+                    if m.channel == "slate_refresh"
+                        s = get!(pending, rid, Set{String}())
+                        for v in split(m.data, ","; keepempty = false)
+                            push!(s, String(v))
+                        end
+                    elseif m.channel == "files_changed"   # KaimonGate's Revise watcher: parent /src edited
+                        push!(srcchanged, rid)
                     end
                 end
                 for (rid, vars) in pending
                     isempty(vars) || _do_refresh(rid, collect(vars))
+                end
+                for rid in srcchanged
+                    _do_src_changed(rid)
                 end
             catch
             end
@@ -141,7 +152,11 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # worker can attribute package provenance (which deps are notebook adds vs parent).
     return """
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
+    insert!(LOAD_PATH, 3, $(repr(_REVISE_ENV)))   # slate-owned Revise — after the notebook project (@), before globals
     import KaimonGate
+    # Load Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
+    # KaimonGate.serve auto-starts a watcher that PUBs `files_changed` on Revise.revision_event.
+    try; @eval using Revise; catch e; @warn "slate: Revise unavailable in worker (hot-reload off)" exception=e; end
     include($(repr(_WORKER_JL)))
     SlateWorker.PARENT_PROJECT[] = $(repr(String(parent)))
     SlateWorker.start(; host = "127.0.0.1", port = $port, stream_port = $stream_port)
@@ -292,6 +307,17 @@ function complete(k::GateKernel, report::Report, code::AbstractString, pos::Inte
     wire === nothing && return empty
     return (items = Tuple{String,String}[(String(t), String(kd)) for (t, kd) in wire.items],
             from = Int(wire.from), to = Int(wire.to))
+end
+
+"Apply pending parent-/src revisions in the worker (Revise) → the changed top-level def-names."
+function revise_apply!(k::GateKernel)
+    k.conn === nothing && return String[]
+    wire = try
+        _tool(k, "__slate_revise", Dict{String,Any}(); timeout = 60.0)
+    catch
+        return String[]
+    end
+    return wire === nothing ? String[] : String[String(x) for x in wire]
 end
 
 function module_help(k::GateKernel, report::Report, name::AbstractString)

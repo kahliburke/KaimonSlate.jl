@@ -111,6 +111,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
                           ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                           Dict{String,String}())
         register_refresh!(r.id, vars -> server_refresh(nb, vars))
+        register_srcchange!(r.id, () -> server_src_changed(nb))
         _load_chat_log!(nb)
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb
@@ -125,6 +126,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     _history!(nb; source = "open")
     # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
     register_refresh!(r.id, vars -> server_refresh(nb, vars))
+    register_srcchange!(r.id, () -> server_src_changed(nb))   # parent /src edited (Revise) → invalidate readers
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     _autoindex!(nb)                      # background: index project deps + used packages' docs
     return nb
@@ -180,6 +182,35 @@ function server_refresh(nb::LiveNotebook, vars)
         eval_stale!(nb.report, nb.kernel)
     end
     _broadcast(nb, "refresh")
+    return nothing
+end
+
+# Parent-project /src hot-reload (Revise). A worker `files_changed` event → apply the pending
+# revisions in the worker, learn which top-level defs changed, and mark the cells that READ them
+# (plus their dependents) stale, then notify the browser (`srcreload:<n>`). Mark-stale, NOT
+# auto-run — the user re-runs (Run stale / ⇧⏎). Per-notebook toggle via meta["hotreload"]
+# (default on); only meaningful with a gate worker (Revise lives in the worker).
+function server_src_changed(nb::LiveNotebook)
+    nb.kernel isa GateKernel || return
+    get(nb.report.meta, "hotreload", true) == false && return
+    names = try; revise_apply!(nb.kernel); catch; String[]; end
+    isempty(names) && return
+    syms = Set{Symbol}(Symbol(n) for n in names)
+    staled = Set{String}()
+    lock(nb.lock) do
+        seed = String[]
+        for c in nb.report.cells
+            (c.kind == CODE && !isdisjoint(c.reads, syms)) || continue
+            c.state = STALE; push!(seed, c.id); push!(staled, c.id)
+        end
+        isempty(seed) && return
+        for id in dependents_of(nb.report, Set(seed))
+            i = _index_of(nb.report.cells, id)
+            i === nothing || (nb.report.cells[i].state = STALE; push!(staled, id))
+        end
+    end
+    isempty(staled) && return
+    _broadcast(nb, "srcreload:$(length(staled))")
     return nothing
 end
 

@@ -12,6 +12,16 @@ let _hydrating = false;       // true while a standalone's env reconstructs (rea
 let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
 let lastVersion = -1;
 
+// Lightweight transient notification (bottom-right corner); stacks, auto-dismisses.
+function toast(msg, ms = 4500) {
+  let host = document.getElementById('toasts');
+  if (!host) { host = document.createElement('div'); host.id = 'toasts'; document.body.appendChild(host); }
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+  host.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, ms);
+}
+
 const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
 const srcEditInner = () => '<textarea></textarea><div class="mdhint">⇧⏎ commit · esc cancel</div>';
 const srcEditHTML = () => `<div class="srcedit" style="display:none">${srcEditInner()}</div>`;
