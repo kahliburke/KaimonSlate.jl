@@ -1252,9 +1252,11 @@ end
 
 "Lexical (FTS) search of the docs index — matches a bare name/module fragment the embedding buries."
 function _fts_docs(query::AbstractString; limit::Int = 20)
+    # `qdrant_fts_search` was folded into `search_code` (mode="lexical", format="structured");
+    # the structured hits carry name/text/score, which `_fts_record` reads.
     hits = try
-        _kt_json(_kt(:qdrant_fts_search, Dict("collection" => _DOCS_COLLECTION,
-                                              "query" => String(query), "limit" => limit)))
+        _kt_json(_kt(:search_code, Dict("collection" => _DOCS_COLLECTION, "query" => String(query),
+                                        "limit" => limit, "mode" => "lexical", "format" => "structured")))
     catch
         return Dict{String,Any}[]   # FTS unavailable (old Kaimon / uncovered) → semantic-only
     end
