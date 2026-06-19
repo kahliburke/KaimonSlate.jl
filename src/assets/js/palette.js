@@ -92,68 +92,93 @@ document.getElementById('cmdin').addEventListener('keydown', e => {
 });
 document.getElementById('cmdbg').addEventListener('mousedown', e => { if (e.target.id === 'cmdbg') closePalette(); });
 
-// ── Docs / help palette (⌘⇧K) — semantic search + live `?name` help browser ──
-// Semantic search of the notebook's package docs, PLUS a REPL-style help viewer: the
-// detail pane renders the docstring as markdown, links its `refs`, and — for a module —
-// lists its exports so you can drill into a package. Typing an exact name resolves it live.
-let _doc = [], _docSel = 0;
-let _helpStack = [];                 // drill-down nav within the detail pane (refs / exports)
+// ── Docs / help browser (⌘⇧K) — semantic search + live `?name` help, in a dockable panel ──
+// A bottom-right dock: semantic search of the notebook's package docs PLUS a REPL-style help
+// viewer (markdown docstrings, clickable `refs`, module-exports drill-down). Searches and
+// opened pages form a back/forward history; the panel minimizes to a launcher and restores.
 const _IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_!]*)*$/;
 const _NOLINK = new Set(['true','false','nothing','missing','end','function','for','while','if','x','i','n','a','b']);
-function openDocs() {
-  document.getElementById('docbg').classList.add('show');
-  const inp = document.getElementById('docin'); inp.value = ''; _doc = []; _docSel = 0; _helpStack = [];
-  document.getElementById('doclist').innerHTML = '<li class="dochint">Describe an API in plain words — e.g. “draw a heatmap” — or type an exact name / module (e.g. <code>LinearAlgebra</code>) to browse it.</li>';
-  document.getElementById('docdetail').innerHTML = '';
-  inp.oninput = _docSearch; inp.focus();
+const _DOC_HINT = '<li class="dochint">Describe an API in plain words — e.g. “draw a heatmap” — or type an exact name / module (e.g. <code>LinearAlgebra</code>) to browse it.</li>';
+
+// History of "views". A view = { q, results, sel, rec }; rec=null shows results[sel].
+let _hist = [], _hpos = -1, _docMin = true;
+const _view = () => _hpos >= 0 ? _hist[_hpos] : null;
+function _go(v) {                                   // push a view, truncating any forward history
+  _hist = _hist.slice(0, _hpos + 1); _hist.push(v); _hpos = _hist.length - 1;
+  if (_hist.length > 100) { _hist.shift(); _hpos--; }
+  _renderView(); _saveDocs();
 }
-function closeDocs() { document.getElementById('docbg').classList.remove('show'); }
+function _navBack() { if (_hpos > 0) { _hpos--; _renderView(); _saveDocs(); } else minimizeDocs(); }
+function _navFwd()  { if (_hpos < _hist.length - 1) { _hpos++; _renderView(); _saveDocs(); } }
+
+function openDocs() {                               // show the dock (un-minimize); keeps prior state
+  _docMin = false;
+  document.getElementById('docpanel').classList.remove('min');
+  document.getElementById('doclauncher').classList.add('hidden');
+  _hpos < 0 ? _go({ q: '', results: [], sel: 0, rec: null }) : _renderView();
+  document.getElementById('docin').focus(); _saveDocs();
+}
+function minimizeDocs() {                           // collapse to the launcher pill (state retained)
+  _docMin = true;
+  document.getElementById('docpanel').classList.add('min');
+  document.getElementById('doclauncher').classList.remove('hidden');
+  _saveDocs();
+}
+const closeDocs = minimizeDocs;                     // "close" now means minimize
+function toggleDocs() { _docMin ? openDocs() : document.getElementById('docin').focus(); }   // ⌘⇧K
+function _saveDocs() {
+  try { localStorage.setItem('slateDocs', JSON.stringify({ min: _docMin, q: (_view() && _view().q) || '' })); } catch (_) {}
+}
+function _restoreDocs() {
+  let s; try { s = JSON.parse(localStorage.getItem('slateDocs') || '{}'); } catch (_) { s = {}; }
+  if (s && s.min === false) { openDocs(); if (s.q) { document.getElementById('docin').value = s.q; _docSearch(); } }
+}
 const _docSearch = debounce(async () => {
   const q = document.getElementById('docin').value.trim();
-  const ul = document.getElementById('doclist');
-  if (!q) { ul.innerHTML = '<li class="dochint">Describe an API in plain words…</li>'; _doc = []; _helpStack = []; document.getElementById('docdetail').innerHTML = ''; return; }
-  ul.innerHTML = '<li class="dochint">Searching…</li>';
-  let res = [];
-  try { const r = await api('GET', '/api/docsearch?q=' + encodeURIComponent(q)); res = (r && r.results) || []; } catch (_) {}
-  // Exact lookup: a single identifier / dotted path resolves live — handles `?Module`
-  // (→ its exports) and exact names that semantic search ranks low. Pinned at the top.
-  if (_IDENT_RE.test(q)) {
-    try {
-      const hr = await api('GET', '/api/help?name=' + encodeURIComponent(q));
-      if (hr && hr.name && (hr.docHtml || (hr.exports && hr.exports.length) || hr.kind !== 'unknown')) {
-        res = [{ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml,
-                 exports: hr.exports || [], kind: hr.kind, exact: true, _enriched: true },
-               ...res.filter(r => !(r.name === hr.name && (r.module || '') === (hr.module || '')))];
-      }
-    } catch (_) {}
+  let results = [];
+  if (q) {
+    try { const r = await api('GET', '/api/docsearch?q=' + encodeURIComponent(q)); results = (r && r.results) || []; } catch (_) {}
+    if (_IDENT_RE.test(q)) {                        // exact name/module → live lookup, pinned on top
+      try {
+        const hr = await api('GET', '/api/help?name=' + encodeURIComponent(q));
+        if (hr && hr.name && (hr.docHtml || (hr.exports && hr.exports.length) || hr.kind !== 'unknown'))
+          results = [{ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml,
+                       exports: hr.exports || [], kind: hr.kind, exact: true, _enriched: true },
+                     ...results.filter(r => !(r.name === hr.name && (r.module || '') === (hr.module || '')))];
+      } catch (_) {}
+    }
   }
-  _doc = res; _docSel = 0; _helpStack = []; _renderDocs();
+  const cur = _view();
+  if (cur && cur.rec == null) { cur.q = q; cur.results = results; cur.sel = 0; _renderView(); _saveDocs(); }   // live-update the search view
+  else _go({ q, results, sel: 0, rec: null });     // a new search after viewing a page → new history step
 }, 200);
-function _renderDocs() {
-  const ul = document.getElementById('doclist');
-  if (!_doc.length) { ul.innerHTML = '<li class="docempty">No matches — try different words.</li>'; document.getElementById('docdetail').innerHTML = ''; return; }
-  ul.innerHTML = _doc.map((r, i) => {
-    const right = r.exact ? '<span class="k exact">exact</span>'
-                          : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
-    return `<li class="${i === _docSel ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>${right}</span></li>`;
-  }).join('');
-  _renderDetail();
+function _select(i) {                               // pick a result row (in place — not a history step)
+  const v = _view(); if (!v || !v.results.length) return;
+  v.sel = Math.max(0, Math.min(i, v.results.length - 1)); v.rec = null;
+  _renderView(); _saveDocs();
 }
-// The detail pane: the active help record (a drill-down view if any, else the selected
-// search result), rendered as markdown with clickable refs + (for a module) its exports.
-function _renderDetail() {
-  const r = _helpStack.length ? _helpStack[_helpStack.length - 1] : _doc[_docSel];
-  const d = document.getElementById('docdetail');
-  if (!r) { d.innerHTML = ''; return; }
-  d.innerHTML = _helpRecordHtml(r, _helpStack.length > 0);
-  _linkifyDoc(d);
-  d.scrollTop = 0;
+// Paint the current view into both panes + the nav buttons + the search box.
+function _renderView() {
+  const v = _view(), ul = document.getElementById('doclist'), dt = document.getElementById('docdetail');
+  const bb = document.getElementById('docback2'), fb = document.getElementById('docfwd');
+  if (bb) bb.disabled = _hpos <= 0; if (fb) fb.disabled = _hpos >= _hist.length - 1;
+  const inp = document.getElementById('docin'); if (v && document.activeElement !== inp && inp.value !== v.q) inp.value = v.q;
+  if (!v || !v.q) ul.innerHTML = _DOC_HINT;
+  else if (!v.results.length) ul.innerHTML = '<li class="docempty">No matches — try different words.</li>';
+  else ul.innerHTML = v.results.map((r, i) => {
+    const right = r.exact ? '<span class="k exact">exact</span>' : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
+    return `<li class="${i === v.sel && !v.rec ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>${right}</span></li>`;
+  }).join('');
+  const r = v && (v.rec || (v.results && v.results[v.sel]));
+  if (!r) { dt.innerHTML = ''; return; }
+  dt.innerHTML = _helpRecordHtml(r);
+  _linkifyDoc(dt); dt.scrollTop = 0;
   r._enriched || _enrichDetail(r);             // upgrade with live exports/doc on first view
 }
 const _lookupName = r => (r.module && r.module !== r.name) ? r.module + '.' + r.name : r.name;
-// Lazily upgrade a selected result with a LIVE help lookup — fills in a module's exports
-// (the drill-down grid) and a fresh docstring, so ANY module/binding becomes browseable,
-// not just an exactly-typed query. One lookup per record (cached on the record).
+// Lazily upgrade the shown record with a LIVE help lookup — fills in a module's exports
+// (the drill-down grid) + a fresh docstring, so ANY module/binding becomes browseable, not
+// just an exactly-typed query. One lookup per record (cached on the record).
 async function _enrichDetail(r) {
   if (r._enriched || !r.name) return;
   r._enriched = true;
@@ -163,15 +188,15 @@ async function _enrichDetail(r) {
   if (hr.docHtml) r.docHtml = hr.docHtml;
   if (hr.exports && hr.exports.length) r.exports = hr.exports;
   if (hr.kind && hr.kind !== 'unknown') r.kind = hr.kind;
-  if (_currentDoc() === r) _renderDetail();    // still showing this one → repaint with exports
+  const v = _view(), shown = v && (v.rec || (v.results && v.results[v.sel]));
+  if (shown === r) _renderView();              // still showing this one → repaint with exports
 }
-function _helpRecordHtml(r, showBack) {
+function _helpRecordHtml(r) {
   const kind = r.kind && r.kind !== 'unknown' ? `<span class="dockind">${_escc(r.kind)}</span>` : '';
   const mod = r.module || '';
   let nm = r.name;
   if (mod && nm.startsWith(mod + '.')) nm = nm.slice(mod.length + 1);   // de-dup "Mod.Mod.x" on drill-in
   const title = (mod && mod !== nm) ? `${_escc(mod)}.<b>${_escc(nm)}</b>` : `<b>${_escc(nm)}</b>`;
-  const back = showBack ? `<button class="docback" onclick="helpBack()" title="back">‹ back</button>` : '';
   const body = r.docHtml ? `<div class="docmd">${r.docHtml}</div>` : '<div class="docmd dim">No documentation found.</div>';
   let exports = '';
   if (r.exports && r.exports.length) {
@@ -180,10 +205,10 @@ function _helpRecordHtml(r, showBack) {
       r.exports.map(e => `<button class="docexport kind-${_escc(e.kind)}" data-name="${_escc(base + '.' + e.name)}" title="${_escc(e.kind)} — click to open">${_escc(e.name)}</button>`).join('') +
       '</div></div>';
   }
-  return `<div class="dochead">${back}<h4>${title}</h4>${kind}</div>${body}${exports}` +
-    '<div class="hint">↵ insert name · click a <code>ref</code> or export to drill in · esc to close</div>';
+  return `<div class="dochead"><h4>${title}</h4>${kind}</div>${body}${exports}` +
+    '<div class="hint">↵ insert name · click a <code>ref</code> or export to drill in · ‹ › or esc to go back</div>';
 }
-// Make inline-code identifiers in a docstring clickable → look them up in place.
+// Make inline-code identifiers in a docstring clickable → drill into them.
 function _linkifyDoc(root) {
   root.querySelectorAll('.docmd code').forEach(c => {
     const t = c.textContent.trim();
@@ -193,65 +218,49 @@ function _linkifyDoc(root) {
     }
   });
 }
-// Drill into a name (a clicked ref or export). Pushes onto the nav stack; if nothing
-// useful resolves, fall back to a fresh semantic search on the bare name.
+// Drill into a name (clicked ref or export) → a new history page. Unresolvable names get a
+// navigable "not found" page rather than hijacking the search.
 async function helpLookup(name) {
   let hr;
   try { hr = await api('GET', '/api/help?name=' + encodeURIComponent(name)); } catch (_) { return; }
   if (!hr || !hr.name) return;
-  if (!hr.docHtml && !(hr.exports && hr.exports.length)) {
-    // Unresolvable (e.g. a name not loaded in this env) — show a navigable "not found"
-    // page instead of hijacking the search box, so the user's state is preserved.
-    _helpStack.push({ name, module: '', kind: 'unknown', exports: [], _enriched: true,
-      docHtml: `<div class="dim">No documentation found for <code>${_escc(name)}</code> — it may not be loaded in this notebook's environment.</div>` });
-    _renderDetail(); return;
-  }
-  _helpStack.push({ module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind, _enriched: true });
-  _renderDetail();
+  const v = _view() || { q: '', results: [], sel: 0 };
+  const rec = (!hr.docHtml && !(hr.exports && hr.exports.length))
+    ? { name, module: '', kind: 'unknown', exports: [], _enriched: true,
+        docHtml: `<div class="dim">No documentation found for <code>${_escc(name)}</code> — it may not be loaded in this notebook's environment.</div>` }
+    : { module: hr.module || hr.name, name: hr.name, doc: hr.doc, docHtml: hr.docHtml, exports: hr.exports || [], kind: hr.kind, _enriched: true };
+  _go({ q: v.q || '', results: v.results || [], sel: v.sel || 0, rec });
 }
-function helpBack() { _helpStack.pop(); _renderDetail(); }
-function _paintDocs() {
-  const ul = document.getElementById('doclist');
-  [...ul.children].forEach((li, i) => li.classList.toggle('on', i === _docSel));
-  const on = ul.children[_docSel]; if (on) on.scrollIntoView({ block: 'nearest' });
-  _helpStack = [];                   // selecting a list row resets any drill-down
-  _renderDetail();
-}
-// The record currently shown (drill-down view, else the selected search result).
-function _currentDoc() { return _helpStack.length ? _helpStack[_helpStack.length - 1] : _doc[_docSel]; }
 // Insert the bare name at the selected cell's cursor, else copy the qualified name.
 function _docPick() {
-  const r = _currentDoc(); if (!r) return;
-  closeDocs();
+  const v = _view(), r = v && (v.rec || (v.results && v.results[v.sel])); if (!r) return;
   const ed = editors[selectedId];
-  if (ed) { ed.replaceSelection(r.name.replace(/^.*\./, '')); ed.focus(); }
+  if (ed) { ed.replaceSelection(r.name.replace(/^.*\./, '')); ed.focus(); minimizeDocs(); }
   else if (navigator.clipboard) { navigator.clipboard.writeText((r.module ? r.module + '.' : '') + r.name); }
 }
-// Click selects (shows the docstring); double-click / Enter inserts.
-document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _docSel = +li.dataset.i; _paintDocs(); document.getElementById('docin').focus(); } });
-document.getElementById('doclist').addEventListener('dblclick', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { _docSel = +li.dataset.i; _helpStack = []; _docPick(); } });
-// Drill into an export chip in the detail pane.
+// List: click selects; double-click inserts.
+document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _select(+li.dataset.i); document.getElementById('docin').focus(); } });
+document.getElementById('doclist').addEventListener('dblclick', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { _select(+li.dataset.i); _docPick(); } });
+// Detail: drill into an export chip.
 document.getElementById('docdetail').addEventListener('click', e => { const ex = e.target.closest('.docexport'); if (ex) helpLookup(ex.dataset.name); });
+document.getElementById('docin').addEventListener('input', _docSearch);
 document.getElementById('docin').addEventListener('keydown', e => {
-  if (e.key === 'ArrowDown') { e.preventDefault(); _docSel = Math.min(_docSel + 1, _doc.length - 1); _paintDocs(); }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); _docSel = Math.max(_docSel - 1, 0); _paintDocs(); }
+  const v = _view(), sel = v ? v.sel : 0;
+  if (e.key === 'ArrowDown') { e.preventDefault(); _select(sel + 1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); _select(sel - 1); }
   else if (e.key === 'Enter') { e.preventDefault(); _docPick(); }
 });
-document.getElementById('docbg').addEventListener('mousedown', e => { if (e.target.id === 'docbg') closeDocs(); });
-// Esc anywhere in the open docs palette: step back a drill, else close. (Bound on the
-// document so it works after focus leaves the search box — e.g. clicking the detail pane.)
+// Esc anywhere in the open dock: go back a step (minimizes at the start of history).
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && document.getElementById('docbg').classList.contains('show')) {
-    e.preventDefault(); e.stopPropagation();
-    _helpStack.length ? helpBack() : closeDocs();
-  }
+  if (e.key === 'Escape' && !_docMin) { e.preventDefault(); e.stopPropagation(); _navBack(); }
 }, true);
+_restoreDocs();
 
 // Global ⌘/Ctrl shortcuts (work everywhere, including inside the editor — CodeMirror
 // doesn't bind these). Mirrored in the command palette's shortcut hints.
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); e.shiftKey ? openDocs() : openPalette(); }
+  if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); e.shiftKey ? toggleDocs() : openPalette(); }
   else if (mod && e.key === 'Enter') { e.preventDefault(); runAll(); }                       // ⌘↵  run stale
   else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
   else if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); togglePalette(); } // ⌘⇧F controls

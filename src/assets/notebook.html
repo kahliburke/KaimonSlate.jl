@@ -154,10 +154,16 @@
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>
   <ul id="cmdlist"></ul>
 </div></div>
-<div class="palette-bg" id="docbg"><div class="cmdpal docpal">
-  <input id="docin" placeholder="Search docs — describe what you want (⌘⇧K)…" autocomplete="off" spellcheck="false"/>
+<aside id="docpanel" class="docpanel min">
+  <div class="dochdr">
+    <button id="docback2" class="docnav" onclick="_navBack()" title="back">‹</button>
+    <button id="docfwd" class="docnav" onclick="_navFwd()" title="forward">›</button>
+    <input id="docin" placeholder="Search docs or type a name… (⌘⇧K)" autocomplete="off" spellcheck="false"/>
+    <button id="docmin" class="docnav" onclick="minimizeDocs()" title="minimize">▾</button>
+  </div>
   <div class="docbody"><ul id="doclist" class="doclist"></ul><div id="docdetail" class="docdetail"></div></div>
-</div></div>
+</aside>
+<button id="doclauncher" onclick="openDocs()" title="Help / docs (⌘⇧K)">📖 Docs</button>
 
 <!-- App modules — ordered classic scripts sharing one global scope (load order matters). -->
 <script src="/assets/js/core.js"></script>
