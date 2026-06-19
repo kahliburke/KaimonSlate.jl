@@ -485,6 +485,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/diag", req -> _withnb(h, req, nb -> begin
         set_diag!(nb.id, _body(req)); _json(Dict("ok" => true))
     end))
+    # Per-notebook toggle for parent /src hot-reload (Revise). Stored in report meta.
+    HTTP.register!(router, "POST", "/api/{id}/hotreload", req -> _withnb(h, req, nb -> begin
+        nb.report.meta["hotreload"] = get(_body(req), "enabled", true) === true
+        _json(Dict("ok" => true, "hotreload" => nb.report.meta["hotreload"]))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))
     end))

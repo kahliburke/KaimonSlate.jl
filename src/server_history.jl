@@ -232,6 +232,7 @@ function state_json(nb::LiveNotebook)
     let proj = Base.current_project(dirname(abspath(nb.path)))
         proj === nothing || (meta["project"] = dirname(proj))
     end
+    meta["hotreload"] = get(nb.report.meta, "hotreload", true)   # /src auto-reload toggle (default on)
     if get(nb.report.meta, "hydrating", false) === true
         # While the env reconstructs: show the embedded frozen render if present (already
         # cell_json-shaped), else the parsed cells un-run. Live cells replace these on hydrate.

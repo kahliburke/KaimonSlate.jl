@@ -6,6 +6,10 @@ function openSettings() {
   const wide = document.getElementById('setwide');
   wide.checked = document.body.classList.contains('fullwidth');
   wide.onchange = () => { document.body.classList.toggle('fullwidth', wide.checked); localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0'); };
+  // Per-notebook: pick up parent /src edits (Revise) and mark affected cells stale (default on).
+  const hr = document.getElementById('sethotreload');
+  hr.checked = !(nbState && nbState.hotreload === false);
+  hr.onchange = () => api('POST', '/api/hotreload', { enabled: hr.checked }).catch(() => {});
   const th = document.getElementById('settheme');
   th.value = localStorage.getItem('slateTheme') || 'dark';
   th.onchange = () => localStorage.setItem('slateTheme', th.value);   // real themes land later
