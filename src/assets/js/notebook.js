@@ -57,7 +57,7 @@ function Editor({ cell }) {
 function Cell({ cell, selectedId, live, focusId }) {
   const c = cell;
   const ref = useRef(null);
-  const last = useRef({ struct: undefined, out: undefined, vis: undefined });
+  const last = useRef({ bindKey: undefined, ctrlKey: undefined, out: undefined, vis: undefined });
   const state = (live && live[c.id]) || c.state;   // transient (running/edited) wins until server state arrives
 
   // Dispose this cell's ECharts when it unmounts; charts otherwise update in place.
@@ -82,26 +82,35 @@ function Cell({ cell, selectedId, live, focusId }) {
       return;
     }
 
-    // Binds (bind cell) / control strip (code cell): (re)build the widgets ONLY when their
-    // STRUCTURE changes — never on a value echo — then sync values in place. Keyed on
-    // names/widgets/params (value excluded) so dragging a slider doesn't rebuild it.
-    const isBind = window.hasBinds(c);
-    const structKey = isBind
-      ? JSON.stringify((c.binds || []).map(b => [b.name, b.widget, b.params]))
-      : JSON.stringify((c.controls || []).map(col => col.map(s => [s.name, s.widget, s.params])));
-    if (structKey !== last.current.struct) {
-      last.current.struct = structKey;
-      const host = el.querySelector(isBind ? '.binds' : '.controls');
-      if (host) host.innerHTML = isBind ? window.bindsInner(c) : window.controlStripInner(c);
-      window.mountControls(c);                       // wire the freshly-built controls
+    // The cell's own @bind rows (`.binds`) and its surfaced-control strip (`.controls`) are
+    // INDEPENDENT structures — a MIXED cell (e.g. a plot that also declares @bind) has both.
+    // (Re)build each ONLY when ITS structure changes — never on a value echo — then sync
+    // values in place. Keyed on names/widgets/params (value excluded so dragging a slider
+    // doesn't rebuild). The binds key also tracks `hosted`/`hostedby` (a row flips between live
+    // widget and jump-chip as it's surfaced/unsurfaced); the strip keys on `controls` so the 🎛
+    // picker, which mutates `controls` (not `binds`), actually re-renders the strip.
+    const bindKey = JSON.stringify((c.binds || []).map(b => [b.name, b.widget, b.params, b.hosted, b.hostedby]));
+    const ctrlKey = JSON.stringify((c.controls || []).map(col => col.map(s => [s.name, s.widget, s.params])));
+    let rebuilt = false;
+    if (bindKey !== last.current.bindKey) {
+      last.current.bindKey = bindKey;
+      const host = el.querySelector('.binds');
+      if (host) { host.innerHTML = window.bindsInner(c); rebuilt = true; }
     }
+    if (ctrlKey !== last.current.ctrlKey) {
+      last.current.ctrlKey = ctrlKey;
+      const host = el.querySelector('.controls');
+      if (host) { host.innerHTML = window.controlStripInner(c); rebuilt = true; }
+    }
+    if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
     const out = el.querySelector('.output');
     if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typeset(out); }
     window.renderCharts(c);                           // in-place setOption — animates, keeps canvas
     window.renderTables(c);                           // refill rows in place — keeps sort/filter/page
     window.syncControlValues({ cells: [c] });         // values in place; skips focused/just-touched → drag-safe
 
-    const visible = !isBind && !c.collapsed && !c.codeHidden;
+    // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
+    const visible = !window.hasBinds(c) && !c.collapsed && !c.codeHidden;
     if (visible && !last.current.vis) { const ed = window.editors[c.id]; ed && ed.refresh(); }
     last.current.vis = visible;
   });
@@ -117,7 +126,9 @@ function Cell({ cell, selectedId, live, focusId }) {
   if (c.kind === 'md') {
     body = html`<div class="md" title="double-click to edit" ondblclick=${() => window.editSource(c.id, 'markdown')}></div>${srcedit}`;
   } else if (isBind) {
-    body = html`<div class="binds"></div>${srcedit}<div class="output"></div><div class="tables"></div><div class="echarts"></div>`;
+    // A bind/MIXED cell: its own @bind rows, the surfaced-control strip (so controls surfaced
+    // here — including its own @bind — actually render), then the toggle source editor + output.
+    body = html`<div class="binds"></div><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div>${srcedit}<div class="output"></div><div class="tables"></div><div class="echarts"></div>`;
   } else {
     body = html`<${Editor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><div class="echarts"></div>`;
   }

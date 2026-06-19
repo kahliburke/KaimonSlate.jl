@@ -342,14 +342,18 @@ _control_spec(cell::Cell, spec::BindSpec) =
     Dict{String,Any}("id" => cell.id, "name" => String(spec.name),
                      "widget" => spec.widget, "params" => spec.params, "value" => spec.value)
 
-_bind_json(spec::BindSpec, hosted::Bool) =
+# `hosts` is the list of cell ids whose control strip surfaces this bind (usually one,
+# possibly several, possibly the bind's OWN cell). `hosted` stays a simple bool for the
+# common path; `hostedby` lets the frontend say *where* (jump link) and tell self-host apart.
+_bind_json(spec::BindSpec, hosts::Vector{String}) =
     Dict{String,Any}("name" => String(spec.name), "widget" => spec.widget,
-                     "params" => spec.params, "value" => spec.value, "hosted" => hosted)
+                     "params" => spec.params, "value" => spec.value,
+                     "hosted" => !isempty(hosts), "hostedby" => hosts)
 
-# `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable
-# names surfaced via some cell's `controls=` (so each collapses to a chip).
+# `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable name →
+# the cell ids that surface it via `controls=` (so each can collapse to a chip / jump link).
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
-                   hostednames::Set{String} = Set{String}())
+                   hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}())
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
@@ -368,7 +372,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         isempty(cols) || (d["controls"] = cols)
     end
     if !isempty(c.binds)
-        d["binds"] = [_bind_json(b, String(b.name) in hostednames) for b in c.binds]
+        d["binds"] = [_bind_json(b, get(hostednames, String(b.name), String[])) for b in c.binds]
     end
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
@@ -416,9 +420,9 @@ function _bind_index(report::Report)
     for c in report.cells, b in c.binds
         bindref[String(b.name)] = (c, b)
     end
-    hostednames = Set{String}()
+    hostednames = Dict{String,Vector{String}}()
     for c in report.cells, col in c.controls, n in col
-        haskey(bindref, n) && push!(hostednames, n)
+        haskey(bindref, n) && push!(get!(hostednames, n, String[]), c.id)
     end
     return bindref, hostednames
 end

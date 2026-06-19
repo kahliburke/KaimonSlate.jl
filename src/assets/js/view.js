@@ -42,11 +42,20 @@ function controlMarkup(bindId, b) {
 }
 
 // One row inside a bind/group cell: the live widget, or — when its control is
-// surfaced in a strip elsewhere — a slim chip (the variable stays live).
-const bindRow = (cellId, b) => b.hosted
-  ? `<div class="hostedph">⊞ <span class="wname">${b.name}</span>` +
-    '<span class="hint">— surfaced in a control strip</span></div>'
-  : `<div class="widget">${controlMarkup(cellId, b)}</div>`;
+// surfaced in a strip — a slim chip (the variable stays live). Three cases:
+//  • not surfaced            → the live widget here.
+//  • surfaced in THIS cell   → nothing; the live widget renders in this cell's own
+//                              control strip below (showing a chip too would dupe it).
+//  • surfaced elsewhere      → a chip that jumps to the host strip on click.
+const bindRow = (cellId, b) => {
+  if (!b.hosted) return `<div class="widget">${controlMarkup(cellId, b)}</div>`;
+  const others = (b.hostedby || []).filter(h => h !== cellId);
+  if (!others.length) return '';                  // surfaced only in this cell's own strip
+  const where = others.map(h => '‘' + h + '’').join(', ');
+  return `<div class="hostedph" style="cursor:pointer" onclick="selectCell('${others[0]}', true)"` +
+    ` title="surfaced in ${where} — click to jump">⊞ <span class="wname">${b.name}</span>` +
+    `<span class="hint">— surfaced in ${where}</span></div>`;
+};
 
 // The body of a bind/group cell: one row per bound variable it defines.
 const bindsInner = c => (c.binds || []).map(b => bindRow(c.id, b)).join('');
@@ -254,6 +263,15 @@ async function commitSource(id) {
   const cm = editors[id], src = cm ? cm.getValue() : srcMap[id];
   if (cm) { cm.toTextArea(); delete editors[id]; }
   srcMap[id] = src;
+  // Restore the rendered view ourselves (like cancelSource): Preact now PRESERVES the cell's
+  // DOM nodes across re-render, so the display:none editSource set on `.md`/`.binds` (and the
+  // display:'' on `.srcedit`) would otherwise persist — leaving the raw source editor showing
+  // instead of the freshly rendered cell. (The old wipe-and-rebuild renderAll made this moot.)
+  const cell = document.getElementById('cell-' + id);
+  if (cell) {
+    const sed = cell.querySelector('.srcedit'); if (sed) sed.style.display = 'none';
+    const d = _disp(cell); if (d) d.style.display = '';
+  }
   renderAll(await api('POST', '/api/cell/' + id, { source: src }));   // re-render in its new form
 }
 function cancelSource(id) {
