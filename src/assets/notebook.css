@@ -164,6 +164,18 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
          opacity:0; transform:translateY(8px); transition:opacity .25s ease, transform .25s ease; }
 .toast.show { opacity:1; transform:none; }
 .toast.err { border-left-color:var(--red); }
+/* Persistent source-reload banner — top-left, stays until acted on/dismissed. */
+.srcbanner { position:fixed; top:58px; left:16px; z-index:70; max-width:420px; display:flex;
+             align-items:center; gap:10px; flex-wrap:wrap; background:var(--bg2); color:var(--text);
+             border:1px solid var(--border); border-left:3px solid var(--teal); border-radius:9px;
+             padding:10px 12px; font-size:.82rem; box-shadow:0 10px 28px #000a; }
+.srcbanner.err { border-left-color:var(--red); }
+.srcbanner .msg { flex:1 1 100%; }
+.srcbanner b { color:#fff; }
+.srcbanner button { font-size:.78rem; padding:3px 10px; }
+.srcbanner .primary { border-color:var(--teal); color:var(--teal); }
+.srcbanner .x { margin-left:auto; background:none; border:none; color:var(--dim); padding:2px 4px; }
+.srcbanner .x:hover { color:var(--text); }
 .dropline { position:absolute; left:0; right:0; height:3px; background:var(--purple); border-radius:2px;
             box-shadow:0 0 8px var(--purple); display:none; z-index:5; pointer-events:none; }
 .cell.bind { border-left-color:var(--teal); }

@@ -210,6 +210,32 @@ async function histReplay() {
   histReplaying = false; btn.textContent = '▶ Replay'; btn.classList.remove('stop');
 }
 
+// ── Source-reload banner (parent /src hot-reload) ─────────────────────────────
+// Persistent, top-left. The change detector is best-effort (~file-granular), so rather than
+// silently trust it we keep this up until the user acts: run our guess (the stale cells), or
+// re-run the whole notebook (safe). Parse errors show a red, button-less variant.
+function hideSrcBanner() { const b = document.getElementById('srcbanner'); b.style.display = 'none'; b.innerHTML = ''; }
+function showSrcReload(n) {
+  const b = document.getElementById('srcbanner'); b.className = 'srcbanner';
+  b.innerHTML =
+    `<span class="msg">🔁 <b>Project source changed</b> — ~${n} cell${n === 1 ? '' : 's'} likely affected ` +
+    `(our guess may be incomplete).</span>` +
+    `<button class="primary" id="srcrunaff">Run affected${n ? ` (${n})` : ''}</button>` +
+    `<button id="srcrunall">Re-run all (safe)</button>` +
+    `<button class="x" title="dismiss">✕</button>`;
+  b.style.display = 'flex';
+  b.querySelector('.x').onclick = hideSrcBanner;
+  b.querySelector('#srcrunaff').onclick = async () => { hideSrcBanner(); updateStates(await api('POST', '/api/run', {})); };
+  b.querySelector('#srcrunall').onclick = async () => { hideSrcBanner(); updateStates(await api('POST', '/api/rerun-all', {})); };
+}
+function showSrcError(msg) {
+  const b = document.getElementById('srcbanner'); b.className = 'srcbanner err';
+  b.innerHTML = `<span class="msg">⚠ <b>Source didn’t compile</b> — ${_esc(msg)}</span>` +
+    `<button class="x" title="dismiss">✕</button>`;
+  b.style.display = 'flex';
+  b.querySelector('.x').onclick = hideSrcBanner;
+}
+
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
 function connectLive() {
@@ -217,14 +243,14 @@ function connectLive() {
   es.onmessage = async (e) => {
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // async live update — patch in place
-    if (e.data.startsWith('srcreload:')) {   // parent /src hot-reload (Revise) → cells marked stale
+    if (e.data.startsWith('srcreload:')) {   // parent /src hot-reload (Revise): show the persistent banner
       const n = parseInt(e.data.slice(10), 10) || 0;
-      updateStates(await api('GET', '/api/state'));
-      toast(`🔁 Source reloaded — ${n} cell${n === 1 ? '' : 's'} now stale. ⌘↵ to run.`);
+      updateStates(await api('GET', '/api/state'));   // reflect our guessed stale marks
+      showSrcReload(n);
       return;
     }
     if (e.data.startsWith('srcerror:')) {    // a /src save didn't parse — Revise couldn't apply it
-      toast('⚠ Source not reloaded — ' + e.data.slice(9), 7000, 'err');
+      showSrcError(e.data.slice(9));
       return;
     }
     const v = parseInt(e.data, 10);

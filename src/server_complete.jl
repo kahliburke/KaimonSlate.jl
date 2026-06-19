@@ -390,6 +390,15 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/undo", req -> _withnb(h, req, nb -> (undo!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> (redo!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (eval_stale!(nb.report, nb.kernel); _json(state_json(nb)))))
+    # Re-run the WHOLE notebook (every cell in order, keeping the namespace) — the "safe"
+    # option after a /src hot-reload when our guess at affected cells may be incomplete.
+    HTTP.register!(router, "POST", "/api/{id}/rerun-all", req -> _withnb(h, req, nb -> begin
+        lock(nb.lock) do
+            for c in nb.report.cells; c.state = STALE; end
+            eval_stale!(nb.report, nb.kernel)
+        end
+        _json(state_json(nb))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> (restart_kernel!(nb); _json(state_json(nb)))))
     # Agent chat: forward the turn to Kaimon's agent service (spawning a session
     # bound to this notebook on first use); the agent's `{kind,turn,data}` events

@@ -202,7 +202,9 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
     lock(nb.lock) do
         seed = String[]
         for c in nb.report.cells
-            (c.kind == CODE && !isdisjoint(c.reads, syms)) || continue
+            # Both code AND markdown join the reactive graph via `reads` (md from its {{ }}
+            # free vars), and eval_stale! re-renders stale md — so include both.
+            isdisjoint(c.reads, syms) && continue
             c.state = STALE; push!(seed, c.id); push!(staled, c.id)
         end
         isempty(seed) && return
