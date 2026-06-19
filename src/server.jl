@@ -509,20 +509,20 @@ end
 # ── Build-floor + version-CAS (multi-agent write safety) ─────────────────────
 # The safety layer Slate owns so several agents can drive ONE notebook without
 # clobbering each other (MULTIAGENT.md §3). Two composable mechanisms, both opt-in
-# so the solo-agent path is completely unaffected (no token, no expected_version):
+# so the solo-agent path is completely unaffected (it never takes the floor):
 #
-#   • Build-floor: a notebook-scoped lease. While held, only the holder (the agent
-#     presenting the matching token) may commit — the Galley's "one voice at a time"
-#     enforced at the Slate layer, for ANY agent, crew or not. Auto-expires after
-#     FLOOR_TTL idle so a crashed holder can't deadlock the notebook.
+#   • Build-floor: a notebook-scoped lease keyed by the holder's CALLER SESSION ID
+#     (KaimonGate.current_caller — the invoking agent's Mcp-Session-Id). While held,
+#     only that same caller may commit; every edit carries the caller implicitly, so
+#     the model threads NO token and can't lock itself out. "One voice at a time" for
+#     ANY agent. Auto-expires after FLOOR_TTL idle so a crashed holder can't deadlock.
 #   • Version-CAS: when NO floor is held, a mutation may carry the `nb.version` it was
 #     decided against; we reject if the notebook has moved since (lost-update guard).
 #
 # Floor state lives in a module-level map (not an AgentSession/LiveNotebook field) so
 # it's Revise-friendly. Lock order is always nb.lock → _FLOOR_LOCK (never inverted).
 mutable struct FloorLease
-    holder::String
-    token::String
+    holder::String          # the holder's caller session id (KaimonGate.current_caller / Mcp-Session-Id)
     acquired_at::Float64
     renewed_at::Float64
 end
@@ -543,33 +543,36 @@ function _live_floor(nb::LiveNotebook)
     end
 end
 
-# Grant (or re-grant to the same holder) the floor → (token, ""), or (nothing, why).
+# Grant (or re-grant to the same caller) the floor → (true, ""), or (false, why). The
+# holder IS the caller's session id, so no token is minted/threaded — the same caller's
+# later edits match implicitly.
 function acquire_floor!(nb::LiveNotebook, holder::AbstractString)
+    isempty(holder) && return (false, "no agent session — the floor can't be claimed by an unidentified caller")
     lock(_FLOOR_LOCK) do
         l = get(_NB_FLOOR, nb.id, nothing)
         if l !== nothing && time() - l.renewed_at <= FLOOR_TTL && l.holder != String(holder)
-            return (nothing, "held by '$(l.holder)' (≈$(round(Int, time() - l.acquired_at))s ago)")
+            return (false, "held by '$(l.holder)' (≈$(round(Int, time() - l.acquired_at))s ago)")
         end
-        tok = bytes2hex(rand(UInt8, 6))
-        _NB_FLOOR[nb.id] = FloorLease(String(holder), tok, time(), time())
-        return (tok, "")
+        _NB_FLOOR[nb.id] = FloorLease(String(holder), time(), time())
+        return (true, "")
     end
 end
 
-# Keep a held lease alive across a multi-op transaction (called after each commit).
-function _renew_floor!(nb::LiveNotebook, token::AbstractString)
-    isempty(token) && return
+# Keep a held lease alive across a multi-op transaction (called after each commit by its holder).
+function _renew_floor!(nb::LiveNotebook, caller::AbstractString)
+    isempty(caller) && return
     lock(_FLOOR_LOCK) do
         l = get(_NB_FLOOR, nb.id, nothing)
-        l !== nothing && l.token == token && (l.renewed_at = time())
+        l !== nothing && l.holder == String(caller) && (l.renewed_at = time())
     end
 end
 
-# Release a held lease (only the token holder can). Returns true if released.
-function release_floor!(nb::LiveNotebook, token::AbstractString)
+# Release a held lease (only its holder can). Returns true if released.
+function release_floor!(nb::LiveNotebook, caller::AbstractString)
+    isempty(caller) && return false
     lock(_FLOOR_LOCK) do
         l = get(_NB_FLOOR, nb.id, nothing)
-        (l !== nothing && l.token == token) || return false
+        (l !== nothing && l.holder == String(caller)) || return false
         delete!(_NB_FLOOR, nb.id)
         return true
     end
@@ -582,14 +585,16 @@ function floor_status(nb::LiveNotebook)
 end
 
 # Gate one agent commit. Returns nothing to proceed, or a rejection string (the op
-# must NOT mutate). Call inside `nb.lock`. A verified floor holder skips version-CAS
-# (exclusivity already guarantees freshness); otherwise the optional version check
-# catches a lost update against another agent's (or an external) commit.
-function _guard_commit(nb::LiveNotebook; token::AbstractString = "", expected_version::Int = -1)
+# must NOT mutate). Call inside `nb.lock`. `caller` is the invoking agent's session id
+# (KaimonGate.current_caller). If the floor is held by ANOTHER caller the op is rejected;
+# its own holder (or a free floor) proceeds. A floor holder skips version-CAS (exclusivity
+# guarantees freshness); a free floor still honors the optional version check, which catches
+# a lost update against an external (or sessionless) commit.
+function _guard_commit(nb::LiveNotebook; caller::AbstractString = "", expected_version::Int = -1)
     l = _live_floor(nb)
     if l !== nothing
-        l.token == token && return nothing
-        return "⛔ build-floor held by '$(l.holder)' — your change was NOT applied. Call slate.acquire_floor first (or wait for it to release / expire)."
+        (!isempty(caller) && l.holder == String(caller)) && return nothing      # you hold the floor
+        return "⛔ build-floor held by another agent ('$(l.holder)') — your change was NOT applied. Wait for it to release / expire, or coordinate."
     end
     if expected_version >= 0 && expected_version != nb.version
         return "⚠ stale write REJECTED — you decided against v$(expected_version) but the notebook is now at v$(nb.version). Nothing was applied; re-read (slate.read) and retry.\n\n" * notebook_digest(nb)
@@ -655,10 +660,10 @@ return id + result. One file write (build the cell with its source up front) so 
 async file-watcher can't race the intermediate empty-cell state."
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
-                         token::AbstractString = "", expected_version::Int = -1)
+                         caller::AbstractString = "", expected_version::Int = -1)
     rej = nothing
     cid = lock(nb.lock) do
-        rej = _guard_commit(nb; token = token, expected_version = expected_version)
+        rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
         rej === nothing || return ""
         cells = nb.report.cells
         i = isempty(after) ? length(cells) : something(_index_of(cells, after), length(cells))
@@ -669,38 +674,38 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         return cell.id
     end
     rej === nothing || return rej
-    _renew_floor!(nb, token)
+    _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "added id=$cid →\n$(_result_of(nb, cid))"
 end
 
 "Replace a cell's source, run it, return its result."
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
-                          token::AbstractString = "", expected_version::Int = -1)
+                          caller::AbstractString = "", expected_version::Int = -1)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
-        r = _guard_commit(nb; token = token, expected_version = expected_version)
+        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
         edit_cell!(nb, id, source)
         return nothing
     end
     rej === nothing || return rej
-    _renew_floor!(nb, token)
+    _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "edited id=$id →\n$(_result_of(nb, id))"
 end
 
 "Run one cell (or recompute all stale if `id` empty); return the result(s)."
 function agent_run!(nb::LiveNotebook, id::AbstractString = "";
-                    token::AbstractString = "", expected_version::Int = -1)
+                    caller::AbstractString = "", expected_version::Int = -1)
     rej = lock(nb.lock) do
-        r = _guard_commit(nb; token = token, expected_version = expected_version)
+        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
         eval_stale!(nb.report, nb.kernel)
         return nothing
     end
     rej === nothing || return rej
-    _renew_floor!(nb, token)
+    _renew_floor!(nb, caller)
     _agent_push!(nb)
     isempty(id) ? "ran stale cells; notebook is up to date" :
         (_cell_exists(nb, id) ? "id=$id →\n$(_result_of(nb, id))" : "(no cell id=$id)")
@@ -708,16 +713,16 @@ end
 
 "Delete a cell."
 function agent_delete_cell!(nb::LiveNotebook, id::AbstractString;
-                            token::AbstractString = "", expected_version::Int = -1)
+                            caller::AbstractString = "", expected_version::Int = -1)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
-        r = _guard_commit(nb; token = token, expected_version = expected_version)
+        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
         delete_cell!(nb, id)
         return nothing
     end
     rej === nothing || return rej
-    _renew_floor!(nb, token)
+    _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "deleted id=$id"
 end

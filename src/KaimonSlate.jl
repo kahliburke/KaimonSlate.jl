@@ -88,6 +88,9 @@ so the extension needs no Kaimon dependency — handlers are plain typed functio
 reflected into MCP JSON Schema by Kaimon.
 """
 function create_tools(GateTool::Type)
+    # The invoking agent's identity (its MCP session id), or "" for a sessionless/self call.
+    # Keys the build-floor implicitly, so the model never threads a token (and can't self-lock).
+    _caller() = (c = parentmodule(GateTool).current_caller(); c === nothing ? "" : String(c))
 
     """
         open(path::String) -> String
@@ -170,24 +173,20 @@ function create_tools(GateTool::Type)
     `kind` = "code" or "md". Add ONE cell at a time and read its result before the
     next — do not compose the whole notebook up front.
     """
-    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code",
-                      token::String = "", expected_version::Int = -1)::String
+    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_add_cell!(nb, source; after = after, kind = kind,
-                               token = token, expected_version = expected_version)
+        return agent_add_cell!(nb, source; after = after, kind = kind, caller = _caller())
     end
 
     """
         edit_cell(notebook, cell, source, token, expected_version) -> String
 
     Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
-    that errored, or to revise one in place. `token`/`expected_version` are for
-    multi-agent safety — see `add_cell` (omit when you're the only agent).
+    that errored, or to revise one in place.
     """
-    function edit_cell(notebook::String, cell::String, source::String;
-                       token::String = "", expected_version::Int = -1)::String
+    function edit_cell(notebook::String, cell::String, source::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_edit_cell!(nb, cell, source; token = token, expected_version = expected_version)
+        return agent_edit_cell!(nb, cell, source; caller = _caller())
     end
 
     """
@@ -195,10 +194,9 @@ function create_tools(GateTool::Type)
 
     Run cell `cell` and return its result; `cell` = "" recomputes all stale cells.
     """
-    function run_cell(notebook::String, cell::String;
-                      token::String = "", expected_version::Int = -1)::String
+    function run_cell(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_run!(nb, cell; token = token, expected_version = expected_version)
+        return agent_run!(nb, cell; caller = _caller())
     end
 
     """
@@ -206,40 +204,38 @@ function create_tools(GateTool::Type)
 
     Delete cell `cell` from the notebook.
     """
-    function delete_cell(notebook::String, cell::String;
-                         token::String = "", expected_version::Int = -1)::String
+    function delete_cell(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_delete_cell!(nb, cell; token = token, expected_version = expected_version)
+        return agent_delete_cell!(nb, cell; caller = _caller())
     end
 
     # ── Multi-agent write safety (MULTIAGENT.md §3) ───────────────────────────
     # Only needed when SEVERAL agents drive one notebook. A solo agent ignores all of
-    # this (omit `token`/`expected_version` and the ops behave exactly as before).
+    # this — your edits already carry your session id implicitly, so they just work.
 
     """
-        acquire_floor(notebook, holder) -> String
+        acquire_floor(notebook) -> String
 
     Claim the notebook's BUILD-FLOOR before a run of edits, so no other agent can
-    commit underneath you ("one voice at a time"). Returns a `token` — pass it to
-    `add_cell`/`edit_cell`/`run`/`delete_cell` while you work, then `release_floor`.
-    The lease auto-expires after a few minutes idle. If another agent holds it, you
-    get told who — coordinate or retry.
+    commit underneath you ("one voice at a time"). No token to manage — every edit you
+    make is recognized as yours automatically; just `release_floor` when done. The lease
+    auto-expires after a few minutes idle. If another agent holds it, you get told who.
     """
-    function acquire_floor(notebook::String; holder::String = "agent")::String
+    function acquire_floor(notebook::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        tok, why = acquire_floor!(nb, holder)
-        tok === nothing && return "⛔ build-floor $why. Try again shortly, or coordinate via the team."
-        return "🔓 build-floor acquired by '$holder' — token=$tok. Pass it as `token` to every edit, then slate.release_floor. Auto-expires after $(Int(NotebookServer.FLOOR_TTL))s idle."
+        ok, why = acquire_floor!(nb, _caller())
+        ok || return "⛔ build-floor $why. Try again shortly, or coordinate via the team."
+        return "🔓 build-floor acquired — you hold it; other agents are locked out until slate.release_floor (auto-expires after $(Int(NotebookServer.FLOOR_TTL))s idle). Your edits carry your session automatically."
     end
 
     """
-        release_floor(notebook, token) -> String
+        release_floor(notebook) -> String
 
-    Release the build-floor you hold (by its `token`) so other agents can commit.
+    Release the build-floor you hold so other agents can commit.
     """
-    function release_floor(notebook::String, token::String)::String
+    function release_floor(notebook::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return release_floor!(nb, token) ? "✅ build-floor released." : "(you don't hold the build-floor — nothing to release)"
+        return release_floor!(nb, _caller()) ? "✅ build-floor released." : "(you don't hold the build-floor — nothing to release)"
     end
 
     """
