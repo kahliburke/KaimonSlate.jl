@@ -403,10 +403,19 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .outmore:hover { background:var(--bg2); }
 
   /* Dockable help browser: a bottom-right panel + the launcher pill it minimizes to. */
-  .docpanel { position: fixed; right: 16px; bottom: 16px; z-index: 60; width: min(820px, 94vw); height: min(580px, 76vh);
+  .docpanel { position: fixed; right: 16px; bottom: 16px; z-index: 60; width: min(960px, 95vw); height: min(600px, 78vh);
     background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.55);
     display: flex; flex-direction: column; overflow: hidden; }
   .docpanel.min { display: none; }
+  /* Related-items rail (third column) — referenced types + semantic neighbors. */
+  .docrelated { flex: 0 0 196px; min-width: 0; overflow: auto; padding: 4px 10px 10px; border-left: 1px solid rgba(255,255,255,.08); }
+  .docrelated:empty { display: none; }
+  .relhdr { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin: 8px 2px 4px; }
+  .relgrid { display: flex; flex-direction: column; gap: 4px; }
+  .relchip { font-family: 'Cascadia Code', ui-monospace, monospace; font-size: 11.5px; text-align: left; cursor: pointer;
+    background: var(--bg3); color: #c8d2e4; border: 1px solid transparent; border-radius: 5px; padding: 3px 8px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .relchip:hover { border-color: var(--accent); color: var(--accent); }
   .docpanel .docbody { flex: 1; min-height: 0; max-height: none; }
   .dochdr { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   .dochdr input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--bg3);

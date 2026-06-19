@@ -169,11 +169,37 @@ function _renderView() {
     const right = r.exact ? '<span class="k exact">exact</span>' : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
     return `<li class="${i === v.sel && !v.rec ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>${right}</span></li>`;
   }).join('');
+  const rel = document.getElementById('docrelated');
   const r = v && (v.rec || (v.results && v.results[v.sel]));
-  if (!r) { dt.innerHTML = ''; return; }
+  if (!r) { dt.innerHTML = ''; rel.innerHTML = ''; return; }
   dt.innerHTML = _helpRecordHtml(r);
   _linkifyDoc(dt); dt.scrollTop = 0;
+  _renderRelated(r);                           // the right rail (referenced + related)
   r._enriched || _enrichDetail(r);             // upgrade with live exports/doc on first view
+}
+const _shownRecord = () => { const v = _view(); return v && (v.rec || (v.results && v.results[v.sel])); };
+// Names linked in the current detail pane (the type/ref tokens we just linkified), unique.
+function _referenced() {
+  const seen = new Set(), out = [];
+  document.querySelectorAll('#docdetail .doclink[data-name]').forEach(a => { const n = a.dataset.name; if (n && !seen.has(n)) { seen.add(n); out.push(n); } });
+  return out;
+}
+// The right rail: "Referenced" (type/ref tokens in the doc) + "Related" (semantic neighbors,
+// fetched once and cached on the record). Empty rail collapses via .docrelated:empty.
+async function _renderRelated(r) {
+  const el = document.getElementById('docrelated');
+  const chip = (name, label) => `<button class="relchip" data-name="${_escc(name)}">${_escc(label || name)}</button>`;
+  const sec = (title, chips) => chips.length ? `<div class="relhdr">${title}</div><div class="relgrid">${chips.join('')}</div>` : '';
+  const refs = _referenced().map(n => chip(n, n.replace(/^.*\./, '')));
+  const rel = Array.isArray(r._related) ? r._related.map(n => chip((n.module ? n.module + '.' : '') + n.name, n.name)) : [];
+  el.innerHTML = sec('Referenced', refs) + sec('Related', rel);
+  if (r._related === undefined && r.name) {     // fetch semantic neighbors once
+    r._related = null;
+    let res = [];
+    try { const x = await api('GET', '/api/docsearch?q=' + encodeURIComponent(_lookupName(r))); res = (x && x.results) || []; } catch (_) {}
+    r._related = res.filter(n => !(n.name === r.name && (n.module || '') === (r.module || ''))).slice(0, 8);
+    if (_shownRecord() === r) _renderRelated(r); // repaint with the related section
+  }
 }
 const _lookupName = r => (r.module && r.module !== r.name) ? r.module + '.' + r.name : r.name;
 // Lazily upgrade the shown record with a LIVE help lookup — fills in a module's exports
@@ -267,6 +293,8 @@ document.getElementById('docdetail').addEventListener('click', e => {
   if (a) { e.preventDefault(); const h = a.getAttribute('href') || '';
     if (/^https?:\/\//i.test(h)) window.open(h, '_blank', 'noopener'); }   // external → new tab; relative/@ref → ignore
 });
+// Related-items rail: a chip drills into that name.
+document.getElementById('docrelated').addEventListener('click', e => { const c = e.target.closest('.relchip'); if (c && c.dataset.name) helpLookup(c.dataset.name); });
 document.getElementById('docin').addEventListener('input', _docSearch);
 document.getElementById('docin').addEventListener('keydown', e => {
   const v = _view(), sel = v ? v.sel : 0;
