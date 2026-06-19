@@ -49,7 +49,8 @@ const bindRow = (cellId, b) => b.hosted
   : `<div class="widget">${controlMarkup(cellId, b)}</div>`;
 
 // The body of a bind/group cell: one row per bound variable it defines.
-const bindsHTML = c => `<div class="binds">${(c.binds || []).map(b => bindRow(c.id, b)).join('')}</div>`;
+const bindsInner = c => (c.binds || []).map(b => bindRow(c.id, b)).join('');
+const bindsHTML = c => `<div class="binds">${bindsInner(c)}</div>`;
 
 const hasBinds = c => c.binds && c.binds.length;
 
@@ -75,19 +76,18 @@ function controlStrip(c) {
 
 // One compact header line per cell: run + id (left), then duration, hover-revealed
 // actions, and the state badge (right). Replaces the old two-row bar+head.
-function cellHeader(c) {
+function cellHeaderInner(c) {
   const isCode = c.kind === 'code' && !hasBinds(c);
   const other = c.kind === 'md' ? 'code' : 'md';
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
-  const run = isCode ? `<button class="run" data-run="${c.id}" title="run (⇧⏎)">▶</button>` : '';
+  const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}')" title="run (⇧⏎)">▶</button>` : '';
   const bu = transBinduses(c);
   const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
   const _someOn = bu.some(n => _present.has(n));
   const autoctl = bu.length
     ? `<button class="autoctl${_someOn ? ' on' : ''}" onclick="openControlPicker('${c.id}', event)" title="pick which @bind controls to surface on this cell (${bu.join(', ')})">🎛</button>` : '';
-  return '<div class="cellhead">' +
-    '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
+  return '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     '<span class="hspace"></span>' +
@@ -103,9 +103,9 @@ function cellHeader(c) {
       `<button class="addbtn" onclick="addCell('${c.id}','code')" oncontextmenu="addMenu(event,'${c.id}');return false" title="add below · right-click for type">＋</button>` +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
-    `<span class="badge">${c.state}</span>` +
-    '</div>';
+    `<span class="badge">${c.state}</span>`;
 }
+function cellHeader(c) { return '<div class="cellhead">' + cellHeaderInner(c) + '</div>'; }
 
 function cellEl(c) {
   const div = document.createElement('div');
@@ -206,7 +206,14 @@ function mountEditor(c) {
   const ed = CodeMirror.fromTextArea(ta, {
     mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity
   });
-  ed.setValue(c.source);
+  wireCodeEditor(ed, c);
+  editors[c.id] = ed;
+}
+// Wire a freshly-created CodeMirror for code cell `c`: edit tracking, completion + signature
+// keys, as-you-type. Shared by the vanilla mount and the Preact <Editor> component, so the
+// editor behaves identically however it was created. `ed` already holds the source.
+function wireCodeEditor(ed, c) {
+  if (ed.getValue() !== c.source) ed.setValue(c.source);
   let primed = false;
   ed.on('change', () => { if (primed) setState(c.id, 'edited'); });
   setTimeout(() => primed = true, 0);
@@ -241,8 +248,6 @@ function mountEditor(c) {
   });
   ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
   ed.on('blur', () => setEditing(c.id, false));
-  document.querySelector('#cell-' + c.id + ' [data-run]').onclick = () => runCell(c.id);
-  editors[c.id] = ed;
 }
 
 // Source editing for non-code cells (markdown + @bind widgets): reveal a raw
@@ -296,12 +301,24 @@ function cancelSource(id) {
   const d = _disp(cell); if (d) d.style.display = '';
 }
 
-function renderAll(state) {
+// Notebook rendering is owned by the Preact <Notebook> (notebook.js), driven by the signals
+// store. renderAll/updateStates now just publish the state + refresh the chrome; the component
+// diffs cells by id (so editors survive structural ops) and does per-cell output processing in
+// effects. The old full-wipe rebuild and the in-place patch collapse into one publish.
+function renderAll(state)    { _publishState(state); }
+function updateStates(state) { _publishState(state); }
+function _publishState(state) {
   nbState = state;
-  window.slateStore && window.slateStore.applyState(state);   // feed the Preact signals store
-  _depFocus = null;                            // #nb is wiped below — drop any dep-cone highlight
-  const se = document.scrollingElement || document.documentElement;
-  const top = se.scrollTop;                    // preserve scroll across the full rebuild (structural ops)
+  window.__slateState = state;                  // latest state, always — so the store (a deferred
+                                                // module) can seed from it even if it loads AFTER
+                                                // this first ran (the boot reload() is async).
+  _depFocus = null;
+  if (selectedId && !(state.cells || []).some(c => c.id === selectedId)) selectedId = null;   // dropped/renamed
+  window.slateStore && window.slateStore.applyState(state);   // → Preact re-renders #nb reactively
+  updateChrome(state);
+}
+// Topbar/banner bits that live outside #nb (title, worker dot, vscode link, hydrating banner).
+function updateChrome(state) {
   document.getElementById('title').textContent = state.title || 'Notebook';
   const w = state.worker || {}, dot = document.getElementById('wdot');
   if (dot) {
@@ -309,7 +326,6 @@ function renderAll(state) {
     dot.title = w.kind === 'gate' ? ('worker :' + w.port + (w.connected ? ' · connected' : ' · disconnected')) : 'in-process kernel';
   }
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
-  // Hydrating banner: a standalone is showing its frozen preview while the env reconstructs.
   const hb = document.getElementById('hydbanner');
   _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
   if (state.hydrating) {
@@ -323,32 +339,7 @@ function renderAll(state) {
   } else {
     hb.style.display = 'none'; document.body.classList.remove('hydrating');
   }
-  const nb = document.getElementById('nb');
-  nb.innerHTML = '';
-  for (const k of Object.keys(editors)) delete editors[k];
-  Object.keys(charts).forEach(k => { charts[k].forEach(i => i.dispose()); delete charts[k]; });
-  state.cells.forEach(c => nb.appendChild(cellEl(c)));
-  // Seed change-tracking from this fresh build so the next /state poll won't
-  // redundantly re-swap (and re-init) outputs, then boot any embedded scripts.
-  state.cells.forEach(c => { outMap[c.id] = c.output; if (c.kind === 'md') mdMap[c.id] = mdHtml(c); });
-  runScripts(nb);
-  state.cells.forEach(mountEditor);
-  state.cells.forEach(mountControls);
-  state.cells.forEach(renderCharts);
-  state.cells.forEach(renderTables);
-  typeset(nb);
-  collapseOutputs(nb);
   updateStaleBadge(state);
-  renderPalette();
-  syncAgentTop();                              // re-align the agent drawer to the (now-rendered) first cell
-  if (selectedId && !cellIds().includes(selectedId)) selectedId = null;   // dropped/renamed
-  if (selectedId) selectCell(selectedId);                                 // re-apply command-mode ring
-  // Restore scroll now, next frame, and after each figure decodes (base64 images
-  // change height late — Safari otherwise clamps scrollTop and the view jumps).
-  const restore = () => { se.scrollTop = top; };
-  restore();
-  requestAnimationFrame(restore);
-  nb.querySelectorAll('img').forEach(im => im.complete || im.addEventListener('load', restore, { once: true }));
 }
 
 // ── Controls palette ─────────────────────────────────────────────────────────
@@ -480,34 +471,10 @@ async function runScripts(root) {
   }
 }
 
-// Update outputs + states in place (preserves editor instances/cursors + scroll).
-function updateStates(state) {
-  nbState = state;
-  window.slateStore && window.slateStore.applyState(state);   // feed the Preact signals store
-  const se = document.scrollingElement || document.documentElement;
-  const top = se.scrollTop;
-  state.cells.forEach(c => {
-    const el = document.getElementById('cell-' + c.id);
-    if (!el) return;
-    srcMap[c.id] = c.source;
-    el.className = 'cell ' + (hasBinds(c) ? 'bind' : c.kind) + ' state-' + c.state;
-    const b = el.querySelector('.badge'); if (b) b.textContent = c.state;
-    const dur = el.querySelector('.cdur'); if (dur) dur.textContent = c.duration != null ? c.duration + ' ms' : '';
-    // Only re-inject when the HTML actually changed: an unconditional swap on every
-    // /state poll would tear down and re-init a live figure (e.g. Bonito), spawning
-    // duplicate sessions/WebSockets and flicker.
-    const out = el.querySelector('.output');
-    if (out && c.output !== outMap[c.id]) { outMap[c.id] = c.output; _swapOutput(out, c.output); typeset(out); }
-    const md = el.querySelector('.md');
-    if (md) { const h = mdHtml(c); if (h !== mdMap[c.id]) { mdMap[c.id] = h; md.innerHTML = h; runScripts(md); typeset(md); } }
-    renderCharts(c);   // setOption in place — animates data changes
-    renderTables(c);   // refill rows in place — keeps sort/filter/page
-  });
-  se.scrollTop = top;                          // hold scroll across the patch …
-  requestAnimationFrame(() => { se.scrollTop = top; });   // … and after Safari's deferred reflow
-  syncControlValues(state);
-  updatePaletteValues(state);
-  collapseOutputs();
-  updateStaleBadge(state);
-}
+// Expose the `const` helpers the Preact modules (notebook.js) need: ES modules can't see a
+// classic script's lexical `const` globals — only `var`/`function` globals become window
+// properties. So ONLY the consts go here (the functions are already on window). `editors`/
+// `charts`/`srcMap` are shared by reference, so the module's mutations stay in sync. (All of
+// these are defined in core.js or earlier in view.js, so they exist when this runs.)
+Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditHTML, srcEditInner, bindsInner, hasBinds });
 

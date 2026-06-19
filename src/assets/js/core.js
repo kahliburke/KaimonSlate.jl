@@ -15,8 +15,8 @@ let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '20
 let lastVersion = -1;
 
 const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
-const srcEditHTML = () => '<div class="srcedit" style="display:none"><textarea></textarea>' +
-  '<div class="mdhint">⇧⏎ commit · esc cancel</div></div>';
+const srcEditInner = () => '<textarea></textarea><div class="mdhint">⇧⏎ commit · esc cancel</div>';
+const srcEditHTML = () => `<div class="srcedit" style="display:none">${srcEditInner()}</div>`;
 
 // Capture a cell's (first) ECharts canvas as a PNG and stash it server-side, so the
 // agent's slate_view — and future PDF export — get a uniform image for client-rendered

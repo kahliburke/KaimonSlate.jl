@@ -5,6 +5,7 @@
 // the store is fed by the existing state flow. Next: the editor island, then <Notebook>.
 import { html, render } from 'htm/preact';
 import { title, cells, worker } from './store.js';
+import './notebook.js';   // mounts the Preact <Notebook> into #nb (owns the cell rendering)
 
 // A live readout of notebook state, straight from the signals store. Re-renders on its own
 // whenever the store changes — no manual wiring.

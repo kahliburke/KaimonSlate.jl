@@ -8,7 +8,9 @@
 // these signals become the *only* source and the bridge calls are removed.
 import { signal, computed } from '@preact/signals';
 
-export const nbState  = signal(window.nbState || null);      // the whole /api/state payload
+// Seed from the last state the classic boot published (window.__slateState). The boot's
+// reload() is async and may run before this module loads, so it stashes state there for us.
+export const nbState  = signal(window.__slateState || null); // the whole /api/state payload
 export const selected = signal(window.selectedId || null);   // selected cell id (command mode)
 
 export const cells = computed(() => (nbState.value && nbState.value.cells) || []);
