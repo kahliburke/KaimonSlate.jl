@@ -111,7 +111,8 @@ function _ensure_poller!()
                 # of one per message — otherwise a tight async loop floods every SSE
                 # client with redundant re-renders.
                 pending = Dict{String,Set{String}}()
-                srcchanged = Set{String}()
+                srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
+                srcerr = Dict{String,String}()          # parent /src parse/apply errors
                 for m in K.drain_stream_messages!(_manager())
                     rid = get(_GATE_SESSION, m.session_name, nothing)
                     rid === nothing && continue
@@ -120,15 +121,23 @@ function _ensure_poller!()
                         for v in split(m.data, ","; keepempty = false)
                             push!(s, String(v))
                         end
-                    elseif m.channel == "files_changed"   # KaimonGate's Revise watcher: parent /src edited
-                        push!(srcchanged, rid)
+                    elseif m.channel == "slate_revise"        # worker's hot-reload watcher: applied; here are the changed names
+                        s = get!(srcnames, rid, Set{String}())
+                        for v in split(m.data, ","; keepempty = false)
+                            push!(s, String(v))
+                        end
+                    elseif m.channel == "slate_revise_err"    # a /src save didn't parse/apply
+                        srcerr[rid] = String(m.data)
                     end
                 end
                 for (rid, vars) in pending
                     isempty(vars) || _do_refresh(rid, collect(vars))
                 end
-                for rid in srcchanged
-                    _do_src_changed(rid)
+                for (rid, names) in srcnames
+                    isempty(names) || _do_src_changed(rid, collect(names))
+                end
+                for (rid, msg) in srcerr
+                    _do_src_error(rid, msg)
                 end
             catch
             end

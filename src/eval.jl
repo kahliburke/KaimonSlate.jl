@@ -32,9 +32,16 @@ end
 const _SRCCHANGE_REGISTRY = Dict{String,Any}()
 register_srcchange!(report_id::AbstractString, cb) = (_SRCCHANGE_REGISTRY[String(report_id)] = cb; nothing)
 unregister_srcchange!(report_id::AbstractString) = (delete!(_SRCCHANGE_REGISTRY, String(report_id)); nothing)
-function _do_src_changed(report_id::AbstractString)
+# The callback takes (changed_names, error_msg): a normal reload passes the names + ""; a
+# parse/apply error passes [] + the message. One registry covers both.
+function _do_src_changed(report_id::AbstractString, names)
     cb = get(_SRCCHANGE_REGISTRY, String(report_id), nothing)
-    cb === nothing || cb()
+    cb === nothing || cb(String[String(n) for n in names], "")
+    return nothing
+end
+function _do_src_error(report_id::AbstractString, msg)
+    cb = get(_SRCCHANGE_REGISTRY, String(report_id), nothing)
+    cb === nothing || cb(String[], String(msg))
     return nothing
 end
 

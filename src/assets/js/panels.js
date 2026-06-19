@@ -223,6 +223,10 @@ function connectLive() {
       toast(`🔁 Source reloaded — ${n} cell${n === 1 ? '' : 's'} now stale. ⌘↵ to run.`);
       return;
     }
+    if (e.data.startsWith('srcerror:')) {    // a /src save didn't parse — Revise couldn't apply it
+      toast('⚠ Source not reloaded — ' + e.data.slice(9), 7000, 'err');
+      return;
+    }
     const v = parseInt(e.data, 10);
     if (!isNaN(v) && v !== lastVersion) { lastVersion = v; renderAll(await api('GET', '/api/state')); }
     // Keep the history rail fresh while it's open (agent turns, external edits).

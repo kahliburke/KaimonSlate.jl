@@ -13,10 +13,10 @@ let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '20
 let lastVersion = -1;
 
 // Lightweight transient notification (bottom-right corner); stacks, auto-dismisses.
-function toast(msg, ms = 4500) {
+function toast(msg, ms = 4500, kind = '') {
   let host = document.getElementById('toasts');
   if (!host) { host = document.createElement('div'); host.id = 'toasts'; document.body.appendChild(host); }
-  const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+  const t = document.createElement('div'); t.className = 'toast' + (kind ? ' ' + kind : ''); t.textContent = msg;
   host.appendChild(t);
   requestAnimationFrame(() => t.classList.add('show'));
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, ms);

@@ -327,12 +327,9 @@ function _def_name(ex)
 end
 findfirst_def(args) = (for a in args; r = _def_name(a); r === nothing || return r; end; nothing)
 
-"Apply pending Revise revisions; return the names of changed top-level defs (for cell invalidation)."
-function __slate_revise()
-    isdefined(Main, :Revise) || return String[]
-    R = Main.Revise
-    queue = try; collect(R.revision_queue); catch; Tuple[]; end   # (PkgData, relpath) pending, captured pre-revise
-    try; R.revise(); catch; end                                   # apply (mod_exs_infos for changed files is now populated)
+# Changed top-level def-names from a snapshot of (PkgData, relpath) revision entries. Reads the
+# changed file's parsed defs (whole file → file-granular invalidation), best-effort.
+function _changed_names(queue)
     changed = Set{String}()
     for item in queue
         try
@@ -346,6 +343,64 @@ function __slate_revise()
         end
     end
     return collect(changed)
+end
+
+# A Revise apply error → a short message (the file + reason), best-effort across Revise versions.
+function _revise_error_msg(R, thrown)
+    thrown === nothing || return first(sprint(showerror, thrown), 400)
+    qe = try; isdefined(R, :queue_errors) ? R.queue_errors : nothing; catch; nothing; end
+    (qe === nothing || isempty(qe)) && return ""
+    return try
+        k, v = first(qe)                                    # (PkgId/file) => (exception, backtrace)
+        ex = v isa Tuple ? v[1] : v
+        "$(basename(string(k))): $(first(sprint(showerror, ex), 300))"
+    catch
+        "Revise could not apply a source change."
+    end
+end
+
+const _LAST_SRC_ERR = Ref{String}("")
+
+# Resilient headless hot-reload. Revise's own file watchers populate `revision_queue`
+# headlessly; we poll it, APPLY the revisions, and PUB either the changed def-names
+# (`slate_revise`) or a parse/load error (`slate_revise_err`). Crucially, every iteration is
+# wrapped so a bad/invalid save can NEVER kill the watcher — tracking resumes the instant the
+# file parses again. Errors are deduped so an unfixed file doesn't spam toasts.
+function _start_src_watcher()
+    isdefined(Main, :Revise) || return nothing
+    @async while true
+        try
+            sleep(0.4)
+            R = Main.Revise
+            (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || continue
+            queue = collect(R.revision_queue)
+            thrown = nothing
+            try; R.revise(); catch e; thrown = e; end
+            emsg = _revise_error_msg(R, thrown)
+            if !isempty(emsg)
+                if emsg != _LAST_SRC_ERR[]
+                    _LAST_SRC_ERR[] = emsg
+                    KaimonGate._publish_stream("slate_revise_err", emsg)
+                end
+            else
+                _LAST_SRC_ERR[] = ""
+                names = _changed_names(queue)
+                isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
+            end
+        catch e
+            try; @warn "slate src watcher iteration failed" exception = e; catch; end
+            try; sleep(0.5); catch; end
+        end
+    end
+    return nothing
+end
+
+"Apply pending Revise revisions; return the changed top-level def names (manual / testing)."
+function __slate_revise()
+    isdefined(Main, :Revise) || return String[]
+    queue = try; collect(Main.Revise.revision_queue); catch; Tuple[]; end
+    try; Main.Revise.revise(); catch; end
+    return _changed_names(queue)
 end
 
 "GateTools exposed to the KaimonSlate server."
@@ -380,6 +435,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int)
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate")
+    _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a
     # remote `:shutdown` (which calls `exit(0)` from the gate task). Flush each

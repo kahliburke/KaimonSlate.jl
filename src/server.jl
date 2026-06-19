@@ -111,7 +111,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
                           ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                           Dict{String,String}())
         register_refresh!(r.id, vars -> server_refresh(nb, vars))
-        register_srcchange!(r.id, () -> server_src_changed(nb))
+        register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))
         _load_chat_log!(nb)
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb
@@ -126,7 +126,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     _history!(nb; source = "open")
     # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
     register_refresh!(r.id, vars -> server_refresh(nb, vars))
-    register_srcchange!(r.id, () -> server_src_changed(nb))   # parent /src edited (Revise) → invalidate readers
+    register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))   # parent /src reloaded (Revise)
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     _autoindex!(nb)                      # background: index project deps + used packages' docs
     return nb
@@ -190,10 +190,12 @@ end
 # (plus their dependents) stale, then notify the browser (`srcreload:<n>`). Mark-stale, NOT
 # auto-run — the user re-runs (Run stale / ⇧⏎). Per-notebook toggle via meta["hotreload"]
 # (default on); only meaningful with a gate worker (Revise lives in the worker).
-function server_src_changed(nb::LiveNotebook)
-    nb.kernel isa GateKernel || return
+function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::AbstractString = "")
     get(nb.report.meta, "hotreload", true) == false && return
-    names = try; revise_apply!(nb.kernel); catch; String[]; end
+    if !isempty(err)                              # a /src save didn't parse/apply → just notify
+        _broadcast(nb, "srcerror:" * replace(strip(err), r"\s*\n\s*" => " "))
+        return
+    end
     isempty(names) && return
     syms = Set{Symbol}(Symbol(n) for n in names)
     staled = Set{String}()

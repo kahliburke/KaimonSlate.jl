@@ -163,6 +163,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
          border-radius:8px; padding:9px 13px; font-size:.82rem; max-width:340px; box-shadow:0 8px 24px #0009;
          opacity:0; transform:translateY(8px); transition:opacity .25s ease, transform .25s ease; }
 .toast.show { opacity:1; transform:none; }
+.toast.err { border-left-color:var(--red); }
 .dropline { position:absolute; left:0; right:0; height:3px; background:var(--purple); border-radius:2px;
             box-shadow:0 0 8px var(--purple); display:none; z-index:5; pointer-events:none; }
 .cell.bind { border-left-color:var(--teal); }
