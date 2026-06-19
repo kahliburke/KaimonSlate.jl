@@ -107,6 +107,17 @@ eval_capture(::InProcessKernel, report::Report, source::AbstractString) =
     _eval_capture(report_module(report), source)
 
 """
+    complete(kernel, report, code, pos) -> (; items, from, to)
+
+Completion candidates for `code` at byte offset `pos`, resolved WHERE the kernel's
+bindings live — so `using`'d packages and evaluated-cell bindings complete, not just
+`Base`. `items` is a `Vector{Tuple{String,String}}` of `(text, kind)`; `from`/`to` are
+0-based byte offsets of the replaced range. The in-process kernel completes locally.
+"""
+complete(::InProcessKernel, report::Report, code::AbstractString, pos::Integer) =
+    slate_completions(report_module(report), code, pos)
+
+"""
 Set a `@bind` control's value from the browser: coerce it against the widget, update
 the per-notebook registry (so a later re-run preserves it), and assign the global so
 readers see it. Returns the coerced value. Routed through the namespace's injected

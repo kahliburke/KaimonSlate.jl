@@ -277,6 +277,23 @@ function harvest_docs(k::GateKernel, report::Report, mod_names)
     return Dict{String,Any}[Dict{String,Any}(String(k) => v for (k, v) in r) for r in wire]
 end
 
+# Completion runs in the worker (where `using`'d packages + evaluated bindings live).
+# Best-effort and never blocks the UI: if the worker isn't up yet, or the call errors or
+# times out, return nothing — the server still offers cell-local completions. No `prepare!`
+# here on purpose: a keystroke must never trigger a cold (~90s) worker spawn.
+function complete(k::GateKernel, report::Report, code::AbstractString, pos::Integer)
+    empty = (items = Tuple{String,String}[], from = Int(pos), to = Int(pos))
+    k.conn === nothing && return empty
+    wire = try
+        _tool(k, "__slate_complete", Dict("code" => String(code), "pos" => Int(pos)); timeout = 10.0)
+    catch
+        return empty
+    end
+    wire === nothing && return empty
+    return (items = Tuple{String,String}[(String(t), String(kd)) for (t, kd) in wire.items],
+            from = Int(wire.from), to = Int(wire.to))
+end
+
 function module_help(k::GateKernel, report::Report, name::AbstractString)
     prepare!(k, report)
     wire = try

@@ -209,16 +209,34 @@ function mountEditor(c) {
   ed.on('change', () => { if (primed) setState(c.id, 'edited'); });
   setTimeout(() => primed = true, 0);
   const complete = cm => cm.showHint({ hint: juliaHint, completeSingle: false });
-  const tabComplete = cm => {                  // complete after a word/`.`, else indent
-    const cur = cm.getCursor();
-    const before = cm.getRange({ line: cur.line, ch: Math.max(0, cur.ch - 1) }, cur);
-    if (cm.somethingSelected() || !/[\w.]/.test(before)) return CodeMirror.Pass;
-    complete(cm);
+  const tabComplete = cm => {                  // cycle signature params · complete (word/dot, or arg position) · else indent
+    if (cm._ph) { _phGoto(cm, cm._ph.idx + 1); return; }   // signature placeholder mode owns Tab
+    if (cm.somethingSelected()) return CodeMirror.Pass;
+    const cur = cm.getCursor(), line0 = cm.getRange({ line: cur.line, ch: 0 }, cur), before = line0.slice(-1);
+    const inCall = (line0.match(/\(/g) || []).length > (line0.match(/\)/g) || []).length;
+    if (/[\w.]/.test(before) || (inCall && /[(,;\s]/.test(before))) complete(cm);   // arg/kwarg position → signatures
+    else return CodeMirror.Pass;
   };
-  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Esc': () => ed.getInputField().blur(),
-                              'Shift-Cmd-Enter': () => runAndAddBelow(c.id), 'Shift-Ctrl-Enter': () => runAndAddBelow(c.id),
+  // As-you-type: open the popup once ≥2 identifier chars are typed (it then self-updates).
+  // Skip inside strings/comments. Field access (`.`) fires immediately, below.
+  const autoComplete = debounce(cm => {
+    if (cm.state.completionActive || cm._ph) return;   // not while filling signature placeholders
+    const cur = cm.getCursor(), tok = cm.getTokenAt(cur);
+    if (tok.type === 'comment' || tok.type === 'string') return;
+    if (!/[A-Za-z_][\w!]$/.test(cm.getRange({ line: cur.line, ch: 0 }, cur))) return;
+    complete(cm);
+  }, 140);
+  const shiftTab = cm => { if (cm._ph) { _phGoto(cm, cm._ph.idx - 1, -1); return; } return CodeMirror.Pass; };
+  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Shift-Tab': shiftTab,
+                              'Esc': () => { if (ed._ph) _phEnd(ed); else ed.getInputField().blur(); },
+                              'Ctrl-Space': complete, 'Shift-Cmd-Enter': () => runAndAddBelow(c.id), 'Shift-Ctrl-Enter': () => runAndAddBelow(c.id),
                               'Shift-Ctrl--': () => splitCell(c.id, ed), 'Shift-Cmd--': () => splitCell(c.id, ed) });
-  ed.on('inputRead', (cm, ev) => { if (ev.text[0] === '.') complete(cm); });   // auto on field access
+  ed.on('inputRead', (cm, ev) => {             // auto on field access, debounced as-you-type otherwise
+    if (cm._ph) return;                        // filling placeholders — don't pop completions over the cursor
+    const t = ev.text[0] || '';
+    if (t === '.') complete(cm);
+    else if (/[A-Za-z_]/.test(t)) autoComplete(cm);
+  });
   ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
   ed.on('blur', () => setEditing(c.id, false));
   document.querySelector('#cell-' + c.id + ' [data-run]').onclick = () => runCell(c.id);

@@ -10,7 +10,7 @@ the engine (`ReportEngine`) and per-cell renderer (`ReportRender`).
 module NotebookServer
 
 using HTTP, JSON, FileWatching, CodecZlib
-import REPL, Base64
+import Base64
 import Typst_jll
 using ..ReportEngine
 using ..ReportRender
@@ -1793,18 +1793,17 @@ function _id_prefix(code::String, pos::Int)
     return (i, String(cu[(i + 1):pos]), dotted)
 end
 
-# Text to insert for a completion. `completion_text` throws on `BslashCompletion`
-# (Julia ≥1.12 — that's the LaTeX/emoji `\pi`→π path), so fall back to the struct's
-# symbol field. Robust across Julia versions: normal path first, field access on throw.
-function _comp_text(c)
-    try
-        return REPL.REPLCompletions.completion_text(c)::AbstractString
-    catch
-        for f in (:completion, :name)               # BslashCompletion holds the symbol here
-            hasproperty(c, f) && return String(getfield(c, f))
-        end
-        return ""
-    end
+# Stable re-rank for the popup: cell-local bindings float to the top and keywords sink,
+# while names of the same kind keep REPLCompletions' (alphabetical) order. `prefix` is the
+# typed token — an exact match (you've already typed the whole name) drops to the bottom.
+const _KIND_RANK = Dict("local" => 0, "field" => 1, "kwarg" => 1, "var" => 2, "function" => 2,
+                        "type" => 2, "const" => 2, "module" => 2, "method" => 2, "key" => 2,
+                        "path" => 2, "text" => 3, "latex" => 3, "keyword" => 4)
+function _rank_completions(items::Vector{Tuple{String,String}}, prefix::AbstractString)
+    length(items) <= 1 && return items
+    order = collect(enumerate(items))
+    sort!(order; by = p -> (p[2][1] == prefix ? 1 : 0, get(_KIND_RANK, p[2][2], 3), p[1]))
+    return [it for (_, it) in order]
 end
 
 # Names introduced at a binding site (LHS of `=`, params, `f(a,b)` def, `x::T`, …).
@@ -2005,21 +2004,25 @@ function _make_router(h::Hub)
         body = _body(req)
         code = String(get(body, "code", ""))
         pos = clamp(Int(get(body, "pos", ncodeunits(code))), 0, ncodeunits(code))
-        mod = nb.report.mod === nothing ? Main : nb.report.mod
         pstart, prefix, dotted = _id_prefix(code, pos)
-        texts, from, to = try
-            comps, range, _ = REPL.REPLCompletions.completions(code, pos, mod)
-            (filter(!isempty, String[_comp_text(c) for c in comps]), first(range) - 1, last(range))
+        # Completion resolves WHERE the cells eval (the worker, for a gate kernel), so
+        # `using`'d packages and evaluated bindings complete — not just server-side globals.
+        items, from, to = (Tuple{String,String}[], pstart, pos)
+        try
+            r = ReportEngine.complete(nb.kernel, nb.report, code, pos)
+            items = Tuple{String,String}[(String(t), String(k)) for (t, k) in r.items]
+            from = Int(r.from); to = Int(r.to)
         catch
-            (String[], pstart, pos)
         end
         if !dotted                          # union in cell-local bindings (skip field access)
-            have = Set(texts)
+            have = Set(first.(items))
             locals = try; _cell_locals(code); catch; Set{Symbol}(); end
             extra = sort!(String[n for n in (String(s) for s in locals) if startswith(n, prefix) && !(n in have)])
-            isempty(extra) || (texts = vcat(extra, texts))
+            isempty(extra) || (items = vcat(Tuple{String,String}[(n, "local") for n in extra], items))
         end
-        _json(Dict("completions" => texts, "from" => from, "to" => to))
+        items = _rank_completions(items, prefix)
+        _json(Dict("completions" => [Dict("text" => t, "kind" => k) for (t, k) in items],
+                   "from" => from, "to" => to))
     end))
     HTTP.register!(router, "POST", "/api/{id}/cell-add", req -> _withnb(h, req, nb -> begin
         b = _body(req)

@@ -31,6 +31,7 @@ include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / 
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
+include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 
 # Per-notebook execution namespace (warm; reset by replacing the module). Built by the
 # SAME shared contract `_populate_notebook_ns!` as the in-process kernel, so the two
@@ -73,6 +74,9 @@ __slate_table_page(table_id::String, page::Int, page_size::Int, sort_col::Int, s
 "Capture markdown `{{ }}` interpolation expressions (rich) — one wire-form each."
 __slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e) for e in exprs]
 
+"Completion candidates in the warm namespace → `(; items, from, to)` (see `slate_completions`)."
+__slate_complete(code::String, pos::Int) = slate_completions(_NS[], code, pos)
+
 # A throwaway module to `import` packages into for harvesting, so eager indexing can
 # load project deps the notebook hasn't `using`'d WITHOUT polluting the cell namespace.
 const _DOC_SCAN = Ref{Module}()
@@ -90,8 +94,16 @@ end
 "Resolve `name` (loading its head module if needed) and return its help record
 `{name,module,doc,kind,exports}` — powers the docs palette's `?Module` drill-down."
 function __slate_module_help(name::String)
-    m = _doc_scan()
     head = String(first(split(name, '.')))
+    # Prefer the live notebook namespace: a `using`'d or cell-defined symbol (e.g. `damped_wave`)
+    # resolves there WITH its docs. Only fall back to a throwaway module that imports the head
+    # package for `?Module` drill-down on a package the notebook hasn't brought into scope.
+    nb = _NS[]
+    if isdefined(nb, Symbol(head))
+        rec = try; module_help(nb, name); catch; nothing; end
+        rec !== nothing && (get(rec, "kind", "unknown") != "unknown" || !isempty(strip(get(rec, "doc", "")))) && return rec
+    end
+    m = _doc_scan()
     try; Core.eval(m, Meta.parse("import " * head)); catch; end   # load the package if needed
     return module_help(m, name)
 end
@@ -294,6 +306,7 @@ function tools()
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
+        KaimonGate.GateTool("__slate_complete", __slate_complete),
         KaimonGate.GateTool("__slate_harvest_docs", __slate_harvest_docs),
         KaimonGate.GateTool("__slate_module_help", __slate_module_help),
         KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),

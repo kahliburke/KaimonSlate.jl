@@ -23,6 +23,60 @@ async function insertBind(snippet) {
   const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
   if (id && editors[id]) { editors[id].setValue(snippet); editors[id].focus(); }
 }
+// ── Recipes ───────────────────────────────────────────────────────────────────
+// Starter code for common tasks (mostly Makie plots, dark theme). Each drops into a
+// fresh code cell below the selection, ready to edit and run. Surfaced in ⌘K.
+const RECIPES = [
+  ['Plotting setup — CairoMakie + dark theme',
+`using CairoMakie
+set_theme!(theme_dark())`],
+  ['Line plot',
+`fig = Figure(size = (640, 360))
+ax = Axis(fig[1, 1]; xlabel = "x", ylabel = "y", title = "Line")
+x = range(0, 2π; length = 200)
+lines!(ax, x, sin.(x))
+fig`],
+  ['Scatter plot',
+`fig = Figure(size = (640, 360))
+ax = Axis(fig[1, 1]; xlabel = "x", ylabel = "y", title = "Scatter")
+scatter!(ax, randn(200), randn(200); markersize = 7, color = (:cyan, 0.6))
+fig`],
+  ['Multi-series + legend',
+`fig = Figure(size = (640, 360))
+ax = Axis(fig[1, 1]; xlabel = "x", ylabel = "y", title = "Series")
+x = range(0, 2π; length = 200)
+lines!(ax, x, sin.(x); label = "sin")
+lines!(ax, x, cos.(x); label = "cos")
+axislegend(ax)
+fig`],
+  ['Bar chart',
+`fig = Figure(size = (640, 360))
+ax = Axis(fig[1, 1]; xlabel = "category", ylabel = "value", title = "Bar")
+barplot!(ax, 1:5, [3, 1, 4, 1, 5])
+fig`],
+  ['Histogram',
+`fig = Figure(size = (640, 360))
+ax = Axis(fig[1, 1]; xlabel = "value", ylabel = "count", title = "Histogram")
+hist!(ax, randn(1000); bins = 30)
+fig`],
+  ['Heatmap + colorbar',
+`fig = Figure(size = (640, 360))
+ax = Axis(fig[1, 1]; title = "Heatmap")
+hm = heatmap!(ax, randn(24, 24))
+Colorbar(fig[1, 2], hm)
+fig`],
+  ['Subplots (2×1)',
+`fig = Figure(size = (640, 480))
+x = range(0, 2π; length = 200)
+lines!(Axis(fig[1, 1]; title = "top"), x, sin.(x))
+lines!(Axis(fig[2, 1]; title = "bottom"), x, cos.(x))
+fig`],
+];
+async function insertRecipe(code) {
+  const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
+  if (id && editors[id]) { editors[id].setValue(code); editors[id].focus(); }
+}
+
 // ── Command palette (⌘K) ──────────────────────────────────────────────────────
 function paletteCommands() {
   // `key` is the shortcut hint shown on the right of each row. Single-letter / ⇧-keys are
@@ -53,6 +107,7 @@ function paletteCommands() {
     { label: 'Hide code for all plot cells', run: () => hideAllPlotCode(true) },
     { label: 'Show code for all plot cells', run: () => hideAllPlotCode(false) },
     ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
+    ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },
   ];
@@ -112,6 +167,7 @@ function _navBack() { if (_hpos > 0) { _hpos--; _renderView(); _saveDocs(); } el
 function _navFwd()  { if (_hpos < _hist.length - 1) { _hpos++; _renderView(); _saveDocs(); } }
 
 function openDocs() {                               // show the dock (un-minimize); keeps prior state
+  _docReturn = null;                               // opened directly (not from a cell) → nothing to return to
   _docMin = false;
   document.getElementById('docpanel').classList.remove('min');
   document.getElementById('doclauncher').classList.add('hidden');
@@ -123,9 +179,35 @@ function minimizeDocs() {                           // collapse to the launcher 
   document.getElementById('docpanel').classList.add('min');
   document.getElementById('doclauncher').classList.remove('hidden');
   _saveDocs();
+  const r = _docReturn; _docReturn = null;         // return focus to the cell ⌘⇧K was fired from
+  if (r && r.cm) { r.cm.focus(); try { r.cm.setCursor(r.pos); } catch (_) {} }
 }
 const closeDocs = minimizeDocs;                     // "close" now means minimize
 function toggleDocs() { _docMin ? openDocs() : minimizeDocs(); }   // ⌘⇧K — open ↔ minimize
+
+// The dotted identifier the cursor sits on or beside, in a focused cell editor — powers
+// ⌘⇧K "help on this symbol". Expands over `[\w!.]` both ways, then trims stray dots
+// (so `a.b.` → `a.b`, and a cursor just past `foo` still resolves `foo`).
+function _symbolAtCursor(cm) {
+  const cur = cm.getCursor(), line = cm.getLine(cur.line) || '';
+  const ident = c => c && /[A-Za-z0-9_!.]/.test(c);
+  let a = cur.ch, b = cur.ch;
+  while (a > 0 && ident(line[a - 1])) a--;
+  while (b < line.length && ident(line[b])) b++;
+  return line.slice(a, b).replace(/^\.+|\.+$/g, '');
+}
+function _focusedEditorCM() {                       // whichever cell editor currently has focus, else null
+  if (typeof editors === 'undefined') return null;
+  for (const id in editors) { const cm = editors[id]; if (cm && cm.hasFocus && cm.hasFocus()) return cm; }
+  return null;
+}
+// Where to send focus back when the help pane closes (set when ⌘⇧K is fired from a cell).
+let _docReturn = null;
+// Open the help dock searching for `name` (semantic docsearch + live `?name` lookup, pinned).
+function openDocsFor(name) {
+  openDocs();
+  const inp = document.getElementById('docin'); inp.value = name; _docSearch();
+}
 function _saveDocs() {
   try { localStorage.setItem('slateDocs', JSON.stringify({ min: _docMin, q: (_view() && _view().q) || '' })); } catch (_) {}
 }
@@ -338,7 +420,15 @@ _restoreDocs();
 // doesn't bind these). Mirrored in the command palette's shortcut hints.
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); e.shiftKey ? toggleDocs() : openPalette(); }
+  if (mod && (e.key === 'k' || e.key === 'K')) {                          // ⌘K palette · ⌘⇧K docs
+    e.preventDefault();
+    if (!e.shiftKey) openPalette();
+    else {                                                               // ⌘⇧K on a symbol → its help, refocus on close
+      const cm = _focusedEditorCM(), sym = cm ? _symbolAtCursor(cm) : '';
+      if (sym) { const pos = cm.getCursor(); openDocsFor(sym); _docReturn = { cm, pos }; }
+      else toggleDocs();
+    }
+  }
   else if (mod && e.key === 'Enter') { e.preventDefault(); runAll(); }                       // ⌘↵  run stale
   else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
   else if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); togglePalette(); } // ⌘⇧F controls

@@ -266,8 +266,31 @@ input.toggle:checked::after { left:18px; }
 /* Completion popup — match the dark theme (CodeMirror show-hint defaults to bright white). */
 .CodeMirror-hints { background:var(--bg2); border:1px solid var(--border); border-radius:7px; box-shadow:0 8px 24px #000a;
   font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; padding:3px; z-index:120; max-height:260px; }
-.CodeMirror-hint { color:var(--fg); padding:3px 9px; border-radius:4px; }
+.CodeMirror-hint { color:var(--fg); padding:3px 9px; border-radius:4px; display:flex; align-items:center; gap:7px; }
 li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
+/* completion row: kind icon · symbol · faint kind label */
+.cmh-ic { flex:0 0 auto; width:14px; text-align:center; font-weight:700; }
+.cmh-tx { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; }
+.cmh-kd { flex:0 0 auto; font-size:.72em; color:var(--dim); }
+li.CodeMirror-hint-active .cmh-ic, li.CodeMirror-hint-active .cmh-kd { color:#0d1120 !important; }
+.cmh-function,.cmh-method { color:var(--accent); }
+.cmh-type { color:var(--green); }
+.cmh-module { color:var(--purple); }
+.cmh-const,.cmh-latex { color:var(--orange); }
+.cmh-local,.cmh-var { color:var(--gold); }
+.cmh-keyword { color:var(--red); }
+.cmh-field,.cmh-path,.cmh-key,.cmh-kwarg,.cmh-text { color:var(--dim); }
+/* doc preview card floated beside the popup */
+.cmh-doc { position:fixed; z-index:121; width:360px; max-height:320px; overflow:auto;
+  background:var(--bg2); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px #000a;
+  padding:8px 11px; font-size:.8rem; line-height:1.5; color:var(--text); display:none; }
+.cmh-doc-k { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.7rem; text-transform:uppercase;
+  letter-spacing:.04em; color:var(--dim); margin-bottom:5px; }
+.cmh-doc p:first-of-type { margin-top:0; }
+.cmh-doc pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); border-radius:5px; padding:6px 8px; }
+.cmh-doc code { font-family:'Cascadia Code',ui-monospace,monospace; }
+/* signature placeholders: ghosted call params you Tab through until filled */
+.cmh-ph { color:var(--dim); background:rgba(86,156,214,.12); border-radius:3px; }
 /* History panel (time machine) */
 .histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
   border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
@@ -422,8 +445,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
     border-radius: 7px; padding: 7px 11px; font-size: 13px; outline: none; }
   .dochdr input:focus { border-color: var(--accent); }
   .docnav { flex: 0 0 auto; width: 26px; height: 26px; background: none; border: 1px solid var(--bg3); color: var(--dim);
-    border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1; }
+    border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center; }
   .docnav:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+  .docnav:focus { outline: none; }
+  .docnav:focus-visible { color: var(--accent); border-color: var(--accent); }
   .docnav:disabled { opacity: .35; cursor: default; }
   #doclauncher { position: fixed; right: 16px; bottom: 16px; z-index: 60; background: var(--bg2); color: var(--text);
     border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px; cursor: pointer; font-size: 13px;
