@@ -13,13 +13,16 @@ import { effect } from '@preact/signals';
 import { cells as cellsSignal, selected as selectedSignal, liveStates as liveSignal, focus as focusSignal } from './store.js';
 
 const raw = s => ({ __html: s || '' });
+const _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
-// Dep-focus: the cells in `id`'s dependency CHAIN — itself, its transitive precursors (deps),
-// and its transitive dependents — so focusing on a cell shows just that flow. `null` → all.
-function _focusCone(cells, id) {
-  if (!id) return cells;
+// Dep-focus: the SET of cell ids in `id`'s dependency CHAIN — itself, its transitive precursors
+// (deps), and its transitive dependents — so focusing on a cell shows just that flow. Returns a
+// Set, or `null` when nothing is focused (→ every cell visible). All cells stay mounted either
+// way; cells outside the cone are animated collapsed (see <Cell>), so editors/figures survive.
+function _coneIds(cells, id) {
+  if (!id) return null;
   const byId = {}; cells.forEach(c => (byId[c.id] = c));
-  if (!byId[id]) return cells;
+  if (!byId[id]) return null;
   const cone = new Set([id]);
   const up = x => (byId[x]?.deps || []).forEach(d => { if (!cone.has(d)) { cone.add(d); up(d); } });
   up(id);                                            // upstream precursors
@@ -35,7 +38,44 @@ function _focusCone(cells, id) {
     }
   }
   down.forEach(x => cone.add(x));
-  return cells.filter(c => cone.has(c.id));
+  return cone;
+}
+
+// Smoothly collapse a cell out of the flow (focus dropped it from the cone) or expand it back,
+// by animating max-height/opacity/margin. max-height is set to the MEASURED pixel height first
+// (not a guessed large value), so there's no "wait then snap" — neighbours flow as it shrinks.
+function _animateCollapse(el, collapse) {
+  const T = 'max-height .26s ease, opacity .18s ease, margin .26s ease, border-top-width .26s, border-bottom-width .26s';
+  if (_reduceMotion) {                               // honour the OS setting: no tween, just the end state
+    el.style.maxHeight = collapse ? '0px' : '';
+    el.style.opacity = collapse ? '0' : '';
+    el.style.marginTop = el.style.marginBottom = collapse ? '0px' : '';
+    el.style.borderTopWidth = el.style.borderBottomWidth = collapse ? '0px' : '';
+    return;
+  }
+  if (collapse) {
+    el.style.maxHeight = el.scrollHeight + 'px';     // start from the real height
+    el.getBoundingClientRect();                      // force reflow so the next change transitions
+    el.style.transition = T;
+    el.style.maxHeight = '0px'; el.style.opacity = '0';
+    el.style.marginTop = '0px'; el.style.marginBottom = '0px';
+    el.style.borderTopWidth = '0px'; el.style.borderBottomWidth = '0px';
+  } else {
+    el.style.maxHeight = 'none';                      // measure natural height
+    const full = el.scrollHeight;
+    el.style.maxHeight = '0px';
+    el.getBoundingClientRect();                       // reflow at collapsed size
+    el.style.transition = T;
+    el.style.maxHeight = full + 'px'; el.style.opacity = '1';
+    el.style.marginTop = '14px'; el.style.marginBottom = '14px';   // back to the .cell CSS value
+    el.style.borderTopWidth = '1px'; el.style.borderBottomWidth = '1px';
+    const done = e => {                               // wait for max-height (the longest) before cleanup
+      if (e.target !== el || e.propertyName !== 'max-height') return;
+      el.removeEventListener('transitionend', done);
+      el.style.maxHeight = el.style.transition = el.style.marginTop = el.style.marginBottom = el.style.borderTopWidth = el.style.borderBottomWidth = '';
+    };
+    el.addEventListener('transitionend', done);
+  }
 }
 
 // <Editor>: a CodeMirror created ONCE into a host div and preserved. The component renders a
@@ -54,11 +94,20 @@ function Editor({ cell }) {
   return html`<div ref=${ref}></div>`;
 }
 
-function Cell({ cell, selectedId, live, focusId }) {
+function Cell({ cell, selectedId, live, focusId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
   const last = useRef({ bindKey: undefined, ctrlKey: undefined, out: undefined, vis: undefined });
   const state = (live && live[c.id]) || c.state;   // transient (running/edited) wins until server state arrives
+
+  // Dep-focus: cells outside the focused cone collapse out of the flow (and expand back) rather
+  // than unmounting, so the transition is smooth and editors/figures survive. Animate only on a
+  // real change; `false` initial avoids animating the first mount of an already-collapsed cell.
+  const wasCollapsed = useRef(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (el && collapsed !== wasCollapsed.current) { wasCollapsed.current = collapsed; _animateCollapse(el, collapsed); }
+  }, [collapsed]);
 
   // Dispose this cell's ECharts when it unmounts; charts otherwise update in place.
   useEffect(() => () => {
@@ -135,23 +184,48 @@ function Cell({ cell, selectedId, live, focusId }) {
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
-function Notebook({ cells, selectedId, live, focusId }) {
+function Notebook({ cells, selectedId, live, focusId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
     window.syncAgentTop && window.syncAgentTop();
   });
+  const coneCount = cone ? cone.size : (cells || []).length;
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
-      title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${cells.length} cell${cells.length === 1 ? '' : 's'} — click to exit</div>` : null;
-  return html`${banner}${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} live=${live} focusId=${focusId} />`)}`;
+      title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
+  // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
+  return html`${banner}${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`)}`;
 }
 
 const nbHost = document.getElementById('nb');
 if (nbHost) {
-  // Re-render on cell list / selection / live-state / dep-focus change. When focused, only the
-  // focus cell's dependency chain is rendered (the rest dissolve away).
+  // Re-render on cell list / selection / live-state / dep-focus change. Every cell stays
+  // mounted; when focused, cells outside the dependency cone animate collapsed (the rest of the
+  // smoothing lives in <Cell>/_animateCollapse), so editors and live figures survive the toggle.
+  let _prevFocus;
   effect(() => {
     const fid = focusSignal.value;
-    render(html`<${Notebook} cells=${_focusCone(cellsSignal.value, fid)} selectedId=${selectedSignal.value} live=${liveSignal.value} focusId=${fid} />`, nbHost);
+    const cone = _coneIds(cellsSignal.value, fid);
+    // On a focus TOGGLE the cells above the anchor collapse/expand, which would shift the page
+    // (you'd land at the top on exit). Pin the anchor cell — the one focused, or the one we're
+    // leaving — to its current viewport offset for the duration of the collapse animation, so it
+    // stays put while everything reflows around it.
+    const focusChanged = fid !== _prevFocus;
+    const anchorId = focusChanged ? (fid || _prevFocus) : null;
+    const anchorEl = anchorId && document.getElementById('cell-' + anchorId);
+    const beforeTop = anchorEl ? anchorEl.getBoundingClientRect().top : null;
+    _prevFocus = fid;
+
+    render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} live=${liveSignal.value} focusId=${fid} />`, nbHost);
+
+    if (beforeTop != null) {
+      const t0 = performance.now();
+      const pin = () => {
+        const el = document.getElementById('cell-' + anchorId);
+        if (el) { const d = el.getBoundingClientRect().top - beforeTop; if (Math.abs(d) > 0.5) window.scrollBy(0, d); }
+        if (performance.now() - t0 < 340) requestAnimationFrame(pin);   // through the .26s collapse
+      };
+      requestAnimationFrame(pin);
+    }
   });
   console.log('[preact] phase 2+3 — <Notebook> owns #nb (editors preserved across updates)');
 }

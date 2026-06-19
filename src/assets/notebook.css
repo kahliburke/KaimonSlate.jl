@@ -1,7 +1,7 @@
 :root {
   --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40; --text:#d4d8e8;
   --dim:#6a7090; --accent:#569cd6; --green:#56d364; --red:#e57575; --gold:#ffd700;
-  --orange:#ce9178; --purple:#c586c0;
+  --orange:#ce9178; --purple:#c586c0; --teal:#4ec9b0;
   --page-pad:20px;   /* top/side gutter for the content column; reused by the agent drawer */
 }
 * { box-sizing:border-box; }
@@ -159,7 +159,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 #nb { position:relative; }
 .dropline { position:absolute; left:0; right:0; height:3px; background:var(--purple); border-radius:2px;
             box-shadow:0 0 8px var(--purple); display:none; z-index:5; pointer-events:none; }
-.cell.bind { border-left-color:var(--purple); }
+.cell.bind { border-left-color:var(--teal); }
 .widget { display:flex; align-items:center; gap:12px; padding:12px 14px; }
 .wname { font-family:'Cascadia Code',monospace; color:var(--accent); min-width:64px; }
 .widget input[type=range] { flex:1; accent-color:var(--purple); }
@@ -395,7 +395,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .spinner { width:38px; height:38px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 .loading .lmsg { color:var(--text); font-size:.9rem; }
-.cell.selected { outline:3px solid var(--purple); outline-offset:-2px;       /* command mode */
+.cell.selected { outline:3px solid var(--purple); outline-offset:-2px;       /* command mode (purple) — distinct from blue state edges + teal bind edges */
                  box-shadow:0 0 12px rgba(197,134,192,.4); }
 .cell.editing  { outline:3px solid var(--green); outline-offset:-2px; }       /* edit mode */
 .cid { cursor:pointer; } .cid:hover { color:var(--accent); }
