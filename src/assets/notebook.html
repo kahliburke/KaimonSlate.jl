@@ -4,6 +4,16 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Kaimon Notebook</title>
+<!-- Preact migration (no build): one pinned Preact; signals/htm import the bare "preact"
+     specifier (?external=preact) so every module shares it — duplicate copies break hooks. -->
+<script type="importmap">
+{ "imports": {
+  "preact": "https://esm.sh/preact@10.24.3",
+  "preact/hooks": "https://esm.sh/preact@10.24.3/hooks?external=preact",
+  "@preact/signals": "https://esm.sh/@preact/signals@1.3.0?external=preact",
+  "htm/preact": "https://esm.sh/htm@3.1.1/preact?external=preact"
+}}
+</script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css"/>
@@ -177,5 +187,8 @@
 <script src="/assets/js/agent.js"></script>
 <script src="/assets/js/panels.js"></script>
 <script src="/assets/js/dragdrop.js"></script>
+<!-- Preact app (ESM module). Strangler-fig: coexists with the classic scripts above
+     and takes over the UI island by island until the vanilla code is retired. -->
+<script type="module" src="/assets/js/app.js"></script>
 </body>
 </html>
