@@ -257,8 +257,16 @@ function _docPick() {
 // List: click selects; double-click inserts.
 document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _select(+li.dataset.i); document.getElementById('docin').focus(); } });
 document.getElementById('doclist').addEventListener('dblclick', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { _select(+li.dataset.i); _docPick(); } });
-// Detail: drill into an export chip or a doc link (signature type / inline ref).
-document.getElementById('docdetail').addEventListener('click', e => { const t = e.target.closest('.docexport, .doclink'); if (t && t.dataset.name) helpLookup(t.dataset.name); });
+// Detail: drill into an export chip or a doc link (signature type / inline ref). Also
+// neutralize REAL markdown links rendered inside a docstring — a relative href would
+// otherwise navigate to /n/<garbage> → 302 → the index, kicking you out of the notebook.
+document.getElementById('docdetail').addEventListener('click', e => {
+  const t = e.target.closest('.docexport, .doclink');
+  if (t && t.dataset.name) { e.preventDefault(); helpLookup(t.dataset.name); return; }
+  const a = e.target.closest('a[href]');
+  if (a) { e.preventDefault(); const h = a.getAttribute('href') || '';
+    if (/^https?:\/\//i.test(h)) window.open(h, '_blank', 'noopener'); }   // external → new tab; relative/@ref → ignore
+});
 document.getElementById('docin').addEventListener('input', _docSearch);
 document.getElementById('docin').addEventListener('keydown', e => {
   const v = _view(), sel = v ? v.sel : 0;
