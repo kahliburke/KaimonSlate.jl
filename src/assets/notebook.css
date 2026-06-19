@@ -12,9 +12,12 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .topbar h1 { font-size:1.1rem; margin:0; color:#fff; flex:1; }
 .wdot { width:9px; height:9px; border-radius:50%; background:var(--dim); display:inline-block; flex:0 0 auto; }
 .wdot.up { background:var(--green); } .wdot.inproc { background:var(--accent); } .wdot.down { background:var(--red); }
-.nbswitch { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
-            padding:4px 8px; font-size:.82rem; max-width:220px; }
-.nbswitch:hover { border-color:var(--accent); }
+.brand { display:flex; align-items:center; gap:7px; flex:0 0 auto; text-decoration:none;
+         color:#fff; font-weight:600; font-size:1.05rem; padding:2px 4px; border-radius:7px; }
+.brand:hover { color:var(--accent); }
+.brandmark { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px;
+             border-radius:7px; background:var(--accent); color:#fff; font-weight:700; font-size:.95rem;
+             font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
          padding:4px 12px; cursor:pointer; font-size:.82rem; }
 button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid var(--border);

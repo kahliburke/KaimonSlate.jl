@@ -35,7 +35,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       find_live, notebook_digest,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
                       acquire_floor!, release_floor!, floor_status,
-                      index_docs!, search_docs, cell_image, cell_inspect,
+                      index_docs!, search_docs, cell_image, cell_inspect, diag_report,
                       export_standalone, expand
 
 export serve_notebook, LiveNotebook, expand
@@ -307,6 +307,20 @@ function create_tools(GateTool::Type)
         return cell_inspect(nb, cell)
     end
 
+    """
+        diag(notebook) -> String
+
+    Browser diagnostics for an OPEN notebook tab: console errors, failed resource loads
+    (e.g. 404s), and unhandled promise rejections captured by the live page. Push-based —
+    reflects the most recent tab session, so open the notebook in a browser and reload to
+    refresh. Use after a front-end change to verify the console is clean (no headless browser
+    needed). Reports "✓ clean" when nothing was captured.
+    """
+    function notebook_diag(notebook::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return diag_report(nb)
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -334,6 +348,7 @@ function create_tools(GateTool::Type)
         GateTool("release_floor", release_floor),
         GateTool("view", view_cell),
         GateTool("inspect", inspect_cell),
+        GateTool("diag", notebook_diag),
         GateTool("index_docs", index_docs),
         GateTool("search_docs", search_docs_tool),
     ]

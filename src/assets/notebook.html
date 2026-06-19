@@ -4,6 +4,9 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Kaimon Slate</title>
+<!-- Diagnostics capture FIRST, so it catches the earliest errors; pushed to the server for
+     the slate.diag MCP tool. -->
+<script src="/assets/js/diag.js"></script>
 <!-- Inline SVG favicon (data URI → no extra request, no /favicon.ico 404). -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23569cd6'/><text x='50' y='73' font-size='62' text-anchor='middle' fill='%23ffffff' font-family='monospace'>S</text></svg>"/>
 <!-- All third-party assets are served locally from /assets/vendor/* (the server fetches +
@@ -36,8 +39,7 @@
 </head>
 <body>
 <div class="topbar">
-  <a class="btnlink" href="/" title="all notebooks">📓</a>
-  <select id="nbswitch" class="nbswitch" title="switch notebook"></select>
+  <a class="brand" href="/" title="all notebooks"><span class="brandmark">S</span>Slate</a>
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title">Notebook</h1>
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>

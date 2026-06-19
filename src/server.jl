@@ -1371,6 +1371,35 @@ end
 # UNIFORM image interface: `cell_image` returns a PNG whether the figure was produced
 # server-side (CairoMakie's `image/png`) or client-side (ECharts) — one approach for
 # the agent (`slate_view`) today, and the source of figure bytes for PDF export later.
+# Browser diagnostics: the open tab pushes its captured console errors / failed requests /
+# unhandled rejections here (on load + debounced on each new entry; see assets/js/diag.js), so
+# `slate.diag` can report the console state without a headless browser. One payload per tab.
+const _DIAG = Dict{String,Any}()                               # nbid → last pushed payload
+const _DIAG_LOCK = ReentrantLock()
+set_diag!(nbid, payload) = lock(_DIAG_LOCK) do; _DIAG[String(nbid)] = payload; end
+get_diag(nbid) = lock(_DIAG_LOCK) do; get(_DIAG, String(nbid), nothing); end
+
+# Human-readable diagnostics for the `slate.diag` MCP tool.
+function diag_report(nb::LiveNotebook)
+    d = get_diag(nb.id)
+    d === nothing && return "No browser has reported diagnostics for '$(nb.id)' yet. Open the " *
+        "notebook in a browser (it pushes on load) and retry."
+    entries = get(d, "entries", Any[])
+    io = IOBuffer()
+    url = string(get(d, "url", "")); ts = string(get(d, "ts", ""))
+    println(io, "Browser diagnostics for '", nb.id, "'", isempty(url) ? "" : "  ($url)")
+    println(io, "session ", get(d, "session", "?"), isempty(ts) ? "" : "  @ $ts")
+    if isempty(entries)
+        println(io, "\n✓ clean — no console errors, failed requests, or unhandled rejections.")
+    else
+        println(io, "\n", length(entries), " entr", length(entries) == 1 ? "y" : "ies", ":")
+        for e in entries
+            println(io, "  [", get(e, "kind", "?"), "] ", get(e, "text", ""))
+        end
+    end
+    return String(take!(io))
+end
+
 const _SNAPSHOTS = Dict{String,Dict{String,Vector{UInt8}}}()   # nbid → cellid → latest PNG
 const _SNAP_SVG = Dict{String,Dict{String,String}}()           # nbid → cellid → latest light-theme SVG (vector)
 const _SNAP_SVG_DARK = Dict{String,Dict{String,String}}()      # nbid → cellid → latest dark-theme SVG (vector)
@@ -2355,6 +2384,11 @@ function _make_router(h::Hub)
         (isempty(cell) || isempty(img)) && return _json(Dict("ok" => false))
         try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(img)); svg = svg, svg_dark = svg_dark); catch; return _json(Dict("ok" => false)); end
         _json(Dict("ok" => true))
+    end))
+    # Browser diagnostics push (console errors / failed requests / unhandled rejections) →
+    # read back by the slate.diag MCP tool. See assets/js/diag.js.
+    HTTP.register!(router, "POST", "/api/{id}/diag", req -> _withnb(h, req, nb -> begin
+        set_diag!(nb.id, _body(req)); _json(Dict("ok" => true))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))

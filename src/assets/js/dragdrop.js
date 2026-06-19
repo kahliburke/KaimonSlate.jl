@@ -251,19 +251,7 @@ document.addEventListener('dragend', () => {
   if (ctrlDrag !== null) { ctrlDrag = null; document.body.classList.remove('cdnd'); clearCtrlDrop(); }
 });
 
-// Populate the notebook switcher from the hub registry (a hub-level route, so
-// fetched raw — not through the nb-scoped `api()`).
-async function loadSwitcher() {
-  try {
-    const nbs = await (await fetch('/api/notebooks')).json();
-    const sel = document.getElementById('nbswitch');
-    sel.innerHTML = nbs.map(n => `<option value="${n.id}" ${n.id === NB_ID ? 'selected' : ''}>${n.title}</option>`).join('');
-    sel.onchange = () => { if (sel.value !== NB_ID) location.href = '/n/' + sel.value; };
-  } catch (e) {}
-}
-
 if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
-loadSwitcher();
 reload();
 // Replay the buffered agent conversation first, then start live SSE — so a live
 // event can't be wiped by the replay's clear.
