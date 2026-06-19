@@ -123,11 +123,13 @@ function cellEl(c) {
     // echarts hosts sit OUTSIDE the widgets, so value-only updates never tear a widget
     // down mid-drag. Empty (invisible) for a pure bind cell.
     div.className = 'cell bind state-' + c.state;
+    // srcEdit sits ABOVE the output so editing the code shows the editor over the plot
+    // (matching a plain code cell), not below it. It's hidden until the `</>` toggle.
     div.innerHTML = cellHeader(c) + bindsHTML(c) +
+      srcEditHTML() +
       '<div class="output">' + c.output + '</div>' +
       '<div class="tables"></div>' +
-      '<div class="echarts"></div>' +
-      srcEditHTML();
+      '<div class="echarts"></div>';
   } else {
     div.className = 'cell code state-' + c.state;
     div.innerHTML = cellHeader(c) +

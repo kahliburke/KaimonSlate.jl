@@ -71,6 +71,54 @@ x = range(0, 2π; length = 200)
 lines!(Axis(fig[1, 1]; title = "top"), x, sin.(x))
 lines!(Axis(fig[2, 1]; title = "bottom"), x, cos.(x))
 fig`],
+  ['Reactive plot — slider + Makie',
+`@bind freq Slider(1:20; default = 5, label = "freq")
+fig = Figure(size = (640, 360))
+ax = Axis(fig[1, 1]; title = "sin(\$(freq)·x)")
+x = range(0, 2π; length = 400)
+lines!(ax, x, sin.(freq .* x))
+fig`],
+  ['DataFrame + interactive table',
+`using DataFrames
+df = DataFrame(x = 1:50, y = randn(50), grp = rand(["a", "b", "c"], 50))
+slate_table(df)`],
+  // ECharts (client-rendered; `echart(opt)` takes an ECharts option Dict).
+  ['ECharts line',
+`echart(Dict(
+    "backgroundColor" => "transparent",
+    "tooltip" => Dict("trigger" => "axis"),
+    "xAxis" => Dict("type" => "category", "data" => ["Mon", "Tue", "Wed", "Thu", "Fri"]),
+    "yAxis" => Dict("type" => "value"),
+    "series" => [Dict("type" => "line", "smooth" => true, "data" => [120, 200, 150, 80, 70])],
+))`],
+  ['ECharts bar',
+`echart(Dict(
+    "backgroundColor" => "transparent",
+    "tooltip" => Dict("trigger" => "axis"),
+    "xAxis" => Dict("type" => "category", "data" => ["A", "B", "C", "D", "E"]),
+    "yAxis" => Dict("type" => "value"),
+    "series" => [Dict("type" => "bar", "data" => [5, 20, 36, 10, 12])],
+))`],
+  ['ECharts pie',
+`echart(Dict(
+    "backgroundColor" => "transparent",
+    "tooltip" => Dict("trigger" => "item"),
+    "series" => [Dict(
+        "type" => "pie", "radius" => "60%",
+        "data" => [
+            Dict("value" => 40, "name" => "A"), Dict("value" => 30, "name" => "B"),
+            Dict("value" => 20, "name" => "C"), Dict("value" => 10, "name" => "D"),
+        ],
+    )],
+))`],
+  ['ECharts scatter',
+`echart(Dict(
+    "backgroundColor" => "transparent",
+    "tooltip" => Dict(),
+    "xAxis" => Dict(), "yAxis" => Dict(),
+    "series" => [Dict("type" => "scatter", "symbolSize" => 10,
+        "data" => [[randn(), randn()] for _ in 1:60])],
+))`],
 ];
 async function insertRecipe(code) {
   const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
