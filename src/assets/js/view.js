@@ -391,12 +391,10 @@ function syncControlValues(state) {
   });
 }
 
-function setState(id, s) {
-  const el = document.getElementById('cell-' + id);
-  if (!el) return;
-  el.className = 'cell code state-' + s;
-  const b = el.querySelector('.badge'); if (b) b.textContent = s;
-}
+// Instant local feedback (running/edited) before the server round-trips: routed through the
+// store so Preact owns the cell's className + badge (an imperative className here would fight
+// Preact and stick — the pulsing-bracket bug). Cleared when the authoritative state arrives.
+function setState(id, s) { window.slateStore && window.slateStore.setLiveState(id, s); }
 
 // Replace a cell's output, reserving its current height until the new content
 // (notably a base64 <img>, which has no size until it decodes) lays out. Without

@@ -12,14 +12,20 @@ import { signal, computed } from '@preact/signals';
 // reload() is async and may run before this module loads, so it stashes state there for us.
 export const nbState  = signal(window.__slateState || null); // the whole /api/state payload
 export const selected = signal(window.selectedId || null);   // selected cell id (command mode)
+export const focus    = signal(null);                        // dep-focus: show ONLY this cell's dependency chain
+export const liveStates = signal({});                        // transient per-cell state (running/edited) for instant feedback,
+                                                             // until the authoritative server state arrives
 
 export const cells = computed(() => (nbState.value && nbState.value.cells) || []);
 export const title = computed(() => (nbState.value && nbState.value.title) || 'Notebook');
 export const worker = computed(() => (nbState.value && nbState.value.worker) || {});
 
-export function applyState(state) { if (state) nbState.value = state; }
+// New server state is authoritative — drop the transient live-state overrides.
+export function applyState(state) { if (state) { nbState.value = state; if (Object.keys(liveStates.value).length) liveStates.value = {}; } }
 export function setSelected(id) { selected.value = id; }
+export function setFocus(id) { focus.value = (focus.value === id ? null : id); }   // toggle
+export function setLiveState(id, s) { liveStates.value = { ...liveStates.value, [id]: s }; }
 
 // Bridge for the classic (non-module) scripts, which can't `import`. They call these;
 // Preact components import the signals directly above.
-window.slateStore = { nbState, selected, cells, title, worker, applyState, setSelected };
+window.slateStore = { nbState, selected, focus, cells, title, worker, liveStates, applyState, setSelected, setFocus, setLiveState };

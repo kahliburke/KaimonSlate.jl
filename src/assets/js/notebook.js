@@ -10,7 +10,7 @@
 import { html, render } from 'htm/preact';
 import { useRef, useEffect } from 'preact/hooks';
 import { effect } from '@preact/signals';
-import { cells as cellsSignal, selected as selectedSignal } from './store.js';
+import { cells as cellsSignal, selected as selectedSignal, liveStates as liveSignal } from './store.js';
 
 const raw = s => ({ __html: s || '' });
 
@@ -30,10 +30,11 @@ function Editor({ cell }) {
   return html`<div ref=${ref}></div>`;
 }
 
-function Cell({ cell, selectedId }) {
+function Cell({ cell, selectedId, live }) {
   const c = cell;
   const ref = useRef(null);
   const last = useRef({ struct: undefined, out: undefined, vis: undefined });
+  const state = (live && live[c.id]) || c.state;   // transient (running/edited) wins until server state arrives
 
   // Dispose this cell's ECharts when it unmounts; charts otherwise update in place.
   useEffect(() => () => {
@@ -48,6 +49,8 @@ function Cell({ cell, selectedId }) {
   useEffect(() => {
     const el = ref.current; if (!el) return;
     window.srcMap[c.id] = c.source;
+    const badge = el.querySelector('.badge');     // header renders c.state; reflect the live state
+    if (badge && badge.textContent !== state) badge.textContent = state;
 
     if (c.kind === 'md') {
       const md = el.querySelector('.md'); const h = window.mdHtml(c);
@@ -80,7 +83,7 @@ function Cell({ cell, selectedId }) {
   });
 
   const isBind = window.hasBinds(c);
-  const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + c.state
+  const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     + (selectedId === c.id ? ' selected' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
@@ -97,17 +100,17 @@ function Cell({ cell, selectedId }) {
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
-function Notebook({ cells, selectedId }) {
+function Notebook({ cells, selectedId, live }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
     window.syncAgentTop && window.syncAgentTop();
   });
-  return html`${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} />`)}`;
+  return html`${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} live=${live} />`)}`;
 }
 
 const nbHost = document.getElementById('nb');
 if (nbHost) {
-  // Re-render whenever the cell list or selection changes (the effect subscribes to both).
-  effect(() => render(html`<${Notebook} cells=${cellsSignal.value} selectedId=${selectedSignal.value} />`, nbHost));
+  // Re-render whenever the cell list, selection, or transient live-state changes.
+  effect(() => render(html`<${Notebook} cells=${cellsSignal.value} selectedId=${selectedSignal.value} live=${liveSignal.value} />`, nbHost));
   console.log('[preact] phase 2+3 — <Notebook> owns #nb (editors preserved across updates)');
 }
