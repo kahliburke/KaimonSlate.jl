@@ -59,7 +59,7 @@ const hasBinds = c => c.binds && c.binds.length;
 // (which replace `.output`) never tear down a widget mid-drag. Always present
 // (even empty) so any code cell is a drop target for the palette. Each control
 // carries a drag grip (move/reorder) and a ✕ (un-host).
-function controlStrip(c) {
+function controlStripInner(c) {
   const cols = c.controls || [];                 // array of columns; each column an array of specs
   const ctrl = s => `<div class="control" data-cname="${s.name}">` +
     `<span class="cgrip" draggable="true" data-name="${s.name}" title="drag to move / reorder">⠿</span>` +
@@ -71,7 +71,11 @@ function controlStrip(c) {
   const dz = i => `<div class="coldrop" data-colindex="${i}"></div>`;
   let inner = dz(0);
   cols.forEach((col, i) => { inner += `<div class="ccol" data-colindex="${i}">${col.map(ctrl).join('')}</div>` + dz(i + 1); });
-  return `<div class="controls${cols.length ? '' : ' empty'}" data-cell="${c.id}">${inner}</div>`;
+  return inner;
+}
+const _ctrlEmpty = c => (c.controls || []).length ? '' : ' empty';
+function controlStrip(c) {
+  return `<div class="controls${_ctrlEmpty(c)}" data-cell="${c.id}">${controlStripInner(c)}</div>`;
 }
 
 // One compact header line per cell: run + id (left), then duration, hover-revealed
@@ -107,42 +111,9 @@ function cellHeaderInner(c) {
 }
 function cellHeader(c) { return '<div class="cellhead">' + cellHeaderInner(c) + '</div>'; }
 
-function cellEl(c) {
-  const div = document.createElement('div');
-  div.id = 'cell-' + c.id;
-  div.dataset.cid = c.id;
-  srcMap[c.id] = c.source;
-  if (c.kind === 'md') {
-    div.className = 'cell md state-' + c.state;
-    div.innerHTML = cellHeader(c) +
-      `<div class="md" ondblclick="editSource('${c.id}','markdown')" title="double-click to edit">${mdHtml(c)}</div>` +
-      srcEditHTML();
-  } else if (hasBinds(c)) {
-    // A bind cell: one row per variable (live widget or hosted chip), PLUS an output
-    // area so a MIXED cell (binds + code) shows its result too. The output/tables/
-    // echarts hosts sit OUTSIDE the widgets, so value-only updates never tear a widget
-    // down mid-drag. Empty (invisible) for a pure bind cell.
-    div.className = 'cell bind state-' + c.state;
-    // srcEdit sits ABOVE the output so editing the code shows the editor over the plot
-    // (matching a plain code cell), not below it. It's hidden until the `</>` toggle.
-    div.innerHTML = cellHeader(c) + bindsHTML(c) +
-      srcEditHTML() +
-      '<div class="output">' + c.output + '</div>' +
-      '<div class="tables"></div>' +
-      '<div class="echarts"></div>';
-  } else {
-    div.className = 'cell code state-' + c.state;
-    div.innerHTML = cellHeader(c) +
-      '<textarea></textarea>' +
-      controlStrip(c) +
-      '<div class="output">' + c.output + '</div>' +
-      '<div class="tables"></div>' +
-      '<div class="echarts"></div>';
-  }
-  if (c.collapsed) div.classList.add('collapsed');         // folded (persisted in the .jl)
-  if (c.codeHidden) div.classList.add('codehidden');       // code editor hidden, output shown
-  return div;
-}
+// (cellEl + mountEditor removed — the Preact <Notebook>/<Cell>/<Editor> in notebook.js now
+//  build the cell DOM and own the CodeMirror lifecycle. cellHeaderInner/bindsInner/controlStrip/
+//  srcEditInner/wireCodeEditor are the shared pieces it reuses; see the window expose below.)
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
@@ -200,15 +171,6 @@ function mountControls(c) {
   if (cell) cell.querySelectorAll('[data-bind]').forEach(wireControl);
 }
 
-function mountEditor(c) {
-  if (c.kind !== 'code' || hasBinds(c)) return;
-  const ta = document.querySelector('#cell-' + c.id + ' textarea');
-  const ed = CodeMirror.fromTextArea(ta, {
-    mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity
-  });
-  wireCodeEditor(ed, c);
-  editors[c.id] = ed;
-}
 // Wire a freshly-created CodeMirror for code cell `c`: edit tracking, completion + signature
 // keys, as-you-type. Shared by the vanilla mount and the Preact <Editor> component, so the
 // editor behaves identically however it was created. `ed` already holds the source.

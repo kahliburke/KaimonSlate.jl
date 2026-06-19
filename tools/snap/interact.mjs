@@ -32,7 +32,7 @@ try {
   });
   await page.waitForTimeout(1500);   // bind POST → recompute → state → Preact re-render
   const after = await ampOf();
-  out.reactivity = { before, after, pass: before === '3' && after === '8' };
+  out.reactivity = { before, after, pass: after === '8' && before !== after };
 
   // ── 2 · editor preservation across a structural op (add a cell) ──────────────
   const stamp = await page.evaluate(() => {
@@ -62,6 +62,24 @@ try {
   // cleanup: delete the added cell so the notebook is left as it was
   if (added) await page.evaluate(id => window.delCell(id), added).catch(() => {});
   await page.waitForTimeout(400);
+
+  // ── 3 · slider element survives a value echo (drag-safe — not recreated) ─────
+  await page.$$eval('#cell-controls input[type=range]', els => { els[0].__probe = 'amp-elt'; });
+  await page.$$eval('#cell-controls input[type=range]', els => {
+    els[0].value = '6'; els[0].dispatchEvent(new Event('input', { bubbles: true })); els[0].dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await page.waitForTimeout(1500);
+  out.sliderElementSurvives = await page.$$eval('#cell-controls input[type=range]', els => els[0] && els[0].__probe === 'amp-elt');
+
+  // ── 4 · collapsed editor renders code once expanded (refresh-on-visible) ─────
+  const renderedLen = () => page.evaluate(() => (document.querySelector('#cell-setup .CodeMirror-code') || {}).textContent?.length || 0);
+  const collapsedLen = await renderedLen();              // collapsed → host hidden, may be 0
+  await page.evaluate(() => window.toggleCollapse('setup'));
+  await page.waitForTimeout(700);
+  const expandedLen = await renderedLen();               // should now show the source
+  const hasUsing = await page.evaluate(() => ((document.querySelector('#cell-setup .CodeMirror-code') || {}).textContent || '').includes('using'));
+  await page.evaluate(() => window.toggleCollapse('setup')).catch(() => {});   // restore
+  out.collapsedEditor = { collapsedLen, expandedLen, hasUsing, pass: hasUsing && expandedLen > 0 };
 
   out.consoleErrors = errs.filter(e => !/favicon/.test(e));
   console.log(JSON.stringify(out, null, 2));

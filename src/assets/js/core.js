@@ -6,8 +6,6 @@ const editors = {};
 const charts = {};            // cell id -> [echarts instances]
 const tableState = {};        // cell id -> [{sort,filter,page,pageSize} per table] (view prefs, sticky)
 const srcMap = {};            // cell id -> raw source (for markdown editing)
-const outMap = {};            // cell id -> last injected output HTML (skip redundant re-swaps)
-const mdMap = {};             // cell id -> last injected markdown HTML (skip redundant re-renders)
 let nbState = null;           // latest notebook state (drives the controls palette)
 let _hydrating = false;       // true while a standalone's env reconstructs (read-only preview)
 // Min delay (ms) between live recomputes while dragging a control. Persisted.

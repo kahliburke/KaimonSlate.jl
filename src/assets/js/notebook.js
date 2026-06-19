@@ -32,54 +32,69 @@ function Editor({ cell }) {
 
 function Cell({ cell, selectedId }) {
   const c = cell;
-  const last = useRef({ out: undefined, wire: undefined });
+  const ref = useRef(null);
+  const last = useRef({ struct: undefined, out: undefined, vis: undefined });
+
   // Dispose this cell's ECharts when it unmounts; charts otherwise update in place.
   useEffect(() => () => {
     const cs = window.charts[c.id];
     if (cs) { cs.forEach(i => { try { i.dispose(); } catch (_) {} }); delete window.charts[c.id]; }
   }, []);
-  // Output/controls processing after each render — but the imperative bits (scripts, control
-  // wiring) only re-run when their content actually changed, so we never double-execute a
-  // <script> or double-bind a control listener (Preact left unchanged innerHTML in place).
+
+  // Fill/update the cell's content IMPERATIVELY via the vanilla helpers, so live widgets aren't
+  // recreated on a value echo (a drag survives), outputs swap in place (no flash in cells below),
+  // and a CodeMirror created inside a collapsed cell is refreshed once it becomes visible (it
+  // renders blank otherwise). The hosts in the returned vnode are stable, so Preact keeps them.
   useEffect(() => {
-    const el = document.getElementById('cell-' + c.id);
-    if (!el) return;
+    const el = ref.current; if (!el) return;
     window.srcMap[c.id] = c.source;
-    if (c.output !== last.current.out) { last.current.out = c.output; window.runScripts(el); window.typeset(el); }
-    const wireKey = (window.hasBinds(c) ? window.bindsInner(c) : '') + ' '
-                  + ((c.kind === 'code' && !window.hasBinds(c)) ? window.controlStrip(c) : '');
-    if (wireKey !== last.current.wire) { last.current.wire = wireKey; window.mountControls(c); }
-    window.renderCharts(c);   // in-place setOption — animates data changes, keeps the canvas
-    window.renderTables(c);   // refill rows in place — keeps sort/filter/page
+
+    if (c.kind === 'md') {
+      const md = el.querySelector('.md'); const h = window.mdHtml(c);
+      if (md && h !== last.current.out) { last.current.out = h; window._swapOutput(md, h); window.typeset(md); }
+      return;
+    }
+
+    // Binds (bind cell) / control strip (code cell): (re)build the widgets ONLY when their
+    // STRUCTURE changes — never on a value echo — then sync values in place. Keyed on
+    // names/widgets/params (value excluded) so dragging a slider doesn't rebuild it.
+    const isBind = window.hasBinds(c);
+    const structKey = isBind
+      ? JSON.stringify((c.binds || []).map(b => [b.name, b.widget, b.params]))
+      : JSON.stringify((c.controls || []).map(col => col.map(s => [s.name, s.widget, s.params])));
+    if (structKey !== last.current.struct) {
+      last.current.struct = structKey;
+      const host = el.querySelector(isBind ? '.binds' : '.controls');
+      if (host) host.innerHTML = isBind ? window.bindsInner(c) : window.controlStripInner(c);
+      window.mountControls(c);                       // wire the freshly-built controls
+    }
+    const out = el.querySelector('.output');
+    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typeset(out); }
+    window.renderCharts(c);                           // in-place setOption — animates, keeps canvas
+    window.renderTables(c);                           // refill rows in place — keeps sort/filter/page
+    window.syncControlValues({ cells: [c] });         // values in place; skips focused/just-touched → drag-safe
+
+    const visible = !isBind && !c.collapsed && !c.codeHidden;
+    if (visible && !last.current.vis) { const ed = window.editors[c.id]; ed && ed.refresh(); }
+    last.current.vis = visible;
   });
 
-  const cls = 'cell ' + (c.kind === 'md' ? 'md' : (window.hasBinds(c) ? 'bind' : 'code')) + ' state-' + c.state
+  const isBind = window.hasBinds(c);
+  const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + c.state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     + (selectedId === c.id ? ' selected' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
+  // Content hosts are empty/stable — Preact preserves them; the effect above fills them.
   let body;
   if (c.kind === 'md') {
-    body = html`
-      <div class="md" title="double-click to edit" ondblclick=${() => window.editSource(c.id, 'markdown')}
-           dangerouslySetInnerHTML=${raw(window.mdHtml(c))}></div>
-      ${srcedit}`;
-  } else if (window.hasBinds(c)) {
-    body = html`
-      <div class="binds" dangerouslySetInnerHTML=${raw(window.bindsInner(c))}></div>
-      ${srcedit}
-      <div class="output" dangerouslySetInnerHTML=${raw(c.output)}></div>
-      <div class="tables"></div>
-      <div class="echarts"></div>`;
+    body = html`<div class="md" title="double-click to edit" ondblclick=${() => window.editSource(c.id, 'markdown')}></div>${srcedit}`;
+  } else if (isBind) {
+    body = html`<div class="binds"></div>${srcedit}<div class="output"></div><div class="tables"></div><div class="echarts"></div>`;
   } else {
-    body = html`
-      <${Editor} cell=${c} />
-      <div dangerouslySetInnerHTML=${raw(window.controlStrip(c))}></div>
-      <div class="output" dangerouslySetInnerHTML=${raw(c.output)}></div>
-      <div class="tables"></div>
-      <div class="echarts"></div>`;
+    body = html`<${Editor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><div class="echarts"></div>`;
   }
-  return html`<div id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
+  return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
 function Notebook({ cells, selectedId }) {
