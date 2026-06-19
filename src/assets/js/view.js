@@ -298,6 +298,7 @@ function cancelSource(id) {
 
 function renderAll(state) {
   nbState = state;
+  window.slateStore && window.slateStore.applyState(state);   // feed the Preact signals store
   _depFocus = null;                            // #nb is wiped below — drop any dep-cone highlight
   const se = document.scrollingElement || document.documentElement;
   const top = se.scrollTop;                    // preserve scroll across the full rebuild (structural ops)
@@ -482,6 +483,7 @@ async function runScripts(root) {
 // Update outputs + states in place (preserves editor instances/cursors + scroll).
 function updateStates(state) {
   nbState = state;
+  window.slateStore && window.slateStore.applyState(state);   // feed the Preact signals store
   const se = document.scrollingElement || document.documentElement;
   const top = se.scrollTop;
   state.cells.forEach(c => {

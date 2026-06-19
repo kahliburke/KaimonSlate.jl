@@ -7,6 +7,7 @@ let selectedId = null, _dPending = false, _dTimer = null;
 const cellIds = () => ((nbState && nbState.cells) || []).map(c => c.id);
 function selectCell(id, scroll) {
   selectedId = id;
+  window.slateStore && window.slateStore.setSelected(id);     // feed the Preact signals store
   document.querySelectorAll('.cell').forEach(el => el.classList.toggle('selected', el.dataset.cid === id));
   const el = id && document.getElementById('cell-' + id);
   if (el && scroll) el.scrollIntoView({ block: 'nearest' });
