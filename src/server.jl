@@ -650,6 +650,64 @@ end
 _agent_push!(nb::LiveNotebook) = (nb.version += 1; _broadcast(nb, string(nb.version)))
 
 _cell_exists(nb, id) = _index_of(nb.report.cells, id) !== nothing
+
+# Coarse relative age for a history timestamp (no Dates dep).
+function _ago(ts)
+    s = max(0, round(Int, time() - Float64(ts)))
+    s < 60 ? "$(s)s ago" : s < 3600 ? "$(s ÷ 60)m ago" : s < 86400 ? "$(s ÷ 3600)h ago" : "$(s ÷ 86400)d ago"
+end
+
+# Per-cell edit history from the time machine: each recorded version where THIS cell's source
+# changed, newest first (version / age / origin / diff-label). Cheap — uses the per-cell digest
+# already in each entry, no full-source retrieval. `[]` if history is unavailable.
+function _cell_history(path::AbstractString, cellid::AbstractString; limit::Int = 12)
+    es = try; SlateHistory.entries(path); catch; return String[]; end
+    out = String[]; prev = :none
+    for e in es
+        cc = nothing
+        for cd in get(e, "cells", Any[]); string(get(cd, "id", "")) == cellid && (cc = cd; break); end
+        h = cc === nothing ? nothing : string(get(cc, "hash", ""))
+        h == prev && continue
+        status = cc === nothing ? "absent" : (prev === :none || prev === nothing ? "created" : "edited")
+        lbl = string(get(e, "label", "")); src = string(get(e, "source", ""))
+        push!(out, string("v", get(e, "seq", "?"), "  ", _ago(get(e, "ts", time())), "  ", status,
+                          isempty(src) ? "" : "  [$src]", isempty(lbl) ? "" : "  ($lbl)"))
+        prev = h
+    end
+    return first(reverse(out), limit)
+end
+
+"""
+    cell_inspect(nb, cellid) -> String
+
+Everything about one cell for the agent's build loop: state (kind/state/deps/reads/writes/
+duration/flags), source, the canonical result, and the cell's edit history. The live rendered
+DOM + optional raster come from the open browser via a separate path (see `slate.inspect`).
+"""
+function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
+    lock(nb.lock) do
+        idx = _index_of(nb.report.cells, cellid)
+        idx === nothing && return "No cell '$cellid' in '$(nb.id)'. Use slate.read to list cells."
+        c = nb.report.cells[idx]
+        io = IOBuffer()
+        kind = c.kind == MARKDOWN ? "md" : "code"
+        println(io, "Cell '", c.id, "' in '", nb.id, "' — ", kind, ", ", lowercase(string(c.state)),
+                " — position ", idx, "/", length(nb.report.cells), " — v", nb.version)
+        if c.kind == CODE
+            isempty(c.reads)  || println(io, "reads:    ", join(sort(string.(collect(c.reads))), ", "))
+            isempty(c.writes) || println(io, "writes:   ", join(sort(string.(collect(c.writes))), ", "))
+            isempty(c.deps)   || println(io, "deps:     ", join(sort(collect(c.deps)), ", "))
+            o = c.output
+            (o !== nothing && o.duration_ms > 0) && println(io, "duration: ", round(o.duration_ms; digits = 2), " ms")
+        end
+        isempty(c.flags) || println(io, "flags:    ", join(sort(string.(collect(c.flags))), ", "))
+        println(io, "\n--- source ---\n", rstrip(c.source))
+        c.kind == CODE && println(io, "\n--- result ---\n", _cell_result_text(c))
+        h = _cell_history(nb.path, cellid)
+        isempty(h) || println(io, "\n--- history (newest first) ---\n", join(h, "\n"))
+        return String(take!(io))
+    end
+end
 function _result_of(nb, id)
     i = _index_of(nb.report.cells, id)
     i === nothing ? "(cell $id not found)" : _cell_result_text(nb.report.cells[i])

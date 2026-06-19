@@ -35,7 +35,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       find_live, notebook_digest,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
                       acquire_floor!, release_floor!, floor_status,
-                      index_docs!, search_docs, cell_image,
+                      index_docs!, search_docs, cell_image, cell_inspect,
                       export_standalone, expand
 
 export serve_notebook, LiveNotebook, expand
@@ -294,6 +294,19 @@ function create_tools(GateTool::Type)
         return getfield(Main, :Kaimon).KaimonGate.image_result(png; text = "Cell '$cell' — rendered figure")
     end
 
+    """
+        inspect(notebook, cell) -> String
+
+    Everything about one cell, for inspecting while you build: its state (kind/state/deps/
+    reads/writes/duration/flags), source, the canonical result, and its edit history. Use it
+    after add_cell/edit_cell/run to decide the next step. (Rendered figure → slate.view;
+    whole notebook → slate.read.)
+    """
+    function inspect_cell(notebook::String, cell::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return cell_inspect(nb, cell)
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -320,6 +333,7 @@ function create_tools(GateTool::Type)
         GateTool("acquire_floor", acquire_floor),
         GateTool("release_floor", release_floor),
         GateTool("view", view_cell),
+        GateTool("inspect", inspect_cell),
         GateTool("index_docs", index_docs),
         GateTool("search_docs", search_docs_tool),
     ]
