@@ -46,8 +46,26 @@ function output_html(cell::Cell)
         print(io, "<div class=\"val\"><pre>", _esc(o.value_repr), "</pre></div>")
     end
     isempty(o.display) || print(io, "<div class=\"dispwrap\">", _render_chunks(o.display), "</div>")
-    o.exception === nothing || print(io, "<div class=\"err\"><pre>", _esc(o.exception), "</pre></div>")
+    if o.exception !== nothing
+        print(io, "<div class=\"err\"><pre>", _esc(o.exception))
+        (o.backtrace === nothing || isempty(o.backtrace)) || print(io, "\n", _linkify_trace(o.backtrace))
+        print(io, "</pre></div>")
+    end
     return String(take!(io))
+end
+
+# Make `path.jl:line` references in a backtrace clickable → open in VS Code. Escapes the text,
+# then wraps each source location in a `vscode://file/<abspath>:<line>` link (expanding `~`).
+function _linkify_trace(bt::AbstractString)
+    home = homedir()
+    return replace(_esc(bt), r"((?:~|/)[\w./ \-]*\.jl):(\d+)" => function (m)
+        p = match(r"^(.*\.jl):(\d+)$", m)
+        p === nothing && return m
+        path, line = String(p.captures[1]), String(p.captures[2])
+        ap = startswith(path, "~") ? home * path[2:end] : path
+        isabspath(ap) && isfile(ap) || return m   # skip Base's relative ./foo.jl etc. — only real files
+        "<a class=\"srcref\" href=\"vscode://file" * ap * ":" * line * "\" title=\"open in VS Code\">" * m * "</a>"
+    end)
 end
 
 # Markdown → HTML with the table extension (GFM tables) and LaTeX math.

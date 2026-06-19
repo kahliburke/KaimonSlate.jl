@@ -180,9 +180,20 @@ function run_capture(mod::Module, source::AbstractString)
         catch
         end
     end
-    exc = err === nothing ? nothing : sprint(showerror, err)
-    bt = btrace === nothing ? nothing :
-        sprint((io, t) -> Base.show_backtrace(io, t), btrace)
+    # `include_string` wraps a cell's runtime error in a LoadError ("… in expression starting at
+    # string:N"). Unwrap it so the cell shows the REAL error (UndefVarError, DomainError, …).
+    realerr = err isa LoadError ? err.error : err
+    exc = realerr === nothing ? nothing : sprint(showerror, realerr)
+    # Trim our eval machinery (include_string + capture/gate frames below it) from the backtrace —
+    # user/package frames sit above it — so the trace shows where the error actually is.
+    bt = nothing
+    if btrace !== nothing
+        k = findfirst(ip -> any(f -> f.func === :include_string ||
+                                     (f.func === :eval && occursin("boot.jl", string(f.file))),
+                                Base.StackTraces.lookup(ip)), btrace)
+        tb = k === nothing ? btrace : btrace[1:max(1, k - 1)]
+        bt = sprint((io, t) -> Base.show_backtrace(io, t), tb)
+    end
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
