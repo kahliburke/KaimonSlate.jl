@@ -125,7 +125,7 @@ function minimizeDocs() {                           // collapse to the launcher 
   _saveDocs();
 }
 const closeDocs = minimizeDocs;                     // "close" now means minimize
-function toggleDocs() { _docMin ? openDocs() : document.getElementById('docin').focus(); }   // ⌘⇧K
+function toggleDocs() { _docMin ? openDocs() : minimizeDocs(); }   // ⌘⇧K — open ↔ minimize
 function _saveDocs() {
   try { localStorage.setItem('slateDocs', JSON.stringify({ min: _docMin, q: (_view() && _view().q) || '' })); } catch (_) {}
 }
@@ -148,10 +148,27 @@ const _docSearch = debounce(async () => {
       } catch (_) {}
     }
   }
+  results = _rankResults(results, q);              // float literal name matches above pure-semantic hits
   const cur = _view();
   if (cur && cur.rec == null) { cur.q = q; cur.results = results; cur.sel = 0; _renderView(); _saveDocs(); }   // live-update the search view
   else _go({ q, results, sel: 0, rec: null });     // a new search after viewing a page → new history step
 }, 200);
+// Re-rank: a result whose NAME matches the query (exact > prefix > substring) outranks a
+// closer-embedding but lexically-unrelated hit — semantic search alone buries obvious matches.
+function _rankResults(results, q) {
+  const ql = q.trim().toLowerCase();
+  return results.map((r, i) => {
+    const n = (r.name || '').toLowerCase();
+    let b = 0; r._nameMatch = false;
+    if (r.exact) b = 1000;
+    else if (ql.length >= 2) {
+      if (n === ql) { b = 100; r._nameMatch = true; }
+      else if (n.startsWith(ql)) { b = 60; r._nameMatch = true; }
+      else if (n.includes(ql)) { b = 30; r._nameMatch = true; }
+    }
+    return { r, b, i };
+  }).sort((a, b) => (b.b - a.b) || ((Number(b.r.score) || 0) - (Number(a.r.score) || 0)) || (a.i - b.i)).map(x => x.r);
+}
 function _select(i) {                               // pick a result row (in place — not a history step)
   const v = _view(); if (!v || !v.results.length) return;
   v.sel = Math.max(0, Math.min(i, v.results.length - 1)); v.rec = null;
@@ -166,7 +183,9 @@ function _renderView() {
   if (!v || !v.q) ul.innerHTML = _DOC_HINT;
   else if (!v.results.length) ul.innerHTML = '<li class="docempty">No matches — try different words.</li>';
   else ul.innerHTML = v.results.map((r, i) => {
-    const right = r.exact ? '<span class="k exact">exact</span>' : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
+    const right = r.exact ? '<span class="k exact">exact</span>'
+                : r._nameMatch ? '<span class="k exact">name</span>'
+                : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
     return `<li class="${i === v.sel && !v.rec ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>${right}</span></li>`;
   }).join('');
   const rel = document.getElementById('docrelated');
