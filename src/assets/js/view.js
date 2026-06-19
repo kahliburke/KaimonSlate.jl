@@ -107,7 +107,7 @@ function cellHeaderInner(c) {
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
-      (isCode ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
+      (c.kind === 'code' ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
       (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
@@ -300,6 +300,7 @@ function _publishState(state) {
 // Topbar/banner bits that live outside #nb (title, worker dot, vscode link, hydrating banner).
 function updateChrome(state) {
   document.getElementById('title').textContent = state.title || 'Notebook';
+  document.title = (state.title ? state.title + ' · ' : '') + 'Kaimon Slate';   // browser tab
   const w = state.worker || {}, dot = document.getElementById('wdot');
   if (dot) {
     dot.className = 'wdot ' + (w.kind === 'inproc' ? 'inproc' : (w.connected ? 'up' : 'down')) + (_busy > 0 ? ' busy' : '');
