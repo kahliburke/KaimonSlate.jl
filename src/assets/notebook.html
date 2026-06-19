@@ -4,27 +4,32 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Kaimon Notebook</title>
-<!-- Preact migration (no build): one pinned Preact; signals/htm import the bare "preact"
-     specifier (?external=preact) so every module shares it — duplicate copies break hooks. -->
+<!-- All third-party assets are served locally from /assets/vendor/* (the server fetches +
+     caches them on first run from the URLs pinned in assets/vendor.json), so the notebook
+     works offline after one warm load. Preact is ESM via an import map; signals/htm import
+     the bare "preact" specifier, which the map resolves to the one local copy (sharing it
+     across modules — duplicate Preacts break hooks/signals). -->
 <script type="importmap">
 { "imports": {
-  "preact": "https://esm.sh/preact@10.24.3",
-  "preact/hooks": "https://esm.sh/preact@10.24.3/hooks?external=preact",
-  "@preact/signals": "https://esm.sh/@preact/signals@1.3.0?external=preact",
-  "htm/preact": "https://esm.sh/htm@3.1.1/preact?external=preact"
+  "preact": "/assets/vendor/preact/dist/preact.module.js",
+  "preact/hooks": "/assets/vendor/preact/hooks/dist/hooks.module.js",
+  "@preact/signals-core": "/assets/vendor/signals-core/dist/signals-core.module.js",
+  "@preact/signals": "/assets/vendor/signals/dist/signals.module.js",
+  "htm": "/assets/vendor/htm/dist/htm.module.js",
+  "htm/preact": "/assets/vendor/htm/preact/index.module.js"
 }}
 </script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"/>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css"/>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/julia/julia.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"/>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<link rel="stylesheet" href="/assets/vendor/codemirror/codemirror.min.css"/>
+<link rel="stylesheet" href="/assets/vendor/codemirror/theme/material-darker.min.css"/>
+<link rel="stylesheet" href="/assets/vendor/codemirror/addon/hint/show-hint.min.css"/>
+<script src="/assets/vendor/codemirror/codemirror.min.js"></script>
+<script src="/assets/vendor/codemirror/mode/julia/julia.min.js"></script>
+<script src="/assets/vendor/codemirror/mode/markdown/markdown.min.js"></script>
+<script src="/assets/vendor/codemirror/addon/hint/show-hint.min.js"></script>
+<script src="/assets/vendor/echarts/echarts.min.js"></script>
+<link rel="stylesheet" href="/assets/vendor/katex/katex.min.css"/>
+<script defer src="/assets/vendor/katex/katex.min.js"></script>
+<script defer src="/assets/vendor/katex/contrib/auto-render.min.js"></script>
 <link rel="stylesheet" href="/assets/notebook.css"/>
 </head>
 <body>

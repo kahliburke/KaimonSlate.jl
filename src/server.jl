@@ -1733,6 +1733,52 @@ _worker_label(nb::LiveNotebook) =
 _html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store"], body)
 _asset(body, ctype) = HTTP.Response(200, ["Content-Type" => ctype, "Cache-Control" => "no-store"], body)
 
+# ── Front-end vendor cache (offline support) ──────────────────────────────────
+# Third-party assets (CodeMirror, ECharts, KaTeX, Preact/signals/htm) are pinned in
+# assets/vendor.json (package → version + base URL) and served from /assets/vendor/<pkg>/<sub>.
+# Each file is fetched from `<base><sub>` on first request, cached OUTSIDE the repo, and
+# served from disk after — so the notebook works offline once warm. Bump a version in
+# vendor.json to upgrade (new files re-download under a version-keyed cache path).
+const _VENDOR_JSON = joinpath(@__DIR__, "assets", "vendor.json")
+const _VENDOR_CACHE = get(ENV, "KAIMONSLATE_ASSET_CACHE",
+                          joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia")), "scratchspaces", "kaimonslate-assets"))
+const _VENDOR_LOCK = ReentrantLock()
+
+function _vendor_ctype(p)
+    e = lowercase(splitext(p)[2])
+    return e in (".js", ".mjs")   ? "application/javascript; charset=utf-8" :
+           e == ".css"            ? "text/css; charset=utf-8" :
+           e == ".woff2"          ? "font/woff2" :
+           e == ".woff"           ? "font/woff" :
+           e == ".ttf"            ? "font/ttf" :
+           e in (".map", ".json") ? "application/json; charset=utf-8" :
+           "application/octet-stream"
+end
+
+# Resolve `<pkg>/<sub>` to a cached local file, fetching from the pinned base URL on first
+# request (atomic write under a lock). Returns the path, or nothing on bad input / unknown
+# package / fetch failure. The version is part of the cache path, so upgrades never collide.
+function _vendor_file(pkg::AbstractString, sub::AbstractString)
+    (isempty(sub) || occursin("..", sub) || startswith(sub, "/")) && return nothing
+    man = try; JSON.parsefile(_VENDOR_JSON); catch; return nothing; end
+    entry = get(man, pkg, nothing)
+    (entry isa AbstractDict && haskey(entry, "version") && haskey(entry, "base")) || return nothing
+    ver = String(entry["version"]); base = replace(String(entry["base"]), "{version}" => ver)
+    dest = joinpath(_VENDOR_CACHE, pkg, ver, sub)
+    isfile(dest) && return dest
+    return lock(_VENDOR_LOCK) do
+        isfile(dest) && return dest
+        mkpath(dirname(dest))
+        tmp = dest * ".part"
+        try
+            r = HTTP.get(base * sub; redirect = true, retry = false, status_exception = true)
+            write(tmp, r.body); mv(tmp, dest; force = true); dest
+        catch
+            rm(tmp; force = true); nothing
+        end
+    end
+end
+
 # Run `f(nb)` for the notebook named by the request's `id` path param, else 404.
 function _withnb(h::Hub, req, f)
     id = HTTP.getparam(req, "id")
@@ -1944,6 +1990,17 @@ function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
+    # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so
+    # nested paths work (CodeMirror modes/addons, KaTeX fonts). First hit fetches+caches.
+    HTTP.register!(router, "GET", "/assets/vendor/**", req -> begin
+        rel = replace(HTTP.URI(req.target).path, r"^/assets/vendor/" => "")
+        parts = split(rel, '/'; limit = 2)
+        (length(parts) == 2 && !isempty(parts[2])) || return HTTP.Response(404)
+        f = _vendor_file(String(parts[1]), String(parts[2]))
+        f === nothing && return HTTP.Response(404, "vendor asset unavailable (offline & uncached?)")
+        HTTP.Response(200, ["Content-Type" => _vendor_ctype(parts[2]),
+                            "Cache-Control" => "public, max-age=31536000, immutable"], read(f))
+    end)
     HTTP.register!(router, "GET", "/assets/js/{file}", req -> begin
         f = HTTP.getparam(req, "file")
         # path-safety: a bare `name.js` only — no separators, no traversal.
