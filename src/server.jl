@@ -1142,15 +1142,16 @@ function index_docs!(records)
         doc = string(get(r, "doc", "")); text = "$modname.$name\n$doc"
         vec = try; _embed(text); catch; continue; end
         pt = Dict("id" => _doc_id(text), "vector" => vec,
-                  "payload" => Dict("module" => modname, "name" => name, "doc" => doc))
+                  # `text` (= "Module.name\ndoc") lets Kaimon's FTS index this point — trigram
+                  # substring then matches a bare name/module fragment the embedding buries.
+                  "payload" => Dict("module" => modname, "name" => name, "doc" => doc, "text" => text))
         try; _kt(:qdrant_upsert_points, Dict("collection" => _DOCS_COLLECTION, "points" => [pt])); n += 1; catch; end
     end
     return n
 end
 
-"Semantic search the docs index → up to `limit` {module,name,doc,score} matches."
-function search_docs(query::AbstractString; limit::Int = 8)
-    _agent_available() || return Dict{String,Any}[]
+"Semantic (vector) search of the docs index → {module,name,doc,score} matches."
+function _semantic_docs(query::AbstractString; limit::Int = 8)
     vec = try; _embed(query); catch; return Dict{String,Any}[]; end
     res = _kt_json(_kt(:qdrant_search, Dict("collection" => _DOCS_COLLECTION,
                                             "vector" => vec, "limit" => limit)))
@@ -1165,6 +1166,46 @@ function search_docs(query::AbstractString; limit::Int = 8)
                         "score"  => something(_field(h, "score"), 0.0)))
     end
     return out
+end
+
+# One FTS hit (its `text` payload is "Module.name\ndoc") → {module,name,doc,score,lexical}.
+function _fts_record(h)
+    name = string(something(_field(h, "name"), ""))
+    text = string(something(_field(h, "text"), ""))
+    nl = findfirst('\n', text)
+    head = nl === nothing ? text : String(SubString(text, 1, prevind(text, nl)))
+    doc  = nl === nothing ? "" : String(SubString(text, nextind(text, nl)))
+    i = findlast('.', head)
+    modname = i === nothing ? "" : String(SubString(head, 1, prevind(head, i)))
+    isempty(name) && i !== nothing && (name = String(SubString(head, nextind(head, i))))
+    return Dict{String,Any}("module" => modname, "name" => name, "doc" => doc,
+                            "score" => something(_field(h, "score"), 0.0), "lexical" => true)
+end
+
+"Lexical (FTS) search of the docs index — matches a bare name/module fragment the embedding buries."
+function _fts_docs(query::AbstractString; limit::Int = 20)
+    hits = try
+        _kt_json(_kt(:qdrant_fts_search, Dict("collection" => _DOCS_COLLECTION,
+                                              "query" => String(query), "limit" => limit)))
+    catch
+        return Dict{String,Any}[]   # FTS unavailable (old Kaimon / uncovered) → semantic-only
+    end
+    hits isa AbstractVector || return Dict{String,Any}[]
+    return Dict{String,Any}[_fts_record(h) for h in hits]
+end
+
+"Hybrid docs search: lexical (FTS name/substring) ∪ semantic (vector), lexical floated, deduped."
+function search_docs(query::AbstractString; limit::Int = 8)
+    _agent_available() || return Dict{String,Any}[]
+    q = strip(String(query)); isempty(q) && return Dict{String,Any}[]
+    lex = _fts_docs(q)
+    sem = _semantic_docs(q; limit = limit)
+    seen = Set{Tuple{String,String}}(); out = Dict{String,Any}[]
+    for d in Iterators.flatten((lex, sem))           # lexical first → name matches outrank pure-semantic
+        k = (string(d["module"]), string(d["name"])); k in seen && continue
+        push!(seen, k); push!(out, d)
+    end
+    return first(out, max(limit, min(length(lex), 12)))   # keep lexical hits; cap the tail
 end
 
 # A docstring (markdown) → safe HTML for the help viewer. Empty in → empty out.
@@ -1190,6 +1231,8 @@ end
 # is version-cached (persistent), so re-opens are instant and only changed deps re-index.
 const _DOC_CACHE = Dict{String,String}()                 # package name → last-indexed version
 const _DOC_CACHE_LOCK = ReentrantLock()
+const _DOC_SCHEMA = "2"   # bump when the indexed payload shape changes → forces a one-time re-harvest
+                          # (schema 2 added the `text` payload that Kaimon's FTS index needs)
 _doc_cache_file() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
                              "kaimonslate", "docindex.json")
 function _doc_cache_load()
@@ -1197,12 +1240,19 @@ function _doc_cache_load()
         isempty(_DOC_CACHE) || return
         f = _doc_cache_file()
         isfile(f) || return
-        try; merge!(_DOC_CACHE, Dict(String(k) => string(v) for (k, v) in JSON.parsefile(f))); catch; end
+        try
+            loaded = Dict(String(k) => string(v) for (k, v) in JSON.parsefile(f))
+            # A stale schema → leave the cache empty so every package re-harvests + re-indexes
+            # (re-upserting the same point ids with the new payload; the old points are overwritten).
+            get(loaded, "__schema__", "") == _DOC_SCHEMA && merge!(_DOC_CACHE, loaded)
+        catch
+        end
     end
 end
 function _doc_cache_put!(name, version)
     lock(_DOC_CACHE_LOCK) do
         _DOC_CACHE[String(name)] = String(version)
+        _DOC_CACHE["__schema__"] = _DOC_SCHEMA           # not a package — never in the harvest set
         f = _doc_cache_file()
         try; mkpath(dirname(f)); open(f, "w") do io; JSON.print(io, _DOC_CACHE); end; catch; end
     end
@@ -1242,6 +1292,9 @@ function _autoindex!(nb::LiveNotebook)
         isempty(pending) && return
         recs = ReportEngine.harvest_docs(nb.kernel, nb.report, pending)
         index_docs!(recs)
+        # Mirror the new `text` payloads into Kaimon's FTS index (the plain upsert path doesn't),
+        # so lexical name/substring search works. Idempotent; best-effort if FTS is unavailable.
+        try; _kt(:qdrant_ensure_fts_coverage, Dict("collection" => _DOCS_COLLECTION)); catch; end
         for n in pending; _doc_cache_put!(n, get(want, n, "")); end
         @info "slate: auto-indexed docs" notebook = nb.id packages = pending symbols = length(recs)
     catch e
