@@ -85,7 +85,41 @@ async function pkgRm(name) {
   if (r && r.ok === false) await alertDark('Remove failed:\n' + (r.message || '?'));
   loadPackages();
 }
-document.getElementById('pkgin').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); pkgAdd(); } });
+// Package-name completion: a custom dropdown anchored under the input (a native <datalist>
+// renders its popup off to the side and unbounded — it drifts over the panel). Fetches registry
+// matches as you type; ↑/↓ move, ↵ picks the highlighted one (else adds what's typed), click
+// picks, esc/blur hides. The list is scrollable + height-capped so a flood of matches stays put.
+const _pkgsug = () => document.getElementById('pkgsug');
+let _pkgCands = [], _pkgSel = -1;
+function _pkgPaintSug() {
+  const el = _pkgsug();
+  if (!_pkgCands.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.innerHTML = _pkgCands.map((n, i) => `<div class="${i === _pkgSel ? 'on' : ''}" data-i="${i}">${_esc(n)}</div>`).join('');
+  el.style.display = '';
+  if (_pkgSel >= 0 && el.children[_pkgSel]) el.children[_pkgSel].scrollIntoView({ block: 'nearest' });
+}
+function _pkgHideSug() { _pkgCands = []; _pkgSel = -1; _pkgPaintSug(); }
+function _pkgPick(i) {
+  const n = _pkgCands[i]; if (n == null) return;
+  const inp = document.getElementById('pkgin'); inp.value = n; _pkgHideSug(); inp.focus();
+}
+const _pkgComplete = debounce(async () => {
+  const q = document.getElementById('pkgin').value.trim();
+  if (q.length < 2) { _pkgHideSug(); return; }
+  let names = [];
+  try { const r = await api('GET', '/api/pkg-complete?q=' + encodeURIComponent(q)); names = (r && r.names) || []; } catch (_) {}
+  _pkgCands = names; _pkgSel = -1; _pkgPaintSug();
+}, 160);
+document.getElementById('pkgin').addEventListener('input', _pkgComplete);
+document.getElementById('pkgin').addEventListener('keydown', e => {
+  const open = _pkgCands.length > 0;
+  if (e.key === 'ArrowDown' && open) { e.preventDefault(); _pkgSel = Math.min(_pkgSel + 1, _pkgCands.length - 1); _pkgPaintSug(); }
+  else if (e.key === 'ArrowUp' && open) { e.preventDefault(); _pkgSel = Math.max(_pkgSel - 1, 0); _pkgPaintSug(); }
+  else if (e.key === 'Enter') { e.preventDefault(); (open && _pkgSel >= 0) ? _pkgPick(_pkgSel) : (_pkgHideSug(), pkgAdd()); }
+  else if (e.key === 'Escape' && open) { e.preventDefault(); _pkgHideSug(); }
+});
+_pkgsug().addEventListener('mousedown', e => { const d = e.target.closest('div[data-i]'); if (d) { e.preventDefault(); _pkgPick(+d.dataset.i); } });
+document.getElementById('pkgin').addEventListener('blur', () => setTimeout(_pkgHideSug, 120));
 
 // ── Topbar ☰ overflow menu ──────────────────────────────────────────────────
 function toggleTopMenu(e) { if (e) e.stopPropagation(); document.getElementById('topmenu').classList.toggle('open'); }

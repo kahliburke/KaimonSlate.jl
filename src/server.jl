@@ -12,6 +12,7 @@ module NotebookServer
 using HTTP, JSON, FileWatching, CodecZlib
 import Base64
 import Typst_jll
+import Pkg
 using ..ReportEngine
 using ..ReportRender
 
@@ -1400,6 +1401,36 @@ function diag_report(nb::LiveNotebook)
     return String(take!(io))
 end
 
+# Package-name completion for the Add box — all names across the reachable registries (General
+# + any others), cached after the first scan (the set is static for the process lifetime).
+const _PKG_NAMES = Ref{Vector{String}}()
+function _pkg_names()
+    isassigned(_PKG_NAMES) && return _PKG_NAMES[]
+    names = String[]
+    try
+        for reg in Pkg.Registry.reachable_registries(), (_, e) in reg.pkgs
+            push!(names, e.name)
+        end
+    catch
+    end
+    try   # stdlibs (LinearAlgebra, Statistics, …) aren't in the registries but are addable
+        for d in readdir(Sys.STDLIB)
+            isdir(joinpath(Sys.STDLIB, d)) && push!(names, d)
+        end
+    catch
+    end
+    _PKG_NAMES[] = sort!(unique!(names))
+end
+# Rank: exact match first, then prefix matches, then substring; case-insensitive; capped.
+function _pkg_complete(q::AbstractString, limit::Int = 50)
+    q = lowercase(strip(q)); isempty(q) && return String[]
+    names = _pkg_names()
+    exact = filter(n -> lowercase(n) == q, names)
+    pre = filter(n -> lowercase(n) != q && startswith(lowercase(n), q), names)
+    sub = filter(n -> !startswith(lowercase(n), q) && occursin(q, lowercase(n)), names)
+    first(vcat(exact, pre, sub), limit)
+end
+
 const _SNAPSHOTS = Dict{String,Dict{String,Vector{UInt8}}}()   # nbid → cellid → latest PNG
 const _SNAP_SVG = Dict{String,Dict{String,String}}()           # nbid → cellid → latest light-theme SVG (vector)
 const _SNAP_SVG_DARK = Dict{String,Dict{String,String}}()      # nbid → cellid → latest dark-theme SVG (vector)
@@ -2254,6 +2285,11 @@ function _make_router(h::Hub)
     # where adds land — removable) and `parent` deps (inherited from the enclosing project,
     # which the forked env extends — read-only). `detached` is true when there's no parent
     # (the notebook env IS everything). `manageable` is false for an in-process kernel.
+    # Package-name completion for the Add box (matches reachable registries).
+    HTTP.register!(router, "GET", "/api/{id}/pkg-complete", req -> _withnb(h, req, _ -> begin
+        q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
+        _json(Dict("names" => _pkg_complete(String(q))))
+    end))
     HTTP.register!(router, "GET", "/api/{id}/packages", req -> _withnb(h, req, nb -> begin
         e = _notebook_adds(nb)
         _json(Dict("notebook" => e.adds,

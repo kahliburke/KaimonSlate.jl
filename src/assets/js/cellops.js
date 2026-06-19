@@ -75,7 +75,9 @@ async function delCell(id) {
   const idx = cellIds().indexOf(id);
   renderAll(await api('POST', '/api/cell-delete/' + id));
   const after = cellIds();
-  after.length ? selectCell(after[Math.min(Math.max(0, idx), after.length - 1)], true) : (selectedId = null);
+  // Select the PREVIOUS cell (idx-1), not the one that shifted up into the gap; clamp so
+  // deleting the first cell falls back to the new first. selectCell scrolls it into view.
+  after.length ? selectCell(after[Math.min(Math.max(0, idx - 1), after.length - 1)], true) : (selectedId = null);
 }
 async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
 // ── Upstream-dependency navigation (🔗) ───────────────────────────────────────

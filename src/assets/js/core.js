@@ -64,7 +64,7 @@ function renderCharts(c) {
       const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
       insts.push(echarts.init(d, 'dark'));
     }
-    while (host.children.length > specs.length) { host.removeChild(host.lastChild); insts.pop().dispose(); }
+    while (host.children.length > specs.length) { host.removeChild(host.lastChild); const inst = insts.pop(); if (inst) try { inst.dispose(); } catch (_) {} }
     specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
     if (insts.length) _snapCell(c.id, insts, specs[0]);   // PNG (slate_view) + SVG (vector PDF) → server
   }
