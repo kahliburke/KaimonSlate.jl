@@ -36,7 +36,7 @@ document.addEventListener('keydown', e => {
   // shift branches must precede the plain arrows so the modifier wins.
   if (e.shiftKey && (k === 'ArrowUp' || k === 'K')) { e.preventDefault(); moveCell(selectedId, 'up'); }
   else if (e.shiftKey && (k === 'ArrowDown' || k === 'J')) { e.preventDefault(); moveCell(selectedId, 'down'); }
-  else if (k === 'Enter') { e.preventDefault(); enterEdit(selectedId); }
+  else if (k === 'Enter' && !e.shiftKey) { e.preventDefault(); enterEdit(selectedId); }   // ⇧⏎ is run, handled below
   else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); if (idx < ids.length - 1) selectCell(ids[idx + 1], true); }
   else if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); if (idx > 0) selectCell(ids[idx - 1], true); }
   else if (k === 'a') { e.preventDefault(); addCell(selectedId, 'code', true); }
@@ -47,6 +47,22 @@ document.addEventListener('keydown', e => {
   else if (k === 'd') { e.preventDefault();
     if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }
     else { _dPending = true; _dTimer = setTimeout(() => _dPending = false, 650); } }
+});
+// Run shortcuts in COMMAND mode (a cell is selected but not being edited) — mirror the
+// in-editor keys: ⇧⏎ runs the cell and moves to the next; ⌘/Ctrl⇧⏎ runs and opens a fresh
+// cell below. (In edit mode CodeMirror's extraKeys handle these, so we bail when in a field.)
+// Only plain code cells have the always-on editor runCell reads; md/@bind cells just advance.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || !e.shiftKey || e.altKey) return;
+  if (document.getElementById('modalbg').classList.contains('show')) return;
+  const inField = e.target.closest('.CodeMirror') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  if (inField) return;
+  const ids = cellIds(); if (!selectedId || !ids.includes(selectedId)) return;
+  e.preventDefault();
+  const id = selectedId, c = _cellById(id);
+  const ran = (c && c.kind === 'code' && !hasBinds(c)) ? runCell(id) : Promise.resolve();
+  if (e.metaKey || e.ctrlKey) ran.then(() => addCell(id, 'code', false, true));            // run + new cell below (edit it)
+  else ran.then(() => { const a = cellIds(), i = a.indexOf(id); if (i >= 0 && i < a.length - 1) selectCell(a[i + 1], true); });
 });
 // Click selects (mousedown precedes editor focus); double-click the id label renames it.
 document.getElementById('nb').addEventListener('mousedown', e => {

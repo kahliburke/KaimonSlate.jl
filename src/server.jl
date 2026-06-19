@@ -436,6 +436,11 @@ function state_json(nb::LiveNotebook)
     meta = Dict{String,Any}(
         "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
         "version" => nb.version, "worker" => _kernel_status(nb.kernel))
+    # The project ROOT (dir holding the nearest Project.toml above the notebook) — so "open
+    # project in VS Code" opens the project, not the notebooks/ subdir. Omitted when detached.
+    let proj = Base.current_project(dirname(abspath(nb.path)))
+        proj === nothing || (meta["project"] = dirname(proj))
+    end
     if get(nb.report.meta, "hydrating", false) === true
         # While the env reconstructs: show the embedded frozen render if present (already
         # cell_json-shaped), else the parsed cells un-run. Live cells replace these on hydrate.

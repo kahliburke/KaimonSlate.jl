@@ -157,7 +157,7 @@ function paletteCommands() {
     ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
     ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
     { label: 'Open notebook in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p; } },
-    { label: 'Open project in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p.replace(/\/[^\/]*$/, ''); } },
+    { label: 'Open project in VS Code', run: () => { const d = nbState && (nbState.project || (nbState.path || '').replace(/\/[^\/]*$/, '')); if (d) location.href = 'vscode://file' + d; } },
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },
   ];
@@ -479,7 +479,7 @@ document.addEventListener('keydown', e => {
       else toggleDocs();
     }
   }
-  else if (mod && e.key === 'Enter') { e.preventDefault(); runAll(); }                       // ⌘↵  run stale
+  else if (mod && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAll(); }         // ⌘↵  run stale (⌘⇧↵ is run+add-below, handled elsewhere)
   else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
   else if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); togglePalette(); } // ⌘⇧F controls
 });
