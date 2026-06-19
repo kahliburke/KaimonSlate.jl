@@ -208,15 +208,31 @@ function _helpRecordHtml(r) {
   return `<div class="dochead"><h4>${title}</h4>${kind}</div>${body}${exports}` +
     '<div class="hint">↵ insert name · click a <code>ref</code> or export to drill in · ‹ › or esc to go back</div>';
 }
-// Make inline-code identifiers in a docstring clickable → drill into them.
+// Make identifiers in a docstring clickable (drill-in via the #docdetail delegation):
+//  • an inline `code` span that is itself a single name → the whole span links;
+//  • inside a code block (a signature), each CamelCase type token (Vector, Float64, …) links.
 function _linkifyDoc(root) {
   root.querySelectorAll('.docmd code').forEach(c => {
+    if (c.closest('pre')) { _linkifyCode(c); return; }       // signature / fenced block
     const t = c.textContent.trim();
     if (t.length > 1 && _IDENT_RE.test(t) && !_NOLINK.has(t)) {
-      const a = document.createElement('a'); a.className = 'doclink'; a.textContent = c.textContent;
-      a.onclick = () => helpLookup(t); c.replaceWith(a);
+      const a = document.createElement('a'); a.className = 'doclink'; a.dataset.name = t; a.textContent = c.textContent;
+      c.replaceWith(a);
     }
   });
+}
+// CommonMark code blocks are plain text → safe to re-emit as escaped HTML with CamelCase
+// type tokens wrapped as links (e.g. `-> Vector{Float64}` → Vector and Float64 clickable).
+function _linkifyCode(el) {
+  const TYPE = /[A-Z][A-Za-z0-9_]+/g, esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const txt = el.textContent; let out = '', last = 0, m;
+  while ((m = TYPE.exec(txt))) {
+    out += esc(txt.slice(last, m.index));
+    out += _NOLINK.has(m[0]) ? esc(m[0]) : `<a class="doclink" data-name="${esc(m[0])}">${esc(m[0])}</a>`;
+    last = m.index + m[0].length;
+  }
+  out += esc(txt.slice(last));
+  el.innerHTML = out;
 }
 // Drill into a name (clicked ref or export) → a new history page. Unresolvable names get a
 // navigable "not found" page rather than hijacking the search.
@@ -241,8 +257,8 @@ function _docPick() {
 // List: click selects; double-click inserts.
 document.getElementById('doclist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { e.preventDefault(); _select(+li.dataset.i); document.getElementById('docin').focus(); } });
 document.getElementById('doclist').addEventListener('dblclick', e => { const li = e.target.closest('li'); if (li && li.dataset.i !== undefined) { _select(+li.dataset.i); _docPick(); } });
-// Detail: drill into an export chip.
-document.getElementById('docdetail').addEventListener('click', e => { const ex = e.target.closest('.docexport'); if (ex) helpLookup(ex.dataset.name); });
+// Detail: drill into an export chip or a doc link (signature type / inline ref).
+document.getElementById('docdetail').addEventListener('click', e => { const t = e.target.closest('.docexport, .doclink'); if (t && t.dataset.name) helpLookup(t.dataset.name); });
 document.getElementById('docin').addEventListener('input', _docSearch);
 document.getElementById('docin').addEventListener('keydown', e => {
   const v = _view(), sel = v ? v.sel : 0;
