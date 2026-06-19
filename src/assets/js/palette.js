@@ -186,13 +186,14 @@ function _renderView() {
     const right = r.exact ? '<span class="k exact">exact</span>'
                 : r._nameMatch ? '<span class="k exact">name</span>'
                 : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
-    return `<li class="${i === v.sel && !v.rec ? 'on' : ''}" data-i="${i}"><span class="docname">${_escc(r.module)}.<b>${_escc(r.name)}</b>${right}</span></li>`;
+    const label = (r.module && r.module !== r.name) ? `${_escc(r.module)}.<b>${_escc(r.name)}</b>` : `<b>${_escc(r.name)}</b>`;
+    return `<li class="${i === v.sel && !v.rec ? 'on' : ''}" data-i="${i}"><span class="docname">${label}${right}</span></li>`;
   }).join('');
   const rel = document.getElementById('docrelated');
   const r = v && (v.rec || (v.results && v.results[v.sel]));
   if (!r) { dt.innerHTML = ''; rel.innerHTML = ''; return; }
   dt.innerHTML = _helpRecordHtml(r);
-  _linkifyDoc(dt); dt.scrollTop = 0;
+  _linkifyDoc(dt, r); dt.scrollTop = 0;
   _renderRelated(r);                           // the right rail (referenced + related)
   r._enriched || _enrichDetail(r);             // upgrade with live exports/doc on first view
 }
@@ -256,12 +257,18 @@ function _helpRecordHtml(r) {
 // Make identifiers in a docstring clickable (drill-in via the #docdetail delegation):
 //  • an inline `code` span that is itself a single name → the whole span links;
 //  • inside a code block (a signature), each CamelCase type token (Vector, Float64, …) links.
-function _linkifyDoc(root) {
+function _linkifyDoc(root, r) {
+  // When the page is a MODULE, its doc lists sibling exports as bare `names`; qualify them with
+  // the module so the lookup resolves (the worker imports the head segment as a module).
+  const isMod = r && (r.kind === 'module' || (r.exports && r.exports.length));
+  const ctxMod = isMod ? (r.module && r.module !== r.name ? r.module + '.' + r.name : r.name) : '';
   root.querySelectorAll('.docmd code').forEach(c => {
-    if (c.closest('pre')) { _linkifyCode(c); return; }       // signature / fenced block
+    if (c.closest('pre')) { _linkifyCode(c); return; }       // signature / fenced block → bare type tokens
     const t = c.textContent.trim();
     if (t.length > 1 && _IDENT_RE.test(t) && !_NOLINK.has(t)) {
-      const a = document.createElement('a'); a.className = 'doclink'; a.dataset.name = t; a.textContent = c.textContent;
+      const a = document.createElement('a'); a.className = 'doclink';
+      a.dataset.name = (ctxMod && t.indexOf('.') < 0) ? ctxMod + '.' + t : t;   // qualify a sibling under the module
+      a.textContent = c.textContent;
       c.replaceWith(a);
     }
   });
