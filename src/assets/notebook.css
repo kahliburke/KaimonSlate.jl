@@ -52,6 +52,10 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cell.state-stale   { border-left-color:var(--gold); }
 .cell.state-edited  { border-left-color:var(--orange); }
 .cell.state-running { border-left-color:var(--green); animation:pulse 1s infinite; }
+/* dep-focus filter view: banner shown while only a cell's dependency chain is rendered */
+.focusbar { position:sticky; top:0; z-index:25; cursor:pointer; margin:0 0 10px; padding:7px 12px;
+  background:rgba(86,156,214,.14); border:1px solid var(--accent); border-radius:8px; color:var(--text); font-size:.82rem; }
+.focusbar:hover { background:rgba(86,156,214,.22); }
 .cell.state-errored { border-left-color:var(--red); }
 @keyframes pulse { 50% { border-left-color:var(--bg2); } }
 .cellhead { display:flex; align-items:center; gap:8px; padding:3px 10px; background:var(--bg3);

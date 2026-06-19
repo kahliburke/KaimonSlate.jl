@@ -98,7 +98,7 @@ function cellHeaderInner(c) {
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
-      (isCode ? `<button onclick="toggleDeps('${c.id}')" title="highlight this cell's upstream dependencies">🔗</button>` : '') + autoctl +
+      (isCode ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
       (isCode ? `<button class="hidecode${c.codeHidden ? ' on' : ''}" onclick="toggleHideCode('${c.id}')" title="${c.codeHidden ? 'show code' : 'hide code — show only the output'}">${c.codeHidden ? '🙈' : '👁'}</button>` : '') +
       editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +

@@ -10,9 +10,33 @@
 import { html, render } from 'htm/preact';
 import { useRef, useEffect } from 'preact/hooks';
 import { effect } from '@preact/signals';
-import { cells as cellsSignal, selected as selectedSignal, liveStates as liveSignal } from './store.js';
+import { cells as cellsSignal, selected as selectedSignal, liveStates as liveSignal, focus as focusSignal } from './store.js';
 
 const raw = s => ({ __html: s || '' });
+
+// Dep-focus: the cells in `id`'s dependency CHAIN — itself, its transitive precursors (deps),
+// and its transitive dependents — so focusing on a cell shows just that flow. `null` → all.
+function _focusCone(cells, id) {
+  if (!id) return cells;
+  const byId = {}; cells.forEach(c => (byId[c.id] = c));
+  if (!byId[id]) return cells;
+  const cone = new Set([id]);
+  const up = x => (byId[x]?.deps || []).forEach(d => { if (!cone.has(d)) { cone.add(d); up(d); } });
+  up(id);                                            // upstream precursors
+  // downstream dependents: reachability from `id` ONLY (seeding from the whole cone would pull
+  // in siblings that merely share a precursor like `setup`).
+  const down = new Set();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const c of cells) {
+      if (down.has(c.id) || c.id === id) continue;
+      if ((c.deps || []).some(d => d === id || down.has(d))) { down.add(c.id); changed = true; }
+    }
+  }
+  down.forEach(x => cone.add(x));
+  return cells.filter(c => cone.has(c.id));
+}
 
 // <Editor>: a CodeMirror created ONCE into a host div and preserved. The component renders a
 // stable empty host and never re-renders it (empty-dep effect), so cursor/undo/scroll/the
@@ -30,7 +54,7 @@ function Editor({ cell }) {
   return html`<div ref=${ref}></div>`;
 }
 
-function Cell({ cell, selectedId, live }) {
+function Cell({ cell, selectedId, live, focusId }) {
   const c = cell;
   const ref = useRef(null);
   const last = useRef({ struct: undefined, out: undefined, vis: undefined });
@@ -85,7 +109,7 @@ function Cell({ cell, selectedId, live }) {
   const isBind = window.hasBinds(c);
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
-    + (selectedId === c.id ? ' selected' : '');
+    + (selectedId === c.id ? ' selected' : '') + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
   // Content hosts are empty/stable — Preact preserves them; the effect above fills them.
@@ -100,17 +124,23 @@ function Cell({ cell, selectedId, live }) {
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
-function Notebook({ cells, selectedId, live }) {
+function Notebook({ cells, selectedId, live, focusId }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
     window.syncAgentTop && window.syncAgentTop();
   });
-  return html`${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} live=${live} />`)}`;
+  const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
+      title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${cells.length} cell${cells.length === 1 ? '' : 's'} — click to exit</div>` : null;
+  return html`${banner}${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} live=${live} focusId=${focusId} />`)}`;
 }
 
 const nbHost = document.getElementById('nb');
 if (nbHost) {
-  // Re-render whenever the cell list, selection, or transient live-state changes.
-  effect(() => render(html`<${Notebook} cells=${cellsSignal.value} selectedId=${selectedSignal.value} live=${liveSignal.value} />`, nbHost));
+  // Re-render on cell list / selection / live-state / dep-focus change. When focused, only the
+  // focus cell's dependency chain is rendered (the rest dissolve away).
+  effect(() => {
+    const fid = focusSignal.value;
+    render(html`<${Notebook} cells=${_focusCone(cellsSignal.value, fid)} selectedId=${selectedSignal.value} live=${liveSignal.value} focusId=${fid} />`, nbHost);
+  });
   console.log('[preact] phase 2+3 — <Notebook> owns #nb (editors preserved across updates)');
 }

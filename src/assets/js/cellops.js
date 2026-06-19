@@ -83,11 +83,7 @@ async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-mo
 // (transitively) reads from, computed client-side from each cell's `deps` (shipped in
 // state_json). Lets you SEE what feeds a cell and click a precursor to jump to it.
 let _depFocus = null;
-function clearDeps() {
-  _depFocus = null;
-  document.querySelectorAll('.cell.dep-focus, .cell.dep-up').forEach(el => el.classList.remove('dep-focus', 'dep-up'));
-  document.querySelectorAll('.depflag').forEach(el => el.remove());
-}
+function clearDeps() { window.slateStore && window.slateStore.setFocus(null); }
 function _upstreamCone(id) {
   const byId = {}; ((nbState && nbState.cells) || []).forEach(c => byId[c.id] = c);
   const up = new Set(), stack = [id];
@@ -116,20 +112,12 @@ function _depFlag(el, text, title) {
   const f = document.createElement('span'); f.className = 'depflag';
   f.textContent = text; if (title) f.title = title; f.onclick = clearDeps; el.appendChild(f);
 }
-function toggleDeps(id) {
-  if (_depFocus === id) { clearDeps(); return; }   // 🔗 again on the same cell → off
-  clearDeps(); _depFocus = id;
-  const focus = document.getElementById('cell-' + id);
-  const up = _upstreamCone(id);
-  if (focus) focus.classList.add('dep-focus');
-  if (!up.size) { if (focus) _depFlag(focus, 'no upstream deps', 'click to clear'); return; }
-  up.forEach(d => { const el = document.getElementById('cell-' + d);
-    if (el) { el.classList.add('dep-up'); _depFlag(el, '⬆ feeds ' + id, 'a precursor of ' + id + ' — click to clear'); } });
-  const first = [...up].map(d => document.getElementById('cell-' + d)).filter(Boolean)
-    .sort((a, b) => a.offsetTop - b.offsetTop)[0];
-  if (first) first.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && _depFocus) clearDeps(); });
+// 🔗 → dep-focus: render ONLY this cell's dependency chain (precursors + itself + dependents);
+// click again (or Esc) to return to the full notebook. Filtering lives in the Preact <Notebook>.
+function toggleDeps(id) { window.slateStore && window.slateStore.setFocus(id); }
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && window.slateStore && window.slateStore.focus.value) window.slateStore.setFocus(null);
+});
 async function moveCellRel(id, target, before) { renderAll(await api('POST', '/api/cell-move/' + id, { target, before })); }
 async function toggleType(id, kind)  { renderAll(await api('POST', '/api/cell-type/' + id, { kind })); }
 async function undoNb() { renderAll(await api('POST', '/api/undo')); }
