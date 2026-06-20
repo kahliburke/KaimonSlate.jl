@@ -322,7 +322,9 @@ function _def_name(ex)
     (h === :abstract || h === :primitive)    ? _name_str(ex.args[1]) :
     h === :macro                             ? (n = _sig_name(ex.args[1]); n === nothing ? nothing : "@" * n) :
     h === :const && !isempty(ex.args)        ? (a = ex.args[1]; _name_str(a isa Expr && a.head === :(=) ? a.args[1] : a)) :
-    h === :macrocall                         ? findfirst_def(ex.args) :
+    # Revise wraps some top-level defs (e.g. consecutive bare one-liners) as `begin <LNN> def end`
+    # (a :block), and docstrings as :macrocall — recurse into both to find the inner def name.
+    (h === :macrocall || h === :block)       ? findfirst_def(ex.args) :
     nothing
 end
 findfirst_def(args) = (for a in args; r = _def_name(a); r === nothing || return r; end; nothing)
