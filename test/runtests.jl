@@ -3,6 +3,7 @@
 # is also runnable standalone: `julia --project test/test_<name>.jl`.
 using SafeTestsets
 
+@safetestset "defname" begin include("test_defname.jl") end
 @safetestset "engine" begin include("test_engine.jl") end
 @safetestset "eval"   begin include("test_eval.jl") end
 @safetestset "deps"   begin include("test_deps.jl") end
