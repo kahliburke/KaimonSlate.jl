@@ -346,13 +346,21 @@ function _changed_names(queue)
 end
 
 # A Revise apply error → a short message (the file + reason), best-effort across Revise versions.
-function _revise_error_msg(R, thrown)
+# Snapshot of the keys currently in Revise's (persistent) error queue.
+_qe_keys(R) = try; isdefined(R, :queue_errors) ? Set(collect(keys(R.queue_errors))) : Set{Any}(); catch; Set{Any}(); end
+
+# An error message IF this revise introduced one. `thrown` is a revise() throw; otherwise we
+# compare queue_errors against `before` and only report errors NEW to this pass — `queue_errors`
+# RETAINS old entries, so checking it absolutely would wedge us in the error branch forever
+# (the bug behind "stopped notifying after a few edits").
+function _revise_error_msg(R, thrown, before::Set)
     thrown === nothing || return first(sprint(showerror, thrown), 400)
     qe = try; isdefined(R, :queue_errors) ? R.queue_errors : nothing; catch; nothing; end
-    (qe === nothing || isempty(qe)) && return ""
+    qe === nothing && return ""
+    newks = [k for k in keys(qe) if !(k in before)]
+    isempty(newks) && return ""
     return try
-        k, v = first(qe)                                    # (PkgId/file) => (exception, backtrace)
-        ex = v isa Tuple ? v[1] : v
+        k = newks[1]; v = qe[k]; ex = v isa Tuple ? v[1] : v
         "$(basename(string(k))): $(first(sprint(showerror, ex), 300))"
     catch
         "Revise could not apply a source change."
@@ -363,21 +371,27 @@ const _LAST_SRC_ERR = Ref{String}("")
 
 # Resilient headless hot-reload. Revise's own file watchers populate `revision_queue`
 # headlessly; we poll it, APPLY the revisions, and PUB either the changed def-names
-# (`slate_revise`) or a parse/load error (`slate_revise_err`). Crucially, every iteration is
-# wrapped so a bad/invalid save can NEVER kill the watcher — tracking resumes the instant the
-# file parses again. Errors are deduped so an unfixed file doesn't spam toasts.
+# (`slate_revise`) or a parse/load error (`slate_revise_err`). Every iteration is wrapped so a
+# bad/invalid save can NEVER kill the watcher — tracking resumes the instant the file parses
+# again. Logs each pass so the worker log shows what hot-reload is doing.
 function _start_src_watcher()
-    isdefined(Main, :Revise) || return nothing
+    if !isdefined(Main, :Revise)
+        @info "slate hot-reload: Revise not loaded — disabled"
+        return nothing
+    end
+    @info "slate hot-reload: watcher started"
     @async while true
         try
             sleep(0.4)
             R = Main.Revise
             (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || continue
             queue = collect(R.revision_queue)
+            before = _qe_keys(R)
             thrown = nothing
             try; R.revise(); catch e; thrown = e; end
-            emsg = _revise_error_msg(R, thrown)
+            emsg = _revise_error_msg(R, thrown, before)
             if !isempty(emsg)
+                @warn "slate hot-reload: revise error" error = emsg
                 if emsg != _LAST_SRC_ERR[]
                     _LAST_SRC_ERR[] = emsg
                     KaimonGate._publish_stream("slate_revise_err", emsg)
@@ -385,10 +399,11 @@ function _start_src_watcher()
             else
                 _LAST_SRC_ERR[] = ""
                 names = _changed_names(queue)
+                @info "slate hot-reload: revised" files = length(queue) changed = names
                 isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
             end
         catch e
-            try; @warn "slate src watcher iteration failed" exception = e; catch; end
+            try; @warn "slate hot-reload: watcher iteration failed" exception = e; catch; end
             try; sleep(0.5); catch; end
         end
     end
