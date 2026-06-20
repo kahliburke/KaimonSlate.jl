@@ -34,6 +34,18 @@ function _binding_kind(parent::Module, name::AbstractString)
     (v isa Function || v isa Base.Callable) ? "function" : "const"
 end
 
+# A dead generic-function stub: a name bound to a non-builtin Function with NO methods — e.g. a
+# function whose only method Revise removed when its def was deleted from /src (Julia can't unbind
+# the name, so it lingers as `f (generic function with 0 methods)`). Excludes builtins (whose
+# `methods` is empty) so getfield/tuple/etc. aren't dropped. (Note: this also hides an intentional
+# empty interface stub `function f end`, which is uncommon and still typeable.)
+function _dead_stub(parent::Module, name::AbstractString)
+    sym = Symbol(name)
+    (parent isa Module && isdefined(parent, sym)) || return false
+    v = try; getglobal(parent, sym); catch; return false; end
+    return v isa Function && !(v isa Core.Builtin) && isempty(methods(v))
+end
+
 # Coarse kind for a completion → the UI's icon + ranking. Pure type-dispatch plus the
 # binding refinement above; robust across Julia versions (unknown structs fall through).
 function _comp_kind(c)
@@ -104,6 +116,7 @@ function slate_completions(mod::Module, code::AbstractString, pos::Integer)
         for c in comps
             t = _comp_text(c)
             isempty(t) && continue
+            c isa REPL.REPLCompletions.ModuleCompletion && _dead_stub(c.parent, t) && continue
             k = _comp_kind(c)
             k == "method" && (t = try; _retype_kwargs(t, _kwarg_types(c.method)); catch; t; end)
             push!(items, (t, k))
