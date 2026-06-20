@@ -27,14 +27,32 @@ function _unique_id(h::Hub, path::AbstractString)
 end
 
 _notebooks_json(h::Hub) = lock(h.lock) do
-    [Dict("id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
-          "cells" => length(nb.report.cells), "worker" => _worker_label(nb))
-     for nb in values(h.notebooks)]
+    [begin
+        cs = nb.report.cells
+        Dict("id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
+             "cells" => length(cs),
+             "code" => count(c -> c.kind == CODE, cs),
+             "md" => count(c -> c.kind == MARKDOWN, cs),
+             "errors" => count(c -> c.state == ERRORED, cs),
+             "stale" => count(c -> c.state == STALE, cs),
+             "running" => count(c -> c.state == RUNNING, cs),
+             "binds" => sum(c -> length(c.binds), cs; init = 0),
+             "compute_ms" => sum(c -> c.output === nothing ? 0.0 : c.output.duration_ms, cs; init = 0.0),
+             "mtime" => _file_mtime(nb.path),
+             "worker" => _worker_label(nb), "port" => _worker_port(nb))
+     end for nb in values(h.notebooks)]
 end
 
 # A short "worker :port" tag for the index, when a notebook runs on a gate worker.
 _worker_label(nb::LiveNotebook) =
     nb.kernel isa GateKernel && nb.kernel.port != 0 ? " · worker&nbsp;:$(nb.kernel.port)" : ""
+
+# The gate worker's port (0 / nothing when in-process) — for the index card's running dot.
+_worker_port(nb::LiveNotebook) =
+    nb.kernel isa GateKernel && nb.kernel.port != 0 ? nb.kernel.port : nothing
+
+# File mtime as unix seconds (the index renders it as relative "edited Nm ago"); 0 if absent.
+_file_mtime(path::AbstractString) = try; round(Int, mtime(abspath(path))); catch; 0; end
 
 
 _html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store"], body)
