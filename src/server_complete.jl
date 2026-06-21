@@ -259,6 +259,10 @@ function _make_router(h::Hub)
             isempty(extra) || (items = vcat(Tuple{String,String}[(n, "local") for n in extra], items))
         end
         items = _rank_completions(items, prefix)
+        # `@bind` vars expand to consts, so the completer tags them "const" — relabel them "bind"
+        # for a clearer icon (a control, not a constant).
+        bindnames = Set(String(b.name) for c in nb.report.cells for b in c.binds)
+        isempty(bindnames) || (items = Tuple{String,String}[(t, t in bindnames ? "bind" : k) for (t, k) in items])
         _json(Dict("completions" => [Dict("text" => t, "kind" => k) for (t, k) in items],
                    "from" => from, "to" => to))
     end))

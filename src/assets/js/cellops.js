@@ -126,6 +126,34 @@ function transBinduses(c) {
   }
   return [...acc].sort();
 }
+// Does this cell render a result (plot/value/table/echart) that controls can pair with?
+const _hasResult = c => !!(c && (c.output || (c.echarts && c.echarts.length) || (c.tables && c.tables.length)));
+// Names a cell can surface into its control strip: its OWN @bind vars FIRST (only when the cell
+// also shows a result — so a mixed plot+@bind cell can fold its own widget into the same strip as
+// the external controls; a pure @bind cell stays as-is), then the transitively-affecting external
+// binds. This is the picker's/🎛's source list — own + external in one arrangeable strip.
+function surfaceableNames(c) {
+  if (!c) return [];
+  const own = _hasResult(c) ? (c.binds || []).map(b => b.name) : [];
+  const ext = transBinduses(c).filter(n => !own.includes(n));
+  return [...own, ...ext];
+}
+// Every @bind control declared anywhere in the notebook (unique, notebook order).
+function allBindNames() {
+  const seen = new Set(), out = [];
+  ((nbState && nbState.cells) || []).forEach(c => (c.binds || []).forEach(b => {
+    if (!seen.has(b.name)) { seen.add(b.name); out.push(b.name); }
+  }));
+  return out;
+}
+// What the 🎛 picker offers a cell: the controls AFFECTING it first (own + transitively-read),
+// then every OTHER @bind in the notebook — so you can dock any control (incl. one just created),
+// consistent with drag-from-palette. `all` is the full controllable set (for the apply step).
+function pickerNames(c) {
+  const aff = surfaceableNames(c), affSet = new Set(aff);
+  const other = allBindNames().filter(n => !affSet.has(n));
+  return { aff, other, all: [...aff, ...other] };
+}
 function _depFlag(el, text, title) {
   const f = document.createElement('span'); f.className = 'depflag';
   f.textContent = text; if (title) f.title = title; f.onclick = clearDeps; el.appendChild(f);

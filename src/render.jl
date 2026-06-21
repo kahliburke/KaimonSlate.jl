@@ -80,6 +80,16 @@ const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
 const _MATH_INLINE = r"\$([^\$\n]+?)\$"
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
 
+# A string value's text/plain repr is quoted (`"c"`), but inside `{{ }}` interpolation — a
+# presentation context, like Julia's `$(…)` — we want the bare content (`c`). Strip one layer of
+# surrounding double-quotes and undo the basic `show` escapes; non-string reprs (numbers, symbols,
+# arrays) have no enclosing quotes and pass through untouched.
+function _interp_scalar(s::AbstractString)
+    (ncodeunits(s) >= 2 && startswith(s, '"') && endswith(s, '"')) || return s
+    inner = s[nextind(s, firstindex(s)):prevind(s, lastindex(s))]
+    return replace(inner, "\\\"" => "\"", "\\\$" => "\$", "\\\\" => "\\", "\\n" => "\n", "\\t" => "\t")
+end
+
 # Render markdown, splicing each `{{ expr }}` capture in. Self-contained outputs
 # (image / HTML / LaTeX / scalar) embed directly; echarts & interactive tables
 # emit a host placeholder (`.ichart`/`.itable` keyed by index) that the SPA
@@ -100,7 +110,7 @@ function _md_html(src::AbstractString, interps = CellOutput[])
         elseif !isempty(o.tables)
             push!(frags, "<div class=\"itable\" data-i=\"$tc\"></div>"); tc += 1
         elseif !isempty(o.value_repr)
-            push!(frags, "<span class=\"ival\">" * _esc(o.value_repr) * "</span>")
+            push!(frags, "<span class=\"ival\">" * _esc(_interp_scalar(o.value_repr)) * "</span>")
         else
             push!(frags, "")
         end
@@ -133,7 +143,7 @@ end
 function _math_value(o::Union{CellOutput,Nothing})
     o === nothing && return ""
     o.exception === nothing || return "?"
-    isempty(o.value_repr) || return o.value_repr
+    isempty(o.value_repr) || return _interp_scalar(o.value_repr)
     for ch in o.display
         if ch.mime == "text/latex"
             t = strip(String(copy(ch.data)))

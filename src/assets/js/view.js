@@ -4,18 +4,37 @@
 // widget renders, changing it drives recompute the same way.
 const _esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
+// The text shown in a widget's value mirror (`.wval`). A toggle with on/off labels shows the
+// active state's word; a button shows its click count; everything else shows the raw value. Reads
+// the on/off text from the input's data- attributes so the local + server-sync paths agree.
+function _ctrlValLabel(el, v) {
+  const w = el.dataset.widget;
+  if (w === 'button') return '×' + v;
+  if (w === 'toggle' && (el.dataset.on != null || el.dataset.off != null))
+    return v ? (el.dataset.on != null ? el.dataset.on : 'on') : (el.dataset.off != null ? el.dataset.off : 'off');
+  return _showVal(v);
+}
 
 function controlMarkup(bindId, b) {
   const p = b.params || {}, w = b.widget;
   const a = `data-bind="${bindId}" data-name="${b.name}" data-widget="${w}"`;
-  const opts = (p.options || []);
+  // Options are {value,label} (a bare value normalizes to value===label). The browser carries the
+  // stringified VALUE in each option's `value` attr; the LABEL is what's shown (rich for radio).
+  const opts = (p.options || []).map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+  const _selV = String(b.value);
   let ctrl = '', wval = `<span class="wval">${_esc(_showVal(b.value))}</span>`;
   if (w === 'slider')
     ctrl = `<input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${b.value}" ${a}/>`;
   else if (w === 'number')
     ctrl = `<input type="number" value="${b.value}" ${p.min != null ? `min="${p.min}"` : ''} ${p.max != null ? `max="${p.max}"` : ''} ${a}/>`;
-  else if (w === 'checkbox' || w === 'toggle')
-    ctrl = `<input type="checkbox" class="${w}" ${b.value ? 'checked' : ''} ${a}/>`;
+  else if (w === 'checkbox' || w === 'toggle') {
+    // A toggle with on/off labels carries them as data- attributes (so the value mirror can show
+    // the active word) and seeds its `.wval` with the current state's label.
+    const da = (w === 'toggle' && (p.on != null || p.off != null))
+      ? ` data-on="${_esc(p.on != null ? p.on : 'on')}" data-off="${_esc(p.off != null ? p.off : 'off')}"` : '';
+    ctrl = `<input type="checkbox" class="${w}" ${b.value ? 'checked' : ''} ${a}${da}/>`;
+    if (da) wval = `<span class="wval">${_esc(b.value ? (p.on != null ? p.on : 'on') : (p.off != null ? p.off : 'off'))}</span>`;
+  }
   else if (w === 'text')
     ctrl = `<input type="text" value="${_esc(b.value)}" ${a}/>`;
   else if (w === 'textarea')
@@ -27,18 +46,22 @@ function controlMarkup(bindId, b) {
   else if (w === 'time')
     ctrl = `<input type="time" value="${_esc(b.value)}" ${a}/>`;
   else if (w === 'select')
-    ctrl = `<select ${a}>` + opts.map(o => `<option ${o == b.value ? 'selected' : ''}>${_esc(o)}</option>`).join('') + '</select>';
-  else if (w === 'multiselect')
+    ctrl = `<select ${a}>` + opts.map(o => `<option value="${_esc(o.value)}" ${String(o.value) === _selV ? 'selected' : ''}>${_esc(o.label)}</option>`).join('') + '</select>';
+  else if (w === 'multiselect') {
+    const sv = (b.value || []).map(String);
     ctrl = `<select multiple ${a}>` +
-      opts.map(o => `<option ${(b.value || []).includes(o) ? 'selected' : ''}>${_esc(o)}</option>`).join('') + '</select>';
-  else if (w === 'radio')
-    ctrl = `<span class="radiogroup" ${a}>` + opts.map((o, i) =>
-      `<label><input type="radio" name="r-${bindId}-${b.name}" value="${_esc(o)}" ${o == b.value ? 'checked' : ''}/>${_esc(o)}</label>`).join('') + '</span>';
+      opts.map(o => `<option value="${_esc(o.value)}" ${sv.includes(String(o.value)) ? 'selected' : ''}>${_esc(o.label)}</option>`).join('') + '</select>';
+  }
+  else if (w === 'radio')                            // labels rendered (KaTeX) — see _typesetControls
+    ctrl = `<span class="radiogroup" ${a}>` + opts.map(o =>
+      `<label><input type="radio" name="r-${bindId}-${b.name}" value="${_esc(o.value)}" ${String(o.value) === _selV ? 'checked' : ''}/>` +
+      `<span class="optlbl">${_esc(o.label)}</span></label>`).join('') + '</span>';
   else if (w === 'button') {
     ctrl = `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
     wval = `<span class="wval">×${b.value}</span>`;       // show the click count
   }
-  return `<span class="wname">${b.name}</span>${ctrl}${wval}`;
+  const nm = p.label != null ? p.label : b.name;   // a widget's `label=` overrides the displayed var name
+  return `<span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
 }
 
 // One row inside a bind/group cell: the live widget, or — when its control is
@@ -95,7 +118,7 @@ function cellHeaderInner(c) {
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
   const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}')" title="run (⇧⏎)">▶</button>` : '';
-  const bu = transBinduses(c);
+  const bu = surfaceableNames(c);
   const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
   const _someOn = bu.some(n => _present.has(n));
   const autoctl = bu.length
@@ -153,7 +176,7 @@ function wireControl(el) {
   };
   const flush = v => { inflight ? (pending = v) : fire(v); };   // release → send now
   const mirror = v => { const w = el.closest('.widget, .control'); const m = w && w.querySelector('.wval');
-    if (m) m.textContent = widget === 'button' ? '×' + v : _showVal(v); };
+    if (m) m.textContent = _ctrlValLabel(el, v); };
   // Mark the control as just-touched so background refreshes (async live updates)
   // don't yank its value out from under the user mid-interaction.
   const touch = () => { el._touched = performance.now(); };
@@ -177,17 +200,19 @@ function wireControl(el) {
 // Wire every bound widget in a cell — its own @bind widget and/or control strip.
 function mountControls(c) {
   const cell = document.getElementById('cell-' + c.id);
-  if (cell) cell.querySelectorAll('[data-bind]').forEach(wireControl);
+  if (!cell) return;
+  cell.querySelectorAll('[data-bind]').forEach(wireControl);
+  cell.querySelectorAll('.radiogroup').forEach(typeset);   // render rich ($math$) radio option labels
 }
 
 // Wire a freshly-created CodeMirror for code cell `c`: edit tracking, completion + signature
 // keys, as-you-type. Shared by the vanilla mount and the Preact <Editor> component, so the
 // editor behaves identically however it was created. `ed` already holds the source.
-function wireCodeEditor(ed, c) {
-  if (ed.getValue() !== c.source) ed.setValue(c.source);
-  let primed = false;
-  ed.on('change', () => { if (primed) setState(c.id, 'edited'); });
-  setTimeout(() => primed = true, 0);
+// Completion behaviour (Tab/Ctrl-Space/as-you-type/signatures) shared by BOTH the always-on
+// code editor AND the toggle-source editor used by @bind cells — so a bind cell's `</>` source
+// editor completes too (it lost completion after eval otherwise). Wires the as-you-type popup on
+// `ed` and returns the completion extraKeys for the caller to merge with its own (Enter/Esc).
+function _wireCompletion(ed) {
   const complete = cm => cm.showHint({ hint: juliaHint, completeSingle: false });
   const tabComplete = cm => {                  // cycle signature params · complete (word/dot, or arg position) · else indent
     if (cm._ph) { _phGoto(cm, cm._ph.idx + 1); return; }   // signature placeholder mode owns Tab
@@ -207,16 +232,25 @@ function wireCodeEditor(ed, c) {
     complete(cm);
   }, 140);
   const shiftTab = cm => { if (cm._ph) { _phGoto(cm, cm._ph.idx - 1, -1); return; } return CodeMirror.Pass; };
-  ed.setOption('extraKeys', { 'Shift-Enter': () => runCell(c.id), 'Tab': tabComplete, 'Shift-Tab': shiftTab,
-                              'Esc': () => { if (ed._ph) _phEnd(ed); else ed.getInputField().blur(); },
-                              'Ctrl-Space': complete, 'Shift-Cmd-Enter': () => runAndAddBelow(c.id), 'Shift-Ctrl-Enter': () => runAndAddBelow(c.id),
-                              'Shift-Ctrl--': () => splitCell(c.id, ed), 'Shift-Cmd--': () => splitCell(c.id, ed) });
   ed.on('inputRead', (cm, ev) => {             // auto on field access, debounced as-you-type otherwise
     if (cm._ph) return;                        // filling placeholders — don't pop completions over the cursor
     const t = ev.text[0] || '';
     if (t === '.') complete(cm);
     else if (/[A-Za-z_]/.test(t)) autoComplete(cm);
   });
+  return { complete, keys: { 'Tab': tabComplete, 'Shift-Tab': shiftTab } };
+}
+function wireCodeEditor(ed, c) {
+  if (ed.getValue() !== c.source) ed.setValue(c.source);
+  let primed = false;
+  ed.on('change', () => { if (primed) setState(c.id, 'edited'); });
+  setTimeout(() => primed = true, 0);
+  const { complete, keys } = _wireCompletion(ed);
+  ed.setOption('extraKeys', Object.assign({}, keys, {
+    'Shift-Enter': () => runCell(c.id),
+    'Esc': () => { if (ed._ph) _phEnd(ed); else ed.getInputField().blur(); },
+    'Ctrl-Space': complete, 'Shift-Cmd-Enter': () => runAndAddBelow(c.id), 'Shift-Ctrl-Enter': () => runAndAddBelow(c.id),
+    'Shift-Ctrl--': () => splitCell(c.id, ed), 'Shift-Cmd--': () => splitCell(c.id, ed) }));
   ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
   ed.on('blur', () => setEditing(c.id, false));
 }
@@ -251,8 +285,12 @@ function editSource(id, mode) {
       viewportMargin: Infinity, lineWrapping: mode === 'markdown'
     });
     cm.setValue(srcMap[id] || '');
-    cm.setOption('extraKeys', { 'Shift-Enter': () => commitSource(id), 'Esc': () => cancelSource(id),
-                                'Shift-Cmd-Enter': () => commitAndAddBelow(id), 'Shift-Ctrl-Enter': () => commitAndAddBelow(id) });
+    // A code/@bind cell edits Julia here → wire the same completion as the always-on editor
+    // (markdown source doesn't need it). Fixes: a bind cell had no completion after eval.
+    const km = { 'Shift-Enter': () => commitSource(id), 'Esc': () => { if (cm._ph) _phEnd(cm); else cancelSource(id); },
+                 'Shift-Cmd-Enter': () => commitAndAddBelow(id), 'Shift-Ctrl-Enter': () => commitAndAddBelow(id) };
+    if (mode !== 'markdown') { const { complete, keys } = _wireCompletion(cm); Object.assign(km, keys, { 'Ctrl-Space': complete }); }
+    cm.setOption('extraKeys', km);
     cm.on('focus', () => setEditing(id, true));
     cm.on('blur', () => setEditing(id, false));
     editors[id] = cm;
@@ -395,23 +433,27 @@ function syncControlValues(state) {
     } else if ((w === 'select' || w === 'multiselect') && Array.isArray(p.options)) {
       // Dynamic options: rebuild the <option> list only if it changed (the value-set
       // below re-applies the selection). Avoids tearing the menu down every sync.
-      const cur = [...el.options].map(o => o.value);
-      if (!_sameList(cur, p.options)) el.innerHTML = p.options.map(o => `<option>${_esc(o)}</option>`).join('');
+      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const cur = [...el.options].map(o => o.value), want = o2.map(o => String(o.value));
+      if (!_sameList(cur, want)) el.innerHTML = o2.map(o => `<option value="${_esc(o.value)}">${_esc(o.label)}</option>`).join('');
     } else if (w === 'radio' && Array.isArray(p.options)) {
-      const cur = [...el.querySelectorAll('input[type=radio]')].map(i => i.value);
-      if (!_sameList(cur, p.options)) {
+      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const cur = [...el.querySelectorAll('input[type=radio]')].map(i => i.value), want = o2.map(o => String(o.value));
+      if (!_sameList(cur, want)) {
         const nm = 'r-' + el.dataset.bind + '-' + el.dataset.name;
-        el.innerHTML = p.options.map(o =>
-          `<label><input type="radio" name="${nm}" value="${_esc(o)}"/>${_esc(o)}</label>`).join('');
+        el.innerHTML = o2.map(o =>
+          `<label><input type="radio" name="${nm}" value="${_esc(o.value)}"/><span class="optlbl">${_esc(o.label)}</span></label>`).join('');
+        typeset(el);                                 // re-render rich labels after a dynamic rebuild
       }
     }
+    const _q = s => (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
     if (w === 'checkbox' || w === 'toggle') el.checked = !!v;
-    else if (w === 'multiselect') [...el.options].forEach(o => { o.selected = Array.isArray(v) && v.includes(o.value); });
-    else if (w === 'radio') { const c = el.querySelector('input[value="' + v + '"]'); if (c) c.checked = true; }
+    else if (w === 'multiselect') { const sv = (Array.isArray(v) ? v : []).map(String); [...el.options].forEach(o => { o.selected = sv.includes(o.value); }); }
+    else if (w === 'radio') { const c = el.querySelector('input[value="' + _q(String(v)) + '"]'); if (c) c.checked = true; }
     else if (w === 'button') el.dataset.count = v;
-    else el.value = v;
+    else el.value = String(v);
     const wrap = el.closest('.widget, .control'); const m = wrap && wrap.querySelector('.wval');
-    if (m) m.textContent = w === 'button' ? '×' + v : _showVal(v);
+    if (m) m.textContent = _ctrlValLabel(el, v);
   });
 }
 

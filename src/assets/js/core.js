@@ -301,7 +301,7 @@ const _charFromByte = (code, b) => _dec.decode(_enc.encode(code).slice(0, b)).le
 // One-glyph icon per completion kind (mirrors the server's `_comp_kind`). The class
 // `cmh-<kind>` colours it (see notebook.css). Unknown kinds fall back to a neutral dot.
 const _KIND_ICON = { local: 'v', var: 'v', const: 'c', function: 'ƒ', method: 'ƒ', type: 'T',
-  module: 'M', field: '.', kwarg: '=', keyword: 'K', latex: '\\', path: '/', key: '#', text: '·' };
+  module: 'M', field: '.', kwarg: '=', keyword: 'K', latex: '\\', path: '/', key: '#', text: '·', bind: '⊞', str: '"' };
 function _renderHint(elt, _data, cur) {
   const ic = document.createElement('span');
   ic.className = 'cmh-ic cmh-' + (cur.kind || 'text');
@@ -344,7 +344,17 @@ function _toHintItem(it) {
   if (typeof it === 'string') return { text: it, displayText: it };
   if (it.kind === 'method')                          // signature row: Enter fills its params
     return { text: it.text, kind: 'method', displayText: it.text.split(' @ ')[0], render: _renderHint, hint: _pickSignature };
+  if (it.kind === 'str')                             // string macro (`colorant"`): show name"…" + auto-close
+    return { text: it.text, kind: 'str', displayText: it.text.replace(/"$/, '') + '"…"', render: _renderHint, hint: _insertStrMacro };
   return { text: it.text, kind: it.kind, render: _renderHint };
+}
+// Accept a string-macro completion: replace the typed prefix with `name""` and drop the cursor
+// between the quotes (so `colora`→`colorant"⎸"`), instead of leaving a stray opening quote.
+function _insertStrMacro(cm, data, completion) {
+  _hideHintDoc();
+  const name = completion.text;                      // e.g. 'colorant"'
+  cm.replaceRange(name + '"', data.from, data.to);
+  cm.setCursor({ line: data.from.line, ch: data.from.ch + name.length });   // between the two quotes
 }
 // True when the cursor sits in the keyword-argument region of the innermost call (past a
 // top-level `;` inside the current unclosed `(`). REPLCompletions won't list kwargs there
@@ -475,7 +485,7 @@ juliaHint.async = true;
 // Skipped for kinds with nothing to look up (locals, keywords, fields, latex, paths).
 let _hintDocEl = null, _hintDocTimer = null;
 const _hintDocCache = {};
-const _NO_DOC = { local: 1, var: 1, keyword: 1, kwarg: 1, latex: 1, path: 1, key: 1, field: 1 };
+const _NO_DOC = { local: 1, var: 1, keyword: 1, kwarg: 1, latex: 1, path: 1, key: 1, field: 1, bind: 1 };
 function _hideHintDoc() { clearTimeout(_hintDocTimer); if (_hintDocEl) _hintDocEl.style.display = 'none'; }
 function _onHintSelect(item, node) {
   clearTimeout(_hintDocTimer);
@@ -484,7 +494,9 @@ function _onHintSelect(item, node) {
 }
 function _loadHintDoc(item, node) {
   const kind = item.kind;
-  const name = kind === 'method' ? item.text.split('(')[0] : item.text;   // method row → the function's docs
+  const name = kind === 'method' ? item.text.split('(')[0]                // method row → the function's docs
+             : kind === 'str' ? '@' + item.text.replace(/"$/, '') + '_str'  // colorant" → @colorant_str docs
+             : item.text;
   if (name in _hintDocCache) return _showHintDoc(_hintDocCache[name], kind, node);
   api('GET', '/api/help?name=' + encodeURIComponent(name)).then(r => {
     const html = (r && r.docHtml) ? r.docHtml : '';

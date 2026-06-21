@@ -41,16 +41,45 @@ end
 NumberField(lo::Real, hi::Real, default::Real = lo; label = nothing) =
     Widget("number", merge(_wparams(label), Dict{String,Any}("min" => lo, "max" => hi)), default)
 Checkbox(default::Bool = false; label = nothing) = Widget("checkbox", _wparams(label), default)
-Toggle(default::Bool = false; label = nothing)   = Widget("toggle", _wparams(label), default)
+# `on`/`off` are the text shown for each state (e.g. `Toggle(false; on="Live", off="Paused")`);
+# omit them to show the plain true/false value. `label` (like every widget) sets the display name.
+function Toggle(default::Bool = false; label = nothing, on = nothing, off = nothing)
+    p = _wparams(label)
+    on  === nothing || (p["on"]  = String(on))
+    off === nothing || (p["off"] = String(off))
+    return Widget("toggle", p, default)
+end
 TextField(default::AbstractString = ""; label = nothing) = Widget("text", _wparams(label), String(default))
 TextArea(default::AbstractString = ""; rows::Int = 3, label = nothing) =
     Widget("textarea", merge(_wparams(label), Dict{String,Any}("rows" => rows)), String(default))
-Select(options, default = first(options); label = nothing) =
-    Widget("select", merge(_wparams(label), Dict{String,Any}("options" => collect(options))), default)
-Radio(options, default = first(options); label = nothing) =
-    Widget("radio", merge(_wparams(label), Dict{String,Any}("options" => collect(options))), default)
-MultiSelect(options, default = Any[]; label = nothing) =
-    Widget("multiselect", merge(_wparams(label), Dict{String,Any}("options" => collect(options))), collect(default))
+# Options for Radio/Select/MultiSelect. Each entry is a bare value (shown as its string) OR a
+# `value => label` pair — the bound variable takes `value`, while `label` is what's displayed (and
+# may carry `$math$`/markdown, rendered for Radio). Stored as `[{value,label}]`; the value keeps
+# its real Julia type so reconcile/coerce match on values, not the (possibly rich) labels.
+function _norm_options(options)
+    specs = Dict{String,Any}[]
+    for o in options
+        v, l = o isa Pair ? (o.first, o.second) : (o, o)
+        push!(specs, Dict{String,Any}("value" => v, "label" => string(l)))
+    end
+    return specs
+end
+_opt_values(opts) = Any[o isa AbstractDict ? o["value"] : o for o in opts]
+_opt_default(default, vals) = default === nothing ? (isempty(vals) ? nothing : first(vals)) :
+                              (default isa Pair ? default.first : default)
+function Select(options, default = nothing; label = nothing)
+    specs = _norm_options(options)
+    return Widget("select", merge(_wparams(label), Dict{String,Any}("options" => specs)), _opt_default(default, _opt_values(specs)))
+end
+function Radio(options, default = nothing; label = nothing)
+    specs = _norm_options(options)
+    return Widget("radio", merge(_wparams(label), Dict{String,Any}("options" => specs)), _opt_default(default, _opt_values(specs)))
+end
+function MultiSelect(options, default = Any[]; label = nothing)
+    specs = _norm_options(options)
+    return Widget("multiselect", merge(_wparams(label), Dict{String,Any}("options" => specs)),
+                  Any[d isa Pair ? d.first : d for d in default])
+end
 ColorPicker(default::AbstractString = "#3aa0ff"; label = nothing) = Widget("color", _wparams(label), String(default))
 DateField(default = ""; label = nothing) = Widget("date", _wparams(label), string(default))
 TimeField(default = ""; label = nothing) = Widget("time", _wparams(label), string(default))
@@ -68,11 +97,11 @@ function _reconcile_bind(oldw::Widget, oldv, neww::Widget)
         lo = get(neww.params, "min", -Inf); hi = get(neww.params, "max", Inf)
         return (oldv isa Number && lo <= oldv <= hi) ? oldv : neww.default
     elseif haskey(neww.params, "options")
-        opts = neww.params["options"]
+        vals = _opt_values(neww.params["options"])
         if neww.kind == "multiselect"
-            return oldv isa AbstractVector ? [v for v in oldv if v in opts] : neww.default
+            return oldv isa AbstractVector ? [v for v in oldv if v in vals] : neww.default
         end
-        return oldv in opts ? oldv : neww.default
+        return oldv in vals ? oldv : neww.default
     end
     return oldv
 end
@@ -86,8 +115,17 @@ function coerce_bind(w::Widget, v)
         return v === true || v == 1
     elseif w.kind == "button"
         return v isa Number ? Int(round(v)) : v
+    elseif w.kind == "select" || w.kind == "radio"
+        # The browser sends the option's stringified value attribute; map it back to the real value.
+        for v0 in _opt_values(get(w.params, "options", ()))
+            string(v0) == string(v) && return v0
+        end
+        return v
     elseif w.kind == "multiselect"
-        return v isa AbstractVector ? collect(v) : (v === nothing ? Any[] : Any[v])
+        vals = _opt_values(get(w.params, "options", ()))
+        sel = v isa AbstractVector ? v : (v === nothing ? Any[] : Any[v])
+        ss = Set(string(s) for s in sel)
+        return Any[v0 for v0 in vals if string(v0) in ss]
     end
     return v
 end

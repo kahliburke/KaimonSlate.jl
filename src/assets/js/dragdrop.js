@@ -42,16 +42,18 @@ async function unhostControl(name, cellId) {
 // Check/uncheck to surface/hide each in the cell's control strip; All / None for the whole set.
 function openControlPicker(id, ev) {
   if (ev) ev.stopPropagation();
-  const c = _cellById(id), bu = transBinduses(c);
-  if (!bu.length) return;
+  const c = _cellById(id), { aff, other } = pickerNames(c);   // affecting (own + read) first, then every other @bind
+  if (!aff.length && !other.length) return;
   const present = new Set([].concat(...columnsOf(id)));
   const pop = document.getElementById('ctlpop');
   pop.dataset.cell = id;
+  const row = n => `<label class="ctlrow"><input type="checkbox" data-n="${_escc(n)}"${present.has(n) ? ' checked' : ''}>` +
+                   `<span>${_escc(n)}</span></label>`;
   pop.innerHTML =
     '<div class="ctlhead">Controls<span class="ctlquick">' +
       '<button data-all="1">All</button><button data-all="0">None</button></span></div>' +
-    bu.map(n => `<label class="ctlrow"><input type="checkbox" data-n="${_escc(n)}"${present.has(n) ? ' checked' : ''}>` +
-                `<span>${_escc(n)}</span></label>`).join('');
+    aff.map(row).join('') +
+    (other.length ? '<div class="ctlsub">other controls</div>' + other.map(row).join('') : '');
   pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.onchange = applyControlPicker);
   pop.querySelectorAll('.ctlquick button').forEach(b => b.onclick = () => {
     pop.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = b.dataset.all === '1');
@@ -70,7 +72,7 @@ function openControlPicker(id, ev) {
 async function applyControlPicker() {
   const pop = document.getElementById('ctlpop'), id = pop.dataset.cell;
   const sel = new Set([...pop.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.dataset.n));
-  const bu = new Set(transBinduses(_cellById(id)));
+  const bu = new Set(pickerNames(_cellById(id)).all);   // every name the picker offered is removable when unchecked
   let cols = columnsOf(id).map(col => col.filter(n => sel.has(n) || !bu.has(n))).filter(col => col.length);
   const present = new Set([].concat(...cols));
   const toAdd = [...sel].filter(n => !present.has(n));

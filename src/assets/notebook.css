@@ -156,6 +156,8 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
                   font-size:.82rem; font-family:'Cascadia Code',ui-monospace,monospace; color:var(--text); }
 .ctlpop .ctlrow:hover { background:var(--bg3); }
 .ctlpop .ctlrow input { accent-color:var(--accent); cursor:pointer; }
+.ctlpop .ctlsub { font-size:.64rem; text-transform:uppercase; letter-spacing:.04em; color:var(--dim);
+                  padding:7px 8px 3px; margin-top:3px; border-top:1px solid var(--bg3); }
 .cellhead .autoctl { color:var(--dim); }
 .cellhead .autoctl.on { color:var(--accent); }
 #nb { position:relative; }
@@ -223,6 +225,7 @@ body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--d
 .widget select[multiple], .control select[multiple] { flex:1; min-width:0; min-height:64px; }
 .radiogroup { display:flex; gap:12px; flex-wrap:wrap; flex:1; }
 .radiogroup label { display:flex; align-items:center; gap:4px; cursor:pointer; }
+.radiogroup .optlbl { display:inline-flex; align-items:center; }   /* holds a rendered ($math$) option label */
 .actionbtn { background:var(--accent); color:#fff; border:none; border-radius:5px; padding:4px 14px; cursor:pointer; }
 .actionbtn:hover { filter:brightness(1.12); }
 input.toggle { appearance:none; -webkit-appearance:none; width:34px; height:18px; border-radius:10px;
@@ -307,6 +310,8 @@ li.CodeMirror-hint-active .cmh-ic, li.CodeMirror-hint-active .cmh-kd { color:#0d
 .cmh-module { color:var(--purple); }
 .cmh-const,.cmh-latex { color:var(--orange); }
 .cmh-local,.cmh-var { color:var(--gold); }
+.cmh-bind { color:var(--teal); }                 /* @bind control — matches the teal bind-cell edge */
+.cmh-str { color:#c3e88d; }                       /* string macro (colorant"…") */
 .cmh-keyword { color:var(--red); }
 .cmh-field,.cmh-path,.cmh-key,.cmh-kwarg,.cmh-text { color:var(--dim); }
 /* doc preview card floated beside the popup */

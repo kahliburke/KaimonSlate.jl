@@ -118,6 +118,10 @@ function slate_completions(mod::Module, code::AbstractString, pos::Integer)
             isempty(t) && continue
             c isa REPL.REPLCompletions.ModuleCompletion && _dead_stub(c.parent, t) && continue
             k = _comp_kind(c)
+            # A string-macro completion (`colorant"`, `r"`, …) — an identifier ending in a lone
+            # `"` (not a quoted dict key, which starts with `"`). Tag it so the UI shows a proper
+            # icon and auto-closes the quote instead of leaving a stray `"`.
+            (endswith(t, '"') && !startswith(t, '"')) && (k = "str")
             k == "method" && (t = try; _retype_kwargs(t, _kwarg_types(c.method)); catch; t; end)
             push!(items, (t, k))
         end
