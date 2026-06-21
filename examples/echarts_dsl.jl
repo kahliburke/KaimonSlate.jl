@@ -64,25 +64,79 @@ echart(
     title = "Trig mix", legend = true,
 )
 
-#%% md id=h_raw
-## Raw passthrough — the whole ECharts surface
+#%% md id=h_ergonomic
+## Ergonomic kinds — heatmap · candlestick · radar · boxplot
 
-`series(:kind, …)` works for *any* ECharts series type, and any top-level component passes
-through verbatim with Symbol/NamedTuple keys. Here: a heatmap with a `visualMap` colour scale.
+These know their data shape and bring the components they imply — category axes + a
+`visualMap` for the heatmap, the `radar` component, a scaled value axis for OHLC — with no
+hand-assembly. `boxplot` even computes the five-number summary from raw samples.
 
 #%% code id=heatmap
 hours = ["12a", "3a", "6a", "9a", "12p", "3p", "6p", "9p"]
 days  = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-heat  = [[i, j, (i * 3 + j * 2) % 11] for i in 0:7 for j in 0:6]
-echart(
-    series(:heatmap, heat; label = (show = true,));
-    title     = "Activity",
-    xAxis     = (type = :category, data = hours),
-    yAxis     = (type = :category, data = days),
-    visualMap = (min = 0, max = 10, calculable = true,
-                 orient = :horizontal, left = :center, bottom = 0),
-    tooltip   = (position = :top,),
-)
+z = [(i * 3 + j * 2) % 11 for j in 1:7, i in 1:8]      # rows = days, cols = hours
+echart(:heatmap, hours, days, z; title = "Activity")
+
+#%% code id=candlestick
+echart(:candlestick, ["10/1", "10/2", "10/3", "10/4", "10/5", "10/6"],
+       [[20, 34, 10, 38], [40, 35, 30, 50], [31, 38, 33, 44],
+        [38, 15, 5, 42], [15, 25, 8, 28], [25, 30, 20, 36]];   # [open, close, low, high]
+       title = "OHLC")
+
+#%% code id=radar
+echart(:radar,
+       ["Sales" => 6500, "Admin" => 16000, "Tech" => 30000, "Support" => 38000, "Dev" => 52000],
+       ["Allocated" => [4200, 3000, 20000, 35000, 50000],
+        "Actual"    => [5000, 14000, 28000, 26000, 42000]];
+       title = "Budget", legend = true)
+
+#%% code id=boxplot
+groups  = ["A", "B", "C", "D"]
+samples = [randn(60) .+ g for g in 1:4]                # raw samples → 5-number summary computed
+echart(:boxplot, groups, samples; title = "Distributions")
+
+#%% md id=h_raw
+## Async + a button — a live gauge
+
+The clean way to stream into a chart: a **`reactive`** value plus an **`@onclick`** handler — no
+globals, no generation counters, no manual `slate_refresh`. Click **Fill ▸** and the handler
+spawns a cancellable ramp to a random target; `level[] = v` pushes each step to the gauge (a
+reader of `level`), which `setOption`s in place. Click again and the prior ramp is cancelled.
+
+#%% code id=gauge_ctrl
+@bind fill Button("Fill ▸")
+
+#%% code id=stop_ctrl
+@bind stop Button("Stop ■")   # separate @bind cell: clicking Stop must not recompute the fill handler
+
+#%% code id=level
+level = reactive(:level, 0)        # a live value: `level[]` reads, `level[] = v` pushes to readers
+
+#%% code id=stopper
+@onclick stop cancel(:fill)        # Stop button → cancel the running ramp (it stops at the next pause)
+
+#%% code id=filler
+@onclick fill begin   
+  	level[] = 0# runs on each click; a new click cancels the running ramp
+    for v in 0:2:rand(45:100)
+        level[] = v
+        pause(0.1)                # cancellable sleep
+    end
+end
+
+#%% code id=b037ad
+
+#%% code id=gauge controls=[fill,stop]
+echart(series(:gauge; min = 0, max = 100,
+              progress = (show = true, width = 14),
+              axisLine = (lineStyle = (width = 14,
+                          color = [[0.3, "#56d364"], [0.7, "#e3b341"], [1.0, "#e57575"]]),),
+              detail = (formatter = "{value}%", color = "inherit", fontSize = 28),
+              data = [(value = level[], name = "load")]);
+       title = "System load", tooltip = false)
+
+#%% code id=20d576
+level[]
 
 #%% md id=h_fullraw
 And the fully-raw escape hatch — a plain ECharts option, no helpers, Symbol/NamedTuple-friendly,

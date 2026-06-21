@@ -166,6 +166,7 @@ end
 # so we don't re-trigger the task), recompute, and push a lightweight live update.
 function server_refresh(nb::LiveNotebook, vars)
     syms = Set{Symbol}(vars)
+    msg = ""
     lock(nb.lock) do
         seed = String[]
         for c in nb.report.cells
@@ -175,13 +176,19 @@ function server_refresh(nb::LiveNotebook, vars)
             push!(seed, c.id)
         end
         isempty(seed) && return
+        changed = Set(seed)
         for id in dependents_of(nb.report, Set(seed))
             i = _index_of(nb.report.cells, id)
-            i === nothing || (nb.report.cells[i].state = STALE)
+            i === nothing || (nb.report.cells[i].state = STALE; push!(changed, id))
         end
         eval_stale!(nb.report, nb.kernel)
+        # Push ONLY the cells that recomputed (seed + dependents), inline in the event — the browser
+        # patches just those (charts `setOption`, output swap) instead of pulling the whole state.
+        bindref, hostednames = _bind_index(nb.report)
+        cells = [cell_json(c, bindref, hostednames) for c in nb.report.cells if c.id in changed]
+        msg = "refresh:" * JSON.json(Dict("cells" => cells))
     end
-    _broadcast(nb, "refresh")
+    isempty(msg) || _broadcast(nb, msg)
     return nothing
 end
 

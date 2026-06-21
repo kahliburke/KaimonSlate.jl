@@ -104,14 +104,31 @@ function infer_bindings!(cell::Cell)
     for s in stmts
         s isa LineNumberNode && continue
         bm = _bind_macrocall(s)
-        if bm === nothing
-            push!(nonbind, s)
-        else
+        om = bm === nothing ? _onclick_macrocall(s) : nothing
+        cm = (bm === nothing && om === nothing) ? _onchange_macrocall(s) : nothing
+        if bm !== nothing
             push!(cell.writes, bm[1])
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, bm[2])).references)
             catch
             end
+        elseif om !== nothing || cm !== nothing
+            # `@onclick btn body` / `@onchange ctrl body` REGISTER a handler — they deliberately do
+            # NOT read the control (a change dispatches to the handler directly, not by recomputing
+            # this cell). Analyse the handler LAMBDA so the control (for @onchange) is the bound
+            # parameter, not a read; the body's OTHER free vars are real deps (the handler
+            # re-registers when a captured var changes) and `level[] = v` registers as a write.
+            ctrl, body = om !== nothing ? (nothing, om[2]) : (cm[1], cm[2])
+            lam = Expr(:(->), Expr(:tuple, ctrl === nothing ? Symbol("_") : ctrl), body)
+            try
+                node = EE.compute_reactive_node(lam)
+                union!(cell.reads, node.references)
+                union!(cell.writes, node.definitions)
+            catch
+            end
+            _collect_mutations!(cell.writes, cell.reads, body)
+        else
+            push!(nonbind, s)
         end
     end
     if !isempty(nonbind)

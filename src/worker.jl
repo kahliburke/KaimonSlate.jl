@@ -27,6 +27,7 @@ end
 echart(option::AbstractDict) = EChart(Dict{String,Any}(string(k) => v for (k, v) in option))
 
 include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (shared with the engine)
+include(joinpath(@__DIR__, "reactive.jl"))  # reactive/@onclick/pause async primitives (shared with the engine)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table — uses no deps; soft-detects Tables.jl
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)

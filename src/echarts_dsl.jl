@@ -11,9 +11,11 @@
 #   echart(; xAxis=(type=:category, data=days), series=[...])       # raw NamedTuple options
 #   echart(Dict("series" => [...]))                                 # raw dict (legacy, unchanged)
 #
-# Tier 1 (ergonomic): line, bar, scatter, area, pie. Any other series type works via
-# `series(:kind, …; data=…)` and every extra kwarg / top-level component (grid, dataZoom,
-# visualMap, toolbox, markLine, …) passes through verbatim — the DSL never gates ECharts.
+# Ergonomic kinds — line, bar, scatter, area, pie, heatmap, candlestick, radar, boxplot —
+# know their data shape AND the components they imply (a heatmap brings category axes + a
+# visualMap; radar brings the radar component; …). Any OTHER series type works via
+# `series(:kind, …; data=…)`, and every extra kwarg / top-level component (grid, dataZoom,
+# toolbox, markLine, …) passes through verbatim — the DSL never gates ECharts.
 
 # Recursively ECharts-ify a DSL value: Symbol→String, NamedTuple/Dict→Dict, Tuple→vector;
 # numeric/string vectors pass straight through (no needless copy).
@@ -24,23 +26,69 @@ _ec(v::Tuple) = Any[_ec(x) for x in v]
 _ec(v::AbstractVector) = eltype(v) <: Union{Number,AbstractString} ? v : Any[_ec(x) for x in v]
 _ec(v) = v
 
-# A single series + the category x-axis it implies (`nothing` → value axis, or no axis).
+# A single series plus the top-level COMPONENTS it implies (xAxis/yAxis/visualMap/radar/…).
+# `echart` merges these into the option (first series wins per key; user kwargs override).
 struct EChartSeries
     opt::Dict{String,Any}
-    xcat::Any
     kind::String
+    layout::Dict{String,Any}
 end
 
 _iscat(x) = !isempty(x) && all(e -> e isa AbstractString || e isa Symbol, x)
 _str(s) = s isa Symbol ? String(s) : s
+_cataxis(xs) = Dict{String,Any}("type" => "category", "data" => collect(xs))
+
+# Type-7 (linear-interpolation) five-number summary for a boxplot category — Base only.
+function _q5(v)
+    s = sort!(collect(Float64, v)); n = length(s)
+    q(p) = (h = (n - 1) * p + 1; lo = floor(Int, h); hi = min(ceil(Int, h), n); s[lo] + (h - lo) * (s[hi] - s[lo]))
+    [s[1], q(0.25), q(0.5), q(0.75), s[n]]
+end
+
+# z::Matrix (rows = y, cols = x) → ECharts `[xIndex, yIndex, value]` triples + category axes +
+# a calculable visualMap spanning the data. `series(:heatmap, z)` or `series(:heatmap, xs, ys, z)`.
+function _heatmap!(opt, layout, args)
+    if length(args) == 1 && args[1] isa AbstractMatrix
+        z = args[1]; xs = string.(1:size(z, 2)); ys = string.(1:size(z, 1))
+    elseif length(args) == 3 && args[3] isa AbstractMatrix
+        z = args[3]; xs = string.(collect(args[1])); ys = string.(collect(args[2]))
+    else
+        return
+    end
+    nr, nc = size(z)
+    opt["data"] = [[j - 1, i - 1, z[i, j]] for i in 1:nr for j in 1:nc]
+    lo, hi = extrema(z)
+    layout["xAxis"] = _cataxis(xs)
+    layout["yAxis"] = _cataxis(ys)
+    layout["visualMap"] = Dict{String,Any}("min" => lo, "max" => hi, "calculable" => true,
+                                            "orient" => "horizontal", "left" => "center", "bottom" => 0)
+end
+
+# indicators: `name => max` pairs (or raw dicts/NamedTuples); vals: one value vector, or
+# `name => vector` pairs for several rings. `series(:radar, indicators, vals)`.
+function _radar!(opt, layout, indicators, vals)
+    layout["radar"] = Dict{String,Any}("indicator" =>
+        Any[i isa Pair ? Dict{String,Any}("name" => string(i.first), "max" => i.second) : _ec(i) for i in indicators])
+    opt["data"] = (vals isa AbstractVector && !isempty(vals) && first(vals) isa Pair) ?
+        Any[Dict{String,Any}("name" => string(p.first), "value" => collect(p.second)) for p in vals] :
+        Any[Dict{String,Any}("value" => collect(vals))]
+end
 
 """
     series(kind, args...; name=nothing, kwargs...)
 
-Build one series for [`echart`](@ref). `kind` is an ECharts series type — `:line`,
-`:bar`, `:scatter`, `:area`, `:pie`, or any other (e.g. `:radar`, `:sankey`). Data
-positionals depend on the kind: `x, y` for line/bar/scatter/area; `labels, values`
-for pie; a single `data` arg otherwise. Any extra kwargs (`smooth`, `stack`,
+Build one series for [`echart`](@ref). `kind` is an ECharts series type:
+
+- `:line` / `:bar` / `:area` `(x, y)` — string x → category axis, numeric x → value axis
+- `:scatter` `(x, y)`
+- `:pie` `(labels, values)`
+- `:heatmap` `(z::Matrix)` or `(xlabels, ylabels, z)` — adds category axes + a visualMap
+- `:candlestick` `(dates, ohlc)` — `ohlc[i] = [open, close, low, high]`
+- `:radar` `(indicators, values)` — `indicators = ["Sales" => 6500, …]`; values a vector, or
+  `["Allocated" => […], "Actual" => […]]` for several rings
+- `:boxplot` `(categories, data)` — each `data[i]` is `[min,Q1,med,Q3,max]` or raw samples
+
+Any other `kind` falls back to `data = args[1]`. Extra kwargs (`smooth`, `stack`,
 `symbolSize`, `areaStyle`, `markLine`, …) splice into the series option verbatim.
 """
 function series(kind::Symbol, args...; name = nothing, kwargs...)
@@ -48,13 +96,13 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
     isarea = k == "area"
     isarea && (k = "line")
     opt = Dict{String,Any}("type" => k)
+    layout = Dict{String,Any}()
     isarea && (opt["areaStyle"] = Dict{String,Any}())
     name === nothing || (opt["name"] = _str(name))
-    xcat = nothing
     if k in ("line", "bar") && length(args) == 2
         x, y = args
         if _iscat(x)
-            xcat = collect(x); opt["data"] = collect(y)
+            layout["xAxis"] = _cataxis(x); opt["data"] = collect(y)
         else
             opt["data"] = [[x[i], y[i]] for i in eachindex(x, y)]
         end
@@ -64,6 +112,20 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
     elseif k == "pie" && length(args) == 2
         labels, vals = args
         opt["data"] = [Dict{String,Any}("name" => string(labels[i]), "value" => vals[i]) for i in eachindex(labels, vals)]
+    elseif k == "heatmap"
+        _heatmap!(opt, layout, args)
+    elseif k == "candlestick" && length(args) == 2
+        dates, ohlc = args
+        opt["data"] = [collect(r) for r in ohlc]
+        layout["xAxis"] = _cataxis(dates)
+        layout["yAxis"] = Dict{String,Any}("type" => "value", "scale" => true)
+    elseif k == "radar" && length(args) == 2
+        _radar!(opt, layout, args[1], args[2])
+    elseif k == "boxplot" && length(args) == 2
+        cats, data = args
+        opt["data"] = [length(d) == 5 ? collect(Float64, d) : _q5(d) for d in data]
+        layout["xAxis"] = _cataxis(cats)
+        layout["yAxis"] = Dict{String,Any}("type" => "value")
     elseif length(args) == 1
         opt["data"] = _ec(only(args))
     elseif length(args) >= 2 && args[1] isa AbstractVector && args[2] isa AbstractVector
@@ -73,29 +135,32 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
     for (kk, vv) in kwargs
         opt[String(kk)] = _ec(vv)
     end
-    return EChartSeries(opt, xcat, k)
+    return EChartSeries(opt, k, layout)
 end
 
-# Series kinds that carry no cartesian x/y axis.
+# Series kinds that carry no cartesian x/y axis (they bring their own coordinate system).
 const _EC_NOAXIS = Set(["pie", "radar", "gauge", "funnel", "sunburst", "tree", "treemap", "sankey", "graph", "map"])
 
-# Assemble the full option from series + layout. Axes are added for cartesian kinds only;
-# unknown kwargs (grid/dataZoom/visualMap/toolbox/color/animation/…) pass through raw.
+# Assemble the full option from series + layout. Each series' implied components are merged
+# first (first wins per key), then cartesian kinds get default value axes if none was implied;
+# unknown kwargs (grid/dataZoom/toolbox/color/animation/…) pass through raw and override.
 function _echart_build(slist; title = nothing, legend = nothing, tooltip = true, theme = true, kwargs...)
     opt = Dict{String,Any}("series" => [s.opt for s in slist])
     theme === false || (opt["backgroundColor"] = "transparent")
+    # Reactive charts re-`setOption` on every update; ECharts' ~1s default UPDATE animation lags
+    # behind rapid streams (the needle chases a stale value). Default to a snappier transition that
+    # tracks typical reactive cadences; override via a kwarg (e.g. `animation = false` to snap).
+    opt["animationDurationUpdate"] = 300
     if title !== nothing
         opt["title"] = (title isa AbstractString || title isa Symbol) ? Dict{String,Any}("text" => String(title)) : _ec(title)
     end
+    for s in slist, (k, v) in s.layout
+        haskey(opt, k) || (opt[k] = v)
+    end
     noaxis = !isempty(slist) && all(s -> s.kind in _EC_NOAXIS, slist)
     if !noaxis
-        catx = nothing
-        for s in slist
-            s.xcat === nothing || (catx = s.xcat; break)
-        end
-        opt["xAxis"] = catx === nothing ? Dict{String,Any}("type" => "value") :
-                                          Dict{String,Any}("type" => "category", "data" => catx)
-        opt["yAxis"] = Dict{String,Any}("type" => "value")
+        haskey(opt, "xAxis") || (opt["xAxis"] = Dict{String,Any}("type" => "value"))
+        haskey(opt, "yAxis") || (opt["yAxis"] = Dict{String,Any}("type" => "value"))
     end
     if tooltip === true
         opt["tooltip"] = Dict{String,Any}("trigger" => noaxis ? "item" : "axis")

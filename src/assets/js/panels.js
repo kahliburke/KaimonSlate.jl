@@ -242,7 +242,8 @@ function connectLive() {
   const es = new EventSource(_apipath('/api/events'));
   es.onmessage = async (e) => {
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
-    if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // async live update — patch in place
+    if (e.data.startsWith('refresh:')) { try { patchCells(JSON.parse(e.data.slice(8)).cells); } catch (_) {} return; }   // targeted: only the changed cells, inline
+    if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // (fallback) full pull
     if (e.data.startsWith('srcreload:')) {   // parent /src hot-reload (Revise): show the persistent banner
       const n = parseInt(e.data.slice(10), 10) || 0;
       updateStates(await api('GET', '/api/state'));   // reflect our guessed stale marks

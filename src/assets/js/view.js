@@ -67,10 +67,8 @@ function controlMarkup(bindId, b) {
     ctrl = `<span class="radiogroup" ${a}>` + opts.map(o =>
       `<label><input type="radio" name="r-${bindId}-${b.name}" value="${_esc(o.value)}" ${String(o.value) === _selV ? 'checked' : ''}/>` +
       `<span class="optlbl">${_esc(o.label)}</span></label>`).join('') + '</span>';
-  else if (w === 'button') {
-    ctrl = `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
-    wval = `<span class="wval">×${b.value}</span>`;       // show the click count
-  }
+  else if (w === 'button')                           // self-labeled — no name span, no value chrome
+    return `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
   const nm = p.label != null ? p.label : b.name;   // a widget's `label=` overrides the displayed var name
   return `<span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
 }
@@ -356,6 +354,36 @@ function cancelSource(id) {
 // effects. The old full-wipe rebuild and the in-place patch collapse into one publish.
 function renderAll(state)    { _publishState(state); }
 function updateStates(state) { _publishState(state); }
+// Targeted live refresh (SSE `refresh:` event): merge ONLY the changed cells into nbState and
+// patch THOSE cells imperatively — charts `setOption`, tables refill, output swap, control values
+// — with NO full-state GET and NO all-cells re-render. nbState.cells is mutated in place so the
+// signal identity is unchanged (Preact doesn't re-render); a structural change (kind / bind-ness)
+// falls back to a full publish.
+function patchCells(cells) {
+  if (!cells || !cells.length || !nbState) return;
+  const list = nbState.cells || [];
+  const idx = {}; list.forEach((c, i) => idx[c.id] = i);
+  let structural = false;
+  cells.forEach(nc => {
+    const i = idx[nc.id];
+    if (i == null) { structural = true; return; }
+    const old = list[i];
+    if (old.kind !== nc.kind || hasBinds(old) !== hasBinds(nc)) structural = true;
+    list[i] = nc;
+  });
+  if (structural) { _publishState({ ...nbState, cells: list.slice() }); return; }
+  cells.forEach(nc => {
+    srcMap[nc.id] = nc.source;
+    const cell = document.getElementById('cell-' + nc.id);
+    if (cell) {
+      cell.className = cell.className.replace(/\bstate-\S+/, 'state-' + nc.state);
+      const badge = cell.querySelector('.badge'); if (badge) badge.textContent = nc.state;
+      if (nc.kind === 'md') { const md = cell.querySelector('.md'); if (md) { _swapOutput(md, mdHtml(nc)); typeset(md); } }
+      else { const out = cell.querySelector('.output'); if (out) { _swapOutput(out, nc.output); typeset(out); } }
+    }
+    renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] });
+  });
+}
 function _publishState(state) {
   nbState = state;
   window.__slateState = state;                  // latest state, always — so the store (a deferred

@@ -259,21 +259,47 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # Per-notebook bind state, closed over by the injected helpers.
     reg = Dict{Symbol,Tuple{Widget,Any}}()
     sink = Ref{Any}(nothing)
+    handlers = Dict{Symbol,Any}()                 # @onclick: button name → handler closure (event model)
+    tokens = Dict{Symbol,Base.RefValue{Bool}}()   # button name → running handler's cancel token
     Core.eval(m, :(const __slate_bind_registry = $reg))
     Core.eval(m, :(const __slate_bind_sink = $sink))
     Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, sink, name, w))))
-    # Browser value change: coerce + update registry, then set the global so readers
-    # see it (the closure captures `m`). Returns the coerced value for the host's state.
+    # Browser value change: coerce + update registry, set the global so readers see it, then
+    # DISPATCH to any registered @onclick handler (so a button is an event — the handler fires
+    # here, NOT by recomputing a cell that reads the button). Returns the coerced value for the host.
     Core.eval(m, :(const __slate_set_bind = $((name, value) -> begin
         cv = _do_set_bind(reg, name, value)
         w = reg[name][1]
-        Core.eval(m, Expr(:(=), name, _wrap_choice(w, cv)))   # user var is a Choice (labeled); host gets bare cv
+        wv = _wrap_choice(w, cv)
+        Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
+        h = get(handlers, name, nothing)
+        h === nothing || __on_fire!(tokens, name, h, wv)      # dispatch @onclick/@onchange with the new value
         cv
     end)))
     # `@bind name W(args…)` → assign the reconciled value, then return `nothing` so a
     # bind cell shows no output (the assignment value isn't displayed).
     Core.eval(m, :(macro bind(name, widget)
         esc(Expr(:block, Expr(:(=), name, Expr(:call, :__slate_bind, QuoteNode(name), widget)), nothing))
+    end))
+    # ── Reactive async primitives (reactive.jl) ──────────────────────────────────
+    Core.eval(m, :(const Reactive = $Reactive))
+    Core.eval(m, :(const pause = $pause))
+    # `reactive(:name, init)` — a live value bound to THIS notebook's slate_refresh.
+    Core.eval(m, :(const reactive = $((nm, init) -> Reactive(nm, init, slate_refresh))))
+    # `@onclick`/`@onchange` REGISTER `body` as the handler for a control (they do NOT read the
+    # control, so a change doesn't recompute this cell — see __slate_set_bind for the dispatch).
+    # Re-running the cell just re-registers (capturing the latest closure); it never fires.
+    Core.eval(m, :(const __on_register = $((nm, f) -> (handlers[nm] = f; nothing))))
+    # `cancel(:ctrl)` — stop the running handler for a control (e.g. from a Stop button).
+    Core.eval(m, :(const cancel = $((nm::Symbol) -> __on_cancel!(tokens, nm))))
+    # `@onclick btn body` — fire `body` on a click (the click count value is ignored).
+    Core.eval(m, :(macro onclick(btn, body)
+        esc(Expr(:call, :__on_register, QuoteNode(btn), Expr(:(->), Expr(:tuple, :_), body)))
+    end))
+    # `@onchange ctrl body` — fire `body` whenever `ctrl` changes; inside the body `ctrl` is the NEW
+    # value (a handler parameter, so the cell doesn't read the global → no recompute on change).
+    Core.eval(m, :(macro onchange(ctrl, body)
+        esc(Expr(:call, :__on_register, QuoteNode(ctrl), Expr(:(->), Expr(:tuple, ctrl), body)))
     end))
     return sink
 end
@@ -284,6 +310,29 @@ end
 # `Slider(1:step:hi)` make the bind cell depend on `step`/`hi`).
 function _bind_macrocall(ex)
     (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@bind")) || return nothing
+    real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
+    length(real) >= 2 || return nothing
+    real[1] isa Symbol || return nothing
+    return (real[1], real[2])
+end
+
+# (button::Symbol, body_expr) if `ex` is `@onclick btn body`, else nothing. Like `_bind_macrocall`,
+# this lets the dependency analysis see through the macro: the button is a READ (so a click
+# recomputes the handler cell) and the body is analysed normally (so `level[] = v` registers as a
+# write of `level`, excluding the handler from its own refresh).
+function _onclick_macrocall(ex)
+    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@onclick")) || return nothing
+    real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
+    length(real) >= 2 || return nothing
+    real[1] isa Symbol || return nothing
+    return (real[1], real[2])
+end
+
+# (control::Symbol, body_expr) if `ex` is `@onchange ctrl body`, else nothing. The control is the
+# handler PARAMETER (the new value), not a read of the global — so the cell doesn't recompute on
+# change; only `body`'s OTHER free vars are reads, and `ctrl[]=`-style mutations are writes.
+function _onchange_macrocall(ex)
+    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@onchange")) || return nothing
     real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
     length(real) >= 2 || return nothing
     real[1] isa Symbol || return nothing
