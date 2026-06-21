@@ -71,13 +71,29 @@ async function mergeBelow(id) {
   renderAll(await api('POST', '/api/cell-merge/' + id, { source: sa.replace(/\s+$/, '') + '\n' + sb.replace(/^\s+/, '') }));
   selectCell(id, true);
 }
+// A single cell is named by its id in toasts/labels; multiples are counted ("3 cells").
+function _idsLabel(ids) { return ids.length === 1 ? ids[0] : ids.length + ' cells'; }
 async function delCell(id) {
+  const sel = selectedIds();
+  if (sel.length > 1) return delCells(sel);            // multi-selection → delete them all (one undo step)
   const idx = cellIds().indexOf(id);
   renderAll(await api('POST', '/api/cell-delete/' + id));
   const after = cellIds();
   // Select the PREVIOUS cell (idx-1), not the one that shifted up into the gap; clamp so
   // deleting the first cell falls back to the new first. selectCell scrolls it into view.
   after.length ? selectCell(after[Math.min(Math.max(0, idx - 1), after.length - 1)], true) : (selectedId = null);
+  toast('Deleted ' + id, 2000);
+}
+// Delete several cells atomically (multi-select dd / cut). Selects the cell before the first
+// removed. `verb` ("delete"/"cut") labels the undo entry so it reads "Undo cut 2 cells". A plain
+// delete toasts here; a cut stays silent (cutCells fires its own "cut" toast).
+async function delCells(ids, verb) {
+  const all = cellIds();
+  const firstIdx = Math.min(...ids.map(i => all.indexOf(i)).filter(i => i >= 0));
+  renderAll(await api('POST', '/api/cells-delete', { ids, verb: verb || 'delete' }));
+  const after = cellIds();
+  after.length ? selectCell(after[Math.min(Math.max(0, firstIdx - 1), after.length - 1)], true) : (selectedId = null);
+  if (verb !== 'cut') toast('Deleted ' + _idsLabel(ids), 2000);
 }
 async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }
 // ── Upstream-dependency navigation (🔗) ───────────────────────────────────────
@@ -122,5 +138,46 @@ document.addEventListener('keydown', e => {
 });
 async function moveCellRel(id, target, before) { renderAll(await api('POST', '/api/cell-move/' + id, { target, before })); }
 async function toggleType(id, kind)  { renderAll(await api('POST', '/api/cell-type/' + id, { kind })); }
-async function undoNb() { renderAll(await api('POST', '/api/undo')); }
-async function redoNb() { renderAll(await api('POST', '/api/redo')); }
+async function undoNb() { const s = await api('POST', '/api/undo'); renderAll(s); if (s && s.undid) toast('Undid ' + s.undid, 2000); }
+async function redoNb() { const s = await api('POST', '/api/redo'); renderAll(s); if (s && s.redid) toast('Redid ' + s.redid, 2000); }
+// ── Cell clipboard: copy / cut / paste (command-mode c / x / v) ────────────────
+// An internal clipboard of {kind, source} cells, mirrored to localStorage so you can copy
+// cells in one notebook tab and paste them into another. The .jl source is ALSO written to the
+// system clipboard (best-effort) so a copy can be pasted into an editor. Paste inserts below the
+// active cell; the pasted cells land STALE (not auto-run) and become the new selection.
+const CLIP_KEY = 'slateClipboard';
+function _writeClip(cells) { try { localStorage.setItem(CLIP_KEY, JSON.stringify(cells)); } catch (e) {} }
+function _readClip() { try { return JSON.parse(localStorage.getItem(CLIP_KEY) || 'null'); } catch (e) { return null; } }
+function _cellsData(ids) {
+  const want = new Set(ids);                           // preserve notebook order, take live editor text
+  return ((nbState && nbState.cells) || []).filter(c => want.has(c.id)).map(c => ({
+    kind: c.kind, source: editors[c.id] ? editors[c.id].getValue() : (srcMap[c.id] || c.source || '')
+  }));
+}
+function copyCells(silent) {
+  const ids = selectedIds(); if (!ids.length) return;
+  const data = _cellsData(ids); _writeClip(data);
+  try { navigator.clipboard && navigator.clipboard.writeText(data.map(c => c.source).join('\n\n')); } catch (e) {}
+  if (!silent) toast(_idsLabel(ids) + ' copied', 2000);
+}
+async function cutCells() {
+  const ids = selectedIds(); if (!ids.length) return;
+  copyCells(true); await delCells(ids, 'cut');      // silent copy + silent delete — one "cut" toast
+  toast(_idsLabel(ids) + ' cut', 2000);
+}
+async function pasteCells() {
+  const clip = _readClip(); if (!clip || !clip.length) { toast('Clipboard is empty', 2000); return; }
+  const after = selectedId || (cellIds().slice(-1)[0] || '');
+  const oldIds = new Set(cellIds());
+  const state = await api('POST', '/api/cells-paste', { after, cells: clip });
+  renderAll(state);
+  const neu = (state.cells || []).map(c => c.id).filter(id => !oldIds.has(id));
+  if (neu.length) {
+    selectedId = neu[neu.length - 1]; anchorId = neu[0];
+    window.slateStore && window.slateStore.setSelection(neu, selectedId);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const el = document.getElementById('cell-' + neu[0]); if (el) el.scrollIntoView({ block: 'nearest' });
+    }));
+  }
+  toast((neu.length ? _idsLabel(neu) : clip.length + ' cell' + (clip.length === 1 ? '' : 's')) + ' pasted', 2000);
+}

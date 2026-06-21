@@ -54,8 +54,8 @@
       <button onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
       <button onclick="toggleHistory();closeTopMenu()">🕘 History</button>
       <hr>
-      <button onclick="undoNb();closeTopMenu()">↶ Undo</button>
-      <button onclick="redoNb();closeTopMenu()">↷ Redo</button>
+      <button id="undobtn" onclick="undoNb();closeTopMenu()">↶ Undo</button>
+      <button id="redobtn" onclick="redoNb();closeTopMenu()">↷ Redo</button>
       <button onclick="openPalette();closeTopMenu()">⌘K Command palette</button>
       <hr>
       <button onclick="exportHtml();closeTopMenu()">⬇ Export HTML</button>
@@ -72,6 +72,7 @@
 </div>
 <div id="hydbanner" class="hydbanner" style="display:none"></div>
 <div id="srcbanner" class="srcbanner" style="display:none"></div>
+<div id="selcount" class="selcount" title="multiple cells selected — c copy · x cut · v paste · dd delete"></div>
 <div class="page"><div id="nb"></div></div>
 <aside id="palette" class="palette">
   <div class="phead"><strong>Controls</strong><span id="palette-count" class="hint"></span>

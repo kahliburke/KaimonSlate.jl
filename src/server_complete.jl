@@ -279,6 +279,12 @@ function _make_router(h::Hub)
     end))
     HTTP.register!(router, "POST", "/api/{id}/cell-delete/{cid}", req -> _withnb(h, req, nb ->
         (delete_cell!(nb, HTTP.getparam(req, "cid")); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/cells-delete", req -> _withnb(h, req, nb -> begin
+        b = _body(req); delete_cells!(nb, get(b, "ids", String[]); verb = get(b, "verb", "delete")); _json(state_json(nb))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/cells-paste", req -> _withnb(h, req, nb -> begin
+        b = _body(req); paste_cells!(nb, get(b, "after", ""), get(b, "cells", Any[])); _json(state_json(nb))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/cell-move/{cid}", req -> _withnb(h, req, nb -> begin
         b = _body(req); cid = HTTP.getparam(req, "cid")
         haskey(b, "target") ? move_cell_rel!(nb, cid, b["target"], get(b, "before", true) === true) :
@@ -387,8 +393,12 @@ function _make_router(h::Hub)
         end
         _json(Dict("rows" => res.rows, "total" => res.total))
     end))
-    HTTP.register!(router, "POST", "/api/{id}/undo", req -> _withnb(h, req, nb -> (undo!(nb); _json(state_json(nb)))))
-    HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> (redo!(nb); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/undo", req -> _withnb(h, req, nb -> begin
+        lbl = undo!(nb); j = state_json(nb); j["undid"] = lbl; _json(j)
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> begin
+        lbl = redo!(nb); j = state_json(nb); j["redid"] = lbl; _json(j)
+    end))
     HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (eval_stale!(nb.report, nb.kernel); _json(state_json(nb)))))
     # Re-run the WHOLE notebook (every cell in order, keeping the namespace) — the "safe"
     # option after a /src hot-reload when our guess at affected cells may be incomplete.

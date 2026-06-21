@@ -10,7 +10,7 @@
 import { html, render } from 'htm/preact';
 import { useRef, useEffect } from 'preact/hooks';
 import { effect } from '@preact/signals';
-import { cells as cellsSignal, selected as selectedSignal, liveStates as liveSignal, focus as focusSignal } from './store.js';
+import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal } from './store.js';
 
 const raw = s => ({ __html: s || '' });
 const _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -94,7 +94,7 @@ function Editor({ cell }) {
   return html`<div ref=${ref}></div>`;
 }
 
-function Cell({ cell, selectedId, live, focusId, collapsed }) {
+function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
   const last = useRef({ bindKey: undefined, ctrlKey: undefined, out: undefined, vis: undefined });
@@ -164,10 +164,14 @@ function Cell({ cell, selectedId, live, focusId, collapsed }) {
     last.current.vis = visible;
   });
 
+  // Selection: the ACTIVE cell gets `.selected` (strong); other members of a multi-selection
+  // get `.multisel` (lighter), so "the cell ops act on" reads distinctly from "also selected".
+  const inSet = selSet ? selSet.has(c.id) : false;
+  const selCls = selectedId === c.id ? ' selected' : (inSet ? ' multisel' : '');
   const isBind = window.hasBinds(c);
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
-    + (selectedId === c.id ? ' selected' : '') + (focusId === c.id ? ' dep-focus' : '');
+    + selCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
   // Content hosts are empty/stable — Preact preserves them; the effect above fills them.
@@ -184,7 +188,7 @@ function Cell({ cell, selectedId, live, focusId, collapsed }) {
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
-function Notebook({ cells, selectedId, live, focusId, cone }) {
+function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
     window.syncAgentTop && window.syncAgentTop();
@@ -193,7 +197,15 @@ function Notebook({ cells, selectedId, live, focusId, cone }) {
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
-  return html`${banner}${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`)}`;
+  return html`${banner}${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`)}`;
+}
+
+// The floating "N cells selected" pill (top-left), shown only when a multi-selection is active.
+function _updateSelCount(selSet) {
+  const el = document.getElementById('selcount'); if (!el) return;
+  const n = selSet ? selSet.size : 0;
+  if (n > 1) { el.textContent = n + ' cells selected'; el.classList.add('show'); }
+  else el.classList.remove('show');
 }
 
 const nbHost = document.getElementById('nb');
@@ -215,7 +227,9 @@ if (nbHost) {
     const beforeTop = anchorEl ? anchorEl.getBoundingClientRect().top : null;
     _prevFocus = fid;
 
-    render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} live=${liveSignal.value} focusId=${fid} />`, nbHost);
+    const selSet = selectedSetSignal.value;
+    _updateSelCount(selSet);
+    render(html`<${Notebook} cells=${cellsSignal.value} cone=${cone} selectedId=${selectedSignal.value} selSet=${selSet} live=${liveSignal.value} focusId=${fid} />`, nbHost);
 
     if (beforeTop != null) {
       const t0 = performance.now();

@@ -219,10 +219,26 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
 end
 
 # Undo/redo over source snapshots. Call _snapshot! *before* a mutating op.
-function _snapshot!(nb::LiveNotebook)
+#
+# Each snapshot carries a human LABEL describing the op it precedes ("paste 3 cells",
+# "delete cell", …) so the UI can say "Undo paste 3 cells" / toast "Undid cut 2 cells".
+# The labels ride PARALLEL stacks keyed by nb.id (module-level, Revise-friendly — same pattern
+# as the build-floor state), kept in lockstep with nb.undo/nb.redo by the three functions below
+# (the only places that touch those stacks). A label travels with its snapshot across the stacks
+# so a redo re-announces the same action.
+const _UNDO_LBL = Dict{String,Vector{String}}()
+const _REDO_LBL = Dict{String,Vector{String}}()
+_lblstack(d, nb::LiveNotebook) = get!(() -> String[], d, nb.id)
+undo_label(nb::LiveNotebook) = (s = _lblstack(_UNDO_LBL, nb); isempty(s) ? "" : last(s))
+redo_label(nb::LiveNotebook) = (s = _lblstack(_REDO_LBL, nb); isempty(s) ? "" : last(s))
+
+function _snapshot!(nb::LiveNotebook; label::AbstractString = "change")
     push!(nb.undo, serialize_report(nb.report))
-    length(nb.undo) > 100 && popfirst!(nb.undo)
-    empty!(nb.redo)
+    push!(_lblstack(_UNDO_LBL, nb), String(label))
+    if length(nb.undo) > 100
+        popfirst!(nb.undo); ul = _lblstack(_UNDO_LBL, nb); isempty(ul) || popfirst!(ul)
+    end
+    empty!(nb.redo); empty!(_lblstack(_REDO_LBL, nb))
 end
 
 function _restore!(nb::LiveNotebook, src::AbstractString)
@@ -231,18 +247,22 @@ function _restore!(nb::LiveNotebook, src::AbstractString)
     _persist!(nb; source = "restore")
 end
 
+# Returns the label of the action just undone (""/no-op when the stack is empty).
 function undo!(nb::LiveNotebook)
-    isempty(nb.undo) && return nb
-    push!(nb.redo, serialize_report(nb.report))
+    isempty(nb.undo) && return ""
+    lbl = (ul = _lblstack(_UNDO_LBL, nb); isempty(ul) ? "change" : pop!(ul))
+    push!(nb.redo, serialize_report(nb.report)); push!(_lblstack(_REDO_LBL, nb), lbl)
     _restore!(nb, pop!(nb.undo))
-    return nb
+    return lbl
 end
 
+# Returns the label of the action just redone (""/no-op when the stack is empty).
 function redo!(nb::LiveNotebook)
-    isempty(nb.redo) && return nb
-    push!(nb.undo, serialize_report(nb.report))
+    isempty(nb.redo) && return ""
+    lbl = (rl = _lblstack(_REDO_LBL, nb); isempty(rl) ? "change" : pop!(rl))
+    push!(nb.undo, serialize_report(nb.report)); push!(_lblstack(_UNDO_LBL, nb), lbl)
     _restore!(nb, pop!(nb.redo))
-    return nb
+    return lbl
 end
 
 

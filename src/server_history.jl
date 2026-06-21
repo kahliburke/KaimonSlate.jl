@@ -233,6 +233,8 @@ function state_json(nb::LiveNotebook)
         proj === nothing || (meta["project"] = dirname(proj))
     end
     meta["hotreload"] = get(nb.report.meta, "hotreload", true)   # /src auto-reload toggle (default on)
+    meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
+    meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true
         # While the env reconstructs: show the embedded frozen render if present (already
         # cell_json-shaped), else the parsed cells un-run. Live cells replace these on hydrate.

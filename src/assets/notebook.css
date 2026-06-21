@@ -159,11 +159,12 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cellhead .autoctl { color:var(--dim); }
 .cellhead .autoctl.on { color:var(--accent); }
 #nb { position:relative; }
-#toasts { position:fixed; right:16px; bottom:16px; z-index:80; display:flex; flex-direction:column; gap:8px;
-          align-items:flex-end; pointer-events:none; }
+/* Upper-left, clearing the topbar + the #selcount pill (top:54px) so they never overlap. */
+#toasts { position:fixed; left:16px; top:88px; z-index:80; display:flex; flex-direction:column; gap:8px;
+          align-items:flex-start; pointer-events:none; }
 .toast { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-left:3px solid var(--accent);
          border-radius:8px; padding:9px 13px; font-size:.82rem; max-width:340px; box-shadow:0 8px 24px #0009;
-         opacity:0; transform:translateY(8px); transition:opacity .25s ease, transform .25s ease; }
+         opacity:0; transform:translateY(-8px); transition:opacity .25s ease, transform .25s ease; }
 .toast.show { opacity:1; transform:none; }
 .toast.err { border-left-color:var(--red); }
 /* Persistent source-reload banner — top-left, stays until acted on/dismissed. */
@@ -422,7 +423,15 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .loading .lmsg { color:var(--text); font-size:.9rem; }
 .cell.selected { outline:3px solid var(--purple); outline-offset:-2px;       /* command mode (purple) — distinct from blue state edges + teal bind edges */
                  box-shadow:0 0 12px rgba(197,134,192,.4); }
+.cell.multisel { outline:2px solid var(--purple); outline-offset:-2px;       /* also-selected (multi-select), lighter than the active cell */
+                 box-shadow:0 0 7px rgba(197,134,192,.2); }
 .cell.editing  { outline:3px solid var(--green); outline-offset:-2px; }       /* edit mode */
+/* Floating selection counter — top-left, out of the way; shown only for a multi-selection. */
+.selcount { position:fixed; top:54px; left:14px; z-index:40; display:none;
+            background:var(--purple); color:#160d18; font-size:.76rem; font-weight:600;
+            padding:4px 11px; border-radius:999px; box-shadow:0 4px 14px rgba(0,0,0,.4);
+            pointer-events:none; letter-spacing:.01em; }
+.selcount.show { display:block; }
 .cid { cursor:pointer; } .cid:hover { color:var(--accent); }
 .cidedit { background:var(--bg3); color:var(--text); border:1px solid var(--accent); border-radius:4px;
            font-family:monospace; font-size:.76rem; padding:0 4px; width:14ch; }

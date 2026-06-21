@@ -321,6 +321,11 @@ function updateChrome(state) {
     hb.style.display = 'none'; document.body.classList.remove('hydrating');
   }
   updateStaleBadge(state);
+  // Undo/Redo menu items announce the next action ("↶ Undo cut 3 cells") and disable when empty.
+  const ub = document.getElementById('undobtn');
+  if (ub) { ub.textContent = '↶ Undo' + (state.undoLabel ? ' ' + state.undoLabel : ''); ub.disabled = !state.undoLabel; }
+  const rb = document.getElementById('redobtn');
+  if (rb) { rb.textContent = '↷ Redo' + (state.redoLabel ? ' ' + state.redoLabel : ''); rb.disabled = !state.redoLabel; }
 }
 
 // ── Controls palette ─────────────────────────────────────────────────────────

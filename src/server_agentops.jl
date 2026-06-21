@@ -27,10 +27,11 @@ end
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
 function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
-    _snapshot!(nb)
+    nid = _gen_id(nb.report)                          # generated up front so the undo label can name it
+    _snapshot!(nb; label = "add $nid")
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
-    cell = Cell(_gen_id(nb.report), kind == "md" ? MARKDOWN : CODE, "")
+    cell = Cell(nid, kind == "md" ? MARKDOWN : CODE, "")
     pos = before ? max(1, i) : i + 1                 # insert above (at `i`) or below the reference
     insert!(cells, pos, cell)
     _commit_structure!(nb, pos)
@@ -370,9 +371,52 @@ end
 
 function delete_cell!(nb::LiveNotebook, id::AbstractString)
     i = _index_of(nb.report.cells, id); i === nothing && return nb
-    _snapshot!(nb)
+    _snapshot!(nb; label = "delete $id")
     deleteat!(nb.report.cells, i)
     _commit_structure!(nb, max(1, i))
+end
+
+_n_cells(n) = "$(n) cell$(n == 1 ? "" : "s")"
+# Label for an op over cell ids: a lone cell is named directly ("cut a1b2c3"), several are counted.
+_op_label(verb, ids) = length(ids) == 1 ? "$verb $(first(ids))" : "$verb $(_n_cells(length(ids)))"
+
+# Delete several cells atomically (multi-select dd / cut) — one undo step. Restales from the
+# first removed position so downstream cells that depended on them recompute. `verb` labels the
+# undo entry ("cut"/"delete") so the UI can say "Undo cut 2 cells" / "Undo delete a1b2c3".
+function delete_cells!(nb::LiveNotebook, ids; verb::AbstractString = "delete")
+    cells = nb.report.cells
+    idset = Set(String(i) for i in ids)
+    idxs = sort!([i for (i, c) in enumerate(cells) if c.id in idset])
+    isempty(idxs) && return nb
+    _snapshot!(nb; label = _op_label(verb, [cells[i].id for i in idxs]))
+    for i in Iterators.reverse(idxs)
+        deleteat!(cells, i)
+    end
+    _commit_structure!(nb, max(1, first(idxs)))
+    return nb
+end
+
+# Insert a list of {kind, source} cells after `after_id` (end if empty) — paste. One undo step;
+# like split/merge it runs the pasted cells (the reactive model keeps no cell lingering stale).
+function paste_cells!(nb::LiveNotebook, after_id::AbstractString, specs)
+    isempty(specs) && return nb
+    n = length(specs)
+    # A single paste names the new cell in its undo label ("paste a1b2c3"); generate that id up
+    # front (one id → no collision) and reuse it. Multi-cell paste labels as "paste N cells".
+    single_id = n == 1 ? _gen_id(nb.report) : ""
+    _snapshot!(nb; label = n == 1 ? "paste $single_id" : "paste $(_n_cells(n))")
+    cells = nb.report.cells
+    i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
+    pos = i
+    for spec in specs
+        kind = (get(spec, "kind", "code") == "md") ? MARKDOWN : CODE
+        src  = String(get(spec, "source", ""))
+        nid  = n == 1 ? single_id : _gen_id(nb.report)   # multi: _gen_id sees prior inserts → unique
+        pos += 1
+        insert!(cells, pos, Cell(nid, kind, src))
+    end
+    _commit_structure!(nb, i + 1)
+    return nb
 end
 
 function move_cell!(nb::LiveNotebook, id::AbstractString, dir::AbstractString)
