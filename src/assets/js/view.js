@@ -4,6 +4,9 @@
 // widget renders, changing it drives recompute the same way.
 const _esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
+// Order-independent key for a control's value — used by the stale-echo guard so an in-flight
+// server echo (which may reorder a multi-select) can't reset a control the user just changed.
+const _valKey = v => Array.isArray(v) ? JSON.stringify([...v].map(String).sort()) : String(v);
 // The text shown in a widget's value mirror (`.wval`). A toggle with on/off labels shows the
 // active state's word; a button shows its click count; everything else shows the raw value. Reads
 // the on/off text from the input's data- attributes so the local + server-sync paths agree.
@@ -47,10 +50,18 @@ function controlMarkup(bindId, b) {
     ctrl = `<input type="time" value="${_esc(b.value)}" ${a}/>`;
   else if (w === 'select')
     ctrl = `<select ${a}>` + opts.map(o => `<option value="${_esc(o.value)}" ${String(o.value) === _selV ? 'selected' : ''}>${_esc(o.label)}</option>`).join('') + '</select>';
-  else if (w === 'multiselect') {
+  else if (w === 'multiselect') {                    // inline scrollable listbox — click a row to toggle (no ⌘/Shift, no popup)
     const sv = (b.value || []).map(String);
-    ctrl = `<select multiple ${a}>` +
-      opts.map(o => `<option value="${_esc(o.value)}" ${sv.includes(String(o.value)) ? 'selected' : ''}>${_esc(o.label)}</option>`).join('') + '</select>';
+    ctrl = `<div class="mslist" ${a} tabindex="0" role="listbox" aria-multiselectable="true">` + opts.map(o => {
+      const on = sv.includes(String(o.value));
+      return `<div class="msopt${on ? ' on' : ''}" data-value="${_esc(o.value)}" role="option" aria-selected="${on}"><span class="optlbl">${_esc(o.label)}</span></div>`;
+    }).join('') + '</div>';
+  }
+  else if (w === 'multicheck') {                     // checkbox list (small sets; click to toggle — no modifiers); rich labels
+    const sv = (b.value || []).map(String);
+    ctrl = `<span class="checkgroup" ${a}>` + opts.map(o =>
+      `<label><input type="checkbox" value="${_esc(o.value)}" ${sv.includes(String(o.value)) ? 'checked' : ''}/>` +
+      `<span class="optlbl">${_esc(o.label)}</span></label>`).join('') + '</span>';
   }
   else if (w === 'radio')                            // labels rendered (KaTeX) — see _typesetControls
     ctrl = `<span class="radiogroup" ${a}>` + opts.map(o =>
@@ -189,12 +200,32 @@ function wireControl(el) {
   const readVal = () => {
     if (widget === 'checkbox' || widget === 'toggle') return el.checked;
     if (widget === 'slider' || widget === 'number') return parseFloat(el.value);
-    if (widget === 'multiselect') return [...el.selectedOptions].map(o => o.value);
+    if (widget === 'multiselect') return [...el.querySelectorAll('.msopt.on')].map(o => o.dataset.value);
+    if (widget === 'multicheck') return [...el.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
     if (widget === 'radio') { const c = el.querySelector('input:checked'); return c ? c.value : null; }
     return el.value;
   };
-  el.oninput  = () => { touch(); const v = readVal(); mirror(v); schedule(v); };
-  el.onchange = () => { touch(); const v = readVal(); mirror(v); flush(v); };
+  if (widget === 'multiselect') {                    // custom listbox: click a row to toggle; Shift-click a range
+    el.addEventListener('mousedown', e => { if (e.shiftKey) e.preventDefault(); });   // don't start a text selection
+    const setOpt = (o, on) => { o.classList.toggle('on', on); o.setAttribute('aria-selected', on); };
+    el.addEventListener('click', e => {
+      const opt = e.target.closest('.msopt'); if (!opt || !el.contains(opt)) return;
+      touch();
+      const opts = [...el.querySelectorAll('.msopt')], idx = opts.indexOf(opt);
+      if (e.shiftKey && el._anchor != null && el._anchor < opts.length) {
+        const on = el._anchorOn !== false;            // extend the range to the anchor's state (default: select)
+        const lo = Math.min(el._anchor, idx), hi = Math.max(el._anchor, idx);
+        for (let i = lo; i <= hi; i++) setOpt(opts[i], on);
+      } else {
+        const on = !opt.classList.contains('on'); setOpt(opt, on);
+        el._anchor = idx; el._anchorOn = on;          // remember the anchor + its new state for the next Shift-click
+      }
+      const v = readVal(); el._dirty = _valKey(v); mirror(v); flush(v);
+    });
+    return;                                          // no input/change events on a div listbox
+  }
+  el.oninput  = () => { touch(); const v = readVal(); el._dirty = _valKey(v); mirror(v); schedule(v); };
+  el.onchange = () => { touch(); const v = readVal(); el._dirty = _valKey(v); mirror(v); flush(v); };
 }
 
 // Wire every bound widget in a cell — its own @bind widget and/or control strip.
@@ -202,7 +233,7 @@ function mountControls(c) {
   const cell = document.getElementById('cell-' + c.id);
   if (!cell) return;
   cell.querySelectorAll('[data-bind]').forEach(wireControl);
-  cell.querySelectorAll('.radiogroup').forEach(typeset);   // render rich ($math$) radio option labels
+  cell.querySelectorAll('.radiogroup, .checkgroup, .mslist').forEach(typeset);   // render rich ($math$) option labels
 }
 
 // Wire a freshly-created CodeMirror for code cell `c`: edit tracking, completion + signature
@@ -419,6 +450,10 @@ function syncControlValues(state) {
     if (el._touched && now - el._touched < 1200) return;
     const v = val[el.dataset.name]; if (v === undefined) return;
     const w = el.dataset.widget;
+    // Stale-echo guard: while a local change is in flight, ONLY the echo that matches the user's
+    // last-sent value clears the mark — an older echo (e.g. the prior multi-select state) is
+    // ignored, so it can't snap a just-changed control back (and an empty selection sticks).
+    if (el._dirty != null) { if (_valKey(v) === el._dirty) el._dirty = null; else return; }
     // Keep the widget's RANGE/options in sync, not just its value — a dynamic widget
     // (e.g. `Slider(1:hi)`) re-reports new params when `hi` changes. Apply range
     // BEFORE the value so the browser doesn't clamp against the stale bounds.
@@ -430,25 +465,35 @@ function syncControlValues(state) {
     } else if (w === 'number') {
       p.min != null ? (el.min = p.min) : el.removeAttribute('min');
       p.max != null ? (el.max = p.max) : el.removeAttribute('max');
-    } else if ((w === 'select' || w === 'multiselect') && Array.isArray(p.options)) {
+    } else if (w === 'select' && Array.isArray(p.options)) {
       // Dynamic options: rebuild the <option> list only if it changed (the value-set
       // below re-applies the selection). Avoids tearing the menu down every sync.
       const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
       const cur = [...el.options].map(o => o.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) el.innerHTML = o2.map(o => `<option value="${_esc(o.value)}">${_esc(o.label)}</option>`).join('');
-    } else if (w === 'radio' && Array.isArray(p.options)) {
+    } else if (w === 'multiselect' && Array.isArray(p.options)) {
       const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
-      const cur = [...el.querySelectorAll('input[type=radio]')].map(i => i.value), want = o2.map(o => String(o.value));
+      const cur = [...el.querySelectorAll('.msopt')].map(o => o.dataset.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) {
-        const nm = 'r-' + el.dataset.bind + '-' + el.dataset.name;
+        el.innerHTML = o2.map(o => `<div class="msopt" data-value="${_esc(o.value)}" role="option"><span class="optlbl">${_esc(o.label)}</span></div>`).join('');
+        typeset(el);
+      }
+    } else if ((w === 'radio' || w === 'multicheck') && Array.isArray(p.options)) {
+      // Radio + checkbox-list MultiCheckBox share a label-per-input layout; rebuild only on change.
+      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const type = w === 'radio' ? 'radio' : 'checkbox';
+      const cur = [...el.querySelectorAll('input')].map(i => i.value), want = o2.map(o => String(o.value));
+      if (!_sameList(cur, want)) {
+        const nm = w === 'radio' ? ` name="r-${el.dataset.bind}-${el.dataset.name}"` : '';
         el.innerHTML = o2.map(o =>
-          `<label><input type="radio" name="${nm}" value="${_esc(o.value)}"/><span class="optlbl">${_esc(o.label)}</span></label>`).join('');
+          `<label><input type="${type}"${nm} value="${_esc(o.value)}"/><span class="optlbl">${_esc(o.label)}</span></label>`).join('');
         typeset(el);                                 // re-render rich labels after a dynamic rebuild
       }
     }
     const _q = s => (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
     if (w === 'checkbox' || w === 'toggle') el.checked = !!v;
-    else if (w === 'multiselect') { const sv = (Array.isArray(v) ? v : []).map(String); [...el.options].forEach(o => { o.selected = sv.includes(o.value); }); }
+    else if (w === 'multiselect') { const sv = (Array.isArray(v) ? v : []).map(String); el.querySelectorAll('.msopt').forEach(o => { const on = sv.includes(o.dataset.value); o.classList.toggle('on', on); o.setAttribute('aria-selected', on); }); }
+    else if (w === 'multicheck') { const sv = (Array.isArray(v) ? v : []).map(String); el.querySelectorAll('input[type=checkbox]').forEach(i => { i.checked = sv.includes(i.value); }); }
     else if (w === 'radio') { const c = el.querySelector('input[value="' + _q(String(v)) + '"]'); if (c) c.checked = true; }
     else if (w === 'button') el.dataset.count = v;
     else el.value = String(v);

@@ -483,27 +483,33 @@ juliaHint.async = true;
 // A floating card beside the popup showing the highlighted symbol's docstring,
 // fetched lazily from /api/help (same live lookup the docs palette uses) and cached.
 // Skipped for kinds with nothing to look up (locals, keywords, fields, latex, paths).
-let _hintDocEl = null, _hintDocTimer = null;
+let _hintDocEl = null, _hintDocTimer = null, _hintGen = 0;
 const _hintDocCache = {};
 const _NO_DOC = { local: 1, var: 1, keyword: 1, kwarg: 1, latex: 1, path: 1, key: 1, field: 1, bind: 1 };
-function _hideHintDoc() { clearTimeout(_hintDocTimer); if (_hintDocEl) _hintDocEl.style.display = 'none'; }
+// Bumping the generation supersedes any in-flight async doc fetch — so a late /api/help reply
+// can't re-show the card after the popup closed (stuck) or moved (ghost in the corner).
+function _hideHintDoc() { _hintGen++; clearTimeout(_hintDocTimer); if (_hintDocEl) _hintDocEl.style.display = 'none'; }
 function _onHintSelect(item, node) {
+  _hintGen++; const gen = _hintGen;
   clearTimeout(_hintDocTimer);
   if (!item || !item.text || _NO_DOC[item.kind]) return _hideHintDoc();
-  _hintDocTimer = setTimeout(() => _loadHintDoc(item, node), 130);
+  _hintDocTimer = setTimeout(() => _loadHintDoc(item, node, gen), 130);
 }
-function _loadHintDoc(item, node) {
+function _loadHintDoc(item, node, gen) {
+  if (gen !== _hintGen) return;                                          // superseded before the fetch even started
   const kind = item.kind;
   const name = kind === 'method' ? item.text.split('(')[0]                // method row → the function's docs
              : kind === 'str' ? '@' + item.text.replace(/"$/, '') + '_str'  // colorant" → @colorant_str docs
              : item.text;
-  if (name in _hintDocCache) return _showHintDoc(_hintDocCache[name], kind, node);
+  if (name in _hintDocCache) return _showHintDoc(_hintDocCache[name], kind, node, gen);
   api('GET', '/api/help?name=' + encodeURIComponent(name)).then(r => {
     const html = (r && r.docHtml) ? r.docHtml : '';
-    _hintDocCache[name] = html; _showHintDoc(html, kind, node);
-  }).catch(() => _hideHintDoc());
+    _hintDocCache[name] = html; _showHintDoc(html, kind, node, gen);
+  }).catch(() => {});
 }
-function _showHintDoc(html, kind, node) {
+function _showHintDoc(html, kind, node, gen) {
+  if (gen !== _hintGen) return;                       // a newer select/close happened — drop this stale show
+  if (!node || !node.isConnected) return _hideHintDoc();   // popup gone → never strand a card in the corner
   if (!html) return _hideHintDoc();
   if (!_hintDocEl) { _hintDocEl = document.createElement('div'); _hintDocEl.className = 'cmh-doc'; document.body.appendChild(_hintDocEl); }
   _hintDocEl.innerHTML = '<div class="cmh-doc-k">' + (kind || '') + '</div>' + html;

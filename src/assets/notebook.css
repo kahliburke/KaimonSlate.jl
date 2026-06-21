@@ -225,7 +225,19 @@ body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--d
 .widget select[multiple], .control select[multiple] { flex:1; min-width:0; min-height:64px; }
 .radiogroup { display:flex; gap:12px; flex-wrap:wrap; flex:1; }
 .radiogroup label { display:flex; align-items:center; gap:4px; cursor:pointer; }
-.radiogroup .optlbl { display:inline-flex; align-items:center; }   /* holds a rendered ($math$) option label */
+.radiogroup .optlbl, .checkgroup .optlbl { display:inline-flex; align-items:center; }   /* holds a rendered ($math$) option label */
+/* MultiCheckBox: a vertical checkbox list (click to toggle — no native multi-select gestures). */
+.checkgroup { display:flex; flex-direction:column; gap:5px; flex:1; min-width:0; }
+.checkgroup label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.checkgroup input[type=checkbox] { accent-color:var(--purple); cursor:pointer; }
+/* MultiSelect: an inline scrollable listbox — click a row to toggle (no ⌘/Shift, no popup, no
+   native reset). Bounded height so a long list scrolls instead of growing the cell. */
+.mslist { display:flex; flex-direction:column; gap:1px; flex:1; min-width:0; max-height:168px; overflow-y:auto;
+          background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:3px; }
+.mslist:focus { outline:none; border-color:var(--accent); }
+.msopt { padding:4px 9px; border-radius:4px; cursor:pointer; user-select:none; display:flex; align-items:center; }
+.msopt:hover { background:var(--bg3); }
+.msopt.on, .msopt.on:hover { background:var(--purple); color:#160d18; }
 .actionbtn { background:var(--accent); color:#fff; border:none; border-radius:5px; padding:4px 14px; cursor:pointer; }
 .actionbtn:hover { filter:brightness(1.12); }
 input.toggle { appearance:none; -webkit-appearance:none; width:34px; height:18px; border-radius:10px;

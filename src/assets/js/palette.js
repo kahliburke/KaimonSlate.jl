@@ -12,6 +12,7 @@ const BIND_SNIPPETS = [
   ['Select',      '@bind choice Select(["a" => "Option A", "b" => "Option B"])'],
   ['Radio',       '@bind pick Radio(["a" => "Choice A", "b" => "Choice B"]; label="Pick one")'],
   ['MultiSelect', '@bind picks MultiSelect(["a" => "A", "b" => "B", "c" => "C"])'],
+  ['MultiCheckBox', '@bind picks MultiCheckBox(["a" => "A", "b" => "B", "c" => "C"])'],
   ['ColorPicker', '@bind col ColorPicker("#56d364")'],
   ['DateField',   '@bind d DateField()'],
   ['TimeField',   '@bind t TimeField()'],
