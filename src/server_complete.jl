@@ -296,7 +296,8 @@ function _make_router(h::Hub)
         _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/cell-type/{cid}", req -> _withnb(h, req, nb -> begin
-        set_kind!(nb, HTTP.getparam(req, "cid"), get(_body(req), "kind", "code")); _json(state_json(nb))
+        b = _body(req)
+        set_kind!(nb, HTTP.getparam(req, "cid"), get(b, "kind", "code"); source = get(b, "source", nothing)); _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/controls", req -> _withnb(h, req, nb -> begin
         set_controls_map!(nb, get(_body(req), "map", Dict{String,Any}())); _json(state_json(nb))

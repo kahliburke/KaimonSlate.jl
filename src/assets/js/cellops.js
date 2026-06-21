@@ -165,7 +165,14 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && window.slateStore && window.slateStore.focus.value) window.slateStore.setFocus(null);
 });
 async function moveCellRel(id, target, before) { renderAll(await api('POST', '/api/cell-move/' + id, { target, before })); }
-async function toggleType(id, kind)  { renderAll(await api('POST', '/api/cell-type/' + id, { kind })); }
+async function toggleType(id, kind)  {
+  // Carry the editor's CURRENT text along with the kind change, so converting (e.g. code→md after
+  // Esc, which keeps the text in the editor but never commits it) preserves unsaved edits. Sent in
+  // one request so the server converts WITHOUT evaluating — pressing m/y must not run the code yet.
+  const cm = window.editors[id], body = { kind };
+  if (cm && cm.getValue) body.source = cm.getValue();
+  renderAll(await api('POST', '/api/cell-type/' + id, body));
+}
 async function undoNb() { const s = await api('POST', '/api/undo'); renderAll(s); if (s && s.undid) toast('Undid ' + s.undid, 2000); }
 async function redoNb() { const s = await api('POST', '/api/redo'); renderAll(s); if (s && s.redid) toast('Redid ' + s.redid, 2000); }
 // ── Cell clipboard: copy / cut / paste (command-mode c / x / v) ────────────────

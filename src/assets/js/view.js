@@ -255,6 +255,7 @@ function _wireCompletion(ed) {
   // Skip inside strings/comments. Field access (`.`) fires immediately, below.
   const autoComplete = debounce(cm => {
     if (cm.state.completionActive || cm._ph) return;   // not while filling signature placeholders
+    if (!cm.hasFocus()) return;                        // blurred during the debounce — don't pop a stranded widget
     const cur = cm.getCursor(), tok = cm.getTokenAt(cur);
     if (tok.type === 'comment' || tok.type === 'string') return;
     if (!/[A-Za-z_][\w!]$/.test(cm.getRange({ line: cur.line, ch: 0 }, cur))) return;

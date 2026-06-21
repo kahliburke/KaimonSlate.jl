@@ -483,12 +483,24 @@ juliaHint.async = true;
 // A floating card beside the popup showing the highlighted symbol's docstring,
 // fetched lazily from /api/help (same live lookup the docs palette uses) and cached.
 // Skipped for kinds with nothing to look up (locals, keywords, fields, latex, paths).
-let _hintDocEl = null, _hintDocTimer = null, _hintGen = 0;
+let _hintDocEl = null, _hintDocTimer = null, _hintGen = 0, _hintDocWatch = null;
 const _hintDocCache = {};
 const _NO_DOC = { local: 1, var: 1, keyword: 1, kwarg: 1, latex: 1, path: 1, key: 1, field: 1, bind: 1 };
 // Bumping the generation supersedes any in-flight async doc fetch — so a late /api/help reply
 // can't re-show the card after the popup closed (stuck) or moved (ghost in the corner).
-function _hideHintDoc() { _hintGen++; clearTimeout(_hintDocTimer); if (_hintDocEl) _hintDocEl.style.display = 'none'; }
+function _hideHintDoc() { _hintGen++; clearTimeout(_hintDocTimer); clearInterval(_hintDocWatch); _hintDocWatch = null; if (_hintDocEl) _hintDocEl.style.display = 'none'; }
+// Force-close any open completion popup AND its doc card — the hard reset used by the
+// outside-click / window-blur safety nets so neither can strand on screen.
+function _closeAllHints() {
+  try { Object.values(editors).forEach(cm => { const a = cm && cm.state && cm.state.completionActive; if (a) a.close(); }); } catch (_) {}
+  _hideHintDoc();
+}
+// Clicking anywhere outside the popup/card, or the window losing focus, tears completion down.
+document.addEventListener('mousedown', e => {
+  if (e.target.closest && (e.target.closest('.CodeMirror-hints') || e.target.closest('.cmh-doc'))) return;
+  _closeAllHints();
+}, true);
+window.addEventListener('blur', _closeAllHints);
 function _onHintSelect(item, node) {
   _hintGen++; const gen = _hintGen;
   clearTimeout(_hintDocTimer);
@@ -520,6 +532,11 @@ function _showHintDoc(html, kind, node, gen) {
   // keep the card fully on screen: clamp its bottom into the viewport, then its top.
   _hintDocEl.style.top = Math.max(M, Math.min(r.top, vh - M - h)) + 'px';
   _hintDocEl.style.left = (r.right + M + W > window.innerWidth ? Math.max(M, r.left - M - W) : r.right + M) + 'px';
+  // Slave the card's lifetime to the popup: however the popup goes away (close event, blur,
+  // click-away, DOM detach on re-render), drop the card the moment it's gone. This is the
+  // backstop for the card getting "stuck" when no close/select event reaches us.
+  clearInterval(_hintDocWatch);
+  _hintDocWatch = setInterval(() => { if (!document.querySelector('.CodeMirror-hints')) _hideHintDoc(); }, 200);
 }
 
 // Pulse the kernel dot while a compute-triggering request is in flight. POSTs that

@@ -481,13 +481,24 @@ function set_code_hidden!(nb::LiveNotebook, id::AbstractString, hidden::Bool)
     return nb
 end
 
-function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString)
+function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; source = nothing)
     cells = nb.report.cells
     i = _index_of(cells, id); i === nothing && return nb
     _snapshot!(nb)
     old = cells[i]
-    cells[i] = Cell(old.id, kind == "md" ? MARKDOWN : CODE, old.source)
-    _commit_structure!(nb, i)
+    # Carry over the latest (possibly unsaved) editor text on the way through, so a convert never
+    # discards edits. Convert + restale the cell and its dependents, but DON'T evaluate: changing a
+    # cell's kind must not run the code (the user runs it when ready) — unlike _commit_structure!.
+    src = source === nothing ? old.source : String(source)
+    cells[i] = Cell(old.id, kind == "md" ? MARKDOWN : CODE, src)
+    build_dependencies!(nb.report)
+    stale = dependents_of(nb.report, [old.id])
+    for c in nb.report.cells
+        c.id in stale && (c.state = STALE)
+    end
+    _persist!(nb)
+    _autoindex!(nb)                      # the new source may introduce a `using`
+    return nb
 end
 
 _json(x) = HTTP.Response(200, ["Content-Type" => "application/json"], JSON.json(x))
