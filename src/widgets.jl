@@ -244,6 +244,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
                                 slate_query, slate_refresh)
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
+    Core.eval(m, :(const series = $series))       # ECharts DSL series builder (echarts_dsl.jl)
     Core.eval(m, :(const slate_table = $slate_table))
     Core.eval(m, :(const SlateTable = $SlateTable))
     Core.eval(m, :(const slate_query = $slate_query))

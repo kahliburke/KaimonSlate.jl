@@ -83,43 +83,32 @@ fig`],
 `using DataFrames
 df = DataFrame(x = 1:50, y = randn(50), grp = rand(["a", "b", "c"], 50))
 slate_table(df)`],
-  // ECharts (client-rendered; `echart(opt)` takes an ECharts option Dict).
+  // ECharts DSL — `echart(:kind, x, y; …)` (Express) or `echart(series(…), …; …)` (multi).
+  // Any extra kwarg / top-level component (grid, dataZoom, visualMap, …) passes through raw.
   ['ECharts line',
-`echart(Dict(
-    "backgroundColor" => "transparent",
-    "tooltip" => Dict("trigger" => "axis"),
-    "xAxis" => Dict("type" => "category", "data" => ["Mon", "Tue", "Wed", "Thu", "Fri"]),
-    "yAxis" => Dict("type" => "value"),
-    "series" => [Dict("type" => "line", "smooth" => true, "data" => [120, 200, 150, 80, 70])],
-))`],
+`echart(:line, ["Mon", "Tue", "Wed", "Thu", "Fri"], [120, 200, 150, 80, 70];
+       title = "Weekly", smooth = true)`],
   ['ECharts bar',
-`echart(Dict(
-    "backgroundColor" => "transparent",
-    "tooltip" => Dict("trigger" => "axis"),
-    "xAxis" => Dict("type" => "category", "data" => ["A", "B", "C", "D", "E"]),
-    "yAxis" => Dict("type" => "value"),
-    "series" => [Dict("type" => "bar", "data" => [5, 20, 36, 10, 12])],
-))`],
+`echart(:bar, ["A", "B", "C", "D", "E"], [5, 20, 36, 10, 12]; title = "Counts")`],
   ['ECharts pie',
-`echart(Dict(
-    "backgroundColor" => "transparent",
-    "tooltip" => Dict("trigger" => "item"),
-    "series" => [Dict(
-        "type" => "pie", "radius" => "60%",
-        "data" => [
-            Dict("value" => 40, "name" => "A"), Dict("value" => 30, "name" => "B"),
-            Dict("value" => 20, "name" => "C"), Dict("value" => 10, "name" => "D"),
-        ],
-    )],
-))`],
+`echart(:pie, ["A", "B", "C", "D"], [40, 30, 20, 10]; title = "Share")`],
   ['ECharts scatter',
-`echart(Dict(
-    "backgroundColor" => "transparent",
-    "tooltip" => Dict(),
-    "xAxis" => Dict(), "yAxis" => Dict(),
-    "series" => [Dict("type" => "scatter", "symbolSize" => 10,
-        "data" => [[randn(), randn()] for _ in 1:60])],
-))`],
+`echart(:scatter, randn(60), randn(60); symbolSize = 9)`],
+  ['ECharts multi-series',
+`x = range(0, 2π; length = 120)
+echart(
+    series(:line, x, sin.(x); name = "sin", smooth = true),
+    series(:line, x, cos.(x); name = "cos", smooth = true);
+    title = "Trig", legend = true,
+)`],
+  ['ECharts raw option',
+`# Full control: any ECharts option, Symbol/NamedTuple-friendly.
+echart(
+    xAxis  = (type = :category, data = ["A", "B", "C"]),
+    yAxis  = (type = :value,),
+    series = [(type = :bar, data = [5, 9, 3])],
+    dataZoom = [(type = :slider,)],
+)`],
 ];
 async function insertRecipe(code) {
   const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
