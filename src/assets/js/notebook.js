@@ -131,6 +131,8 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   useEffect(() => () => {
     const cs = window.charts[c.id];
     if (cs) { cs.forEach(i => { try { i.dispose(); } catch (_) {} }); delete window.charts[c.id]; }
+    const el = ref.current;   // inline `{{ echart }}` instances live on the nodes, not in window.charts
+    if (el) el.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} } });
   }, []);
 
   // Fill/update the cell's content IMPERATIVELY via the vanilla helpers, so live widgets aren't
@@ -139,13 +141,30 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   // renders blank otherwise). The hosts in the returned vnode are stable, so Preact keeps them.
   useEffect(() => {
     const el = ref.current; if (!el) return;
+    // An EXTERNAL source change (agent edit, file watcher, another tab) must refresh the editor —
+    // the always-on <Editor> is created once and never re-applies cell.source, so without this an
+    // agent edit updates the output but leaves the editor showing the OLD source. Only refresh when
+    // the user has no unsaved local edits (editor still matches the prior server source), so we
+    // never clobber in-flight work; a true divergence stays `edited` for the reconcile flow.
+    const _prevSrc = window.srcMap[c.id];
     window.srcMap[c.id] = c.source;
+    const _ed = window.editors[c.id];
+    if (_ed && _ed.getValue && c.source !== _prevSrc) {
+      const _mine = _ed.getValue();
+      if (_mine === _prevSrc) _ed.setValue(c.source);                                  // no local edits → fast-forward to the new source
+      else if (_mine !== c.source && window.slateLiveConflict) window.slateLiveConflict(c.id, _mine, c.source);   // both changed → reconcile modal
+    }
     const badge = el.querySelector('.badge');     // header renders c.state; reflect the live state
     if (badge && badge.textContent !== state) badge.textContent = state;
 
     if (c.kind === 'md') {
       const md = el.querySelector('.md'); const h = window.mdHtml(c);
-      if (md && h !== last.current.out) { last.current.out = h; window._swapOutput(md, h); window.typeset(md); }
+      if (md && h !== last.current.out) {
+        // Dispose any inline `{{ echart }}` instances before the innerHTML swap orphans their nodes
+        // (their ECharts instance + zrender would otherwise leak on every markdown re-render).
+        md.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
+        last.current.out = h; window._swapOutput(md, h); window.typeset(md);
+      }
       return;
     }
 
@@ -172,13 +191,20 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
     const out = el.querySelector('.output');
     if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typeset(out); }
-    window.renderCharts(c);                           // in-place setOption — animates, keeps canvas
-    window.renderTables(c);                           // refill rows in place — keeps sort/filter/page
-    window.syncControlValues({ cells: [c] });         // values in place; skips focused/just-touched → drag-safe
+    // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
+    // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
+    // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook
+    // (a real CPU sink during slider drags). Data changes produce a fresh cell object → fresh array.
+    if (c.echarts !== last.current.echarts) { last.current.echarts = c.echarts; window.renderCharts(c); }
+    if (c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
+    if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValues({ cells: [c] });
 
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
     const visible = !window.hasBinds(c) && !c.collapsed && !c.codeHidden;
-    if (visible && !last.current.vis) { const ed = window.editors[c.id]; ed && ed.refresh(); }
+    if (visible && !last.current.vis) {
+      const ed = window.editors[c.id]; ed && ed.refresh();
+      (window.charts[c.id] || []).forEach(i => { try { i.resize(); } catch (_) {} });   // chart sized 0 while hidden → fix on reveal
+    }
     last.current.vis = visible;
   });
 

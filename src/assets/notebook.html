@@ -76,8 +76,8 @@
   <div class="dm-card">
     <div class="dm-spin"></div>
     <div class="dm-title">Connection lost</div>
-    <div class="dm-msg">The Slate server isn’t responding — it may be restarting.
-      Your edits are safe in the browser; the notebook reconnects and re-syncs automatically.</div>
+    <div class="dm-status" id="dm-status">Waiting for the server to come back online…</div>
+    <div class="dm-msg">Your edits are safe in the browser — the notebook reconnects, restarts the worker, and re-syncs automatically.</div>
     <button class="dm-btn" onclick="reconnectNow()">Reconnect now</button>
   </div>
 </div>

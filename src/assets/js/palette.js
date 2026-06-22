@@ -267,8 +267,13 @@ function _restoreDocs() {
   let s; try { s = JSON.parse(localStorage.getItem('slateDocs') || '{}'); } catch (_) { s = {}; }
   if (s && s.min === false) { openDocs(); if (s.q) { document.getElementById('docin').value = s.q; _docSearch(); } }
 }
-const _docSearch = debounce(async () => {
+// Search runs on Enter (not as-you-type) — the docs search is an expensive embedding+FTS query, so
+// firing it per keystroke was both laggy and wasteful. `_docLastQ` is the query last searched, so
+// the first Enter on a new query SEARCHES and a subsequent Enter OPENS the selected result.
+let _docLastQ = null;
+async function _runDocSearch() {
   const q = document.getElementById('docin').value.trim();
+  _docLastQ = q;
   let results = [];
   if (q) {
     try { const r = await api('GET', '/api/docsearch?q=' + encodeURIComponent(q)); results = (r && r.results) || []; } catch (_) {}
@@ -286,7 +291,8 @@ const _docSearch = debounce(async () => {
   const cur = _view();
   if (cur && cur.rec == null) { cur.q = q; cur.results = results; cur.sel = 0; _renderView(); _saveDocs(); }   // live-update the search view
   else _go({ q, results, sel: 0, rec: null });     // a new search after viewing a page → new history step
-}, 200);
+}
+const _docSearch = _runDocSearch;   // callers that programmatically set the input + search (run immediately)
 // Re-rank: a result whose NAME matches the query (exact > prefix > substring) outranks a
 // closer-embedding but lexically-unrelated hit — semantic search alone buries obvious matches.
 function _rankResults(results, q) {
@@ -455,12 +461,17 @@ document.getElementById('docdetail').addEventListener('click', e => {
 });
 // Related-items rail: a chip drills into that name.
 document.getElementById('docrelated').addEventListener('click', e => { const c = e.target.closest('.relchip'); if (c && c.dataset.name) helpLookup(c.dataset.name); });
-document.getElementById('docin').addEventListener('input', _docSearch);
+// No as-you-type search — it's an expensive embedding+FTS query. Enter runs it.
 document.getElementById('docin').addEventListener('keydown', e => {
   const v = _view(), sel = v ? v.sel : 0;
   if (e.key === 'ArrowDown') { e.preventDefault(); _select(sel + 1); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); _select(sel - 1); }
-  else if (e.key === 'Enter') { e.preventDefault(); _docPick(); }
+  else if (e.key === 'Enter') {
+    e.preventDefault();
+    const q = document.getElementById('docin').value.trim();
+    if (q && q !== _docLastQ) _runDocSearch();   // first Enter on a new query → search
+    else _docPick();                              // already searched → open the selected result
+  }
 });
 // Esc anywhere in the open dock: go back a step (minimizes at the start of history).
 document.addEventListener('keydown', e => {

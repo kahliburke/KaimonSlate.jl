@@ -47,8 +47,9 @@ const _backupSoon = debounce(backupEdits, 400);
 window.backupEdits = backupEdits;
 window._backupSoon = _backupSoon;
 // Safety net: a low-frequency sweep of all editors, so capture never depends on a per-editor
-// change hook being wired. Cheap (a few string compares; only writes when something changed).
-setInterval(backupEdits, 2000);
+// change hook being wired. Idle-cheap — a single DOM check gates the per-editor getValue() work,
+// so when nothing is dirty (no cell marked `edited`) the sweep costs ~one querySelector.
+setInterval(() => { if (_reconcileRan && document.querySelector('.cell.state-edited')) backupEdits(); }, 2000);
 // Capture on tab close. `pagehide` covers Safari/iOS, where `beforeunload` is unreliable.
 window.addEventListener('beforeunload', backupEdits);
 window.addEventListener('pagehide', backupEdits);
@@ -123,6 +124,18 @@ function _discardRestored(ids) {
 }
 let _rcQueue = [], _rcIdx = 0;
 function _startReconcile(cands) { _rcQueue = cands; _rcIdx = 0; _rcRender(); }
+// A LIVE conflict: an external edit (agent / file / another tab) landed on a cell that has the
+// user's unsaved edits. Surface it through the same reconcile walkthrough (mine vs theirs). Dedup
+// by cell id; append if the modal is already open, else start a fresh one.
+function slateLiveConflict(id, mine, server) {
+  const m = document.getElementById('reconcilemodal'), open = m && m.style.display !== 'none';
+  if (!open) { _rcQueue = []; _rcIdx = 0; }
+  const cur = _rcQueue.find((c, i) => i >= _rcIdx && c.id === id);
+  if (cur) { cur.mine = mine; cur.server = server; cur.conflict = true; }   // refresh to the latest
+  else _rcQueue.push({ id, mine, server, conflict: true });
+  if (!open) _rcRender();
+}
+window.slateLiveConflict = slateLiveConflict;
 function _rcModal() {
   let m = document.getElementById('reconcilemodal');
   if (!m) { m = document.createElement('div'); m.id = 'reconcilemodal'; m.className = 'rcmodal'; document.body.appendChild(m); }

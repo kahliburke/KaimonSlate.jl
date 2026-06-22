@@ -260,25 +260,36 @@ function _onConnTrouble() {
   _probeTimer = setInterval(_probe, _PROBE_MS);
   _probe();                                      // try immediately too (covers a one-off blip)
 }
-// Probe the server. A 404 (notebook not re-registered yet) or a network error keeps us
-// waiting; a real state payload means we're back. Uses raw fetch (no busy pulse, and it
-// must not re-trigger the disconnect path on its own expected failures).
+// Update the modal's live status line — tells the user WHERE recovery is (down → re-opening →
+// starting worker → done) instead of an opaque spinner.
+function _setConnStatus(text) { const el = document.getElementById('dm-status'); if (el) el.textContent = text; }
+// Probe the server and report the phase. We only DISMISS once the server answers AND the worker is
+// live — a fresh start has to re-open the notebook and spin up its kernel, and we surface each step.
 async function _probe() {
   if (!_connDown) return;
-  let state;
-  try {
-    const r = await fetch(_apipath('/api/state'));
-    state = r.ok ? await r.json()
-          : r.status === 404 ? await _reopenByPath()    // server up but notebook unregistered → ask it to re-open
-          : null;
-  } catch (_) { return; }                          // server still unreachable — keep polling
-  if (!state || !_connDown) return;                // still down / not re-registered, or a concurrent probe already recovered
+  let r;
+  try { r = await fetch(_apipath('/api/state')); }
+  catch (_) { _setConnStatus('Waiting for the server to come back online…'); return; }   // no response — still down
+  let state = null;
+  if (r.status === 404) {                          // server is up but the notebook isn't registered yet
+    _setConnStatus('Server is back — re-opening the notebook and starting the worker…');
+    state = await _reopenByPath();                 // blocks while the notebook loads + its kernel spins up
+  } else if (r.ok) {
+    try { state = await r.json(); } catch (_) { return; }
+  } else { _setConnStatus('Waiting for the server…'); return; }
+  if (!state || !_connDown) return;                // nothing usable, or a concurrent probe already recovered
+  // The HTTP server answered — but the WORKER may still be coming up (reconstructing a standalone's
+  // env, or a gate kernel reconnecting). Keep the modal up, with progress, until it's actually live.
+  const w = state.worker || {};
+  if (state.hydrating) { _setConnStatus('Server is back — reconstructing the environment & packages…'); return; }
+  if (!(w.kind === 'inproc' || w.connected)) { _setConnStatus('Server is back — starting the worker process…'); return; }
+  // Fully recovered: server up + worker live.
   _connDown = false;
   clearTimeout(_graceTimer); clearInterval(_probeTimer); _graceTimer = _probeTimer = null;
   connectLive();                                 // fresh SSE — the old one gave up on the 404
   updateStates(state);                           // resync (editors preserved)
   window.reconcileBackup && window.reconcileBackup(state);   // if boot 404'd, restore unsaved edits now that we have state
-  if (_modalShown) { const m = document.getElementById('disconnmodal'); if (m) m.style.display = 'none'; toast('Reconnected — synced with the server', 3000, 'ok'); }
+  if (_modalShown) { const m = document.getElementById('disconnmodal'); if (m) m.style.display = 'none'; toast('Reconnected — worker live, synced', 3000, 'ok'); }
   _modalShown = false;
 }
 // Server is up but doesn't have this notebook (empty registry after a restart). Ask it to

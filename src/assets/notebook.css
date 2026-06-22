@@ -180,6 +180,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
            border:3px solid var(--border); border-top-color:var(--red); animation:dm-spin 0.9s linear infinite; }
 @keyframes dm-spin { to { transform:rotate(360deg); } }
 .dm-title { font-size:1.05rem; font-weight:600; color:var(--text); margin-bottom:8px; }
+.dm-status { font-size:.86rem; color:var(--accent); margin-bottom:8px; min-height:1.2em; font-weight:500; }
 .dm-msg { font-size:.84rem; color:var(--dim); line-height:1.45; margin-bottom:18px; }
 .dm-btn { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:8px;
           padding:8px 18px; font-size:.85rem; cursor:pointer; transition:background .15s, border-color .15s; }

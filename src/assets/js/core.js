@@ -43,17 +43,19 @@ function _snapCell(cellId, insts, spec) {
     // theme, dark bg), so each PDF theme gets a chart that reads on its background.
     // Best-effort; the server prefers these over the raster PNG when present.
     const renderSvg = (themeName, bg) => {
+      let off = null, div = null;
       try {
         const w = inst.getWidth() || 640, h = inst.getHeight() || 400;
-        const div = document.createElement('div');
+        div = document.createElement('div');
         div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
         document.body.appendChild(div);
-        const off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
+        off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
         off.setOption(Object.assign({ animation: false, backgroundColor: bg }, spec));
-        const out = off.renderToSVGString();
-        off.dispose(); div.remove();
-        return out;
+        return off.renderToSVGString();
       } catch (_) { return ''; }
+      // ALWAYS tear down the offscreen instance + div — without this, a throw in setOption/render
+      // leaked an ECharts instance (live zrender) + a detached node on every failed snapshot.
+      finally { if (off) { try { off.dispose(); } catch (_) {} } if (div) div.remove(); }
     };
     if (spec) { svg = renderSvg(null, '#ffffff'); svgDark = renderSvg('dark', '#12141c'); }
     if (png) fetch(_apipath('/api/snapshot'), { method: 'POST',
