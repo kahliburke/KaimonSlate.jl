@@ -106,14 +106,18 @@ function _ensure_poller!()
         while true
             try
                 # Coalesce a burst: a worker's async loop can PUB many `slate_refresh`
-                # events between polls. Union the changed vars per notebook and fire
-                # ONE recompute per notebook per poll (≈ one refresh / 50 ms) instead
-                # of one per message — otherwise a tight async loop floods every SSE
-                # client with redundant re-renders.
+                # events at once. Union the changed vars per notebook and fire ONE recompute
+                # per notebook per wake instead of one per message — otherwise a tight async
+                # loop floods every SSE client with redundant re-renders.
                 pending = Dict{String,Set{String}}()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
-                for m in K.drain_stream_messages!(_manager())
+                # Block until a gate-stream message arrives (drain-first, then park in poll() on
+                # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
+                # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
+                # latency than a timer). The ceiling self-heals a park left stale if the health
+                # task recreates a SUB socket. (Was: drain + sleep(0.05) → ~28% idle CPU on -t auto.)
+                for m in K.wait_stream_messages!(_manager(); idle_timeout = 0.25)
                     rid = get(_GATE_SESSION, m.session_name, nothing)
                     rid === nothing && continue
                     if m.channel == "slate_refresh"
@@ -140,8 +144,9 @@ function _ensure_poller!()
                     _do_src_error(rid, msg)
                 end
             catch
+                sleep(0.25)   # error backoff — wait_stream_messages! parks on its own, so this
+                              # only fires on a transient failure (e.g. an FD error), never idle.
             end
-            sleep(0.05)
         end
     end
     return nothing
