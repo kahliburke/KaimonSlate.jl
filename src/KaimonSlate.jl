@@ -166,12 +166,28 @@ function create_tools(GateTool::Type)
     end
 
     """
+        api() -> String
+
+    The Kaimon Slate notebook API cheatsheet: the Slate-specific helpers injected into every
+    cell — `echart` (custom ECharts DSL), `@bind` widgets, `reactive`/`@onclick`/`@onchange`
+    for live updates, `slate_table`. READ THIS before writing cells that plot or add
+    interactivity — these names are NOT in package docs, and a `search_docs` for "chart" or
+    "series" returns CairoMakie, which will lead you astray.
+    """
+    api()::String = NotebookServer.slate_api_reference()   # single source of truth (also feeds the agent prompt)
+
+    """
         add_cell(notebook, source, after, kind) -> String
 
     Append a cell containing `source`, RUN it, and return its result (value/output,
     or the error to fix). `after` = the id to insert after ("" = end of notebook).
     `kind` = "code" or "md". Add ONE cell at a time and read its result before the
     next — do not compose the whole notebook up front.
+
+    Cells run in a REACTIVE notebook with Slate helpers injected (charts via `echart`, widgets
+    via `@bind`, live updates via `reactive`/`@onclick`, tables via `slate_table`) — call
+    `slate.api` for the reference before plotting or adding interactivity; their names are not in
+    package docs.
     """
     function add_cell(notebook::String, source::String; after::String = "", kind::String = "code")::String
         nb, err = _nb(notebook); nb === nothing && return err
@@ -336,6 +352,7 @@ function create_tools(GateTool::Type)
     end
 
     return [
+        GateTool("api", api),
         GateTool("open", nb_open),
         GateTool("list", nb_list),
         GateTool("close", nb_close),

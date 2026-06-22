@@ -180,6 +180,48 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
     return opt
 end
 
+"""
+    echart(kind::Symbol, args...; title, legend, tooltip, theme, kwargs...)  # Express: one series
+    echart(series(…), series(…); title, legend, …)                          # Composable: many series
+    echart(; xAxis=…, series=[…])                                           # Raw NamedTuple/dict options
+
+Build an [Apache ECharts](https://echarts.apache.org) chart that renders live in the cell,
+animating **in place** on reactive updates. Three layers, all sugar over the raw option dict —
+nothing in ECharts is out of reach. RETURN one from a cell to display it. (This is Slate's own
+helper — not Makie's `series`, not a package; see also [`series`](@ref).)
+
+# Express — one series; axes inferred (string x → category, numeric x → value)
+```julia
+echart(:line, ["Mon", "Tue", "Wed"], [120, 200, 150]; title = "Visits", smooth = true)
+echart(:bar, days, counts);  echart(:scatter, randn(500), randn(500); symbolSize = 3)
+echart(:pie, ["A", "B", "C"], [10, 20, 30])
+```
+
+# Ergonomic kinds — know their data shape AND bring the components they imply
+`:heatmap` (matrix → category axes + visualMap), `:candlestick` (OHLC), `:radar` (indicators),
+`:boxplot` (raw samples → 5-number summary):
+```julia
+echart(:heatmap, xlabels, ylabels, z)                       # z::Matrix (rows = y, cols = x)
+echart(:radar, ["Sales" => 6500, "Tech" => 30000], [4200, 20000])
+```
+
+# Composable — several series via `series(kind, …; name=…)`
+```julia
+echart(series(:line, x, sin.(x); name = "sin"),
+       series(:bar,  x, counts;   name = "n"); legend = true, title = "Mix")
+```
+
+# Raw — the full ECharts surface (Symbol/NamedTuple-friendly)
+```julia
+echart(; xAxis = (type = :category, data = days), yAxis = (type = :value,),
+         series = [(type = :bar, data = counts)], dataZoom = [(type = :slider,)])
+```
+
+Dark theme + tooltip default on; a legend appears when several series are named; extra kwargs and
+top-level components (`grid`, `dataZoom`, `visualMap`, `markLine`, …) pass through verbatim. Pairs
+with `@bind` (read a control in the cell → it recomputes) and `reactive`/`@onclick` (stream updates
+into a live value) — see the `slate.api` reference.
+"""
 # Express: a single series + simple layout (title/legend/tooltip/theme); ALL OTHER kwargs → the series.
 echart(kind::Symbol, args...; title = nothing, legend = nothing, tooltip = true, theme = true, kwargs...) =
     EChart(_echart_build([series(kind, args...; kwargs...)]; title = title, legend = legend, tooltip = tooltip, theme = theme))

@@ -165,6 +165,60 @@ function _cell_context(nb::LiveNotebook, id::AbstractString)
     return String(take!(io))
 end
 
+# ── Canonical Slate notebook-API reference (SINGLE SOURCE OF TRUTH) ───────────
+# The one place documenting the helpers injected into every cell (echart, @bind, reactive,
+# slate_table) — fed to BOTH the agent system prompt below AND the `slate.api` tool, so the two
+# can never drift (that drift is exactly what left an agent using the old echart API). Update the
+# notebook API? Update HERE. Reached from the parent module as `NotebookServer.slate_api_reference()`.
+const _SLATE_API = """
+# Kaimon Slate notebook API
+
+Cells run in a REACTIVE notebook: a cell that READS a variable re-runs automatically when that
+variable changes. The LAST expression of a cell is DISPLAYED. Beyond standard Julia and your
+`using`'d packages, these helpers are injected into every cell — they are Slate-specific, so look
+HERE (not `slate.search_docs`, which only indexes packages and will mislead you toward Makie).
+
+## Display
+Return the value to show — a number / String / DataFrame, a CairoMakie figure, an `echart(…)`, or
+`slate_table(df)`. Use `println` for stdout.
+
+## Charts — `echart` (Slate's ECharts DSL; NOT Makie's `series`)
+    echart(:line, x, y; title="…", smooth=true)          # Express: ONE series. kinds: line bar
+                                                          #   scatter area pie heatmap candlestick
+                                                          #   radar boxplot gauge funnel … (+ any raw type)
+    echart(series(:line, x, a; name="a"),                 # Composable: MANY series
+           series(:bar,  x, b; name="b"); legend=true, title="Mix")
+    echart(; xAxis=(type=:category, data=x),              # Raw: the full ECharts option surface
+            series=[(type=:bar, data=b)], dataZoom=[(type=:slider,)])
+Renders live, animating in place on updates. Ergonomic kinds infer data shape + components
+(`:heatmap` matrix→axes+visualMap, `:radar` indicators, `:boxplot` raw samples). `?echart` `?series`.
+
+## Widgets — `@bind name Widget(…)`  (declare in a cell; `name` holds the live value)
+    @bind n     Slider(1:100; label="n")
+    @bind on    Toggle(true; on="A", off="B")
+    @bind which Radio(["sin"=>"sine", "cos"=>"cosine"])     # value => label pairs (which == "sin")
+    @bind sel   Select(opts) / MultiSelect(opts) / MultiCheckBox(opts) / Checkbox(true)
+    @bind s     NumberField(0) / TextField("hi") / TextArea("…") / ColorPicker("#56d364")
+    @bind dt    DateField(…) / TimeField(…)
+    @bind go    Button("Run")                               # value = click count (Int, 0,1,2,…)
+Any cell that READS a bound var recomputes when its control changes. `which.label` = the label.
+
+## Live / async — stream updates into a value over time
+    level = reactive(:level, 0)        # live value: `level[]` reads, `level[] = v` pushes to readers
+    @onclick go begin                  # runs on click; a NEW click cancels the still-running prior run
+        for v in 0:2:100; level[] = v; pause(0.1) end       # pause = CANCELLABLE sleep
+    end
+    @onchange n  (level[] = n)         # runs on each change; `n` is the new value; cell does NOT recompute
+    cancel(:level)                     # cooperatively stop a running @onclick handler (at its next pause)
+A chart/cell that reads `level[]` re-renders live as values are pushed — no manual refresh.
+
+## Tables — `slate_table(df; …)`  → an interactive sortable / filterable / paged table
+
+Worked examples: `examples/echarts_dsl.jl` (all chart forms + a live gauge) and
+`examples/binds_demo.jl` (every widget).
+"""
+slate_api_reference() = _SLATE_API
+
 function _agent_system_prompt(nb::LiveNotebook)
     return """
     You are pair-building a LIVE reactive Julia notebook with the user, in real time.
@@ -181,12 +235,14 @@ function _agent_system_prompt(nb::LiveNotebook)
         figure (returns the image) — inspect a CairoMakie plot you made and fix it
     (`after`="" appends at the end; `kind` is "code" or "md".)
 
-    LEARN THE API — you have NO file access, so do NOT grep/read source. Search docs:
-      mcp__kaimon__slate_search_docs(notebook, query)  — fuzzy semantic search of the
-        notebook's package docs ("a function that sorts in place") → signatures + docs.
-        The project's packages are auto-indexed in the background, so usually just search.
-      mcp__kaimon__slate_index_docs(notebook, modules) — force-index more packages
-        (comma-separated) if a search comes up empty
+    LEARN THE API — you have NO file access, so do NOT grep/read source.
+      mcp__kaimon__slate_api()                          — the SLATE notebook helper cheatsheet:
+        echart (charts), @bind widgets, reactive/@onclick (live updates), slate_table. READ THIS
+        before plotting or adding interactivity — these helpers are NOT in any package's docs.
+      mcp__kaimon__slate_search_docs(notebook, query)   — fuzzy semantic search of the notebook's
+        PACKAGE docs (Statistics, DataFrames, CairoMakie, …). NOTE: a search for "chart"/"series"
+        returns CairoMakie's `series` — that is NOT the Slate `echart` API; use slate_api for that.
+      mcp__kaimon__slate_index_docs(notebook, modules)  — force-index more packages if a search is empty
 
     WORK INCREMENTALLY — this is the entire point of the project:
     - Call slate_read FIRST to see the current state.
@@ -195,16 +251,13 @@ function _agent_system_prompt(nb::LiveNotebook)
     - Choose the next cell from what you just saw. Do NOT compose the whole notebook
       in your head and write it all at once — small, visible steps the user can watch.
     - Cells are REACTIVE: a cell re-runs when an upstream variable it reads changes.
-    - Charts: prefer **ECharts** for interactive data viz — `echart(Dict("series"=>[...], …))`
-      returns a chart that is interactive IN THE BROWSER (hover, zoom, tooltips) and animates in
-      place on reactive updates. Use **CairoMakie** (dark theme: `using CairoMakie;
-      set_theme!(theme_dark())`; return the figure, e.g. `fig`) for static/scientific figures.
-      NEVER GLMakie (needs a GPU window → hangs the worker) or WGLMakie (incompatible deps).
-    - For controls / parameter interactivity, use the NOTEBOOK's reactivity, NOT Makie's: bind a
-      control in one cell — `@bind N Slider(10:5:300)` (also `Toggle`, `ColorPicker`, …) — and
-      have OTHER cells READ `N`; they re-run and re-render when it changes (works with both
-      ECharts and CairoMakie). Do NOT use Makie `SliderGrid`/`@lift`/`Observable` — they need an
-      interactive backend we don't have and render dead (static) under CairoMakie.
+
+    $(_SLATE_API)
+
+    For STATIC/scientific figures use **CairoMakie** (dark: `using CairoMakie;
+    set_theme!(theme_dark())`; return the figure). NEVER GLMakie/WGLMakie (no GPU window), and do
+    NOT use Makie `SliderGrid`/`@lift`/`Observable` — use the @bind reactivity above instead (Makie
+    interactivity renders dead/static under CairoMakie).
 
     SCOPED TURNS: if a turn begins with a "SCOPED TURN — the user clicked ✨ on cell `…`"
     block, that cell is your whole focus for the turn. Stay on it (and only the upstream cells
