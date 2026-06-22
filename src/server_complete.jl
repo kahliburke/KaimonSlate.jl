@@ -553,6 +553,7 @@ function start_hub(; host = "127.0.0.1", port = 8765)
         m = match(_EVENTS_RE, target)
         if m !== nothing
             nb = lock(h.lock) do; get(h.notebooks, m.captures[1], nothing); end
+            nb === nothing && (nb = _reopen_persisted!(h, m.captures[1]))   # re-register after a restart
             nb === nothing ? (HTTP.setstatus(stream, 404); HTTP.startwrite(stream)) : _sse(stream, nb)
         elseif startswith(target, "/api/import-standalone")   # long-lived SSE; raw Stream, not router
             _sse_import(stream, h)
@@ -573,7 +574,7 @@ open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
 """
 function open_notebook!(h::Hub, path::AbstractString)
     file = abspath(path)
-    lock(h.lock) do
+    id = lock(h.lock) do
         for nb in values(h.notebooks)
             abspath(nb.path) == file && return nb.id
         end
@@ -583,11 +584,13 @@ function open_notebook!(h::Hub, path::AbstractString)
         _start_watcher!(nb)
         return id
     end
+    _persist_registry!(h)        # remember id→path so a restart can lazily re-open it
+    return id
 end
 
 "Remove a notebook from the hub: drain its SSE connections and drop it."
 function close_notebook!(h::Hub, id::AbstractString)
-    lock(h.lock) do
+    removed = lock(h.lock) do
         nb = get(h.notebooks, id, nothing)
         nb === nothing && return false
         _close_listeners(nb)
@@ -597,6 +600,8 @@ function close_notebook!(h::Hub, id::AbstractString)
         delete!(h.notebooks, id)
         return true
     end
+    removed && _persist_registry!(h)        # forget an explicitly-closed nb so a restart won't re-open it
+    return removed
 end
 
 "Stop the hub: drain every notebook's SSE connections, then close the server."

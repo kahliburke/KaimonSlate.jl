@@ -72,6 +72,15 @@
 </div>
 <div id="hydbanner" class="hydbanner" style="display:none"></div>
 <div id="srcbanner" class="srcbanner" style="display:none"></div>
+<div id="disconnmodal" class="disconnmodal" style="display:none">
+  <div class="dm-card">
+    <div class="dm-spin"></div>
+    <div class="dm-title">Connection lost</div>
+    <div class="dm-msg">The Slate server isn’t responding — it may be restarting.
+      Your edits are safe in the browser; the notebook reconnects and re-syncs automatically.</div>
+    <button class="dm-btn" onclick="reconnectNow()">Reconnect now</button>
+  </div>
+</div>
 <div id="selcount" class="selcount" title="multiple cells selected — c copy · x cut · v paste · dd delete"></div>
 <div class="page"><div id="nb"></div></div>
 <aside id="palette" class="palette">
@@ -192,6 +201,7 @@
 <!-- App modules — ordered classic scripts sharing one global scope (load order matters). -->
 <script src="/assets/js/core.js"></script>
 <script src="/assets/js/view.js"></script>
+<script src="/assets/js/restore.js"></script>
 <script src="/assets/js/cellops.js"></script>
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/keyboard.js"></script>

@@ -236,10 +236,77 @@ function showSrcError(msg) {
   b.querySelector('.x').onclick = hideSrcBanner;
 }
 
+// ── Connection liveness (detect disconnect → modal → reconnect + resync) ──────
+// When the server restarts (or the network drops), requests silently fail and a cell can
+// sit on "running" forever. We surface it: a failed fetch (api()) or a dropped SSE arms a
+// short grace timer; if we don't recover, a blocking modal informs and waits.
+//
+// We DON'T trust EventSource's built-in retry: once the HTTP server is back but the
+// notebook isn't re-registered yet, the SSE returns 404, and a browser EventSource treats
+// any 4xx as fatal and gives up PERMANENTLY. So instead we actively poll /api/state while
+// down; the notebook id is stable (derived from the filename), so the moment it's
+// re-registered the poll succeeds — then we open a FRESH SSE and resync. In-editor edits
+// survive (CodeMirror is created once, never reset on re-render), so a resync only
+// refreshes badges/outputs/controls; the user's unsaved source stays put, ready to re-run.
+const _GRACE_MS = 1200, _PROBE_MS = 1500;
+let _es = null, _connDown = false, _modalShown = false, _graceTimer = null, _probeTimer = null;
+// Trouble detected. Arm a grace timer (show the modal only if we don't bounce back quickly)
+// and start actively polling for recovery. Idempotent while already handling a drop.
+function _onConnTrouble() {
+  if (_connDown) return;
+  _connDown = true;
+  window.backupEdits && window.backupEdits();     // snapshot in-flight edits immediately, before any reload/restart loses them
+  _graceTimer = setTimeout(() => { if (_connDown) { _modalShown = true; const m = document.getElementById('disconnmodal'); if (m) m.style.display = 'flex'; } }, _GRACE_MS);
+  _probeTimer = setInterval(_probe, _PROBE_MS);
+  _probe();                                      // try immediately too (covers a one-off blip)
+}
+// Probe the server. A 404 (notebook not re-registered yet) or a network error keeps us
+// waiting; a real state payload means we're back. Uses raw fetch (no busy pulse, and it
+// must not re-trigger the disconnect path on its own expected failures).
+async function _probe() {
+  if (!_connDown) return;
+  let state;
+  try {
+    const r = await fetch(_apipath('/api/state'));
+    state = r.ok ? await r.json()
+          : r.status === 404 ? await _reopenByPath()    // server up but notebook unregistered → ask it to re-open
+          : null;
+  } catch (_) { return; }                          // server still unreachable — keep polling
+  if (!state || !_connDown) return;                // still down / not re-registered, or a concurrent probe already recovered
+  _connDown = false;
+  clearTimeout(_graceTimer); clearInterval(_probeTimer); _graceTimer = _probeTimer = null;
+  connectLive();                                 // fresh SSE — the old one gave up on the 404
+  updateStates(state);                           // resync (editors preserved)
+  window.reconcileBackup && window.reconcileBackup(state);   // if boot 404'd, restore unsaved edits now that we have state
+  if (_modalShown) { const m = document.getElementById('disconnmodal'); if (m) m.style.display = 'none'; toast('Reconnected — synced with the server', 3000, 'ok'); }
+  _modalShown = false;
+}
+// Server is up but doesn't have this notebook (empty registry after a restart). Ask it to
+// re-open the file we remembered from the last good state — the empty registry yields the same
+// (filename-stem) id, so our /n/<id> URL resolves again — then read the freshly-loaded state.
+async function _reopenByPath() {
+  let path = null;
+  try { path = localStorage.getItem('slate:path:' + NB_ID); } catch (_) {}
+  if (!path) return null;                          // never saw a good state — can't know the path
+  try {
+    const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+    if (!r.ok) return null;
+    const st = await fetch(_apipath('/api/state'));
+    return st.ok ? st.json() : null;
+  } catch (_) { return null; }
+}
+// Back-compat alias used by api()'s catch.
+const _showDisconnect = _onConnTrouble;
+// Manual button: probe right now (don't wait for the next interval tick).
+function reconnectNow() { _probe(); }
+
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
 function connectLive() {
-  const es = new EventSource(_apipath('/api/events'));
+  if (_es) { try { _es.close(); } catch (_) {} }
+  const es = _es = new EventSource(_apipath('/api/events'));
+  es.onopen = () => { if (_connDown) _probe(); };   // SSE back → confirm via state + dismiss
+  es.onerror = () => { if (es.readyState !== EventSource.OPEN) _onConnTrouble(); };   // dropped
   es.onmessage = async (e) => {
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
     if (e.data.startsWith('refresh:')) { try { patchCells(JSON.parse(e.data.slice(8)).cells); } catch (_) {} return; }   // targeted: only the changed cells, inline
@@ -259,5 +326,4 @@ function connectLive() {
     // Keep the history rail fresh while it's open (agent turns, external edits).
     if (document.getElementById('histpanel').classList.contains('open') && !histReplaying) loadHistory();
   };
-  // EventSource auto-reconnects on error.
 }

@@ -169,6 +169,58 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
          opacity:0; transform:translateY(-8px); transition:opacity .25s ease, transform .25s ease; }
 .toast.show { opacity:1; transform:none; }
 .toast.err { border-left-color:var(--red); }
+.toast.ok { border-left-color:var(--green, #56d364); }
+/* Connection-lost modal — full-screen blocking overlay; informs and waits for reconnect. */
+.disconnmodal { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
+                background:#0a0c10cc; backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+.dm-card { background:var(--bg2); border:1px solid var(--border); border-top:3px solid var(--red);
+           border-radius:12px; padding:26px 28px 22px; max-width:380px; text-align:center;
+           box-shadow:0 18px 50px #000c; }
+.dm-spin { width:30px; height:30px; margin:0 auto 14px; border-radius:50%;
+           border:3px solid var(--border); border-top-color:var(--red); animation:dm-spin 0.9s linear infinite; }
+@keyframes dm-spin { to { transform:rotate(360deg); } }
+.dm-title { font-size:1.05rem; font-weight:600; color:var(--text); margin-bottom:8px; }
+.dm-msg { font-size:.84rem; color:var(--dim); line-height:1.45; margin-bottom:18px; }
+.dm-btn { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:8px;
+          padding:8px 18px; font-size:.85rem; cursor:pointer; transition:background .15s, border-color .15s; }
+.dm-btn:hover { background:var(--accent); border-color:var(--accent); color:#0a0c10; }
+/* Conflict reconcile modal — per-cell diff (server vs your unsaved edit) + keep choice. */
+.cf-card { max-width:680px; text-align:left; }
+.cf-list { max-height:60vh; overflow:auto; margin:6px 0 14px; }
+.cf-cell { border:1px solid var(--border); border-radius:8px; margin-bottom:10px; overflow:hidden; }
+.cf-cell.resolved { opacity:.45; }
+.cf-head { background:var(--bg3); padding:6px 10px; font-size:.82rem; color:var(--text); }
+.cf-diff { font-family:ui-monospace,Menlo,monospace; font-size:.76rem; padding:6px 10px; max-height:200px; overflow:auto; white-space:pre; }
+.cf-diff .dl { display:block; }
+.cf-diff .dl.add { color:var(--green); } .cf-diff .dl.del { color:var(--red); } .cf-diff .dl.ctx { color:var(--dim); }
+.cf-acts { display:flex; gap:8px; padding:8px 10px; border-top:1px solid var(--border); }
+.cf-acts button { font-size:.8rem; padding:5px 12px; }
+.cf-foot { text-align:right; }
+/* Reconcile walkthrough modal — one unsaved cell at a time: diff (saved vs your edit) + choose.
+   Lighter backdrop than the disconnect modal so the cell it navigates to stays visible behind. */
+.rcmodal { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
+           background:#0a0c1099; backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px); }
+.rc-card { background:var(--bg2); border:1px solid var(--border); border-top:3px solid var(--accent);
+           border-radius:12px; padding:18px 20px 16px; width:min(720px, 92vw); box-shadow:0 18px 50px #000c; }
+.rc-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }
+.rc-title { font-size:1rem; font-weight:600; color:var(--text); }
+.rc-prog { font-size:.78rem; color:var(--dim); white-space:nowrap; }
+.rc-warn { font-size:.82rem; color:var(--gold); background:rgba(255,215,0,.08); border:1px solid rgba(255,215,0,.25);
+           border-radius:7px; padding:7px 10px; margin-bottom:10px; }
+.rc-note { font-size:.82rem; color:var(--dim); margin-bottom:10px; }
+.rc-legend { display:flex; gap:16px; font-size:.74rem; margin-bottom:6px; font-family:ui-monospace,Menlo,monospace; }
+.rc-legend .dl.del { color:var(--red); } .rc-legend .dl.add { color:var(--green); }
+.rc-diff { font-family:ui-monospace,Menlo,monospace; font-size:.78rem; line-height:1.45; padding:8px 10px; margin-bottom:14px;
+           max-height:42vh; overflow:auto; white-space:pre; background:var(--bg); border:1px solid var(--border); border-radius:8px; }
+.rc-diff .dl { display:block; }
+.rc-diff .dl.add { color:var(--green); } .rc-diff .dl.del { color:var(--red); } .rc-diff .dl.ctx { color:var(--dim); }
+.rc-acts { display:flex; gap:10px; justify-content:flex-end; margin-bottom:12px; }
+.rc-acts button { font-size:.85rem; padding:7px 16px; border-radius:8px; }
+.rc-acts .rc-mine.primary { background:var(--accent); border-color:var(--accent); color:#0a0c10; font-weight:600; }
+.rc-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; border-top:1px solid var(--border); padding-top:10px; }
+.rc-foot button { font-size:.8rem; padding:5px 12px; }
+.rc-foot .rc-auto { color:var(--text); }
+.rc-foot .rc-later { color:var(--dim); }
 /* Persistent source-reload banner — top-left, stays until acted on/dismissed. */
 .srcbanner { position:fixed; top:58px; left:16px; z-index:70; max-width:420px; display:flex;
              align-items:center; gap:10px; flex-wrap:wrap; background:var(--bg2); color:var(--text);

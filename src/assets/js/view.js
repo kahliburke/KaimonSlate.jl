@@ -273,7 +273,7 @@ function _wireCompletion(ed) {
 function wireCodeEditor(ed, c) {
   if (ed.getValue() !== c.source) ed.setValue(c.source);
   let primed = false;
-  ed.on('change', () => { if (primed) setState(c.id, 'edited'); });
+  ed.on('change', () => { if (primed) { setState(c.id, 'edited'); window._backupSoon && window._backupSoon(); } });
   setTimeout(() => primed = true, 0);
   const { complete, keys } = _wireCompletion(ed);
   ed.setOption('extraKeys', Object.assign({}, keys, {
@@ -323,7 +323,12 @@ function editSource(id, mode) {
     cm.setOption('extraKeys', km);
     cm.on('focus', () => setEditing(id, true));
     cm.on('blur', () => setEditing(id, false));
+    cm.on('change', () => { if (cm.getValue() !== (srcMap[id] || '')) { setState(id, 'edited'); window._backupSoon && window._backupSoon(); } });
     editors[id] = cm;
+    // Apply a pending unsaved-edit restore for a markdown / @bind cell, whose source editor opens
+    // on demand (the always-on <Editor> hook only covers code cells). See restore.js.
+    const pend = window._pendingRestore && window._pendingRestore[id];
+    if (pend != null) { if (cm.getValue() !== pend) cm.setValue(pend); setState(id, 'edited'); delete window._pendingRestore[id]; }
   }
   editors[id].refresh(); editors[id].focus();
 }
@@ -387,6 +392,9 @@ function patchCells(cells) {
 }
 function _publishState(state) {
   nbState = state;
+  // Remember this notebook's file path so a reconnect after a server restart can ask the server
+  // to re-open it by path (the in-memory registry is empty after a restart — see panels.js _probe).
+  if (state && state.path) { try { localStorage.setItem('slate:path:' + NB_ID, state.path); } catch (_) {} }
   window.__slateState = state;                  // latest state, always — so the store (a deferred
                                                 // module) can seed from it even if it loads AFTER
                                                 // this first ran (the boot reload() is async).

@@ -84,12 +84,22 @@ function _animateCollapse(el, collapse) {
 function Editor({ cell }) {
   const ref = useRef(null);
   useEffect(() => {
+    const stale = ref.current.querySelector('.CodeMirror');   // guard: a lingering editor in a reused host → clear it first, so we never stack two (content shown twice)
+    if (stale) stale.remove();
     const ed = window.CodeMirror(ref.current, {
       value: cell.source, mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity,
     });
     window.wireCodeEditor(ed, cell);
     window.editors[cell.id] = ed;
-    return () => { if (window.editors[cell.id] === ed) delete window.editors[cell.id]; };
+    // Apply a pending unsaved-edit restore (see restore.js): a prior session's in-flight text,
+    // loaded as an edit, never run. Done here so it lands even though the editor mounts after
+    // reconcile ran. The restore precedes `primed`, so it won't double-fire the change handler.
+    const pend = window._pendingRestore && window._pendingRestore[cell.id];
+    if (pend != null) { if (ed.getValue() !== pend) ed.setValue(pend); window.setState && window.setState(cell.id, 'edited'); delete window._pendingRestore[cell.id]; }
+    return () => {
+      if (window.editors[cell.id] === ed) delete window.editors[cell.id];
+      try { ed.getWrapperElement().remove(); } catch (_) {}   // drop the CM DOM so a remount into a reused host can't stack a 2nd editor
+    };
   }, []);
   return html`<div ref=${ref}></div>`;
 }
@@ -98,7 +108,15 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
   const last = useRef({ bindKey: undefined, ctrlKey: undefined, out: undefined, vis: undefined });
-  const state = (live && live[c.id]) || c.state;   // transient (running/edited) wins until server state arrives
+  let state = (live && live[c.id]) || c.state;   // transient (running/edited) wins until server state arrives
+  // A cell whose editor diverges from its saved source stays `edited` even after a server-state
+  // push clears the transient live mark (applyState wipes liveStates) — derive it from the editor
+  // so an unsaved edit doesn't silently read as `fresh`. Covers code cells and OPEN markdown/@bind
+  // source editors; `running` still wins (it's executing).
+  if (state !== 'running') {
+    const _ed = window.editors[c.id];
+    if (_ed && _ed.getValue && _ed.getValue() !== c.source) state = 'edited';
+  }
 
   // Dep-focus: cells outside the focused cone collapse out of the flow (and expand back) rather
   // than unmounting, so the transition is smooth and editors/figures survive. Animate only on a

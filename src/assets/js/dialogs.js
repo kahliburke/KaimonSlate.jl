@@ -42,7 +42,7 @@ async function restartWorker(){
   showLoading('Restarting worker — respawning the process and re-running cells…');
   try { renderAll(await api('POST', '/api/restart')); } finally { hideLoading(); }
 }
-async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); }
+async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); window.reconcileBackup && window.reconcileBackup(s); }
 // ── Static export (HTML / print → PDF) ────────────────────────────────────────
 // Download a self-contained HTML document of the notebook (figures embedded, math via
 // KaTeX). PDF goes through the browser's own print dialog on that same static doc.

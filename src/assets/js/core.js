@@ -553,6 +553,12 @@ async function api(method, path, body) {
       body: body ? JSON.stringify(body) : undefined
     });
     return r.json();
+  } catch (e) {
+    _showDisconnect();          // network error → the server is unreachable; surface it (don't fail silently)
+    throw e;
   } finally { if (track) { _busy--; setBusy(); } }
 }
+// While disconnected, in-flight api() calls reject (a cell mid-run, a poll, …). The modal already
+// explains it, so swallow those rejections rather than spamming the console with red noise.
+window.addEventListener('unhandledrejection', e => { if (typeof _connDown !== 'undefined' && _connDown) e.preventDefault(); });
 

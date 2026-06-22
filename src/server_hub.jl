@@ -104,10 +104,64 @@ function _vendor_file(pkg::AbstractString, sub::AbstractString)
     end
 end
 
-# Run `f(nb)` for the notebook named by the request's `id` path param, else 404.
+# ── Persisted open-notebook registry (survive a server restart) ───────────────
+# The in-memory hub registry is empty after a restart, so a browser polling
+# /api/<id>/… gets a 404 and can't reconnect (and the watcher/worker are gone).
+# We persist {id => abspath} to a small per-port file on every open/close, and
+# LAZILY re-open a notebook the first time a request arrives for a known-but-
+# unloaded id — under its ORIGINAL id, so the browser's existing /n/<id> URL
+# resolves again and it resyncs automatically (no page reload, edits preserved).
+const _REOPEN_LOCK = ReentrantLock()
+_registry_file(h::Hub) = joinpath(_VENDOR_CACHE, "open-notebooks-$(h.port).json")
+
+# Snapshot the current registry to disk. Reentrant-lock safe (callers may already hold h.lock).
+function _persist_registry!(h::Hub)
+    data = lock(h.lock) do
+        Dict{String,String}(id => abspath(nb.path) for (id, nb) in h.notebooks)
+    end
+    try
+        f = _registry_file(h); mkpath(dirname(f)); write(f, JSON.json(data))
+    catch
+    end
+    return nothing
+end
+
+# Re-register a notebook by its persisted id after a restart. Returns the (re)loaded
+# LiveNotebook, or nothing if the id isn't persisted / its file is gone. Serialized via
+# _REOPEN_LOCK with a double-check, so concurrent probes (poll + SSE) can't double-load;
+# the heavy load happens OUTSIDE h.lock so it doesn't block every other request.
+function _reopen_persisted!(h::Hub, id::AbstractString)
+    cur = lock(h.lock) do; get(h.notebooks, id, nothing); end
+    cur === nothing || return cur
+    path = try
+        get(JSON.parsefile(_registry_file(h)), id, nothing)
+    catch
+        nothing
+    end
+    (path isa AbstractString && isfile(path)) || return nothing
+    return lock(_REOPEN_LOCK) do
+        again = lock(h.lock) do; get(h.notebooks, id, nothing); end
+        again === nothing || return again
+        nb = try
+            load_notebook(abspath(path); id = id)
+        catch err
+            @warn "Kaimon Slate: failed to re-open notebook after restart" id path exception = err
+            return nothing
+        end
+        lock(h.lock) do; h.notebooks[id] = nb; end
+        _start_watcher!(nb)
+        _persist_registry!(h)
+        @info "Kaimon Slate: re-opened notebook after restart" id path
+        return nb
+    end
+end
+
+# Run `f(nb)` for the notebook named by the request's `id` path param. If the id isn't
+# loaded (e.g. the server restarted), try to re-open it from the persisted registry first.
 function _withnb(h::Hub, req, f)
     id = HTTP.getparam(req, "id")
     nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+    nb === nothing && (nb = _reopen_persisted!(h, id))
     nb === nothing && return HTTP.Response(404, "no such notebook: $id")
     return f(nb)
 end
