@@ -267,6 +267,7 @@ function create_tools(GateTool::Type)
         isempty(mods) && return "Name the packages/modules to index (comma-separated); they must be `using`'d in the notebook."
         recs = ReportEngine.harvest_docs(nb.kernel, nb.report, mods)
         n = index_docs!(recs)
+        n == 0 || NotebookServer.ensure_docs_fts!()   # light up lexical search + module filters for these
         return n == 0 ?
             "Indexed nothing — are the modules loaded (run `using …`) and the docs service (Ollama/Qdrant) up?" :
             "Indexed $n documented symbols from $(join(mods, ", ")). Search them with slate.search_docs."
@@ -280,7 +281,9 @@ function create_tools(GateTool::Type)
     Build the index first with `index_docs`.
     """
     function search_docs_tool(notebook::String, query::String)::String
-        res = search_docs(query)
+        nb, _ = _nb(notebook)   # scope to this notebook's packages when resolvable; unfiltered otherwise
+        mods = nb === nothing ? String[] : NotebookServer._inscope_modules(nb)
+        res = search_docs(query; modules = mods)
         isempty(res) && return "No matches — build the index first with slate.index_docs, or rephrase."
         io = IOBuffer()
         for r in res

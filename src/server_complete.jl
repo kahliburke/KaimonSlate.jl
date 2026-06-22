@@ -486,7 +486,7 @@ function _make_router(h::Hub)
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
-        results = isempty(q) ? Dict{String,Any}[] : search_docs(String(q))
+        results = isempty(q) ? Dict{String,Any}[] : search_docs(String(q); modules = _inscope_modules(nb))
         for r in results; r["docHtml"] = _doc_html(get(r, "doc", "")); end   # rendered markdown for the detail pane
         _json(Dict("results" => results))
     end))
