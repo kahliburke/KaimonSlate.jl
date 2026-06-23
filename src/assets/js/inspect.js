@@ -56,6 +56,45 @@ async function _slateInspect(reqid, cellId) {
   try { await api('POST', '/api/inspect-result', out); } catch (_) {}   // api() → _apipath injects NB_ID
 }
 window._slateInspect = _slateInspect;
+
+// slate.eval_js: run agent-supplied JS in THIS tab and POST the result back, keyed by reqid. Indirect
+// eval `(0, eval)` runs in global scope so page globals (nbState, charts, exportPdf, renderCharts, …)
+// are reachable; a returned Promise is awaited so `await`-style snippets work. Result is JSON-stringified
+// defensively (functions/DOM nodes/circular refs collapsed, size-capped) so it always serializes back.
+function _evalSafeJson(v) {
+  try {
+    const seen = new WeakSet();
+    const s = JSON.stringify(v, (_k, val) => {
+      if (typeof val === 'number' && !isFinite(val)) return val.toString();   // NaN / ±Infinity (not valid JSON)
+      if (typeof val === 'bigint') return val.toString() + 'n';
+      if (typeof val === 'function') return '[function]';
+      if (typeof val === 'undefined') return '[undefined]';
+      if (val instanceof Element) return '[<' + val.tagName.toLowerCase() + (val.id ? ' #' + val.id : '') + '>]';
+      if (val && typeof val === 'object') {
+        if (seen.has(val)) return '[circular]';
+        seen.add(val);
+        if (val instanceof Set) return [...val];                  // Set → array of values
+        if (val instanceof Map) return Object.fromEntries(val);   // Map → object of entries
+      }
+      return val;
+    });
+    if (s === undefined) return String(v);                       // undefined / function at top level
+    return s.length > 20000 ? s.slice(0, 20000) + '\n…(truncated)' : s;
+  } catch (_) { return String(v); }
+}
+async function _slateEvalJs(reqid, code) {
+  const out = { reqid, ok: false, result: 'null', error: '' };
+  // Track the action in the chat panel so the user sees what's being run in their tab.
+  const logm = (typeof logAgentAction === 'function') ? logAgentAction('🧩 eval JS', code) : null;
+  try {
+    let v = (0, eval)(code);                                     // indirect eval → global scope
+    if (v && typeof v.then === 'function') v = await v;          // await a returned Promise
+    out.ok = true; out.result = _evalSafeJson(v);
+  } catch (e) { out.error = String((e && e.stack) || e); }
+  if (logm) { logm.done = true; if (!out.ok) logm.text = '⚠ eval JS (error)'; if (typeof renderAgentMsgs === 'function') renderAgentMsgs(); }
+  try { await api('POST', '/api/eval-result', out); } catch (_) {}   // api() → _apipath injects NB_ID
+}
+window._slateEvalJs = _slateEvalJs;
 // Warm html2canvas at idle so the FIRST inspect doesn't blow its server-side timeout on a cold
 // load (CDN fetch + parse). Kept off the boot path — fires ~2s after load, best-effort.
 setTimeout(() => { _loadHtml2Canvas().catch(() => {}); }, 2000);

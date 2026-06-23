@@ -70,6 +70,7 @@ const _TOOL_LABEL = {
   slate_run:'▶ run cell', slate_delete_cell:'🗑 delete cell', slate_view:'🖼 view figure',
   slate_search_docs:'🔎 search docs', slate_index_docs:'📇 index docs',
   slate_acquire_floor:'🔒 acquire floor', slate_release_floor:'🔓 release floor',
+  slate_inspect:'🔬 inspect cell', slate_diag:'🩺 diagnostics', slate_eval_js:'🧩 eval JS', slate_export_pdf:'📄 export PDF',
   slate_list:'📚 list notebooks', slate_open:'📂 open notebook', slate_close:'📕 close notebook',
   ex:'λ eval', qdrant_search_code:'🔎 search code', goto_definition:'↪ goto def',
   search_methods:'🔎 search methods', format_code:'✨ format', run_tests:'✅ run tests',
@@ -114,6 +115,16 @@ async function loadAgentLog() {
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
 // A centered, dim system line in the transcript (e.g. "⚙ model → … applies next message").
 function _agentNote(text) { agentMsgs.push({ role: 'note', text }); renderAgentMsgs(); }
+// Surface an action driven into the page OUTSIDE the in-notebook agent stream — e.g. an external
+// (MCP) agent's `slate.eval_js` running JS in this tab — as a tool entry in the chat panel, so the
+// user can SEE what's being done to their notebook. Returns the message object so the caller can
+// flip `done`/`text` (then re-render) once it resolves.
+function logAgentAction(text, code) {
+  const m = { role: 'tool', text, code: code || '', done: false };
+  agentMsgs.push(m); renderAgentMsgs();
+  return m;
+}
+window.logAgentAction = logAgentAction;
 // STOP escalates: first press interrupts the in-flight turn (graceful); if the agent
 // is wedged and still working, a second press hard-kills it (terminates the process,
 // clears the agent — the next message spawns a fresh one).

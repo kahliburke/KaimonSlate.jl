@@ -136,46 +136,54 @@ function cell_image_fresh(nb::LiveNotebook, cell::AbstractString)
     return cell_image(nb, cell)
 end
 
-# ── Live cell inspect — round-trip capture from the open browser ──────────────
-# `slate.inspect` asks the open tab to capture a cell's rendered DOM + console + a raster, so an
-# agent can SEE what actually rendered (not just the canonical result). We push an `inspect:<json>`
-# SSE event carrying a reqid, then block on a per-reqid channel until the browser POSTs
-# /api/<id>/inspect-result (assets/js/inspect.js) or a short timeout elapses. No open tab → return
-# `nothing` (text-only inspect, exactly the pre-phase-2 behaviour — never hangs).
-const _INSPECT_PENDING = Dict{String,Channel{Any}}()
-const _INSPECT_LOCK = ReentrantLock()
-const _INSPECT_SEQ = Threads.Atomic{Int}(0)
-_inspect_reqid() = string(Threads.atomic_add!(_INSPECT_SEQ, 1); base = 16)
+# ── Live browser round-trip — ask the open tab to do something, await its reply ──
+# A generic request/response over SSE: push `<event>:<json{reqid,…}>` to the open tab, then block on a
+# per-reqid channel until the browser POSTs the answer back (deliver_live!) or a short timeout elapses.
+# Two callers ride this: `slate.inspect` (capture a cell's rendered DOM + console + raster, so an agent
+# can SEE what rendered) and `slate.eval_js` (run arbitrary JS in the page and return its result). No
+# open tab → `nothing` (the caller degrades gracefully — never hangs).
+const _LIVE_PENDING = Dict{String,Channel{Any}}()
+const _LIVE_LOCK = ReentrantLock()
+const _LIVE_SEQ = Threads.Atomic{Int}(0)
+_live_reqid() = string(Threads.atomic_add!(_LIVE_SEQ, 1); base = 16)
 
-# The POST handler hands the browser's capture to the waiting request. Returns whether a waiter existed.
-function deliver_inspect!(reqid::AbstractString, payload)
-    ch = lock(_INSPECT_LOCK) do; get(_INSPECT_PENDING, String(reqid), nothing); end
+# The POST handler hands the browser's reply to the waiting request. Returns whether a waiter existed.
+function deliver_live!(reqid::AbstractString, payload)
+    ch = lock(_LIVE_LOCK) do; get(_LIVE_PENDING, String(reqid), nothing); end
     ch === nothing && return false
     try; put!(ch, payload); catch; end
     return true
 end
 
-# Ask the open browser to capture cell `cellid`. Returns the capture payload (a Dict) or `nothing`
-# (no live tab, or the browser didn't answer within `timeout`). Always deregisters the request.
-# NOTE: call this OUTSIDE `nb.lock` — it blocks up to `timeout` and must not stall other notebook ops.
-function request_live_inspect(nb::LiveNotebook, cellid::AbstractString; timeout::Real = 4.0)
+# Broadcast `event:<json>` (reqid + `fields`) to the open tab and block until it POSTs a reply, or
+# `timeout`. Returns the reply payload (a Dict) or `nothing` (no live tab / no answer in time). Always
+# deregisters. NOTE: call OUTSIDE `nb.lock` — it blocks up to `timeout` and must not stall other ops.
+function request_live(nb::LiveNotebook, event::AbstractString, fields::AbstractDict; timeout::Real = 4.0)
     any_listener = lock(nb.llock) do; !isempty(nb.listeners); end
     any_listener || return nothing
-    reqid = _inspect_reqid()
+    reqid = _live_reqid()
     ch = Channel{Any}(1)
-    lock(_INSPECT_LOCK) do; _INSPECT_PENDING[reqid] = ch; end
+    lock(_LIVE_LOCK) do; _LIVE_PENDING[reqid] = ch; end
     timer = Timer(_ -> (isopen(ch) && close(ch)), timeout)   # wakes the take! when the browser is silent
     try
-        _broadcast(nb, "inspect:" * JSON.json(Dict("reqid" => reqid, "cell" => String(cellid))))
-        return take!(ch)                 # the browser capture; throws once the timer closes the channel
+        _broadcast(nb, string(event, ":", JSON.json(merge(Dict{String,Any}("reqid" => reqid), fields))))
+        return take!(ch)                 # the browser reply; throws once the timer closes the channel
     catch
-        return nothing                   # timeout (channel closed) or any error → text-only inspect
+        return nothing                   # timeout (channel closed) or any error → caller degrades
     finally
         close(timer)
-        lock(_INSPECT_LOCK) do; delete!(_INSPECT_PENDING, reqid); end
+        lock(_LIVE_LOCK) do; delete!(_LIVE_PENDING, reqid); end
         isopen(ch) && close(ch)
     end
 end
+
+request_live_inspect(nb::LiveNotebook, cellid::AbstractString; timeout::Real = 4.0) =
+    request_live(nb, "inspect", Dict{String,Any}("cell" => String(cellid)); timeout = timeout)
+
+# Run `code` in the open tab (global scope — `nbState`, `charts`, `exportPdf`, … are reachable) and
+# return the browser's reply Dict `{ok, result, error}`, or `nothing` if no tab answered in time.
+request_live_eval(nb::LiveNotebook, code::AbstractString; timeout::Real = 8.0) =
+    request_live(nb, "js", Dict{String,Any}("code" => String(code)); timeout = timeout)
 
 # Render a browser capture into the inspect text: cleaned DOM + this tab's console entries. The
 # raster (if any) is routed to the snapshot store by the POST handler, so it shows via `slate.view`.

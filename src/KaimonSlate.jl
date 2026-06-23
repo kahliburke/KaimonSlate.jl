@@ -36,7 +36,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
-                      export_standalone, expand
+                      request_live_eval, export_standalone, export_pdf, expand
 
 export serve_notebook, LiveNotebook, expand
 
@@ -340,6 +340,63 @@ function create_tools(GateTool::Type)
         return diag_report(nb)
     end
 
+    """
+        eval_js(notebook, code) -> String
+
+    Run `code` as JavaScript IN THE OPEN BROWSER TAB and return its result — the general way to
+    drive or inspect the live notebook UI without a headless browser. Runs in the page's global
+    scope, so page globals are reachable: invoke actions (`renderCharts(c)`, open a dialog, click a
+    handler), read live state (`nbState`, a chart's resolved option `charts[id][0].getOption()`,
+    DOM/computed styles), or trigger a reactive flow. The last expression is the return value; a
+    returned Promise is awaited (so `await`-style snippets work). The value comes back JSON-encoded
+    (functions / DOM nodes / cycles are collapsed, size-capped). Needs an OPEN tab — returns a notice
+    if none answers in time. NOTE: this CANNOT capture a browser download (e.g. the PDF blob from
+    `exportPdf()`); to inspect generated artifacts use the server-side tool (`slate.export_pdf`).
+    """
+    function eval_js(notebook::String, code::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        res = request_live_eval(nb, code)
+        res === nothing && return "No open browser tab answered. Open/reload the notebook in a browser, then retry — eval_js runs in the live page."
+        res isa AbstractDict || return string(res)
+        get(res, "ok", false) === true && return String(get(res, "result", "null"))
+        return "JS error: " * String(get(res, "error", "(unknown)"))
+    end
+
+    """
+        export_pdf(notebook; theme="light", params="0", source="1", style="article",
+                   columns="1", code="normal", body="", path="") -> String
+
+    Render the notebook to a publication-quality PDF (the same server-side Typst pipeline as
+    the browser's "Export PDF") and WRITE it to a file, so you can open that file with `Read`
+    to verify the result — layout, figures, math, and whether interactive chrome or `@bind`
+    parameter strips leaked in. This is how you check the PDF without a browser. Options mirror
+    the export dialog: `theme ∈ ("light","dark")`; `params="1"` shows the frozen `@bind`
+    parameter strip (hidden by default); `source="0"` drops code listings; `style ∈
+    ("article","report")`; `columns ∈ ("1","2")`; `code ∈ ("normal","small","smaller","tiny",
+    "hidden")`; `body ∈ ("","large","normal","compact","small")`. `path` overrides the output
+    file (default: a temp path). Returns the written path — pass it to `Read` to see the pages.
+    """
+    function export_pdf_tool(notebook::String; theme::String = "light", params::String = "0",
+                             source::String = "1", style::String = "article", columns::String = "1",
+                             code::String = "normal", body::String = "", path::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        pdf = try
+            export_pdf(nb; include_source = source != "0", style = style,
+                       columns = something(tryparse(Int, columns), 1), theme = theme,
+                       code = code, body = body, include_params = params == "1")
+        catch e
+            return "PDF export failed: " * sprint(showerror, e)
+        end
+        out = isempty(path) ? joinpath(tempdir(), "slate-export",
+                  replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf") : String(path)
+        try
+            mkpath(dirname(out)); write(out, pdf)
+        catch e
+            return "PDF rendered ($(length(pdf)) bytes) but writing to $out failed: " * sprint(showerror, e)
+        end
+        return "Wrote $(length(pdf)) bytes → $out\n(open it with Read to view the pages)"
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -369,6 +426,8 @@ function create_tools(GateTool::Type)
         GateTool("view", view_cell),
         GateTool("inspect", inspect_cell),
         GateTool("diag", notebook_diag),
+        GateTool("eval_js", eval_js),
+        GateTool("export_pdf", export_pdf_tool),
         GateTool("index_docs", index_docs),
         GateTool("search_docs", search_docs_tool),
     ]
