@@ -398,7 +398,6 @@ function _publishState(state) {
   window.__slateState = state;                  // latest state, always — so the store (a deferred
                                                 // module) can seed from it even if it loads AFTER
                                                 // this first ran (the boot reload() is async).
-  _depFocus = null;
   if (selectedId && !(state.cells || []).some(c => c.id === selectedId)) selectedId = null;   // dropped/renamed
   window.slateStore && window.slateStore.applyState(state);   // → Preact re-renders #nb reactively
   updateChrome(state);

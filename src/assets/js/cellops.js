@@ -100,8 +100,6 @@ async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-mo
 // Light up a cell's transitive upstream cone — every precursor cell whose code it
 // (transitively) reads from, computed client-side from each cell's `deps` (shipped in
 // state_json). Lets you SEE what feeds a cell and click a precursor to jump to it.
-let _depFocus = null;
-function clearDeps() { window.slateStore && window.slateStore.setFocus(null); }
 function _upstreamCone(id) {
   const byId = {}; ((nbState && nbState.cells) || []).forEach(c => byId[c.id] = c);
   const up = new Set(), stack = [id];
@@ -153,10 +151,6 @@ function pickerNames(c) {
   const aff = surfaceableNames(c), affSet = new Set(aff);
   const other = allBindNames().filter(n => !affSet.has(n));
   return { aff, other, all: [...aff, ...other] };
-}
-function _depFlag(el, text, title) {
-  const f = document.createElement('span'); f.className = 'depflag';
-  f.textContent = text; if (title) f.title = title; f.onclick = clearDeps; el.appendChild(f);
 }
 // 🔗 → dep-focus: render ONLY this cell's dependency chain (precursors + itself + dependents);
 // click again (or Esc) to return to the full notebook. Filtering lives in the Preact <Notebook>.
