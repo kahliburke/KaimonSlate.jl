@@ -1,9 +1,0 @@
-{
-  "name": "slate-snap",
-  "private": true,
-  "type": "module",
-  "description": "Headless snapshot of a live Slate notebook — the agent's window into the rendered frontend (HTML + state + console + screenshot).",
-  "dependencies": {
-    "playwright-core": "^1.61.0"
-  }
-}
