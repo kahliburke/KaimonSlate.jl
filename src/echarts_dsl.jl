@@ -167,12 +167,22 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
     elseif tooltip !== false
         opt["tooltip"] = _ec(tooltip)
     end
-    if legend === true
-        opt["legend"] = Dict{String,Any}()
-    elseif legend === nothing
-        count(s -> haskey(s.opt, "name"), slist) > 1 && (opt["legend"] = Dict{String,Any}())
-    elseif legend !== false
+    # Legend. An explicit `legend=<spec>` is the caller's to position — left untouched. An AUTO legend
+    # (legend=true, or several named series) is an empty dict ECharts fills from the series names; that
+    # and a title both default to the top row, so a wide title overlaps the centered legend. When both
+    # are present, drop the auto legend to its own row beneath the title and reserve plotting space
+    # below it (cartesian only — pie/radar ignore `grid`; a series- or caller-supplied grid wins).
+    if legend === false
+        # no legend
+    elseif legend !== true && legend !== nothing
         opt["legend"] = _ec(legend)
+    elseif legend === true || count(s -> haskey(s.opt, "name"), slist) > 1
+        leg = Dict{String,Any}()
+        if haskey(opt, "title")
+            leg["top"] = 30
+            (noaxis || haskey(opt, "grid")) || (opt["grid"] = Dict{String,Any}("top" => 72, "containLabel" => true))
+        end
+        opt["legend"] = leg
     end
     for (k, v) in kwargs
         opt[String(k)] = _ec(v)

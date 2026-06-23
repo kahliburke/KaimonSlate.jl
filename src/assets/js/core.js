@@ -26,6 +26,22 @@ const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-c
 const srcEditInner = () => '<textarea></textarea><div class="mdhint">⇧⏎ commit · esc cancel</div>';
 const srcEditHTML = () => `<div class="srcedit" style="display:none">${srcEditInner()}</div>`;
 
+// Strip the interactive-only chrome from a chart spec for a clean, static, publication render.
+// ECharts has no "publication mode" flag — what reads as on-screen controls are spec components:
+// the toolbox icon row, brush selection handles, and the dataZoom *slider* bar. We blank those for
+// the exported figure while preserving the data, axes, legend, and the current zoom window (so the
+// printed range matches what's on screen). Shallow-clones — never mutates the live spec, so the
+// on-screen chart keeps its controls.
+function _pubSpec(spec) {
+  const s = Object.assign({}, spec);
+  s.animation = false;                                              // capture the settled state
+  if (s.toolbox) s.toolbox = Object.assign({}, s.toolbox, { show: false });
+  if (s.brush) s.brush = undefined;
+  if (s.dataZoom != null)                                           // keep start/end range, drop the slider UI
+    s.dataZoom = [].concat(s.dataZoom).map(d => Object.assign({}, d, { show: false }));
+  return s;
+}
+
 // Capture a cell's (first) ECharts canvas as a PNG and stash it server-side, so the
 // agent's slate_view — and future PDF export — get a uniform image for client-rendered
 // charts, the same way CairoMakie figures come through. Debounced so animation settles
@@ -40,8 +56,10 @@ function _snapCell(cellId, insts, spec) {
     try { png = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#0e1116' }) || '').split(',')[1] || ''; } catch (_) {}
     // Vector SVG for publication PDF: re-render the spec offscreen with the SVG renderer,
     // once for a light page (default theme, white bg) and once for a dark page (dark
-    // theme, dark bg), so each PDF theme gets a chart that reads on its background.
+    // theme, dark bg), so each PDF theme gets a chart that reads on its background. The spec
+    // is run through _pubSpec first so the exported figure carries no interactive chrome.
     // Best-effort; the server prefers these over the raster PNG when present.
+    const pub = _pubSpec(spec);
     const renderSvg = (themeName, bg) => {
       let off = null, div = null;
       try {
@@ -50,7 +68,7 @@ function _snapCell(cellId, insts, spec) {
         div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
         document.body.appendChild(div);
         off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
-        off.setOption(Object.assign({ animation: false, backgroundColor: bg }, spec));
+        off.setOption(Object.assign({ backgroundColor: bg }, pub));
         return off.renderToSVGString();
       } catch (_) { return ''; }
       // ALWAYS tear down the offscreen instance + div — without this, a throw in setOption/render
