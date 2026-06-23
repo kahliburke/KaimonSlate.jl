@@ -3,7 +3,8 @@
 # render through the `cmarker` package with math routed to `mitex` (LaTeX math); a small
 # `\newcommand` shim preamble covers common commands mitex doesn't know natively. Code is
 # shown as syntax-highlighted listings; outputs (value/stdout/error/figures/tables) are
-# typeset; controls are omitted (a PDF is a snapshot). Figures use the bytes we already
+# typeset; `@bind` controls are omitted by default — a PDF is a snapshot — but can be shown
+# as a frozen parameter strip via `include_params`. Figures use the bytes we already
 # have (server CairoMakie PNG or the client ECharts snapshot); a later pass upgrades these
 # to vector/high-res via a browser handoff.
 #
@@ -305,7 +306,8 @@ matches the live UI and Makie-dark figures). `code ∈ ("normal","small","smalle
 sets the code-listing font size, or `"hidden"` to omit source entirely (also honoured via
 `include_source`). `body ∈ ("large","normal","compact","small")` sets the prose font size
 (defaults to "compact" for two-column). Figures use vector data when available (CairoMakie
-PDF, ECharts SVG); `@bind` controls are frozen to their current values as a parameter strip.
+PDF, ECharts SVG). `@bind` controls are omitted by default (a PDF is a static snapshot);
+set `include_params=true` to show them frozen to their current values as a parameter strip.
 
 If the first markdown cell opens with a `---`-fenced front-matter block, its
 title/subtitle/author/date/abstract render as an academic title block (the title overrides
@@ -314,7 +316,7 @@ the filename) and the remainder of that cell becomes normal body text.
 function export_pdf(nb::LiveNotebook; include_source::Bool = true,
                     style::AbstractString = "article", columns::Integer = 1,
                     theme::AbstractString = "light", code::AbstractString = "normal",
-                    body::AbstractString = "")
+                    body::AbstractString = "", include_params::Bool = false)
     show_source = include_source && code != "hidden"
     cols = clamp(Int(columns), 1, 2)
     body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
@@ -361,7 +363,7 @@ function export_pdf(nb::LiveNotebook; include_source::Bool = true,
                     write(joinpath(dir, base * ".jl"), c.source)
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
-                print(io, _emit_controls(c))         # frozen @bind controls (static snapshot)
+                include_params && print(io, _emit_controls(c))   # frozen @bind controls — off by default
                 _emit_output!(io, dir, base, nb, c; theme = theme)
                 print(io, "\n")
             end
