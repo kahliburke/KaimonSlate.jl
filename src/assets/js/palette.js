@@ -473,9 +473,10 @@ document.getElementById('docin').addEventListener('keydown', e => {
     else _docPick();                              // already searched → open the selected result
   }
 });
-// Esc anywhere in the open dock: go back a step (minimizes at the start of history).
+// Esc anywhere in the open dock closes it (minimizes) — users expect Escape to dismiss the popup,
+// not walk history. Back/forward stay on the ‹ › nav buttons.
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !_docMin) { e.preventDefault(); e.stopPropagation(); _navBack(); }
+  if (e.key === 'Escape' && !_docMin) { e.preventDefault(); e.stopPropagation(); minimizeDocs(); }
 }, true);
 _restoreDocs();
 
