@@ -217,9 +217,10 @@ duration/flags), source, the canonical result, and the cell's edit history. The 
 DOM + optional raster come from the open browser via a separate path (see `slate.inspect`).
 """
 function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
-    lock(nb.lock) do
+    # Build the canonical text under the lock; do the (blocking) live-browser capture OUTSIDE it.
+    text = lock(nb.lock) do
         idx = _index_of(nb.report.cells, cellid)
-        idx === nothing && return "No cell '$cellid' in '$(nb.id)'. Use slate.read to list cells."
+        idx === nothing && return nothing
         c = nb.report.cells[idx]
         io = IOBuffer()
         kind = c.kind == MARKDOWN ? "md" : "code"
@@ -239,6 +240,12 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
         isempty(h) || println(io, "\n--- history (newest first) ---\n", join(h, "\n"))
         return String(take!(io))
     end
+    text === nothing && return "No cell '$cellid' in '$(nb.id)'. Use slate.read to list cells."
+    # Live capture from the open browser (rendered DOM + console + raster), best-effort: appends
+    # nothing when no tab is open or it doesn't answer in time, so this never blocks the build loop.
+    cap = request_live_inspect(nb, cellid)
+    cap === nothing || (text *= _format_live_capture(cap))
+    return text
 end
 function _result_of(nb, id)
     i = _index_of(nb.report.cells, id)

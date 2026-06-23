@@ -504,6 +504,15 @@ function _make_router(h::Hub)
         try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(img)); svg = svg, svg_dark = svg_dark); catch; return _json(Dict("ok" => false)); end
         _json(Dict("ok" => true))
     end))
+    # Live cell inspect: the open tab POSTs a cell's captured DOM + console + raster in answer to an
+    # `inspect:` SSE request (assets/js/inspect.js), routed back to the waiting slate.inspect call.
+    HTTP.register!(router, "POST", "/api/{id}/inspect-result", req -> _withnb(h, req, nb -> begin
+        b = _body(req); reqid = String(get(b, "reqid", ""))
+        isempty(reqid) && return _json(Dict("ok" => false))
+        cell = String(get(b, "cell", "")); png = String(get(b, "png", ""))   # raster → snapshot store (slate.view)
+        (isempty(cell) || isempty(png)) || (try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(png))); catch; end)
+        _json(Dict("ok" => deliver_inspect!(reqid, b)))
+    end))
     # Browser diagnostics push (console errors / failed requests / unhandled rejections) →
     # read back by the slate.diag MCP tool. See assets/js/diag.js.
     HTTP.register!(router, "POST", "/api/{id}/diag", req -> _withnb(h, req, nb -> begin
