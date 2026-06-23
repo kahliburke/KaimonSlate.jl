@@ -109,6 +109,33 @@ function cell_image(nb::LiveNotebook, cell::AbstractString)
     return _snapshot(nb.id, cell)
 end
 
+# True when the cell carries a server-side raster (CairoMakie `image/png`) in its output. Those
+# are regenerated on every run, so `view` needn't round-trip the browser to keep them current.
+function _has_server_raster(nb::LiveNotebook, cell::AbstractString)
+    i = findfirst(c -> c.id == cell, nb.report.cells)
+    i === nothing && return false
+    o = nb.report.cells[i].output
+    o === nothing && return false
+    return any(ch -> ch.mime == "image/png", o.display)
+end
+
+"""
+    cell_image_fresh(nb, cell) -> Vector{UInt8} | nothing
+
+Like `cell_image`, but first refreshes the client-rendered raster from the open browser tab so
+`slate.view` is never stale. ECharts cells push a fresh PNG on every render and CairoMakie cells
+carry an authoritative server-side raster, but markdown / tables / plain-value cells only get a
+raster on demand — so without this, `view` returns whatever the last `inspect` happened to
+capture. We ask the open tab to recapture (the same round-trip `inspect` uses; for native-figure
+cells it's a no-op that leaves the higher-fidelity snapshot intact), then read the freshly-stored
+image. Skips the round-trip for server-side rasters, and falls back to the last snapshot when no
+tab is open or the capture times out.
+"""
+function cell_image_fresh(nb::LiveNotebook, cell::AbstractString)
+    _has_server_raster(nb, cell) || request_live_inspect(nb, cell)
+    return cell_image(nb, cell)
+end
+
 # ── Live cell inspect — round-trip capture from the open browser ──────────────
 # `slate.inspect` asks the open tab to capture a cell's rendered DOM + console + a raster, so an
 # agent can SEE what actually rendered (not just the canonical result). We push an `inspect:<json>`

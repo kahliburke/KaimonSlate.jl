@@ -35,7 +35,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       find_live, notebook_digest,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
                       acquire_floor!, release_floor!, floor_status,
-                      index_docs!, search_docs, cell_image, cell_inspect, diag_report,
+                      index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       export_standalone, expand
 
 export serve_notebook, LiveNotebook, expand
@@ -307,7 +307,7 @@ function create_tools(GateTool::Type)
         nb, err = _nb(notebook); nb === nothing && return err
         findfirst(c -> c.id == cell, nb.report.cells) === nothing &&
             return "No cell '$cell' in '$notebook' (use slate.read to list cells)."
-        png = cell_image(nb, cell)   # CairoMakie raster OR client-captured ECharts snapshot
+        png = cell_image_fresh(nb, cell)   # CairoMakie/ECharts raster, or a fresh on-demand capture (md/table/value)
         png === nothing && return "Cell '$cell' has no figure to view yet — run a plotting cell (CairoMakie or an ECharts chart); text/data → use slate.read."
         isdefined(Main, :Kaimon) || return "Image view needs the Kaimon host (unavailable in standalone mode)."
         return getfield(Main, :Kaimon).KaimonGate.image_result(png; text = "Cell '$cell' — rendered figure")
