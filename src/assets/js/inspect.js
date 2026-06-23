@@ -19,6 +19,9 @@ function _loadHtml2Canvas() {
 // OUTPUT) and inline data URIs. Capped so a giant cell can't blow the payload.
 function _cleanCellHtml(el) {
   const clone = el.cloneNode(true);
+  // Drop per-cell chrome that's identical on every cell — pure noise for an inspect: the header
+  // button row + state badge, and empty control-strip scaffolding.
+  clone.querySelectorAll('.cellhead, .controls.empty, .coldrop').forEach(n => n.remove());
   clone.querySelectorAll('.CodeMirror').forEach(n => n.replaceWith(document.createComment(' CodeMirror editor ')));
   clone.querySelectorAll('[src^="data:"]').forEach(n => n.setAttribute('src', '(inline data omitted)'));
   let html = clone.outerHTML || '';
@@ -32,12 +35,22 @@ async function _slateInspect(reqid, cellId) {
     const el = document.getElementById('cell-' + cellId);
     if (el) {
       try { out.html = _cleanCellHtml(el); } catch (_) {}
-      try {
-        const h2c = await _loadHtml2Canvas();
-        const bg = (getComputedStyle(document.body).backgroundColor) || '#12141c';
-        const canvas = await h2c(el, { backgroundColor: bg, scale: 1, logging: false, useCORS: true });
-        out.png = (canvas.toDataURL('image/png').split(',')[1]) || '';
-      } catch (_) {}
+      // Only html2canvas a cell that has NO native figure. ECharts (canvas) and CairoMakie
+      // (server-rendered <img>) are already captured at higher fidelity for slate.view via the
+      // snapshot path — overwriting that store with a whole-cell screenshot is strictly worse.
+      // So the raster only fills in for non-figure cells (markdown / tables / plain values).
+      const hasNativeFig = !!el.querySelector('.echarts canvas, .echart canvas, .output img');
+      if (!hasNativeFig) {
+        try {
+          const h2c = await _loadHtml2Canvas();
+          const bg = (getComputedStyle(document.body).backgroundColor) || '#12141c';
+          // Raster the rendered CONTENT (markdown / output / table), not the cell's button chrome —
+          // so a markdown-layout inspect shows the math/text as laid out, nothing wasteful.
+          const target = el.querySelector('.md, .output, .tables') || el;
+          const canvas = await h2c(target, { backgroundColor: bg, scale: 1, logging: false, useCORS: true });
+          out.png = (canvas.toDataURL('image/png').split(',')[1]) || '';
+        } catch (_) {}
+      }
     }
   } catch (_) {}
   try { await api('POST', '/api/inspect-result', out); } catch (_) {}   // api() → _apipath injects NB_ID

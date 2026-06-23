@@ -245,6 +245,9 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
     # nothing when no tab is open or it doesn't answer in time, so this never blocks the build loop.
     cap = request_live_inspect(nb, cellid)
     cap === nothing || (text *= _format_live_capture(cap))
+    # Point the agent at the image tool whenever the cell has a viewable figure — a native ECharts
+    # canvas / CairoMakie raster, or an html2canvas fill for a figureless cell (all via cell_image).
+    cell_image(nb, cellid) === nothing || (text *= "\n(this cell renders a figure — see it with slate.view)")
     return text
 end
 function _result_of(nb, id)

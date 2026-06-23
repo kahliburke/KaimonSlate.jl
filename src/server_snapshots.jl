@@ -165,7 +165,6 @@ function _format_live_capture(cap)
                                  println(io, "  ", e)
         end
     end
-    isempty(string(get(cap, "png", ""))) || println(io, "\n(rendered raster captured — see it with slate.view)")
     return String(take!(io))
 end
 
