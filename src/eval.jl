@@ -188,14 +188,32 @@ module_help(::InProcessKernel, report::Report, name::AbstractString) =
 """
     project_deps(kernel, report) -> Vector{Dict}
 
-The notebook project's direct dependencies as `{name, version}` (for eager docs
-auto-indexing). The gate kernel reads its worker's active project; in-process has no
-distinct project, so it returns nothing (only `using`'d packages get indexed there).
+The notebook project's direct dependencies as `{name, version, uuid}` (for the env/package
+viewer + eager docs auto-indexing). The gate kernel reads its worker's active project; the
+in-process kernel (standalone/driver) reports the *active* project — which, launched in the
+notebook's own directory, is exactly its environment. `[]` on any failure.
 """
-project_deps(::InProcessKernel, ::Report) = Dict{String,Any}[]
+function project_deps(::InProcessKernel, ::Report)
+    out = Dict{String,Any}[]
+    try
+        proj = Pkg.project()
+        info = Pkg.dependencies()
+        for (name, uuid) in proj.dependencies
+            pi = get(info, uuid, nothing)
+            ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
+            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid)))
+        end
+    catch
+    end
+    return out
+end
 
-# In-process has no notebook/parent split (cells run in the host's active project).
-env_info(::InProcessKernel, ::Report) = (notebook = (path = "", deps = Dict{String,Any}[]), parent = nothing)
+# In-process has no notebook/parent split — the active project IS the notebook env (no parent
+# stack). Same NamedTuple shape the host expects (`info.notebook.deps`, `info.parent`).
+function env_info(k::InProcessKernel, r::Report)
+    path = try; dirname(Pkg.project().path); catch; ""; end
+    return (notebook = (path = path, deps = project_deps(k, r)), parent = nothing)
+end
 bundle_info(::InProcessKernel, ::Report) = (projectdir = "", pathdeps = NamedTuple[])
 
 """

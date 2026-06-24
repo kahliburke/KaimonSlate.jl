@@ -124,7 +124,11 @@ function run_capture(mod::Module, source::AbstractString)
 
     # Collect `@bind` controls declared during this eval — the namespace's injected
     # `__slate_bind` pushes to this sink. Absent on bare modules (e.g. tests) → no-op.
-    sinkref = isdefined(mod, :__slate_bind_sink) ? getfield(mod, :__slate_bind_sink) : nothing
+    # `__slate_bind_sink` is defined via `Core.eval` (a newer world age) than this caller, so the
+    # access goes through `invokelatest` — otherwise Julia 1.12 warns (and a future Julia errors)
+    # on reading a binding from a world prior to its definition (seen on the in-process kernel).
+    sinkref = isdefined(mod, :__slate_bind_sink) ?
+              Base.invokelatest(getfield, mod, :__slate_bind_sink) : nothing
     sinkref === nothing || (sinkref[] = NamedTuple[])
 
     value = nothing

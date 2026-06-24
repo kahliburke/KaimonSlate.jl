@@ -12,6 +12,8 @@ evaluation yet — so it is testable with `Base` alone.
 """
 module ReportEngine
 
+import Pkg   # InProcessKernel reads the active project's deps for the env/package viewer (standalone)
+
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
 export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
