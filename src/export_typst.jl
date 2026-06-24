@@ -102,8 +102,8 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     #set document(title: "$(_typ_str(title))")
     #set page($pageopts)
     #set text(font: "New Computer Modern", size: $(bsize), fill: $(p.text))$(rawtheme)
-    #set par(justify: true)
-    #show heading: set block(above: 1.1em, below: 0.6em)
+    #set par(justify: true, spacing: 1.25em)
+    #show heading: set block(above: 1.9em, below: 1.05em)
     #show heading: set text(fill: $(p.title))
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
