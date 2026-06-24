@@ -214,7 +214,22 @@ function env_info(k::InProcessKernel, r::Report)
     path = try; dirname(Pkg.project().path); catch; ""; end
     return (notebook = (path = path, deps = project_deps(k, r)), parent = nothing)
 end
-bundle_info(::InProcessKernel, ::Report) = (projectdir = "", pathdeps = NamedTuple[])
+# Filesystem coordinates for a self-contained export: the active project dir + its path-tracked
+# dep sources (so `export_standalone` can embed them). Matches the gate kernel's shape. Without
+# this, standalone export errored on the in-process kernel ("no project environment to bundle").
+function bundle_info(::InProcessKernel, ::Report)
+    projectdir = ""; pathdeps = NamedTuple[]
+    try
+        projectdir = dirname(Pkg.project().path)
+        for (_uuid, pi) in Pkg.dependencies()
+            if pi.is_tracking_path && pi.source !== nothing && isdir(pi.source)
+                push!(pathdeps, (name = pi.name, source = String(pi.source)))
+            end
+        end
+    catch
+    end
+    return (projectdir = projectdir, pathdeps = pathdeps)
+end
 
 """
     pkg_op(kernel, report, op, name) -> Dict{String,Any}
