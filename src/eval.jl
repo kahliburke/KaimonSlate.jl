@@ -235,13 +235,43 @@ end
     pkg_op(kernel, report, op, name) -> Dict{String,Any}
 
 Add (`op="add"`) or remove (`op="rm"`) a package in the kernel's active project — the
-notebook's own dependency environment. The gate kernel mutates its worker's project;
-the in-process kernel has NO distinct notebook project (cells eval in the extension), so
-it refuses rather than touch the host environment. Returns `{ok, message}`.
+notebook's own dependency environment. The gate kernel mutates its worker's forked project;
+the in-process kernel (standalone/driver) mutates the ACTIVE project — but refuses when that is
+only the shared default environment, so a stray `julia` (no `--project`) can't pollute your base
+env. Launch in a project dir to enable it. Returns `{ok, message}`.
 """
-pkg_op(::InProcessKernel, ::Report, ::AbstractString, ::AbstractString) =
-    Dict{String,Any}("ok" => false,
-        "message" => "This notebook isn't inside a Julia project (in-process kernel), so it has no package environment to manage. Open it inside a project directory to add packages.")
+function pkg_op(::InProcessKernel, ::Report, op::AbstractString, name::AbstractString)
+    nm = strip(String(name))
+    isempty(nm) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    proj = try; something(Base.active_project(), ""); catch; ""; end
+    _is_shared_env(proj) && return Dict{String,Any}("ok" => false,
+        "message" => "No notebook project is active — only the shared default environment, which " *
+                     "this won't touch. Launch in a project directory (`julia --project=<dir>`) to " *
+                     "manage this notebook's packages.")
+    try
+        o = String(op)
+        o == "add" ? Pkg.add(nm) :
+        o == "rm"  ? Pkg.rm(nm)  :
+            return Dict{String,Any}("ok" => false, "message" => "unknown op: $o")
+        return Dict{String,Any}("ok" => true, "message" => string(o, " ", nm))
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
+# True when `proj` is a shared/default environment (under a depot's `environments/`, e.g.
+# `~/.julia/environments/v1.12`) rather than a project the user deliberately activated.
+function _is_shared_env(proj::AbstractString)
+    isempty(proj) && return true
+    return any(d -> startswith(proj, joinpath(d, "environments")), Base.DEPOT_PATH)
+end
+
+# Whether `pkg_op` can actually add/remove on this kernel — drives the package viewer's read-only
+# state. The gate worker always can (it forks its own env); the in-process kernel only when a real
+# (non-shared) project is active, i.e. exactly when `pkg_op` would accept the operation.
+pkg_manageable(::Kernel) = true
+pkg_manageable(::InProcessKernel) =
+    !_is_shared_env(try; something(Base.active_project(), ""); catch; ""; end)
 
 """
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell

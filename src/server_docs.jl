@@ -144,6 +144,20 @@ function help_lookup(nb::LiveNotebook, name::AbstractString)
     return rec
 end
 
+# Local (no-Kaimon) lexical doc search over the notebook's in-scope modules — the standalone
+# fallback for `search_docs`, which needs Kaimon's embedding/FTS index. Restores partial-name
+# matching (the "type a fragment" experience) without an index; semantic ("plain words") search
+# still needs the full build. Resolves names where cells eval (the in-process report module).
+function local_docsearch(nb::LiveNotebook, query::AbstractString; limit::Int = 12)
+    q = strip(String(query)); isempty(q) && return Dict{String,Any}[]
+    where = try; ReportEngine.report_module(nb.report); catch; return Dict{String,Any}[]; end
+    return try
+        ReportEngine.search_module_names(where, _inscope_modules(nb), q; limit = limit)
+    catch
+        Dict{String,Any}[]
+    end
+end
+
 # ── Auto-indexing ─────────────────────────────────────────────────────────────
 # Index docs WITHOUT the agent asking: on open, eagerly index the notebook's project
 # deps; incrementally pick up any package a cell `using`s. Runs in the background and

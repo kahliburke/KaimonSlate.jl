@@ -39,6 +39,45 @@ function harvest_module_docs(where::Module, mod_names)
 end
 
 """
+    search_module_names(where, mod_names, query; limit=20) -> Vector{Dict}
+
+Local lexical doc search: case-insensitive substring match of `query` against the EXPORTED names
+of each module in `mod_names` (resolved in `where`), ranked exact > prefix > substring (shorter
+names first). Docstrings are fetched only for the returned (capped) matches, so it's cheap enough
+to run per-keystroke with no index. The standalone stand-in for the Qdrant FTS search when no
+embedding/index service (Kaimon) is available — restores partial-name matching. Pure (reflection +
+`Base.Docs`), so it also loads into the dependency-light worker.
+"""
+function search_module_names(where::Module, mod_names, query::AbstractString; limit::Int = 20)
+    q = lowercase(strip(String(query)))
+    isempty(q) && return Dict{String,Any}[]
+    hits = Tuple{Int,String,String,Symbol,Module}[]   # (score, modname, name, sym, module)
+    seen = Set{Tuple{String,String}}()
+    for nm in mod_names
+        m = try; Core.eval(where, Meta.parse(String(nm))); catch; nothing; end
+        m isa Module || continue
+        mn = string(nameof(m))
+        for s in names(m)
+            isdefined(m, s) || continue
+            ls = lowercase(string(s))
+            occursin(q, ls) || continue
+            key = (mn, string(s)); key in seen && continue; push!(seen, key)
+            score = ls == q ? 3 : startswith(ls, q) ? 2 : 1
+            push!(hits, (score, mn, string(s), s, m))
+        end
+    end
+    sort!(hits; by = h -> (-h[1], length(h[3]), h[3]))   # score desc, shorter first, then alpha
+    out = Dict{String,Any}[]
+    for (score, mn, name, sym, m) in first(hits, limit)
+        doc = try; strip(string(Core.eval(m, :(@doc($sym))))); catch; ""; end
+        occursin("No documentation found", doc) && (doc = "")
+        push!(out, Dict{String,Any}("module" => mn, "name" => name, "doc" => doc,
+                                    "score" => score, "lexical" => true))
+    end
+    return out
+end
+
+"""
     module_help(where, name) -> Dict
 
 Resolve `name` in module `where` (the package must already be `using`'d / `import`ed

@@ -356,7 +356,8 @@ function _make_router(h::Hub)
     # Show the environment with provenance: `notebook` deps (the notebook's own forked env,
     # where adds land — removable) and `parent` deps (inherited from the enclosing project,
     # which the forked env extends — read-only). `detached` is true when there's no parent
-    # (the notebook env IS everything). `manageable` is false for an in-process kernel.
+    # (the notebook env IS everything). `manageable` reflects whether pkg_op can add/remove here
+    # (always for the gate worker; for in-process, only when a real non-shared project is active).
     # Package-name completion for the Add box (matches reachable registries).
     HTTP.register!(router, "GET", "/api/{id}/pkg-complete", req -> _withnb(h, req, _ -> begin
         q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
@@ -368,7 +369,7 @@ function _make_router(h::Hub)
                    "parent" => e.parent,
                    "parentPath" => e.parentpath,
                    "detached" => e.detached,
-                   "manageable" => !(nb.kernel isa InProcessKernel)))
+                   "manageable" => ReportEngine.pkg_manageable(nb.kernel)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
         b = _body(req); op = String(get(b, "op", "")); name = String(get(b, "name", ""))
@@ -488,7 +489,11 @@ function _make_router(h::Hub)
     # Semantic docs search (docs v2) — for the UI palette; the agent uses slate.search_docs.
     HTTP.register!(router, "GET", "/api/{id}/docsearch", req -> _withnb(h, req, nb -> begin
         q = strip(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))
-        results = isempty(q) ? Dict{String,Any}[] : search_docs(String(q); modules = _inscope_modules(nb))
+        # With Kaimon: hybrid lexical+semantic over the Qdrant index. Standalone: a local lexical
+        # search over the in-scope modules so partial-name matching still works (no exact-name wall).
+        results = isempty(q) ? Dict{String,Any}[] :
+                  _agent_available() ? search_docs(String(q); modules = _inscope_modules(nb)) :
+                                       local_docsearch(nb, String(q))
         for r in results; r["docHtml"] = _doc_html(get(r, "doc", "")); end   # rendered markdown for the detail pane
         _json(Dict("results" => results))
     end))
