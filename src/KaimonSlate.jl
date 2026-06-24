@@ -38,7 +38,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand
 
-export serve_notebook, LiveNotebook, expand
+export serve_notebook, serve, LiveNotebook, expand
 
 # ── Single-server hub ─────────────────────────────────────────────────────────
 # The extension serves *all* notebooks from one HTTP 2.0 server on one port,
@@ -74,6 +74,50 @@ function _reap_orphan_workers!()
             try; run(`kill -9 $pid`); catch; end
         end
     catch  # pgrep absent / no matches — nothing to reap
+    end
+    return nothing
+end
+
+# ── Standalone launcher (Tier 0 — no Kaimon required) ─────────────────────────
+
+"""
+    serve(path=""; port=8765, host="127.0.0.1", browser=true)
+
+Standalone "slate-driver" launcher: start the hub, open the notebook at `path` (if given),
+optionally open a browser, and BLOCK until interrupted (Ctrl-C). No Kaimon needed — cells run on
+the in-process kernel; run inside Kaimon (or with the `--with-agent` bridge) for the full
+agent/worker experience. Pass `path=""` to start just the hub + switcher index.
+"""
+function serve(path::AbstractString = ""; port::Integer = _PORT,
+               host::AbstractString = "127.0.0.1", browser::Bool = true)
+    h = isempty(path) ? start_hub(; host = host, port = port) :
+                        start_server(path; host = host, port = port)
+    base = "http://$host:$port"
+    url  = isempty(path) ? base : "$base/n/$(first(values(h.notebooks)).id)"
+    tier = isdefined(Main, :Kaimon) ? "Kaimon present" : "standalone · in-process kernel"
+    printstyled("\n  ▪ KaimonSlate "; bold = true, color = :cyan); println("($tier)")
+    println("    serving   ", url)
+    isempty(path) || println("    index     ", base)
+    println("    Ctrl-C to stop\n")
+    browser && _open_browser(url)
+    try
+        wait(h.server)
+    catch e
+        e isa InterruptException || rethrow()
+    finally
+        printstyled("  ▪ stopping…\n"; color = :yellow)
+        try; stop_hub(h); catch; end
+    end
+    return nothing
+end
+
+# Best-effort OS browser open (non-blocking; failure is silent — the URL is already printed).
+function _open_browser(url::AbstractString)
+    try
+        cmd = Sys.isapple()   ? `open $url` :
+              Sys.iswindows() ? `cmd /c start "" $url` : `xdg-open $url`
+        run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
+    catch
     end
     return nothing
 end
