@@ -76,7 +76,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cell.collapsed .cellhead { opacity:.78; }
 /* Hide-code: editor hidden, output/figure (and any @bind control strip) shown — clean,
    interactive plots without the source. */
-.cell.codehidden > textarea, .cell.codehidden .CodeMirror { display:none; }
+.cell.codehidden > textarea, .cell.codehidden .cm-editor { display:none; }
 .cellhead .hidecode.on { color:var(--accent); }
 .cellhead .trace.on { color:var(--accent); }
 
@@ -121,7 +121,10 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cell.state-edited  .badge { color:var(--orange); }
 .cell.state-errored .badge { color:var(--red); }
 .cid { color:var(--dim); font-family:monospace; }
-.CodeMirror { height:auto; font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
+.cm-editor { font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
+.cm-editor .cm-scroller { font-family:inherit; line-height:1.5; }
+.cm-editor .cm-selectionBackground, .cm-editor.cm-focused .cm-selectionBackground { background:rgba(86,156,214,.25); }
+.cm-editor .cm-activeLine { background:rgba(255,255,255,.03); }
 .output { font-size:.84rem; }
 .output .out, .output .val, .output .err, .output .warn { padding:8px 12px; border-top:1px solid var(--border); }
 .output pre { margin:0; white-space:pre-wrap; overflow-x:auto; }
@@ -418,36 +421,20 @@ input.toggle:checked::after { left:18px; }
 @keyframes btnpulse { 0%,100%{box-shadow:0 0 0 0 rgba(86,156,214,.55);} 50%{box-shadow:0 0 0 5px rgba(86,156,214,0);} }
 /* Top-bar kernel dot breathes while the worker is executing (any compute request in flight). */
 .wdot.busy { animation:btnpulse 1.1s ease-in-out infinite; }
-/* Completion popup — match the dark theme (CodeMirror show-hint defaults to bright white). */
-.CodeMirror-hints { background:var(--bg2); border:1px solid var(--border); border-radius:7px; box-shadow:0 8px 24px #000a;
-  font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; padding:3px; z-index:120; max-height:260px; }
-.CodeMirror-hint { color:var(--fg); padding:3px 9px; border-radius:4px; display:flex; align-items:center; gap:7px; }
-li.CodeMirror-hint-active { background:var(--accent); color:#0d1120; }
-/* completion row: kind icon · symbol · faint kind label */
-.cmh-ic { flex:0 0 auto; width:14px; text-align:center; font-weight:700; }
-.cmh-tx { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; }
-.cmh-kd { flex:0 0 auto; font-size:.72em; color:var(--dim); }
-li.CodeMirror-hint-active .cmh-ic, li.CodeMirror-hint-active .cmh-kd { color:#0d1120 !important; }
-.cmh-function,.cmh-method { color:var(--accent); }
-.cmh-type { color:var(--green); }
-.cmh-module { color:var(--purple); }
-.cmh-const,.cmh-latex { color:var(--orange); }
-.cmh-local,.cmh-var { color:var(--gold); }
-.cmh-bind { color:var(--teal); }                 /* @bind control — matches the teal bind-cell edge */
-.cmh-str { color:#c3e88d; }                       /* string macro (colorant"…") */
-.cmh-keyword { color:var(--red); }
-.cmh-field,.cmh-path,.cmh-key,.cmh-kwarg,.cmh-text { color:var(--dim); }
-/* doc preview card floated beside the popup */
-.cmh-doc { position:fixed; z-index:121; width:360px; max-height:320px; overflow:auto;
-  background:var(--bg2); border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 24px #000a;
-  padding:8px 11px; font-size:.8rem; line-height:1.5; color:var(--text); display:none; }
-.cmh-doc-k { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.7rem; text-transform:uppercase;
-  letter-spacing:.04em; color:var(--dim); margin-bottom:5px; }
-.cmh-doc p:first-of-type { margin-top:0; }
-.cmh-doc pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); border-radius:5px; padding:6px 8px; }
-.cmh-doc code { font-family:'Cascadia Code',ui-monospace,monospace; }
-/* signature placeholders: ghosted call params you Tab through until filled */
-.cmh-ph { color:var(--dim); background:rgba(86,156,214,.12); border-radius:3px; }
+/* Completion popup (CM6 autocomplete) — match the dark theme. */
+.cm-tooltip.cm-tooltip-autocomplete { background:var(--bg2); border:1px solid var(--border); border-radius:7px;
+  box-shadow:0 8px 24px #000a; font-family:'Cascadia Code',ui-monospace,monospace; font-size:.82rem; z-index:120; }
+.cm-tooltip-autocomplete > ul { max-height:260px; }
+.cm-tooltip-autocomplete > ul > li { padding:3px 10px; color:var(--text); display:flex; align-items:center; gap:8px; }
+.cm-tooltip-autocomplete > ul > li[aria-selected] { background:var(--accent); color:#0d1120; }
+.cm-completionLabel { flex:1 1 auto; }
+.cm-completionMatchedText { text-decoration:none; font-weight:700; color:var(--accent); }
+.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionMatchedText { color:#0d1120; }
+.cm-completionDetail { flex:0 0 auto; font-size:.74em; color:var(--dim); font-style:normal; }
+.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionDetail { color:#0d1120; }
+/* completion info tooltip (docstring preview, when an option carries `info`) */
+.cm-tooltip.cm-completionInfo { background:var(--bg2); border:1px solid var(--border); border-radius:8px;
+  padding:8px 11px; font-size:.8rem; line-height:1.5; color:var(--text); max-width:380px; }
 /* History panel (time machine) */
 .histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
   border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
