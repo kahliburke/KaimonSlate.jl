@@ -123,4 +123,19 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         mh = markdown_html(raw"$$x = e^{ {{v}} }$$", [v3])
         @test occursin("e^{ 3 }", mh) && !occursin("ival", mh) && !occursin("xslateinterp", mh)
     end
+
+    @testset "cross-cell error frames: line + clickable cellref" begin
+        # A backtrace with frames from two cells (`cell:<id>:N`, the eval filename).
+        bt = "[1] f() @ Main cell:a:1\n[2] top-level scope @ cell:b:3"
+        eo = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", "err", bt, 0.0)
+        # _cell_error_line picks THIS cell's frame.
+        @test ReportRender._cell_error_line(eo, "b") == 3
+        @test ReportRender._cell_error_line(eo, "a") == 1
+        # _linkify_trace turns each frame into a cellref carrying its own cell id.
+        lt = ReportRender._linkify_trace(bt)
+        @test occursin("class=\"cellref\" data-cid=\"a\" data-line=\"1\"", lt)
+        @test occursin("class=\"cellref\" data-cid=\"b\" data-line=\"3\"", lt)
+        # legacy `string:N` still links (to this cell, no data-cid).
+        @test occursin("data-line=\"5\"", ReportRender._linkify_trace("oops @ string:5"))
+    end
 end

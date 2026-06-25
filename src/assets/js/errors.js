@@ -23,14 +23,17 @@ function jumpToCellLine(cellId, line1) {
 }
 window.jumpToCellLine = jumpToCellLine;
 
-// Click the error message (`.errjump`) or the backtrace's `string:N` (`.cellref`) → jump to the
-// cell's offending line. (Real `path.jl:line` links keep their VS Code `.srcref` behavior.)
+// Click the error message (`.errjump`) or a backtrace frame (`.cellref`) → jump to the offending
+// line. A `cell:<id>:N` frame carries its OWN `data-cid` → jump to THAT cell (cross-cell: a function
+// defined elsewhere); otherwise fall back to the cell containing the error. (Real `path.jl:line`
+// links keep their VS Code `.srcref` behavior.)
 document.addEventListener('click', e => {
   if (!e.target.closest) return;
   const ref = e.target.closest('.cellref, .errjump');
   if (!ref) return;
   e.preventDefault();
-  const cell = ref.closest('.cell');
   const line = parseInt(ref.dataset.line, 10);
-  if (cell && cell.dataset && cell.dataset.cid && line) jumpToCellLine(cell.dataset.cid, line);
+  const cell = ref.closest('.cell');
+  const cid = ref.dataset.cid || (cell && cell.dataset && cell.dataset.cid);
+  if (cid && line) jumpToCellLine(cid, line);
 });

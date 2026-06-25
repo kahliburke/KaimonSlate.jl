@@ -267,10 +267,12 @@ function _wire_to_output(wire)
                       collect(wire.trace), String(wire.stderr))
 end
 
-function eval_capture(k::GateKernel, report::Report, source::AbstractString)
+function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string")
     prepare!(k, report)
     wire = try
-        _tool(k, "__slate_eval", Dict("source" => String(source)))
+        # `filename` is a kwarg on the worker tool — GateTool strips optional POSITIONAL args, so it
+        # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
+        _tool(k, "__slate_eval", Dict("source" => String(source), "filename" => String(filename)))
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end

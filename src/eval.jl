@@ -82,8 +82,8 @@ end
 # Run a cell and capture its output. The capture machinery lives in `capture.jl`
 # (shared with the gate worker) and returns a wire-form NamedTuple; here we wrap
 # it into the engine's `CellOutput` (mapping mime tuples → `MimeChunk`).
-function _eval_capture(mod::Module, source::AbstractString)
-    r = run_capture(mod, source)
+function _eval_capture(mod::Module, source::AbstractString, filename::AbstractString = "string")
+    r = run_capture(mod, source, filename)
     chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in r.binds]
     return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
@@ -122,8 +122,8 @@ prepare!(::InProcessKernel, report::Report) = report_module(report)
 reset!(::InProcessKernel, report::Report) = reset_module!(report)
 
 "Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`."
-eval_capture(::InProcessKernel, report::Report, source::AbstractString) =
-    _eval_capture(report_module(report), source)
+eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string") =
+    _eval_capture(report_module(report), source, filename)
 
 """
     complete(kernel, report, code, pos) -> (; items, from, to)
@@ -234,7 +234,10 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     # `begin ` joins on ONE line (no leading newline) so parsed line numbers align 1:1 with the
     # cell's source lines — the trace inspector maps each recorded value back to its source line.
     src = (:trace in cell.flags) ? string("@trace begin ", cell.source, "\nend") : cell.source
-    cell.output = eval_capture(kernel, report, src)
+    # filename = `cell:<id>` → backtrace frames read `cell:<id>:N`, so an error in code defined in
+    # ANOTHER cell still names its source cell (cross-cell error jump). Trace wrap shifts no lines
+    # (`begin ` is on the cell's line 1), so the recorded line numbers stay 1:1 with the source.
+    cell.output = eval_capture(kernel, report, src, "cell:" * cell.id)
     cell.binds = cell.output.binds
     cell.state = cell.output.exception === nothing ? FRESH : ERRORED
     return cell

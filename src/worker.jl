@@ -55,8 +55,9 @@ const _NS = Ref{Module}(_new_ns())
 # Each returns a serialization-friendly value that rides back binary in the gate
 # response's `value` field.
 
-"Evaluate a cell's source in the warm namespace; return the wire-form capture."
-__slate_eval(source::String) = run_capture(_NS[], source)
+"Evaluate a cell's source in the warm namespace; return the wire-form capture. `filename` (a
+kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`."
+__slate_eval(source::String; filename::String = "string") = run_capture(_NS[], source, filename)
 
 "Apply a browser `@bind` value change: coerce against the widget, update the registry,
 and assign the global — via the namespace's injected `__slate_set_bind`. Returns the

@@ -25,9 +25,10 @@ const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
 # own world (a `using`/`struct`/macro def is visible to later statements in the same cell), and
 # `Core.eval` returns the last statement's value. `softscope` descends through the `@trace`
 # wrapper too, so a traced loop works without `local` exactly like an untraced one. Parse errors
-# surface as a catchable `ParseError`. `filename="string"` keeps error locations as `string:N`.
-_eval_cell_source(mod::Module, source::AbstractString) =
-    Core.eval(mod, REPL.softscope(Meta.parseall(String(source); filename = "string")))
+# surface as a catchable `ParseError`. `filename` becomes the backtrace location: the engine passes
+# `"cell:<id>"` so a frame reads `cell:<id>:N` (→ cross-cell error jump); defaults to `"string"`.
+_eval_cell_source(mod::Module, source::AbstractString, filename::AbstractString = "string") =
+    Core.eval(mod, REPL.softscope(Meta.parseall(String(source); filename = String(filename))))
 
 # Vector format captured *in addition* to a raster figure, for publication PDF export
 # (fonts embedded, scales crisply). The browser ignores this chunk; only the Typst
@@ -128,7 +129,7 @@ Returns the wire form:
   duration_ms::Float64)`. `binds` are the `@bind` controls declared this eval
 (`(name, kind, params, value)` each), for the host to render.
 """
-function run_capture(mod::Module, source::AbstractString)
+function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string")
     chunks = Tuple{String,Vector{UInt8}}[]
     capture = _CaptureDisplay(chunks)
     pushdisplay(capture)
@@ -160,7 +161,7 @@ function run_capture(mod::Module, source::AbstractString)
         # `ConsoleLogger(stderr)` — `stderr` is the redirected pipe now, so the macros land in
         # `ereader`. Non-colored (a pipe isn't a color tty), so no ANSI escapes reach the browser.
         Logging.with_logger(Logging.ConsoleLogger(stderr)) do
-            value = _eval_cell_source(mod, source)
+            value = _eval_cell_source(mod, source, filename)
         end
     catch e
         err = e

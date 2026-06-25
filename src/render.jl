@@ -91,13 +91,18 @@ function _render_exc_html(exc::AbstractString)
     return String(take!(io))
 end
 
-# The cell-relative source line an error occurred on — the first `string:N` (our eval `filename`)
-# in the backtrace (top frame) or the exception text. `nothing` when the error has no in-cell
-# location (e.g. it surfaced deep inside a package). Used to highlight + jump to the line.
-function _cell_error_line(o::CellOutput)
+# The source line in THIS cell where an error occurred — used to tint + jump to the offending line.
+# Frames now read `cell:<id>:N` (the eval `filename`), so we take the first frame belonging to THIS
+# cell (`cellid`); if the error is purely inside another cell's code the call site here still names
+# this cell. Falls back to any `cell:…:N` / legacy `string:N` when `cellid` is unknown. `nothing`
+# when the error has no in-cell location (surfaced deep inside a package).
+function _cell_error_line(o::CellOutput, cellid::AbstractString = "")
     for s in (o.backtrace, o.exception)
         s === nothing && continue
-        m = match(r"string:(\d+)", s)
+        for m in eachmatch(r"\bcell:([\w\-]+):(\d+)", s)
+            (isempty(cellid) || m.captures[1] == cellid) && return parse(Int, m.captures[2])
+        end
+        m = match(r"\bstring:(\d+)", s)        # legacy / interpolation eval filename
         m === nothing || return parse(Int, m.captures[1])
     end
     return nothing
@@ -115,6 +120,14 @@ function _linkify_trace(bt::AbstractString)
         isabspath(ap) && isfile(ap) || return m   # skip Base's relative ./foo.jl etc. — only real files
         "<a class=\"srcref\" href=\"vscode://file" * ap * ":" * line * "\" title=\"open in VS Code\">" * m * "</a>"
     end)
+    # `cell:<id>:N` → jump to line N IN CELL <id> (cross-cell: the frame names its own source cell).
+    s = replace(s, r"\bcell:([\w\-]+):(\d+)\b" => function (m)
+        p = match(r"\bcell:([\w\-]+):(\d+)\b", m)
+        cid, ln = String(p.captures[1]), String(p.captures[2])
+        "<a class=\"cellref\" data-cid=\"" * cid * "\" data-line=\"" * ln *
+            "\" title=\"jump to line " * ln * " in cell " * cid * "\">" * m * "</a>"
+    end)
+    # Legacy / interpolation `string:N` → jump to that line in THIS cell (no cell id in the frame).
     return replace(s, r"\bstring:(\d+)\b" => function (m)
         ln = String(match(r"\d+", m).match)
         "<a class=\"cellref\" data-line=\"" * ln * "\" title=\"jump to line " * ln * " in this cell\">" * m * "</a>"

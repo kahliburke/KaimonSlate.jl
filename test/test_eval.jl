@@ -79,6 +79,17 @@ end
         @test r.cells[2].output.value_repr == "2"
     end
 
+    @testset "backtraces name their source cell (cross-cell error jump)" begin
+        # `f` defined in cell `a`, called from cell `b`: b's backtrace must name BOTH cells, so a
+        # frame can jump to the cell that owns it. The eval filename is `cell:<id>`.
+        r = parse_report("#%% code id=a\nf() = error(\"kaboom\")\n\n#%% code id=b\nf()")
+        eval_report!(r)
+        bt = r.cells[2].output.backtrace
+        @test bt !== nothing
+        @test occursin("cell:a:", bt)                 # the frame where f errors (defining cell)
+        @test occursin("cell:b:", bt)                 # the call site (this cell)
+    end
+
     @testset "markdown cells are inert" begin
         r = parse_report("#%% md id=m\n# A heading")
         eval_report!(r)
@@ -175,9 +186,9 @@ end
         ReportEngine.reset!(::RecordingKernel, rep) = ReportEngine.reset_module!(rep)
         ReportEngine.assign_bind!(::RecordingKernel, rep, n::Symbol, v) =
             Base.invokelatest(getfield(ReportEngine.report_module(rep), :__slate_set_bind), n, v)
-        function ReportEngine.eval_capture(::RecordingKernel, rep, src::AbstractString)
+        function ReportEngine.eval_capture(::RecordingKernel, rep, src::AbstractString, filename::AbstractString = "string")
             push!(seen, src)
-            return ReportEngine.eval_capture(InProcessKernel(), rep, src)
+            return ReportEngine.eval_capture(InProcessKernel(), rep, src, filename)
         end
 
         r2 = parse_report("#%% code id=a\nx = 4\n\n#%% md id=m\n# hi\n\n#%% code id=b\nx + 1")

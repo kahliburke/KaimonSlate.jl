@@ -170,7 +170,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
     (:trace in c.flags) && (d["trace"] = true)           # @trace-wrapped on eval (collects trace rows)
     if c.output !== nothing && c.output.exception !== nothing
-        el = ReportRender._cell_error_line(c.output)     # offending cell line → editor highlight + jump
+        el = ReportRender._cell_error_line(c.output, c.id)   # offending cell line → editor highlight + jump
         el === nothing || (d["errorLine"] = el)
     end
     # The trace rows ({line,name,value}) for the inspector popup — the cell's normal output is shown
