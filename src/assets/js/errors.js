@@ -46,11 +46,11 @@ function jumpToCellLine(cellId, line1) {
 }
 window.jumpToCellLine = jumpToCellLine;
 
-// Click the `string:N` reference in a backtrace → jump to that line in the cell. (Real
-// `path.jl:line` links keep their VS Code `.srcref` behavior — they're a different element.)
+// Click the error message (`.errjump`) or the backtrace's `string:N` (`.cellref`) → jump to the
+// cell's offending line. (Real `path.jl:line` links keep their VS Code `.srcref` behavior.)
 document.addEventListener('click', e => {
   if (!e.target.closest) return;
-  const ref = e.target.closest('.cellref');
+  const ref = e.target.closest('.cellref, .errjump');
   if (!ref) return;
   e.preventDefault();
   const cell = ref.closest('.cell');

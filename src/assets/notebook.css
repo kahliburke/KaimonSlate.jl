@@ -139,6 +139,9 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 /* The `string:N` cell-line reference — itself the clickable jump. */
 .output .err .cellref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
 .output .err .cellref:hover { color:#fff; }
+/* The error message also jumps to the offending line; the type underlines on hover as the cue. */
+.output .err .err-msg.errjump { cursor:pointer; }
+.output .err .err-msg.errjump:hover .err-type { text-decoration:underline; text-underline-offset:2px; }
 /* The offending source line, tinted in CodeMirror while the cell is errored (+ a brief flash on jump). */
 .CodeMirror-linebackground.cm-errorline { background:rgba(229,117,117,.16); box-shadow:inset 3px 0 0 var(--red); }
 .CodeMirror-linebackground.cm-errorline-flash { background:rgba(255,215,0,.30); transition:background .9s ease-out; }

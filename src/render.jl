@@ -51,8 +51,16 @@ function output_html(cell::Cell)
     isempty(o.display) || print(io, "<div class=\"dispwrap\">", _render_chunks(o.display), "</div>")
     if o.exception !== nothing
         # The message is syntax-coloured (error type, `backticked` names, Suggestion line); the
-        # backtrace is dimmed and its `string:N` (the cell's own line) is itself the clickable jump.
-        print(io, "<div class=\"err\"><pre>", _render_exc_html(o.exception))
+        # backtrace is dimmed. BOTH the message (`errjump`) and the backtrace's `string:N`
+        # (`cellref`) jump to the cell's offending line on click (errors.js).
+        el = _cell_error_line(o)
+        print(io, "<div class=\"err\"><pre>")
+        if el === nothing
+            print(io, _render_exc_html(o.exception))
+        else
+            print(io, "<span class=\"err-msg errjump\" data-line=\"", el, "\" title=\"jump to line ", el, "\">",
+                  _render_exc_html(o.exception), "</span>")
+        end
         (o.backtrace === nothing || isempty(o.backtrace)) ||
             print(io, "<span class=\"err-bt\">\n", _linkify_trace(o.backtrace), "</span>")
         print(io, "</pre></div>")
