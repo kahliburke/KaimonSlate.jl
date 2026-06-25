@@ -270,6 +270,30 @@ function _wireCompletion(ed) {
   });
   return { complete, keys: { 'Tab': tabComplete, 'Shift-Tab': shiftTab } };
 }
+// Toggle Julia line comments (#) over the selected lines — bound to Cmd-/ and Ctrl-/. Comments at
+// each line's own indent; uncomments only when EVERY non-blank line in the range is already a
+// comment (so a partly-commented block comments the rest rather than toggling inconsistently).
+function _toggleComment(cm) {
+  const start = cm.getCursor('from').line, end = cm.getCursor('to').line;
+  let anyContent = false, allCommented = true;
+  for (let l = start; l <= end; l++) {
+    const s = cm.getLine(l); if (s.trim() === '') continue;
+    anyContent = true; if (!/^\s*#/.test(s)) allCommented = false;
+  }
+  if (!anyContent) return;
+  cm.operation(() => {
+    for (let l = start; l <= end; l++) {
+      const s = cm.getLine(l); if (s.trim() === '') continue;
+      if (allCommented) {
+        const m = s.match(/^(\s*)#\s?/);
+        if (m) cm.replaceRange(m[1], { line: l, ch: 0 }, { line: l, ch: m[0].length });
+      } else {
+        cm.replaceRange('# ', { line: l, ch: s.match(/^\s*/)[0].length });
+      }
+    }
+  });
+}
+
 function wireCodeEditor(ed, c) {
   if (ed.getValue() !== c.source) ed.setValue(c.source);
   let primed = false;
@@ -280,6 +304,7 @@ function wireCodeEditor(ed, c) {
     'Shift-Enter': () => runCell(c.id),
     'Esc': () => { if (ed._ph) _phEnd(ed); else ed.getInputField().blur(); },
     'Ctrl-Space': complete, 'Shift-Cmd-Enter': () => runAndAddBelow(c.id), 'Shift-Ctrl-Enter': () => runAndAddBelow(c.id),
+    'Cmd-/': _toggleComment, 'Ctrl-/': _toggleComment,
     'Shift-Ctrl--': () => splitCell(c.id, ed), 'Shift-Cmd--': () => splitCell(c.id, ed) }));
   ed.on('focus', () => setEditing(c.id, true));    // edit-mode indicator
   ed.on('blur', () => setEditing(c.id, false));
@@ -319,7 +344,7 @@ function editSource(id, mode) {
     // (markdown source doesn't need it). Fixes: a bind cell had no completion after eval.
     const km = { 'Shift-Enter': () => commitSource(id), 'Esc': () => { if (cm._ph) _phEnd(cm); else cancelSource(id); },
                  'Shift-Cmd-Enter': () => commitAndAddBelow(id), 'Shift-Ctrl-Enter': () => commitAndAddBelow(id) };
-    if (mode !== 'markdown') { const { complete, keys } = _wireCompletion(cm); Object.assign(km, keys, { 'Ctrl-Space': complete }); }
+    if (mode !== 'markdown') { const { complete, keys } = _wireCompletion(cm); Object.assign(km, keys, { 'Ctrl-Space': complete, 'Cmd-/': _toggleComment, 'Ctrl-/': _toggleComment }); }
     cm.setOption('extraKeys', km);
     cm.on('focus', () => setEditing(id, true));
     cm.on('blur', () => setEditing(id, false));

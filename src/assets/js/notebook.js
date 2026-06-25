@@ -88,6 +88,7 @@ function Editor({ cell }) {
     if (stale) stale.remove();
     const ed = window.CodeMirror(ref.current, {
       value: cell.source, mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity,
+      indentUnit: 4, tabSize: 4, indentWithTabs: false,   // Julia = 4 spaces; keep Return (indentUnit) and Tab (tabSize) in step
     });
     window.wireCodeEditor(ed, cell);
     window.editors[cell.id] = ed;
