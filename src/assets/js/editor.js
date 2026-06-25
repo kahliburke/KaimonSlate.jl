@@ -112,6 +112,8 @@
           ...completionKeymap,                  // popup nav/close (Escape) takes precedence over cell keys
           ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below
           { key: 'Escape', run: (v) => { v.contentDOM.blur(); return true; } },   // exit edit → command mode
+          // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
+          { key: 'Mod-Shift-k', run: () => { window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
           { key: 'Mod-/', run: toggleComment }, { key: 'Ctrl-/', run: toggleComment },
           indentWithTab, ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap,
         ]),

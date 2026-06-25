@@ -253,6 +253,14 @@ function _focusedEditorCM() {                       // whichever cell editor (Ed
   for (const id in editors) { const v = editors[id]; if (v && v.hasFocus) return v; }
   return null;
 }
+// ⌘⇧K: help for the symbol under the cursor (refocus the cell on close), else toggle the dock.
+// Exposed so the CM6 editor keymap can bind it — CM6's defaultKeymap otherwise eats ⌘⇧K (deleteLine).
+function openDocsAtCursor() {
+  const cm = _focusedEditorCM(), sym = cm ? _symbolAtCursor(cm) : '';
+  if (sym) { const pos = cm.state.selection.main.head; openDocsFor(sym); _docReturn = { cm, pos }; }
+  else toggleDocs();
+}
+window.openDocsAtCursor = openDocsAtCursor;
 // Where to send focus back when the help pane closes (set when ⌘⇧K is fired from a cell).
 let _docReturn = null;
 // Open the help dock searching for `name` (semantic docsearch + live `?name` lookup, pinned).
@@ -487,11 +495,7 @@ document.addEventListener('keydown', e => {
   if (mod && (e.key === 'k' || e.key === 'K')) {                          // ⌘K palette · ⌘⇧K docs
     e.preventDefault();
     if (!e.shiftKey) openPalette();
-    else {                                                               // ⌘⇧K on a symbol → its help, refocus on close
-      const cm = _focusedEditorCM(), sym = cm ? _symbolAtCursor(cm) : '';
-      if (sym) { const pos = cm.state.selection.main.head; openDocsFor(sym); _docReturn = { cm, pos }; }
-      else toggleDocs();
-    }
+    else openDocsAtCursor();                                              // ⌘⇧K on a symbol → its help
   }
   else if (mod && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAll(); }         // ⌘↵  run stale (⌘⇧↵ is run+add-below, handled elsewhere)
   else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
