@@ -50,11 +50,29 @@ function output_html(cell::Cell)
     end
     isempty(o.display) || print(io, "<div class=\"dispwrap\">", _render_chunks(o.display), "</div>")
     if o.exception !== nothing
-        print(io, "<div class=\"err\"><pre>", _esc(o.exception))
+        el = _cell_error_line(o)
+        # `errjumpable` + `data-errline` let the browser tint the offending line in the editor and
+        # scroll/flash to it on click (errors.js). `el` is the cell's own source line (a `string:N`).
+        print(io, el === nothing ? "<div class=\"err\">" : "<div class=\"err errjumpable\" data-errline=\"$(el)\">")
+        print(io, "<pre>", _esc(o.exception))
         (o.backtrace === nothing || isempty(o.backtrace)) || print(io, "\n", _linkify_trace(o.backtrace))
-        print(io, "</pre></div>")
+        print(io, "</pre>")
+        el === nothing || print(io, "<div class=\"errjump\">↦ jump to line ", el, "</div>")
+        print(io, "</div>")
     end
     return String(take!(io))
+end
+
+# The cell-relative source line an error occurred on — the first `string:N` (our eval `filename`)
+# in the backtrace (top frame) or the exception text. `nothing` when the error has no in-cell
+# location (e.g. it surfaced deep inside a package). Used to highlight + jump to the line.
+function _cell_error_line(o::CellOutput)
+    for s in (o.backtrace, o.exception)
+        s === nothing && continue
+        m = match(r"string:(\d+)", s)
+        m === nothing || return parse(Int, m.captures[1])
+    end
+    return nothing
 end
 
 # Make `path.jl:line` references in a backtrace clickable → open in VS Code. Escapes the text,

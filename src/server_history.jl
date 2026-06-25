@@ -169,6 +169,10 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
     (:trace in c.flags) && (d["trace"] = true)           # @trace-wrapped on eval (collects trace rows)
+    if c.output !== nothing && c.output.exception !== nothing
+        el = ReportRender._cell_error_line(c.output)     # offending cell line → editor highlight + jump
+        el === nothing || (d["errorLine"] = el)
+    end
     # The trace rows ({line,name,value}) for the inspector popup — the cell's normal output is shown
     # in place; this rides alongside for the modal. Present only when the cell ran traced.
     (c.output === nothing || isempty(c.output.trace)) || (d["traceData"] = c.output.trace)
