@@ -242,6 +242,13 @@ function mountControls(c) {
 // code editor AND the toggle-source editor used by @bind cells — so a bind cell's `</>` source
 // editor completes too (it lost completion after eval otherwise). Wires the as-you-type popup on
 // `ed` and returns the completion extraKeys for the caller to merge with its own (Enter/Esc).
+// Complete Julia keywords — typing one of these in full is a finished token, not a prefix to
+// complete (e.g. `end` closing a block), so the as-you-type popup is suppressed on an exact match.
+const _JL_KEYWORDS = new Set(['baremodule', 'begin', 'break', 'catch', 'const', 'continue', 'do',
+  'else', 'elseif', 'end', 'export', 'false', 'finally', 'for', 'function', 'global', 'if', 'import',
+  'in', 'isa', 'let', 'local', 'macro', 'module', 'mutable', 'primitive', 'quote', 'return', 'struct',
+  'true', 'try', 'type', 'using', 'where', 'while', 'abstract']);
+
 function _wireCompletion(ed) {
   const complete = cm => cm.showHint({ hint: juliaHint, completeSingle: false });
   const tabComplete = cm => {                  // cycle signature params · complete (word/dot, or arg position) · else indent
@@ -253,13 +260,17 @@ function _wireCompletion(ed) {
     else return CodeMirror.Pass;
   };
   // As-you-type: open the popup once ≥2 identifier chars are typed (it then self-updates).
-  // Skip inside strings/comments. Field access (`.`) fires immediately, below.
+  // Skip inside strings/comments, and skip when the word just typed is a complete Julia KEYWORD
+  // (`end`, `function`, `for`, …) — closing a block shouldn't pop a completion list.
   const autoComplete = debounce(cm => {
     if (cm.state.completionActive || cm._ph) return;   // not while filling signature placeholders
     if (!cm.hasFocus()) return;                        // blurred during the debounce — don't pop a stranded widget
     const cur = cm.getCursor(), tok = cm.getTokenAt(cur);
     if (tok.type === 'comment' || tok.type === 'string') return;
-    if (!/[A-Za-z_][\w!]$/.test(cm.getRange({ line: cur.line, ch: 0 }, cur))) return;
+    const before = cm.getRange({ line: cur.line, ch: 0 }, cur);
+    if (!/[A-Za-z_][\w!]$/.test(before)) return;
+    const word = (before.match(/[A-Za-z_][\w!]*$/) || [''])[0];
+    if (_JL_KEYWORDS.has(word)) return;                // a finished keyword → no popup
     complete(cm);
   }, 140);
   const shiftTab = cm => { if (cm._ph) { _phGoto(cm, cm._ph.idx - 1, -1); return; } return CodeMirror.Pass; };
