@@ -4,11 +4,13 @@
 import { EditorView, keymap, drawSelection, highlightActiveLine, highlightSpecialChars,
          crosshairCursor, Decoration, ViewPlugin } from "@codemirror/view";
 import { EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder } from "@codemirror/state";
-import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess,
+         toggleComment } from "@codemirror/commands";
 import { LRLanguage, LanguageSupport, syntaxHighlighting, HighlightStyle, indentNodeProp,
-         foldNodeProp, foldInside, indentUnit, bracketMatching } from "@codemirror/language";
+         foldNodeProp, foldInside, indentUnit, bracketMatching, indentOnInput, syntaxTree } from "@codemirror/language";
 import { styleTags, tags as t } from "@lezer/highlight";
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionStatus } from "@codemirror/autocomplete";
+import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
+         completionStatus, snippet, startCompletion } from "@codemirror/autocomplete";
 import { parser as juliaParser } from "@plutojl/lezer-julia";
 
 // Map @plutojl/lezer-julia node names → highlight tags. Keyword nodes are the bare literals the
@@ -69,7 +71,8 @@ const juliaHighlightStyle = HighlightStyle.define([
 export {
   EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder,
   keymap, drawSelection, highlightActiveLine, highlightSpecialChars, crosshairCursor, Decoration, ViewPlugin,
-  defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess, indentUnit, bracketMatching,
+  defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess, toggleComment,
+  indentUnit, bracketMatching, indentOnInput, syntaxTree,
   syntaxHighlighting, julia, juliaLanguage, juliaHighlightStyle,
-  autocompletion, closeBrackets, closeBracketsKeymap, completionStatus,
+  autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet, startCompletion,
 };

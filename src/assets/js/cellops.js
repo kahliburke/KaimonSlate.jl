@@ -1,9 +1,8 @@
 async function runCell(id) {
   if (_hydrating) return;                      // env still reconstructing — preview is read-only
-  const ed = editors[id];
   const before = _cellById(id);                // shape BEFORE the run (from the live state)
   setState(id, 'running');
-  const state = await api('POST', '/api/cell/' + id, { source: ed ? ed.getValue() : '' });
+  const state = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || '') });
   const after = (state.cells || []).find(c => c.id === id);
   // A code cell that gains (or loses) @bind widgets — or flips kind — changes its DOM
   // *structure*: the in-place patch (updateStates) can't inject the widget rows, so the
@@ -56,8 +55,9 @@ document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') 
 document.addEventListener('mousedown', e => { if (!e.target.closest('#ctlpop') && !e.target.closest('.autoctl')) hideControlPicker(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') hideControlPicker(); });
 // Split a code cell at the editor cursor into two cells.
-async function splitCell(id, cm) {
-  const idx = cm.indexFromPos(cm.getCursor()), val = cm.getValue();
+async function splitCell(id, view) {
+  const v = view || editors[id]; if (!v) return;
+  const idx = v.state.selection.main.head, val = v.state.doc.toString();
   renderAll(await api('POST', '/api/cell-split/' + id, { before: val.slice(0, idx), after: val.slice(idx) }));
 }
 // Merge a cell with the one below it (same kind only); sends current editor text.
@@ -66,8 +66,8 @@ async function mergeBelow(id) {
   if (i < 0 || i >= ids.length - 1) return;
   const a = _cellById(id), b = _cellById(ids[i + 1]);
   if (!a || !b || a.kind !== b.kind || hasBinds(a) || hasBinds(b)) return;
-  const sa = editors[id] ? editors[id].getValue() : (srcMap[id] || '');
-  const sb = editors[ids[i + 1]] ? editors[ids[i + 1]].getValue() : (srcMap[ids[i + 1]] || '');
+  const sa = editors[id] ? edText(id) : (srcMap[id] || '');
+  const sb = editors[ids[i + 1]] ? edText(ids[i + 1]) : (srcMap[ids[i + 1]] || '');
   renderAll(await api('POST', '/api/cell-merge/' + id, { source: sa.replace(/\s+$/, '') + '\n' + sb.replace(/^\s+/, '') }));
   selectCell(id, true);
 }
@@ -163,8 +163,8 @@ async function toggleType(id, kind)  {
   // Carry the editor's CURRENT text along with the kind change, so converting (e.g. code→md after
   // Esc, which keeps the text in the editor but never commits it) preserves unsaved edits. Sent in
   // one request so the server converts WITHOUT evaluating — pressing m/y must not run the code yet.
-  const cm = window.editors[id], body = { kind };
-  if (cm && cm.getValue) body.source = cm.getValue();
+  const body = { kind };
+  if (window.editors[id]) body.source = edText(id);
   renderAll(await api('POST', '/api/cell-type/' + id, body));
 }
 async function undoNb() { const s = await api('POST', '/api/undo'); renderAll(s); if (s && s.undid) toast('Undid ' + s.undid, 2000); }
@@ -180,7 +180,7 @@ function _readClip() { try { return JSON.parse(localStorage.getItem(CLIP_KEY) ||
 function _cellsData(ids) {
   const want = new Set(ids);                           // preserve notebook order, take live editor text
   return ((nbState && nbState.cells) || []).filter(c => want.has(c.id)).map(c => ({
-    kind: c.kind, source: editors[c.id] ? editors[c.id].getValue() : (srcMap[c.id] || c.source || '')
+    kind: c.kind, source: editors[c.id] ? edText(c.id) : (srcMap[c.id] || c.source || '')
   }));
 }
 function copyCells(silent) {

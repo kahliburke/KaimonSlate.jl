@@ -19,10 +19,9 @@ const BIND_SNIPPETS = [
   ['Button',      '@bind go Button("Run")'],
 ];
 async function insertBind(snippet) {
-  const ed = selectedId && editors[selectedId];
-  if (ed) { const cur = ed.getValue(); ed.replaceSelection((cur.trim() ? '\n' : '') + snippet); ed.focus(); return; }
+  if (selectedId && editors[selectedId]) { const cur = edText(selectedId); edInsert(selectedId, (cur.trim() ? '\n' : '') + snippet); return; }
   const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
-  if (id && editors[id]) { editors[id].setValue(snippet); editors[id].focus(); }
+  if (id && editors[id]) { edSetText(id, snippet); edFocus(id); }
 }
 // ── Recipes ───────────────────────────────────────────────────────────────────
 // Starter code for common tasks (mostly Makie plots, dark theme). Each drops into a
@@ -112,7 +111,7 @@ echart(
 ];
 async function insertRecipe(code) {
   const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
-  if (id && editors[id]) { editors[id].setValue(code); editors[id].focus(); }
+  if (id && editors[id]) { edSetText(id, code); edFocus(id); }
 }
 
 // ── Command palette (⌘K) ──────────────────────────────────────────────────────
@@ -143,7 +142,7 @@ function paletteCommands() {
     { label: 'Convert selected to markdown', key: 'm', run: () => { if (sel) toggleType(sel, 'md'); } },
     { label: 'Convert selected to code', key: 'y', run: () => { if (sel) toggleType(sel, 'code'); } },
     { label: 'Merge selected cell with below', key: '⇧M', run: () => { if (sel) mergeBelow(sel); } },
-    { label: 'Split selected cell at cursor', run: () => { if (sel && editors[sel]) splitCell(sel, editors[sel]); } },
+    { label: 'Split selected cell at cursor', run: () => { if (sel && editors[sel]) splitCell(sel); } },
     { label: 'Rebuild (fresh namespace)', run: resetAll },
     { label: 'Restart worker', run: restartWorker },
     { label: 'Reload from disk', run: reload },
@@ -232,7 +231,7 @@ function minimizeDocs() {                           // collapse to the launcher 
   document.getElementById('doclauncher').classList.remove('hidden');
   _saveDocs();
   const r = _docReturn; _docReturn = null;         // return focus to the cell ⌘⇧K was fired from
-  if (r && r.cm) { r.cm.focus(); try { r.cm.setCursor(r.pos); } catch (_) {} }
+  if (r && r.cm) { try { r.cm.focus(); r.cm.dispatch({ selection: { anchor: r.pos } }); } catch (_) {} }
 }
 const closeDocs = minimizeDocs;                     // "close" now means minimize
 function toggleDocs() { _docMin ? openDocs() : minimizeDocs(); }   // ⌘⇧K — open ↔ minimize
@@ -240,17 +239,18 @@ function toggleDocs() { _docMin ? openDocs() : minimizeDocs(); }   // ⌘⇧K �
 // The dotted identifier the cursor sits on or beside, in a focused cell editor — powers
 // ⌘⇧K "help on this symbol". Expands over `[\w!.]` both ways, then trims stray dots
 // (so `a.b.` → `a.b`, and a cursor just past `foo` still resolves `foo`).
-function _symbolAtCursor(cm) {
-  const cur = cm.getCursor(), line = cm.getLine(cur.line) || '';
+function _symbolAtCursor(view) {                    // CM6 EditorView
+  const head = view.state.selection.main.head, line = view.state.doc.lineAt(head);
+  const text = line.text, ch = head - line.from;
   const ident = c => c && /[A-Za-z0-9_!.]/.test(c);
-  let a = cur.ch, b = cur.ch;
-  while (a > 0 && ident(line[a - 1])) a--;
-  while (b < line.length && ident(line[b])) b++;
-  return line.slice(a, b).replace(/^\.+|\.+$/g, '');
+  let a = ch, b = ch;
+  while (a > 0 && ident(text[a - 1])) a--;
+  while (b < text.length && ident(text[b])) b++;
+  return text.slice(a, b).replace(/^\.+|\.+$/g, '');
 }
-function _focusedEditorCM() {                       // whichever cell editor currently has focus, else null
+function _focusedEditorCM() {                       // whichever cell editor (EditorView) has focus, else null
   if (typeof editors === 'undefined') return null;
-  for (const id in editors) { const cm = editors[id]; if (cm && cm.hasFocus && cm.hasFocus()) return cm; }
+  for (const id in editors) { const v = editors[id]; if (v && v.hasFocus) return v; }
   return null;
 }
 // Where to send focus back when the help pane closes (set when ⌘⇧K is fired from a cell).
@@ -443,7 +443,7 @@ async function helpLookup(name) {
 function _docPick() {
   const v = _view(), r = v && (v.rec || (v.results && v.results[v.sel])); if (!r) return;
   const ed = editors[selectedId];
-  if (ed) { ed.replaceSelection(r.name.replace(/^.*\./, '')); ed.focus(); minimizeDocs(); }
+  if (ed) { edInsert(selectedId, r.name.replace(/^.*\./, '')); minimizeDocs(); }
   else if (navigator.clipboard) { navigator.clipboard.writeText((r.module ? r.module + '.' : '') + r.name); }
 }
 // List: click selects; double-click inserts.
@@ -489,7 +489,7 @@ document.addEventListener('keydown', e => {
     if (!e.shiftKey) openPalette();
     else {                                                               // ⌘⇧K on a symbol → its help, refocus on close
       const cm = _focusedEditorCM(), sym = cm ? _symbolAtCursor(cm) : '';
-      if (sym) { const pos = cm.getCursor(); openDocsFor(sym); _docReturn = { cm, pos }; }
+      if (sym) { const pos = cm.state.selection.main.head; openDocsFor(sym); _docReturn = { cm, pos }; }
       else toggleDocs();
     }
   }

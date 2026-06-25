@@ -36,8 +36,8 @@ function backupEdits() {
   if (!_reconcileRan) return;                 // don't manage the backup until reconcile has read it
   const b = {}, prev = _readBackup();
   for (const id of Object.keys(window.editors)) {
-    const cm = window.editors[id]; if (!cm || !cm.getValue) continue;
-    const mine = cm.getValue(), base = window.srcMap[id] || '';
+    if (!window.editors[id]) continue;
+    const mine = window.edText(id), base = window.srcMap[id] || '';
     if (mine !== base) { b[id] = { mine, base }; _pendingIds.delete(id); }      // live edit → capture; no longer just pending
   }
   for (const id of _pendingIds) if (!b[id] && prev[id]) b[id] = prev[id];       // preserve un-restored pending entries
@@ -61,8 +61,8 @@ const _cellOf = id => ((window.__slateState && window.__slateState.cells) || [])
 // Load `mine` into a cell's editor as an unsaved edit — non-destructive, never runs the cell.
 function _applyRestore(id, mine) {
   const cm = window.editors[id];
-  if (cm && cm.getValue) {
-    if (cm.getValue() !== mine) cm.setValue(mine);
+  if (cm) {
+    window.edSetText(id, mine);
     window.setState && window.setState(id, 'edited');
     delete window._pendingRestore[id];
     return true;
@@ -116,8 +116,7 @@ const _navTo = id => id && window.selectCell && window.selectCell(id, true);
 function _discardRestored(ids) {
   const b = _readBackup();
   ids.forEach(id => {
-    const cm = window.editors[id];
-    if (cm && cm.getValue) { cm.setValue(window.srcMap[id] || ''); window.setState && window.setState(id, 'fresh'); }
+    if (window.editors[id]) { window.edSetText(id, window.srcMap[id] || ''); window.setState && window.setState(id, 'fresh'); }
     delete b[id]; delete window._pendingRestore[id]; _pendingIds.delete(id);
   });
   _writeBackup(b);

@@ -22,7 +22,7 @@ function _cleanCellHtml(el) {
   // Drop per-cell chrome that's identical on every cell — pure noise for an inspect: the header
   // button row + state badge, and empty control-strip scaffolding.
   clone.querySelectorAll('.cellhead, .controls.empty, .coldrop').forEach(n => n.remove());
-  clone.querySelectorAll('.CodeMirror').forEach(n => n.replaceWith(document.createComment(' CodeMirror editor ')));
+  clone.querySelectorAll('.cm-editor').forEach(n => n.replaceWith(document.createComment(' CodeMirror editor ')));
   clone.querySelectorAll('[src^="data:"]').forEach(n => n.setAttribute('src', '(inline data omitted)'));
   let html = clone.outerHTML || '';
   if (html.length > 20000) html = html.slice(0, 20000) + '\n<!-- …truncated… -->';

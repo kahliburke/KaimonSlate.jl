@@ -84,22 +84,28 @@ function _animateCollapse(el, collapse) {
 function Editor({ cell }) {
   const ref = useRef(null);
   useEffect(() => {
-    const stale = ref.current.querySelector('.CodeMirror');   // guard: a lingering editor in a reused host → clear it first, so we never stack two (content shown twice)
-    if (stale) stale.remove();
-    const ed = window.CodeMirror(ref.current, {
-      value: cell.source, mode: 'julia', theme: 'material-darker', lineNumbers: false, viewportMargin: Infinity,
-      indentUnit: 4, tabSize: 4, indentWithTabs: false,   // Julia = 4 spaces; keep Return (indentUnit) and Tab (tabSize) in step
+    ref.current.querySelector('.cm-editor')?.remove();        // guard against a stacked editor in a reused host
+    let primed = false;
+    const view = window.mkEditor(ref.current, {
+      doc: cell.source, cellId: cell.id,
+      onDoc: () => { if (primed && window.edText(cell.id) !== cell.source) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); } },
+      onFocus: () => window.setEditing(cell.id, true),
+      onBlur: () => window.setEditing(cell.id, false),
+      keys: [
+        { key: 'Shift-Enter', run: () => window.runCell(cell.id) },
+        { key: 'Shift-Mod-Enter', run: () => window.runAndAddBelow(cell.id) },
+        { key: 'Shift-Ctrl-Enter', run: () => window.runAndAddBelow(cell.id) },
+        { key: 'Shift-Mod--', run: () => window.splitCell(cell.id, view) },
+        { key: 'Shift-Ctrl--', run: () => window.splitCell(cell.id, view) },
+      ],
     });
-    window.wireCodeEditor(ed, cell);
-    window.editors[cell.id] = ed;
-    // Apply a pending unsaved-edit restore (see restore.js): a prior session's in-flight text,
-    // loaded as an edit, never run. Done here so it lands even though the editor mounts after
-    // reconcile ran. The restore precedes `primed`, so it won't double-fire the change handler.
+    setTimeout(() => primed = true, 0);
+    // Apply a pending unsaved-edit restore (restore.js): a prior session's in-flight text.
     const pend = window._pendingRestore && window._pendingRestore[cell.id];
-    if (pend != null) { if (ed.getValue() !== pend) ed.setValue(pend); window.setState && window.setState(cell.id, 'edited'); delete window._pendingRestore[cell.id]; }
+    if (pend != null) { window.edSetText(cell.id, pend); window.setState && window.setState(cell.id, 'edited'); delete window._pendingRestore[cell.id]; }
     return () => {
-      if (window.editors[cell.id] === ed) delete window.editors[cell.id];
-      try { ed.getWrapperElement().remove(); } catch (_) {}   // drop the CM DOM so a remount into a reused host can't stack a 2nd editor
+      if (window.editors[cell.id] === view) delete window.editors[cell.id];
+      try { view.destroy(); } catch (_) {}
     };
   }, []);
   return html`<div ref=${ref}></div>`;
@@ -115,8 +121,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   // so an unsaved edit doesn't silently read as `fresh`. Covers code cells and OPEN markdown/@bind
   // source editors; `running` still wins (it's executing).
   if (state !== 'running') {
-    const _ed = window.editors[c.id];
-    if (_ed && _ed.getValue && _ed.getValue() !== c.source) state = 'edited';
+    if (window.editors[c.id] && window.edText(c.id) !== c.source) state = 'edited';
   }
 
   // Dep-focus: cells outside the focused cone collapse out of the flow (and expand back) rather
@@ -149,10 +154,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // never clobber in-flight work; a true divergence stays `edited` for the reconcile flow.
     const _prevSrc = window.srcMap[c.id];
     window.srcMap[c.id] = c.source;
-    const _ed = window.editors[c.id];
-    if (_ed && _ed.getValue && c.source !== _prevSrc) {
-      const _mine = _ed.getValue();
-      if (_mine === _prevSrc) _ed.setValue(c.source);                                  // no local edits → fast-forward to the new source
+    if (window.editors[c.id] && c.source !== _prevSrc) {
+      const _mine = window.edText(c.id);
+      if (_mine === _prevSrc) window.edSetText(c.id, c.source);                         // no local edits → fast-forward to the new source
       else if (_mine !== c.source && window.slateLiveConflict) window.slateLiveConflict(c.id, _mine, c.source);   // both changed → reconcile modal
     }
     const badge = el.querySelector('.badge');     // header renders c.state; reflect the live state
@@ -192,7 +196,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
     const out = el.querySelector('.output');
     if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typeset(out); }
-    window._applyErrorLine && window._applyErrorLine(c, window.editors[c.id]);   // tint the offending line
+    window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
     // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook
@@ -204,7 +208,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
     const visible = !window.hasBinds(c) && !c.collapsed && !c.codeHidden;
     if (visible && !last.current.vis) {
-      const ed = window.editors[c.id]; ed && ed.refresh();
+      const ed = window.editors[c.id]; ed && ed.requestMeasure && ed.requestMeasure();
       (window.charts[c.id] || []).forEach(i => { try { i.resize(); } catch (_) {} });   // chart sized 0 while hidden → fix on reveal
     }
     last.current.vis = visible;

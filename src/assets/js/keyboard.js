@@ -47,7 +47,7 @@ function enterEdit(id) {
 document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey) return;
   if (document.getElementById('modalbg').classList.contains('show')) return;
-  const inField = e.target.closest('.CodeMirror') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  const inField = e.target.closest('.cm-editor') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (inField) return;                                  // edit mode / typing → leave keys alone
   const ids = cellIds(); if (!ids.length) return;
   if (!selectedId || !ids.includes(selectedId)) {
@@ -88,7 +88,7 @@ document.addEventListener('keydown', e => {
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter' || !e.shiftKey || e.altKey) return;
   if (document.getElementById('modalbg').classList.contains('show')) return;
-  const inField = e.target.closest('.CodeMirror') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  const inField = e.target.closest('.cm-editor') || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (inField) return;
   const ids = cellIds(); if (!selectedId || !ids.includes(selectedId)) return;
   e.preventDefault();

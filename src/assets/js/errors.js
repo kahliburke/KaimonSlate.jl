@@ -4,45 +4,22 @@
 // to and flashes it. Plain code cells have an always-on editor (window.editors[id]); @bind cells
 // don't, so for those a click just scrolls to the cell.
 
-function _clearErrorLine(ed) {
-  if (ed && ed._errLine != null) {
-    try { ed.removeLineClass(ed._errLine, 'background', 'cm-errorline'); } catch (_) {}
-    ed._errLine = null;
-  }
-}
-
-// Called from the cell render effect (notebook.js) after the output swaps in. Idempotent: it only
-// touches CodeMirror when the highlighted line actually changes.
-function _applyErrorLine(c, ed) {
-  if (!ed || !ed.addLineClass) return;
-  // Don't mislead while the user is editing — the line numbers may no longer match the error.
-  const ln = (c && c.errorLine && c.state !== 'edited') ? c.errorLine - 1 : null;
-  if (ed._errLine === ln) return;
-  _clearErrorLine(ed);
-  if (ln != null && ln >= 0 && ed.lineCount && ln < ed.lineCount()) {
-    try { ed.addLineClass(ln, 'background', 'cm-errorline'); ed._errLine = ln; } catch (_) {}
-  }
+// Called from the cell render effect (notebook.js) after output swaps in. Tints the offending line
+// (CM6 line decoration via markErrorLine/clearErrorLine, editor.js). Suppressed while editing — the
+// line numbers may no longer match the error.
+function _applyErrorLine(c) {
+  if (!c || !window.editors[c.id]) return;
+  (c.errorLine && c.state !== 'edited') ? window.markErrorLine(c.id, c.errorLine) : window.clearErrorLine(c.id);
 }
 window._applyErrorLine = _applyErrorLine;
 
-// Put the cell into edit mode with the cursor on `line1` (1-based) and flash it. Selects the cell,
-// enters edit (focuses the code editor, or opens the source editor for a @bind/md cell), then —
-// after that editor is mounted/refreshed — places the cursor on the line and scrolls it into view.
+// Put the cell into edit mode with the cursor on `line1` (1-based) and flash it: select the cell,
+// enter edit (focuses the code editor / opens the source editor for a @bind/md cell), then flash
+// the line in the now-mounted editor (editor.js::flashLine focuses + scrolls + flashes).
 function jumpToCellLine(cellId, line1) {
   if (typeof selectCell === 'function') selectCell(cellId, true);
-  if (typeof enterEdit === 'function') enterEdit(cellId);     // focus code editor / open source editor
-  const ln = line1 - 1;
-  requestAnimationFrame(() => {
-    const ed = window.editors[cellId];
-    if (!ed || !ed.setCursor || !ed.lineCount || ln < 0 || ln >= ed.lineCount()) return;
-    try {
-      ed.focus();
-      ed.setCursor({ line: ln, ch: 0 });
-      ed.scrollIntoView({ line: ln, ch: 0 }, 80);
-      ed.addLineClass(ln, 'background', 'cm-errorline-flash');
-      setTimeout(() => { try { ed.removeLineClass(ln, 'background', 'cm-errorline-flash'); } catch (_) {} }, 1000);
-    } catch (_) {}
-  });
+  if (typeof enterEdit === 'function') enterEdit(cellId);
+  requestAnimationFrame(() => { if (window.editors[cellId]) window.flashLine(cellId, line1); });
 }
 window.jumpToCellLine = jumpToCellLine;
 

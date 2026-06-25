@@ -333,8 +333,7 @@ function toggleSource(id, mode) {
   const cell = document.getElementById('cell-' + id); if (!cell) return;
   const sed = cell.querySelector('.srcedit');
   if (sed && sed.style.display !== 'none') {
-    const cm = editors[id];
-    (cm && cm.getValue() !== (srcMap[id] || '')) ? commitSource(id) : cancelSource(id);
+    (editors[id] && edText(id) !== (srcMap[id] || '')) ? commitSource(id) : cancelSource(id);
   } else {
     editSource(id, mode);
   }
@@ -344,34 +343,29 @@ function editSource(id, mode) {
   const cell = document.getElementById('cell-' + id);
   if (!cell) return;
   const d = _disp(cell); if (d) d.style.display = 'none';
-  cell.querySelector('.srcedit').style.display = '';
+  const sed = cell.querySelector('.srcedit'); sed.style.display = '';
   if (!editors[id]) {
-    const ta = cell.querySelector('.srcedit textarea');
-    const cm = CodeMirror.fromTextArea(ta, {
-      mode, theme: 'material-darker', lineNumbers: false,
-      viewportMargin: Infinity, lineWrapping: mode === 'markdown'
+    const ta = sed.querySelector('textarea'); if (ta) ta.style.display = 'none';   // CM6 mounts a sibling editor
+    window.mkEditor(sed, {
+      doc: srcMap[id] || '', cellId: id, markdown: mode === 'markdown',
+      onDoc: () => { if (edText(id) !== (srcMap[id] || '')) { setState(id, 'edited'); window._backupSoon && window._backupSoon(); } },
+      onFocus: () => setEditing(id, true), onBlur: () => setEditing(id, false),
+      keys: [
+        { key: 'Shift-Enter', run: () => commitSource(id) },
+        { key: 'Escape', run: () => cancelSource(id) },
+        { key: 'Shift-Mod-Enter', run: () => commitAndAddBelow(id) },
+        { key: 'Shift-Ctrl-Enter', run: () => commitAndAddBelow(id) },
+      ],
     });
-    cm.setValue(srcMap[id] || '');
-    // A code/@bind cell edits Julia here → wire the same completion as the always-on editor
-    // (markdown source doesn't need it). Fixes: a bind cell had no completion after eval.
-    const km = { 'Shift-Enter': () => commitSource(id), 'Esc': () => { if (cm._ph) _phEnd(cm); else cancelSource(id); },
-                 'Shift-Cmd-Enter': () => commitAndAddBelow(id), 'Shift-Ctrl-Enter': () => commitAndAddBelow(id) };
-    if (mode !== 'markdown') { const { complete, keys } = _wireCompletion(cm); Object.assign(km, keys, { 'Ctrl-Space': complete, 'Cmd-/': _toggleComment, 'Ctrl-/': _toggleComment }); }
-    cm.setOption('extraKeys', km);
-    cm.on('focus', () => setEditing(id, true));
-    cm.on('blur', () => setEditing(id, false));
-    cm.on('change', () => { if (cm.getValue() !== (srcMap[id] || '')) { setState(id, 'edited'); window._backupSoon && window._backupSoon(); } });
-    editors[id] = cm;
-    // Apply a pending unsaved-edit restore for a markdown / @bind cell, whose source editor opens
-    // on demand (the always-on <Editor> hook only covers code cells). See restore.js.
+    // Pending unsaved-edit restore for a markdown / @bind cell (its editor opens on demand).
     const pend = window._pendingRestore && window._pendingRestore[id];
-    if (pend != null) { if (cm.getValue() !== pend) cm.setValue(pend); setState(id, 'edited'); delete window._pendingRestore[id]; }
+    if (pend != null) { window.edSetText(id, pend); setState(id, 'edited'); delete window._pendingRestore[id]; }
   }
-  editors[id].refresh(); editors[id].focus();
+  window.edFocus(id);
 }
 async function commitSource(id) {
-  const cm = editors[id], src = cm ? cm.getValue() : srcMap[id];
-  if (cm) { cm.toTextArea(); delete editors[id]; }
+  const src = editors[id] ? edText(id) : srcMap[id];
+  if (editors[id]) { try { editors[id].destroy(); } catch (_) {} delete editors[id]; }
   srcMap[id] = src;
   // Restore the rendered view ourselves (like cancelSource): Preact now PRESERVES the cell's
   // DOM nodes across re-render, so the display:none editSource set on `.md`/`.binds` (and the
@@ -385,7 +379,7 @@ async function commitSource(id) {
   renderAll(await api('POST', '/api/cell/' + id, { source: src }));   // re-render in its new form
 }
 function cancelSource(id) {
-  const cm = editors[id]; if (cm) { cm.toTextArea(); delete editors[id]; }
+  const cm = editors[id]; if (cm) { try { cm.destroy(); } catch (_) {} delete editors[id]; }
   const cell = document.getElementById('cell-' + id); if (!cell) return;
   cell.querySelector('.srcedit').style.display = 'none';
   const d = _disp(cell); if (d) d.style.display = '';

@@ -24,13 +24,8 @@
   "htm/preact": "/assets/vendor/htm/preact/index.module.js"
 }}
 </script>
-<link rel="stylesheet" href="/assets/vendor/codemirror/codemirror.min.css"/>
-<link rel="stylesheet" href="/assets/vendor/codemirror/theme/material-darker.min.css"/>
-<link rel="stylesheet" href="/assets/vendor/codemirror/addon/hint/show-hint.min.css"/>
-<script src="/assets/vendor/codemirror/codemirror.min.js"></script>
-<script src="/assets/vendor/codemirror/mode/julia/julia.min.js"></script>
-<script src="/assets/vendor/codemirror/mode/markdown/markdown.min.js"></script>
-<script src="/assets/vendor/codemirror/addon/hint/show-hint.min.js"></script>
+<!-- CodeMirror 6 (editor + Lezer Julia highlighting), pre-bundled into one local artifact. -->
+<script src="/assets/js/cm6.bundle.js"></script>
 <script src="/assets/vendor/echarts/echarts.min.js"></script>
 <link rel="stylesheet" href="/assets/vendor/katex/katex.min.css"/>
 <script defer src="/assets/vendor/katex/katex.min.js"></script>
@@ -210,6 +205,7 @@
 
 <!-- App modules — ordered classic scripts sharing one global scope (load order matters). -->
 <script src="/assets/js/core.js"></script>
+<script src="/assets/js/editor.js"></script>
 <script src="/assets/js/view.js"></script>
 <script src="/assets/js/restore.js"></script>
 <script src="/assets/js/cellops.js"></script>

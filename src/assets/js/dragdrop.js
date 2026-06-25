@@ -230,7 +230,7 @@ nbEl.addEventListener('click', e => {
 // ⌘Z / ⌘⇧Z notebook undo/redo — but defer to CodeMirror's text undo when an editor is focused.
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
-    if (document.activeElement && document.activeElement.closest('.CodeMirror')) return;
+    if (document.activeElement && document.activeElement.closest('.cm-editor')) return;
     e.preventDefault();
     e.shiftKey ? redoNb() : undoNb();
   }
