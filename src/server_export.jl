@@ -111,6 +111,9 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
         print(io, "<h1 class=\"exp-title\">", title, "</h1>")
         print(io, "<div class=\"exp-meta\">Exported from Kaimon Slate · ", _esc(abspath(nb.path)), "</div>")
         for c in nb.report.cells
+            # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
+            # the export too (both code and output), for markdown and code alike.
+            (:collapsed in c.flags) && continue
             if c.kind == MARKDOWN
                 print(io, "<section class=\"exp-md\">", markdown_html(c.source, c.interp), "</section>")
             else

@@ -373,13 +373,15 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         cols == 2 && print(io, "#columns(2)[\n")
         for (k, c) in enumerate(cells)
             base = "c$(k)"
+            (:collapsed in c.flags) && continue       # folded cell → omit from the export entirely
             if c.kind == MARKDOWN
                 md = (k == firsti && firstmd_rest !== nothing) ? _md_for_typst(c, firstmd_rest) : _md_for_typst(c)
                 isempty(strip(md)) && continue       # front-matter-only cell leaves nothing to render
                 write(joinpath(dir, base * ".md"), md)
                 print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
             else
-                if show_source && !isempty(strip(c.source))
+                # `show_source` is the global toggle; the per-cell 🙈 `hidecode` flag also hides source.
+                if show_source && !(:hidecode in c.flags) && !isempty(strip(c.source))
                     write(joinpath(dir, base * ".jl"), c.source)
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
