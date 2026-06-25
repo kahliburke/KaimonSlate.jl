@@ -50,11 +50,14 @@
       const o = (it && typeof it === 'object') ? it : { text: String(it) };
       const label = o.text != null ? o.text : (o.label != null ? o.label : String(it));
       const opt = { label, type: _cmType(o.kind) };
-      if (o.kind === 'latex' && o.symbol) { opt.apply = o.symbol; opt.detail = o.symbol; }
+      // LaTeX/emoji (`\alpha`→α): the server's `text` IS the symbol. Force `apply` so CM6 replaces
+      // the whole [from,to] span (incl. the leading `\`) with the symbol — not just the word part.
+      if (o.kind === 'latex') opt.apply = label;
       if (o.kind === 'method' && o.text) opt.detail = '()';
       return opt;
     });
-    return { from, to, options, validFor: /^[\w!]*$/ };
+    // `validFor` must admit the leading backslash so a `\latex` completion's span stays valid.
+    return { from, to, options, validFor: /^[\\\w!]*$/ };
   }
 
   // ── error-line decoration (replaces CM5 addLineClass) ──────────────────────────
