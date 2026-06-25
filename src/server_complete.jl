@@ -340,6 +340,25 @@ function _make_router(h::Hub)
         HTTP.Response(200, ["Content-Type" => "application/pdf",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], pdf)
     end))
+    # The editable Typst PROJECT (doc.typ + assets) as a .tar.gz, so the layout can be tweaked and
+    # recompiled (`typst compile doc.typ`). Same options as export.pdf.
+    HTTP.register!(router, "GET", "/api/{id}/export.typ", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        data = try
+            export_typst_bundle(nb; include_source = get(qp, "source", "1") != "0",
+                       style = get(qp, "style", "article"),
+                       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
+                       theme = get(qp, "theme", "light"),
+                       code = get(qp, "code", "normal"),
+                       body = get(qp, "body", ""),
+                       include_params = get(qp, "params", "0") == "1")
+        catch e
+            return HTTP.Response(500, "Typst export failed: " * sprint(showerror, e))
+        end
+        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".typ.tar.gz"
+        HTTP.Response(200, ["Content-Type" => "application/gzip",
+                            "Content-Disposition" => "attachment; filename=\"$fn\""], data)
+    end))
     # Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a
     # shallow git bundle when the project is a repo). Reinflate with `KaimonSlate.expand`.
     HTTP.register!(router, "GET", "/api/{id}/export.standalone.jl", req -> _withnb(h, req, nb -> begin

@@ -32,8 +32,12 @@ _typ_str(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"")
 # `report` is roomier with a larger title. `columns` (1 or 2) lays the body out in one
 # or two columns — figures/code span the full width so they never overflow a column.
 const _STYLES = Dict(
-    "article" => (textsize = "10.5pt", margin = "(x: 2.2cm, y: 2.4cm)", titlesize = "19pt"),
-    "report"  => (textsize = "11pt",   margin = "(x: 2.6cm, y: 2.8cm)", titlesize = "23pt"),
+    # `article` — compact, unnumbered research-note look. `report` — roomier and with NUMBERED
+    # sections + a larger title block, the academic-report distinction (not just a font bump).
+    "article" => (textsize = "10.5pt", margin = "(x: 2.2cm, y: 2.4cm)", titlesize = "19pt",
+                  headabove = "2.1em", headbelow = "1.2em",  parspace = "1.35em", number = false),
+    "report"  => (textsize = "11pt",   margin = "(x: 2.7cm, y: 3.0cm)", titlesize = "26pt",
+                  headabove = "2.7em", headbelow = "1.45em", parspace = "1.6em",  number = true),
 )
 
 # Colour palettes per theme. `light` is the publication default; `dark` matches the live
@@ -102,9 +106,10 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     #set document(title: "$(_typ_str(title))")
     #set page($pageopts)
     #set text(font: "New Computer Modern", size: $(bsize), fill: $(p.text))$(rawtheme)
-    #set par(justify: true, spacing: 1.25em)
-    #show heading: set block(above: 1.9em, below: 1.05em)
+    #set par(justify: true, spacing: $(st.parspace))
+    #show heading: set block(above: $(st.headabove), below: $(st.headbelow))
     #show heading: set text(fill: $(p.title))
+    $(st.number ? "#set heading(numbering: (..n) => { let m = n.pos(); if m.len() <= 1 { none } else { numbering(\"1.1\", ..m.slice(1)) } })" : "")
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
     #let titleblock(t) = { align(center, text(size: $(st.titlesize), weight: "bold", fill: $(p.title), t)); v(2pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt) }
@@ -313,10 +318,25 @@ If the first markdown cell opens with a `---`-fenced front-matter block, its
 title/subtitle/author/date/abstract render as an academic title block (the title overrides
 the filename) and the remainder of that cell becomes normal body text.
 """
-function export_pdf(nb::LiveNotebook; include_source::Bool = true,
-                    style::AbstractString = "article", columns::Integer = 1,
-                    theme::AbstractString = "light", code::AbstractString = "normal",
-                    body::AbstractString = "", include_params::Bool = false)
+function export_pdf(nb::LiveNotebook; kwargs...)
+    dir = _build_typst_project(nb; kwargs...)
+    try
+        typ = joinpath(dir, "doc.typ"); pdf = joinpath(dir, "out.pdf")
+        _typst_compile(typ, pdf)
+        return read(pdf)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+# Assemble the Typst PROJECT — `doc.typ` plus every per-cell aux file it reads (.md / .jl /
+# figures / output blocks) — into a fresh temp dir and return its path. Shared by `export_pdf`
+# (compile it) and `export_typst_bundle` (archive it). Holds `nb.lock` while reading the report;
+# the caller owns the returned dir and must `rm` it.
+function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
+                              style::AbstractString = "article", columns::Integer = 1,
+                              theme::AbstractString = "light", code::AbstractString = "normal",
+                              body::AbstractString = "", include_params::Bool = false)
     show_source = include_source && code != "hidden"
     cols = clamp(Int(columns), 1, 2)
     body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
@@ -369,10 +389,28 @@ function export_pdf(nb::LiveNotebook; include_source::Bool = true,
             end
         end
         cols == 2 && print(io, "]\n")
-        typ = joinpath(dir, "doc.typ")
-        write(typ, String(take!(io)))
-        pdf = joinpath(dir, "out.pdf")
-        _typst_compile(typ, pdf)
-        return read(pdf)
+        write(joinpath(dir, "doc.typ"), String(take!(io)))
+        return dir
+    end
+end
+
+"""
+    export_typst_bundle(nb; <same options as export_pdf>) -> Vector{UInt8}
+
+The complete Typst PROJECT — `doc.typ` plus every figure / markdown / code-listing asset it
+references — as a gzip-compressed tarball (`.tar.gz`). Unpack it and `typst compile doc.typ`
+reproduces the PDF, so the layout and preamble can be tweaked by hand.
+"""
+function export_typst_bundle(nb::LiveNotebook; kwargs...)
+    dir = _build_typst_project(nb; kwargs...)
+    try
+        tarball = Tar.create(dir)
+        try
+            return transcode(GzipCompressor, read(tarball))
+        finally
+            rm(tarball; force = true)
+        end
+    finally
+        rm(dir; recursive = true, force = true)
     end
 end

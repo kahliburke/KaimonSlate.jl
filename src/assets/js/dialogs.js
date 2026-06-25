@@ -86,6 +86,7 @@ function _pdfPick() {
       const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
     });
     document.getElementById('pdfparams').checked = localStorage.getItem('slate_pdfparams') === '1';  // default off
+    document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';    // default off
     document.getElementById('pdfbg').classList.add('show');
   });
 }
@@ -97,18 +98,25 @@ async function exportPdf() {
   const body = document.getElementById('pdfbody').value;
   const code = document.getElementById('pdfcode').value;
   const params = document.getElementById('pdfparams').checked;
+  const typst = document.getElementById('pdftypst').checked;
   ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
   localStorage.setItem('slate_pdfparams', params ? '1' : '0');
+  localStorage.setItem('slate_pdftypst', typst ? '1' : '0');
+  const _save = (blob, ext) => {                       // trigger a browser download of `blob` as <title>.<ext>
+    const url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = (nbState && nbState.title || 'notebook') + ext;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  };
   showLoading('Rendering PDF with Typst…');
   try {
     const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code + (params ? '&params=1' : '');
     const r = await fetch(_apipath('/api/export.pdf') + qs);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
-    const blob = await r.blob(), url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = (nbState && nbState.title || 'notebook') + '.pdf';
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    _save(await r.blob(), '.pdf');
+    if (typst) {                                        // also fetch the editable Typst project bundle
+      const tr = await fetch(_apipath('/api/export.typ') + qs);
+      tr.ok ? _save(await tr.blob(), '.typ.tar.gz') : await alertDark('Typst bundle failed:\n' + (await tr.text()));
+    }
   } catch (e) { await alertDark('PDF export failed: ' + e); }
   finally { hideLoading(); }
 }

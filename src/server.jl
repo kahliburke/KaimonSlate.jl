@@ -11,6 +11,7 @@ module NotebookServer
 
 using HTTP, JSON, FileWatching, CodecZlib
 import Base64
+import Tar
 import Typst_jll
 import Pkg
 using ..ReportEngine
