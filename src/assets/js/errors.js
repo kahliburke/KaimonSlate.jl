@@ -25,19 +25,24 @@ function _applyErrorLine(c, ed) {
 }
 window._applyErrorLine = _applyErrorLine;
 
-// Scroll a cell's editor to `line1` (1-based) and flash it.
+// Put the cell into edit mode with the cursor on `line1` (1-based) and flash it. Selects the cell,
+// enters edit (focuses the code editor, or opens the source editor for a @bind/md cell), then —
+// after that editor is mounted/refreshed — places the cursor on the line and scrolls it into view.
 function jumpToCellLine(cellId, line1) {
-  const cellEl = document.getElementById('cell-' + cellId);
-  if (cellEl) cellEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  const ed = window.editors[cellId];
+  if (typeof selectCell === 'function') selectCell(cellId, true);
+  if (typeof enterEdit === 'function') enterEdit(cellId);     // focus code editor / open source editor
   const ln = line1 - 1;
-  if (ed && ed.addLineClass && ln >= 0 && ed.lineCount && ln < ed.lineCount()) {
+  requestAnimationFrame(() => {
+    const ed = window.editors[cellId];
+    if (!ed || !ed.setCursor || !ed.lineCount || ln < 0 || ln >= ed.lineCount()) return;
     try {
+      ed.focus();
+      ed.setCursor({ line: ln, ch: 0 });
       ed.scrollIntoView({ line: ln, ch: 0 }, 80);
       ed.addLineClass(ln, 'background', 'cm-errorline-flash');
       setTimeout(() => { try { ed.removeLineClass(ln, 'background', 'cm-errorline-flash'); } catch (_) {} }, 1000);
     } catch (_) {}
-  }
+  });
 }
 window.jumpToCellLine = jumpToCellLine;
 
