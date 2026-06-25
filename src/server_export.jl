@@ -118,9 +118,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
                 print(io, "<section class=\"exp-md\">", markdown_html(c.source, c.interp), "</section>")
             else
                 print(io, "<section class=\"exp-code\">")
-                # Honour BOTH the global `?source=0` toggle AND the per-cell `hidecode` flag (the
-                # 🙈 toggle) — a cell whose code is hidden in the notebook exports output-only.
-                (include_source && !(:hidecode in c.flags) && !isempty(strip(c.source))) &&
+                # Show source only when the NOTEBOOK shows it: respect the global `?source=0` toggle,
+                # the per-cell `hidecode` (🙈) flag, AND `@bind` cells (which render their widget,
+                # not the code editor, in the browser) — so the export matches what's on screen.
+                (include_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))) &&
                     print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
                 print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
                 if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot

@@ -380,8 +380,9 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                 write(joinpath(dir, base * ".md"), md)
                 print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
             else
-                # `show_source` is the global toggle; the per-cell 🙈 `hidecode` flag also hides source.
-                if show_source && !(:hidecode in c.flags) && !isempty(strip(c.source))
+                # Match the browser: `show_source` is the global toggle; also hide source for the
+                # per-cell 🙈 `hidecode` flag and for `@bind` cells (which show their widget, not code).
+                if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))
                     write(joinpath(dir, base * ".jl"), c.source)
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
