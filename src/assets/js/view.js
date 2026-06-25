@@ -355,6 +355,7 @@ function editSource(id, mode) {
         { key: 'Escape', run: () => cancelSource(id) },
         { key: 'Shift-Mod-Enter', run: () => commitAndAddBelow(id) },
         { key: 'Shift-Ctrl-Enter', run: () => commitAndAddBelow(id) },
+        { key: 'Shift-Mod--', run: () => splitCell(id) }, { key: 'Shift-Ctrl--', run: () => splitCell(id) },
       ],
     });
     // Pending unsaved-edit restore for a markdown / @bind cell (its editor opens on demand).

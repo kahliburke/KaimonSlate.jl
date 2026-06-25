@@ -32,18 +32,20 @@
     const node = syntaxTree(ctx.state).resolveInner(ctx.pos, -1);
     if (!ctx.explicit && /Comment|String|Char/.test(node.name)) return null;
     const code = ctx.state.doc.toString();
-    const bytePos = window._byteLen ? window._byteLen(code.slice(0, ctx.pos)) : ctx.pos;
+    // _byteLen/_apipath/_charFromByte are global `const`s from core.js (NOT window props — classic
+    // scripts don't attach const/let to window), so reference them bare via the scope chain.
+    const bytePos = _byteLen(code.slice(0, ctx.pos));
     let d;
     try {
-      d = await (await fetch(window._apipath('/api/complete'), {
+      d = await (await fetch(_apipath('/api/complete'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code, pos: bytePos }),
       })).json();
     } catch (_) { return null; }
     const raw = d.completions || [];
     if (!raw.length) return null;
-    const from = window._charFromByte ? window._charFromByte(code, d.from) : d.from;
-    const to = window._charFromByte ? window._charFromByte(code, d.to) : d.to;
+    const from = _charFromByte(code, d.from);
+    const to = _charFromByte(code, d.to);
     const options = raw.map(it => {
       const o = (it && typeof it === 'object') ? it : { text: String(it) };
       const label = o.text != null ? o.text : (o.label != null ? o.label : String(it));
@@ -105,7 +107,8 @@
         autocompletion({ override: [juliaComplete], icons: false }),
         keymap.of([
           ...completionKeymap,                  // popup nav/close (Escape) takes precedence over cell keys
-          ...cellKeys,
+          ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below
+          { key: 'Escape', run: (v) => { v.contentDOM.blur(); return true; } },   // exit edit → command mode
           { key: 'Mod-/', run: toggleComment }, { key: 'Ctrl-/', run: toggleComment },
           indentWithTab, ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap,
         ]),
