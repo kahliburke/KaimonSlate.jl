@@ -182,7 +182,16 @@ function _spawn_worker!(k::GateKernel)
     k.port = port; k.stream_port = stream_port
     logdir = joinpath(tempdir(), "kaimonslate"); mkpath(logdir)
     k.logpath = joinpath(logdir, "worker-$port.log")
-    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no -e $(_worker_script(port, stream_port, k.parent))`
+    # Thread config. OpenBLAS spawns a pool of ~ncores whose IDLE threads busy-spin (polling the
+    # clock against a park timeout) — for an interactive notebook firing many tiny BLAS ops they
+    # never reach the timeout and peg the cores doing no work. Cap the BLAS pool to 1 by default
+    # (small ops are faster single-threaded anyway; bump KAIMONSLATE_BLAS_THREADS for big dense
+    # linear algebra). Julia's own task threads (default "1,1" = 1 compute + 1 interactive) PARK
+    # when idle — no spin; the interactive thread is reserved for keeping reactive handling snappy.
+    blas = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
+    jthreads = get(ENV, "KAIMONSLATE_JULIA_THREADS", "1,1")
+    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
+    cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
     # each chunk, so the log is tailable in real time. A plain `stdout=<file>`
     # redirect is block-buffered and only lands on disk when the worker exits —
