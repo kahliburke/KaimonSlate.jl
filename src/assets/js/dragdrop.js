@@ -92,6 +92,17 @@ async function toggleHideCode(id) {
   const c = _cellById(id);
   renderAll(await api('POST', '/api/hidecode/' + id, { hidden: !(c && c.codeHidden) }));
 }
+// 🔍 value tracing for a code cell. Persisted in the .jl (`trace` token). The cell keeps its
+// NORMAL output; the trace rows show in the inspector popup. If already tracing, clicking just
+// (re)opens the popup; otherwise it turns tracing on (server re-runs, collecting rows) and opens
+// it. Turn it off from the popup's "Stop tracing" button (stopTraceModal).
+async function toggleTrace(id) {
+  const c = _cellById(id);
+  if (c && c.trace) { if (typeof openTraceModal === 'function') openTraceModal(id); return; }
+  renderAll(await api('POST', '/api/trace/' + id, { trace: true }));
+  if (typeof openTraceModal === 'function')
+    requestAnimationFrame(() => requestAnimationFrame(() => openTraceModal(id)));
+}
 // Does this code cell render a plot? An ECharts spec, or a figure (img/svg/canvas) in its output.
 function _cellHasPlot(c) {
   if (!c || c.kind !== 'code') return false;

@@ -78,6 +78,43 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
    interactive plots without the source. */
 .cell.codehidden > textarea, .cell.codehidden .CodeMirror { display:none; }
 .cellhead .hidecode.on { color:var(--accent); }
+.cellhead .trace.on { color:var(--accent); }
+
+/* Trace inspector modal: source lines with captured values shown beneath each line. */
+.tracemodal { max-width:820px; width:92%; padding:0; overflow:hidden; }
+.tracehd { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid var(--border); }
+.tracehd strong { color:var(--text); font-size:.95rem; font-weight:600; }
+.tracehd .tracesub { color:var(--dim); font-size:.78rem; }
+.tracehd .tracestop { margin-left:auto; background:var(--bg3); border:1px solid var(--border); color:var(--dim);
+  cursor:pointer; font-size:.74rem; padding:3px 10px; border-radius:6px; }
+.tracehd .tracestop:hover { color:var(--text); border-color:var(--accent); }
+.tracehd .tracex { background:none; border:none; color:var(--dim); cursor:pointer;
+  font-size:.95rem; padding:2px 6px; border-radius:6px; }
+.tracehd .tracex:hover { color:var(--text); background:var(--bg3); }
+.tracenone { padding:18px; color:var(--dim); font-size:.84rem; }
+.tracebody { max-height:70vh; overflow:auto; padding:8px 0; }
+.traceview { font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace); font-size:.82rem; line-height:1.55; }
+/* Code row: line number + the source line (wraps within the modal — no horizontal scroll). */
+.tvline { display:flex; align-items:baseline; padding:0 18px; }
+.tvline.tv-has { background:rgba(86,156,214,.07); }
+.tv-ln { flex:0 0 2.4em; text-align:right; padding-right:14px; color:var(--dim); user-select:none; }
+.tv-code { white-space:pre-wrap; word-break:break-word; color:var(--text); }
+/* Values row: sits directly under its code line, indented under the code with an accent rail. */
+.tvvals { display:flex; flex-wrap:wrap; gap:5px 16px; margin:1px 18px 5px calc(2.4em + 18px);
+  padding:2px 0 4px 10px; border-left:2px solid var(--accent); background:rgba(86,156,214,.07); }
+.tv-grp { display:inline-flex; flex-wrap:wrap; align-items:center; gap:5px; }
+.tv-name { color:var(--accent); }
+.tv-res { color:var(--gold); font-style:italic; }
+.tv-val { background:var(--bg3); color:var(--green); border-radius:5px; padding:0 6px;
+  white-space:pre-wrap; word-break:break-word; }
+.tv-arrow { color:var(--dim); font-size:.74rem; }
+/* Loop iteration table: one row per pass, variables as columns (same-iteration values together). */
+.tvloop { margin:2px 18px 7px calc(2.4em + 18px); padding:3px 0 3px 12px; overflow-x:auto;
+  border-left:2px solid var(--accent); background:rgba(86,156,214,.07); }
+.tvtab { border-collapse:collapse; font-size:.8rem; }
+.tvtab th { text-align:left; padding:1px 16px 4px 0; color:var(--dim); font-weight:500; white-space:nowrap; }
+.tvtab td { padding:1px 16px 1px 0; vertical-align:top; }
+.tvtab .tv-it { color:var(--dim); text-align:right; padding-right:12px; user-select:none; }
 .badge { text-transform:uppercase; letter-spacing:.04em; font-size:.68rem; min-width:52px; text-align:right; color:var(--dim); }
 .cell.state-fresh   .badge { color:var(--accent); }
 .cell.state-stale   .badge { color:var(--gold); }

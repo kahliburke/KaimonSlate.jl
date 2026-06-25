@@ -281,6 +281,15 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(macro bind(name, widget)
         esc(Expr(:block, Expr(:(=), name, Expr(:call, :__slate_bind, QuoteNode(name), widget)), nothing))
     end))
+    # `@trace begin … end` — rewrite the block to record each assignment into `__slate_trace_sink`
+    # while the cell STILL RETURNS ITS REAL LAST VALUE (so the output is normal; the trace shows in
+    # the inspector popup). `run_capture` reads the sink into the wire `trace` field. The sink is
+    # per-notebook (like `__slate_bind_sink`); `_trace_transform` is spliced as an object (trace.jl).
+    trace_sink = Ref{Any}(nothing)
+    Core.eval(m, :(const __slate_trace_sink = $trace_sink))
+    Core.eval(m, :(macro trace(blk)
+        esc($(_trace_transform)(blk))
+    end))
     # ── Reactive async primitives (reactive.jl) ──────────────────────────────────
     Core.eval(m, :(const Reactive = $Reactive))
     Core.eval(m, :(const pause = $pause))

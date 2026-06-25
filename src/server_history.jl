@@ -168,6 +168,10 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     end
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
+    (:trace in c.flags) && (d["trace"] = true)           # @trace-wrapped on eval (collects trace rows)
+    # The trace rows ({line,name,value}) for the inspector popup — the cell's normal output is shown
+    # in place; this rides alongside for the modal. Present only when the cell ran traced.
+    (c.output === nothing || isempty(c.output.trace)) || (d["traceData"] = c.output.trace)
     # `@bind` variables this cell READS (so the header can one-click surface their controls) —
     # excluding any it defines itself.
     if c.kind == CODE && !isempty(c.reads)

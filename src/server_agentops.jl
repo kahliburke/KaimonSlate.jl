@@ -491,6 +491,20 @@ function set_code_hidden!(nb::LiveNotebook, id::AbstractString, hidden::Bool)
     return nb
 end
 
+# Toggle a cell's `trace` flag (persisted in the `.jl` header as the `trace` token). Unlike
+# collapsed/hidecode this CHANGES the eval result (the cell runs wrapped in `@trace`), so we
+# mark it STALE — the frontend re-runs it to show/hide the trace table.
+function set_trace!(nb::LiveNotebook, id::AbstractString, trace::Bool)
+    lock(nb.lock) do
+        i = _index_of(nb.report.cells, id); i === nothing && return nb
+        c = nb.report.cells[i]
+        trace ? push!(c.flags, :trace) : delete!(c.flags, :trace)
+        c.state = STALE
+        _persist!(nb)
+    end
+    return nb
+end
+
 function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; source = nothing)
     cells = nb.report.cells
     i = _index_of(cells, id); i === nothing && return nb

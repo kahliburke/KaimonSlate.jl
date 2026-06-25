@@ -308,6 +308,13 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/hidecode/{cid}", req -> _withnb(h, req, nb -> begin
         set_code_hidden!(nb, HTTP.getparam(req, "cid"), get(_body(req), "hidden", true) === true); _json(state_json(nb))
     end))
+    HTTP.register!(router, "POST", "/api/{id}/trace/{cid}", req -> _withnb(h, req, nb -> begin
+        # Toggle the flag (marks the cell STALE) then re-run stale cells, so the trace table
+        # appears / disappears in one round-trip — no client-side source resend.
+        set_trace!(nb, HTTP.getparam(req, "cid"), get(_body(req), "trace", true) === true)
+        eval_stale!(nb.report, nb.kernel)
+        _json(state_json(nb))
+    end))
     # Static export: a self-contained HTML document of the notebook (also the print →
     # PDF path — the browser's print dialog saves it as PDF). `?dl=1` downloads; `?source=0`
     # hides code. No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.

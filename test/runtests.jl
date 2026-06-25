@@ -10,6 +10,7 @@ using SafeTestsets
 @safetestset "bind"   begin include("test_bind.jl") end
 @safetestset "render" begin include("test_render.jl") end
 @safetestset "tables" begin include("test_tables.jl") end
+@safetestset "trace"  begin include("test_trace.jl") end
 @safetestset "complete" begin include("test_complete.jl") end
 @safetestset "history" begin include("test_history.jl") end
 @safetestset "agentops" begin include("test_agentops.jl") end

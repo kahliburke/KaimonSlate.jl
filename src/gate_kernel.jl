@@ -263,7 +263,8 @@ function _wire_to_output(wire)
     chunks = MimeChunk[MimeChunk(String(m), Vector{UInt8}(bytes)) for (m, bytes) in wire.mime]
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in wire.binds]
     return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
-                      binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms))
+                      binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms),
+                      collect(wire.trace))
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString)

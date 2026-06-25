@@ -16,7 +16,9 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test s.kind == "slider" && s.params["min"] == 0 && s.params["max"] == 10 && s.default == 0
         @test RE.Checkbox(true).default === true
         sel = RE.Select(["a", "b"])
-        @test sel.kind == "select" && sel.default == "a" && sel.params["options"] == ["a", "b"]
+        # Options normalize to `[{value,label}]` specs (the labeled-options form), not bare values.
+        @test sel.kind == "select" && sel.default == "a" &&
+              [o["value"] for o in sel.params["options"]] == ["a", "b"]
         @test RE.Toggle(true).kind == "toggle"
         @test RE.TextArea("hi").kind == "textarea"
         @test RE.ColorPicker("#ff8800").default == "#ff8800"

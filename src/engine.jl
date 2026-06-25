@@ -47,7 +47,11 @@ struct CellOutput
     exception::Union{String,Nothing}
     backtrace::Union{String,Nothing}
     duration_ms::Float64          # wall-clock eval time
+    trace::Vector{Any}            # `@trace` rows ({line,name,value}); empty unless cell is traced
 end
+# Back-compat constructor for the 9-arg form (callers that don't produce trace rows).
+CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[])
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);
@@ -199,13 +203,14 @@ function _parse_controls(s::AbstractString)
     return cols
 end
 
-"Parse a header line's trailing tokens into (kind, id-or-nothing, controls-columns)."
+"Parse a header line's trailing tokens into (kind, id, controls, collapsed, hidecode, trace)."
 function _parse_header(rest::AbstractString)
     kind = CODE
     id = nothing
     controls = Vector{String}[]
     collapsed = false
     hidecode = false
+    trace = false
     for tok in split(strip(rest))
         if startswith(tok, "id=")
             id = tok[4:end]
@@ -215,13 +220,15 @@ function _parse_header(rest::AbstractString)
             collapsed = true
         elseif tok == "hidecode"            # code editor hidden, output shown (clean plots)
             hidecode = true
+        elseif tok == "trace"               # wrap cell in @trace on eval (inline value tracing)
+            trace = true
         elseif tok == "md" || tok == "markdown"
             kind = MARKDOWN
         elseif tok == "code"
             kind = CODE
         end
     end
-    return kind, id, controls, collapsed, hidecode
+    return kind, id, controls, collapsed, hidecode, trace
 end
 
 "Deterministic short id from a cell's content + position (used when none given)."
@@ -281,6 +288,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
 
     coll = false                          # `collapsed` flag of the current explicit header
     hidec = false                         # `hidecode` flag of the current explicit header
+    trc = false                           # `trace` flag of the current explicit header
     function flush!()
         trimmed = _strip_blank_edges(body)
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
@@ -291,6 +299,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             cell.controls = ctrls
             coll && push!(cell.flags, :collapsed)
             hidec && push!(cell.flags, :hidecode)
+            trc && push!(cell.flags, :trace)
             push!(report.cells, cell)
         end
         empty!(body)
@@ -298,13 +307,14 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         ctrls = Vector{String}[]
         coll = false
         hidec = false
+        trc = false
     end
 
     for line in lines
         m = match(_HEADER, line)
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
-            kind, cid, ctrls, coll, hidec = _parse_header(m.captures[1])
+            kind, cid, ctrls, coll, hidec, trc = _parse_header(m.captures[1])
             explicit = true
             had_header = true
         elseif explicit                   # verbatim body of an explicit cell
@@ -378,6 +388,7 @@ function _cell_source(cell::Cell)
     isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
     (:collapsed in cell.flags) && (header *= " collapsed")
     (:hidecode in cell.flags) && (header *= " hidecode")
+    (:trace in cell.flags) && (header *= " trace")
     return isempty(cell.source) ? header : "$header\n$(cell.source)"
 end
 
@@ -405,6 +416,7 @@ include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
 include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (shared with the worker)
 include(joinpath(@__DIR__, "reactive.jl"))  # reactive/@onclick/pause async primitives (shared)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table (used by capture.jl)
+include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value tracing (engine + worker)
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest for semantic docs search

@@ -213,6 +213,22 @@ end
         @test re.exception !== nothing && occursin("boom", re.exception)
     end
 
+    @testset "REPL soft-scope: top-level loop assigns a global without `local`" begin
+        # Cells eval with REPL soft-scope semantics (not file `include_string`), so a top-level
+        # `for`/`while` can update an existing global — the behaviour users expect from a notebook.
+        r = run_capture(Module(:SoftScope), "total = 0\nfor i in 1:4\n    total += i\nend\ntotal")
+        @test r.exception === nothing
+        @test r.value_repr == "10"
+
+        # world age across statements in one cell: `using`/`struct`+use stay visible.
+        r2 = run_capture(Module(:SoftScope2), "struct Pt; x; end\nPt(7).x")
+        @test r2.exception === nothing && r2.value_repr == "7"
+
+        # a genuine parse error still surfaces as a captured exception (not a crash).
+        r3 = run_capture(Module(:SoftScope3), "for i in")
+        @test r3.exception !== nothing
+    end
+
     @testset "markdown {{ }} interpolation: reads, deps, reactive capture" begin
         r = parse_report("#%% code id=a\nx = 21 * 2\n\n#%% md id=m\nThe answer is {{x}}.")
         build_dependencies!(r)

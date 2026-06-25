@@ -13,7 +13,20 @@
 # the same way. What a captured object can `show` as (e.g. a CairoMakie figure →
 # image/png) is orthogonal — that lives in the worker's own project env.
 
+import REPL   # for `REPL.softscope` — REPL-style cell eval (stdlib; always available)
+
 const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
+
+# Evaluate a cell's `source` the way the REPL does, NOT like a file `include_string`:
+# `REPL.softscope` rewrites top-level soft-scope assignments so a `for`/`while` can update an
+# existing global without `local`/`global` (matching the REPL / IJulia / Pluto — the behaviour
+# users expect from a notebook). `parseall` → a `:toplevel` block, so each statement runs in its
+# own world (a `using`/`struct`/macro def is visible to later statements in the same cell), and
+# `Core.eval` returns the last statement's value. `softscope` descends through the `@trace`
+# wrapper too, so a traced loop works without `local` exactly like an untraced one. Parse errors
+# surface as a catchable `ParseError`. `filename="string"` keeps error locations as `string:N`.
+_eval_cell_source(mod::Module, source::AbstractString) =
+    Core.eval(mod, REPL.softscope(Meta.parseall(String(source); filename = "string")))
 
 # Vector format captured *in addition* to a raster figure, for publication PDF export
 # (fonts embedded, scales crisply). The browser ignores this chunk; only the Typst
@@ -127,12 +140,16 @@ function run_capture(mod::Module, source::AbstractString)
     sinkref = isdefined(mod, :__slate_bind_sink) ? getfield(mod, :__slate_bind_sink) : nothing
     sinkref === nothing || (sinkref[] = NamedTuple[])
 
+    # `@trace` publishes its row buffer here (one per traced cell). Reset before eval; read after.
+    tracesink = isdefined(mod, :__slate_trace_sink) ? getfield(mod, :__slate_trace_sink) : nothing
+    tracesink === nothing || (tracesink[] = nothing)
+
     value = nothing
     err = nothing
     btrace = nothing
     t0 = time_ns()
     try
-        value = include_string(mod, source)
+        value = _eval_cell_source(mod, source)
     catch e
         err = e
         btrace = catch_backtrace()
@@ -143,6 +160,9 @@ function run_capture(mod::Module, source::AbstractString)
     end
     binds = sinkref === nothing ? NamedTuple[] : copy(sinkref[])
     sinkref === nothing || (sinkref[] = nothing)
+    # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
+    trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
+    tracesink === nothing || (tracesink[] = nothing)
     stdout_str = fetch(reader)
     dur_ms = (time_ns() - t0) / 1e6
 
@@ -180,15 +200,16 @@ function run_capture(mod::Module, source::AbstractString)
         catch
         end
     end
-    # `include_string` wraps a cell's runtime error in a LoadError ("… in expression starting at
-    # string:N"). Unwrap it so the cell shows the REAL error (UndefVarError, DomainError, …).
+    # A cell's runtime error may still arrive wrapped in a LoadError (defensive — unwrap to the
+    # REAL error: UndefVarError, DomainError, …). Parse errors arrive as `ParseError` directly.
     realerr = err isa LoadError ? err.error : err
     exc = realerr === nothing ? nothing : sprint(showerror, realerr)
-    # Trim our eval machinery (include_string + capture/gate frames below it) from the backtrace —
-    # user/package frames sit above it — so the trace shows where the error actually is.
+    # Trim our eval machinery (the `Core.eval`/`_eval_cell_source` + capture/gate frames below it)
+    # from the backtrace — user/package frames sit above it — so the trace shows where the error
+    # actually is. `Core.eval` appears as `:eval` in boot.jl.
     bt = nothing
     if btrace !== nothing
-        k = findfirst(ip -> any(f -> f.func === :include_string ||
+        k = findfirst(ip -> any(f -> f.func === :_eval_cell_source ||
                                      (f.func === :eval && occursin("boot.jl", string(f.file))),
                                 Base.StackTraces.lookup(ip)), btrace)
         tb = k === nothing ? btrace : btrace[1:max(1, k - 1)]
@@ -197,5 +218,5 @@ function run_capture(mod::Module, source::AbstractString)
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
-            duration_ms = dur_ms)
+            duration_ms = dur_ms, trace = trace)
 end

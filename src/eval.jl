@@ -87,7 +87,7 @@ function _eval_capture(mod::Module, source::AbstractString)
     chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in r.binds]
     return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
-                      r.backtrace, r.duration_ms)
+                      r.backtrace, r.duration_ms, collect(r.trace))
 end
 
 # ── Kernel: the execution backend ─────────────────────────────────────────────
@@ -227,7 +227,14 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     # Bind cells are ordinary code now: `@bind x W(…)` runs, assigns `x`, and reports
     # its control through the capture channel (`output.binds`). No special path.
     cell.state = RUNNING
-    cell.output = eval_capture(kernel, report, cell.source)
+    # `trace` flag: wrap the source in `@trace begin … end` so eval returns a SlateTrace of
+    # inline values (the cell's normal output is replaced by the trace table). Dependency
+    # analysis is untouched — it parses the ORIGINAL `cell.source`, never this wrapped form.
+    # Both kernels honour it: each notebook namespace has `@trace` injected (widgets.jl).
+    # `begin ` joins on ONE line (no leading newline) so parsed line numbers align 1:1 with the
+    # cell's source lines — the trace inspector maps each recorded value back to its source line.
+    src = (:trace in cell.flags) ? string("@trace begin ", cell.source, "\nend") : cell.source
+    cell.output = eval_capture(kernel, report, src)
     cell.binds = cell.output.binds
     cell.state = cell.output.exception === nothing ? FRESH : ERRORED
     return cell

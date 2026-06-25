@@ -125,6 +125,10 @@
   <div id="pkglist" class="pkglist"></div>
 </aside>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
+<div class="modal-bg" id="tracebg"><div class="modal tracemodal">
+  <div class="tracehd"><strong>🔍 <span id="tracetitle">Trace</span></strong><span class="tracesub" id="tracesub"></span><button class="tracestop" onclick="stopTraceModal()" title="turn off tracing for this cell">stop tracing</button><button class="tracex" onclick="closeTraceModal()" title="close (Esc)">✕</button></div>
+  <div class="tracebody" id="tracebody"></div>
+</div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
 <div class="addmenu" id="addmenu"></div>
 <div class="ctlpop" id="ctlpop"></div>
@@ -218,6 +222,7 @@
 <script src="/assets/js/panels.js"></script>
 <script src="/assets/js/inspect.js"></script>
 <script src="/assets/js/dragdrop.js"></script>
+<script src="/assets/js/trace.js"></script>
 <!-- Preact app (ESM module). Strangler-fig: coexists with the classic scripts above
      and takes over the UI island by island until the vanilla code is retired. -->
 <script type="module" src="/assets/js/app.js"></script>
