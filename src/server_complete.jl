@@ -263,8 +263,17 @@ function _make_router(h::Hub)
         # for a clearer icon (a control, not a constant).
         bindnames = Set(String(b.name) for c in nb.report.cells for b in c.binds)
         isempty(bindnames) || (items = Tuple{String,String}[(t, t in bindnames ? "bind" : k) for (t, k) in items])
-        _json(Dict("completions" => [Dict("text" => t, "kind" => k) for (t, k) in items],
-                   "from" => from, "to" => to))
+        # latex/emoji: a partial query returns the NAME (`\alpha`); attach the resolved symbol as
+        # `apply` so the UI shows the name (filterable) but inserts the character in one step.
+        comps = map(items) do (t, k)
+            d = Dict{String,Any}("text" => t, "kind" => k)
+            if k == "latex" && startswith(t, "\\")
+                sym = ReportEngine.latex_symbol(t)
+                isempty(sym) || (d["apply"] = sym)
+            end
+            d
+        end
+        _json(Dict("completions" => comps, "from" => from, "to" => to))
     end))
     HTTP.register!(router, "POST", "/api/{id}/cell-add", req -> _withnb(h, req, nb -> begin
         b = _body(req)

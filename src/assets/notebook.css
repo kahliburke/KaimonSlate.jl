@@ -375,19 +375,24 @@ input.toggle:checked::after { left:18px; }
 /* Controls palette — a side drawer listing every declared @bind across the notebook. */
 .palette { position:fixed; top:0; right:0; height:100vh; width:300px; background:var(--bg2);
   border-left:1px solid var(--border); transform:translateX(100%); transition:transform .18s ease;
-  z-index:20; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.3); }
-.palette.open { transform:none; }
+  z-index:20; display:flex; flex-direction:column; }
+/* Shadow only when open — a closed panel is parked off-screen-right (translateX 100%) and its
+   shadow would otherwise bleed back onto the viewport's right edge (stacking with the other panels
+   into a dark "fade"). */
+.palette.open { transform:none; box-shadow:-8px 0 24px rgba(0,0,0,.3); }
 /* Agent chat panel (consumer of Kaimon's agent service) */
 /* The drawer's top is aligned to the first content cell (--agent-top, measured in JS) so it
    sits below the menu bar and lines up with the notebook. The topbar-height + page-gutter
    expression is the first-paint fallback until JS measures the real cell. */
 .agentpanel { position:fixed; top:var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))); right:0;
-  height:calc(100vh - var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))));
+  /* End 68px above the viewport bottom so the panel clears the bottom-right docs launcher (≈51px
+     tall incl. its margin) instead of overlapping it. */
+  height:calc(100vh - var(--agent-top, calc(var(--topbar-h, 49px) + var(--page-pad))) - 68px);
   width:380px; max-width:92vw; background:var(--bg2);
   border:1px solid var(--border); border-right:none; border-radius:14px 0 0 14px;
   transform:translateX(100%); transition:transform .18s ease; overflow:hidden;
-  z-index:25; display:flex; flex-direction:column; box-shadow:-8px 0 24px rgba(0,0,0,.35); }
-.agentpanel.open { transform:none; }
+  z-index:25; display:flex; flex-direction:column; }
+.agentpanel.open { transform:none; box-shadow:-8px 0 24px rgba(0,0,0,.35); }   /* shadow only when open (see .palette) */
 .aphead { display:flex; align-items:center; gap:8px; padding:16px 18px; border-bottom:1px solid var(--border); }
 .aphead strong { color:#fff; }
 .apmsgs { flex:1; overflow:auto; padding:16px 18px; display:flex; flex-direction:column; gap:10px; }
@@ -432,14 +437,40 @@ input.toggle:checked::after { left:18px; }
 .cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionMatchedText { color:#0d1120; }
 .cm-completionDetail { flex:0 0 auto; font-size:.74em; color:var(--dim); font-style:normal; }
 .cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionDetail { color:#0d1120; }
+/* LaTeX/emoji rows (type→constant icon): the detail column holds the resolved glyph (\alpha → α).
+   Keep it bright + a touch larger so the preview reads on BOTH the default and selected (accent)
+   rows — the shared detail color is dim normally and near-black when selected. */
+.cm-tooltip-autocomplete li:has(.cm-completionIcon-constant) .cm-completionDetail,
+.cm-tooltip-autocomplete > ul > li[aria-selected]:has(.cm-completionIcon-constant) .cm-completionDetail {
+  color:var(--text); font-size:1.15em; opacity:.95; }
+/* Completion kind icons (icons:true) — coloured per kind to echo the syntax palette. */
+.cm-completionIcon { flex:0 0 auto; width:1.2em; text-align:center; opacity:.9; font-size:.95em; padding-right:0; }
+.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionIcon { opacity:1; }
+.cm-completionIcon-function::after, .cm-completionIcon-method::after { color:#dcdcaa; }
+.cm-completionIcon-type::after { color:#4ec9b0; }
+.cm-completionIcon-namespace::after { color:#569cd6; }
+.cm-completionIcon-keyword::after { color:#c586c0; }
+.cm-completionIcon-property::after { color:#9cdcfe; }
+.cm-completionIcon-constant::after { color:#d19a66; }
+.cm-completionIcon-variable::after { color:#d4d8e8; }
+.cm-completionIcon-macro::after { content:'@'; color:#569cd6; }
 /* completion info tooltip (docstring preview, when an option carries `info`) */
 .cm-tooltip.cm-completionInfo { background:var(--bg2); border:1px solid var(--border); border-radius:8px;
-  padding:8px 11px; font-size:.8rem; line-height:1.5; color:var(--text); max-width:380px; }
+  padding:7px 10px; font-size:.78rem; line-height:1.4; color:var(--text); max-width:380px;
+  max-height:340px; overflow-y:auto; }
+/* Tighten the docstring markdown inside the small popup card (looser spacing suits the docs dock). */
+.cm-completionInfo .docmd { font-size:11.5px; line-height:1.42; }
+.cm-completionInfo .docmd p { margin:3px 0; }
+.cm-completionInfo .docmd h1, .cm-completionInfo .docmd h2, .cm-completionInfo .docmd h3 { margin:7px 0 2px; }
+.cm-completionInfo .docmd ul, .cm-completionInfo .docmd ol { margin:3px 0; }
+.cm-completionInfo .docmd pre { margin:5px 0; padding:6px 8px; }
+.cm-completionInfo .docmd > :first-child { margin-top:0; }
+.cm-completionInfo .docmd > :last-child { margin-bottom:0; }
 /* History panel (time machine) */
 .histpanel { position:fixed; top:0; right:0; height:100vh; width:420px; max-width:94vw; background:var(--bg2);
-  border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
+  border-left:1px solid var(--bg3); transform:translateX(100%);
   transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
-.histpanel.open { transform:none; }
+.histpanel.open { transform:none; box-shadow:-8px 0 24px #0007; }   /* shadow only when open (see .palette) */
 .hbtn { background:var(--bg3); border:none; color:var(--fg); border-radius:6px; padding:3px 9px; cursor:pointer; font-size:.8rem; }
 .hbtn:hover { background:var(--accent); }
 .hbtn.stop { background:var(--red); }
@@ -461,9 +492,9 @@ input.toggle:checked::after { left:18px; }
 .histprev .dl.ctx { color:var(--dim); }
 /* Worker log panel */
 .logpanel { position:fixed; top:0; right:0; height:100vh; width:480px; max-width:96vw; background:var(--bg2);
-  border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; transform:translateX(100%);
+  border-left:1px solid var(--bg3); transform:translateX(100%);
   transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
-.logpanel.open { transform:none; }
+.logpanel.open { transform:none; box-shadow:-8px 0 24px #0007; }   /* shadow only when open (see .palette) */
 .logbox { flex:1; overflow:auto; padding:10px 12px; font-family:'Cascadia Code',monospace; font-size:.74rem;
   line-height:1.4; white-space:pre-wrap; word-break:break-word; color:#c8cde0; }
 /* Packages panel */

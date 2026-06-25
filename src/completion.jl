@@ -55,7 +55,7 @@ function _comp_kind(c)
     c isa RC.KeywordArgumentCompletion  && return "kwarg"
     (c isa RC.PropertyCompletion || c isa RC.FieldCompletion) && return "field"
     c isa RC.MethodCompletion           && return "method"
-    c isa RC.BslashCompletion           && return "latex"
+    c isa RC.BslashCompletion           && return "latex"  # see latex_symbol below for name→char
     c isa RC.PathCompletion             && return "path"
     c isa RC.PackageCompletion          && return "module"
     (c isa RC.DictCompletion || c isa RC.KeyvalCompletion) && return "key"
@@ -97,6 +97,22 @@ function _retype_kwargs(txt::AbstractString, kt::Dict{Symbol,String})
         isempty(t) ? strip(p) : nm * "::" * t
     end
     return pre * " " * join(typed, ", ") * ")" * tail
+end
+
+"""
+    latex_symbol(name) -> String
+
+Resolve a LaTeX/emoji completion command (`"\\alpha"`, `"\\:smile:"`) to its character; `""` if
+unknown. A PARTIAL latex query (`\\alph`) comes back from REPLCompletions as the NAME, not the
+symbol — so the UI displays the name (it must, to filter by what the user typed) but resolves the
+symbol via this to APPLY in one step (else accepting inserts the literal `\\alpha`).
+"""
+function latex_symbol(name::AbstractString)
+    RC = REPL.REPLCompletions
+    s = String(name)
+    sym = get(RC.latex_symbols, s, "")
+    (isempty(sym) && isdefined(RC, :emoji_symbols)) && (sym = get(RC.emoji_symbols, s, ""))
+    return sym
 end
 
 """

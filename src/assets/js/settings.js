@@ -13,6 +13,12 @@ function openSettings() {
   const th = document.getElementById('settheme');
   th.value = localStorage.getItem('slateTheme') || 'dark';
   th.onchange = () => localStorage.setItem('slateTheme', th.value);   // real themes land later
+  // Editor syntax palette — live-applied across all editors via window.setSyntaxTheme (editor.js).
+  const syn = document.getElementById('setsyntax');
+  if (syn) {
+    syn.value = localStorage.getItem('slateSyntaxTheme') || 'dark-plus';
+    syn.onchange = () => { window.setSyntaxTheme && window.setSyntaxTheme(syn.value); };
+  }
   const mdl = document.getElementById('setmodel'), mhint = document.getElementById('setmodelhint');
   // Model and permission both bind only at spawn — changing either reaps the running
   // agent (chat-kill keeps the transcript) so the next turn respawns on the new setting.
