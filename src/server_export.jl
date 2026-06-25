@@ -64,10 +64,11 @@ function _highlight_julia(code::AbstractString)
     isempty(code) && return ""
     try
         JS = Base.JuliaSyntax
-        io = IOBuffer()
-        prev_at = false
+        cu = codeunits(code)                 # token ranges are BYTE ranges (char-aligned), so slice
+        io = IOBuffer()                       # bytes — `code[range]` throws when a token follows a
+        prev_at = false                       # multibyte char like λ/π/θ (mid-char index).
         for t in JS.tokenize(code)
-            txt = code[t.range]
+            txt = String(cu[t.range])
             k = JS.kind(t); ks = string(k)
             cls = JS.is_keyword(k) ? "kw" :
                   ks == "Comment" ? "com" :
