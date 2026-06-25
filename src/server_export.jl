@@ -25,7 +25,8 @@ const _EXPORT_CSS = """
 .exp-src code{font-family:'Cascadia Code','Fira Code',monospace;font-size:.82rem;color:var(--text);white-space:pre;}
 .exp-src .hl-kw{color:#c586c0;} .exp-src .hl-com{color:#6a9955;font-style:italic;}
 .exp-src .hl-num{color:#b5cea8;} .exp-src .hl-str{color:#ce9178;}
-.exp-src .hl-macro{color:#4ec9b0;} .exp-src .hl-op{color:#9aa6c0;}
+.exp-src .hl-macro{color:#569cd6;} .exp-src .hl-op{color:#56b6c2;}
+.exp-src .hl-fn{color:#dcdcaa;} .exp-src .hl-type{color:#4ec9b0;} .exp-src .hl-sym{color:#d19a66;}
 .exp-out{font-size:.86rem;} .exp-out .out,.exp-out .val,.exp-out .err{padding:8px 14px;}
 .exp-out .out{color:var(--dim);} .exp-out .val{color:var(--green);} .exp-out .err{color:var(--red);}
 .exp-out pre{margin:0;white-space:pre-wrap;} .exp-out .dispwrap,.disp.img{padding:10px 14px;}
@@ -65,18 +66,29 @@ function _highlight_julia(code::AbstractString)
     try
         JS = Base.JuliaSyntax
         cu = codeunits(code)                 # token ranges are BYTE ranges (char-aligned), so slice
-        io = IOBuffer()                       # bytes — `code[range]` throws when a token follows a
-        prev_at = false                       # multibyte char like λ/π/θ (mid-char index).
-        for t in JS.tokenize(code)
-            txt = String(cu[t.range])
-            k = JS.kind(t); ks = string(k)
+        toks = collect(JS.tokenize(code))    # bytes — `code[range]` throws when a token follows a
+        kinds = [string(JS.kind(t)) for t in toks]   # multibyte char like λ/π/θ (mid-char index).
+        n = length(toks)
+        io = IOBuffer()
+        prev_at = false                       # last token was `@` → this one is the macro name
+        prev_sym = false                      # last token was a quote-colon → this one completes `:name`
+        for i in 1:n
+            t = toks[i]; txt = String(cu[t.range]); k = JS.kind(t); ks = kinds[i]
+            nextk = i < n ? kinds[i+1] : ""   # IMMEDIATE next (no skip) — call/symbol have no space
+            # `*` `^` `'` `/` `<` … tokenize as identifiers, not operator kinds — catch them too.
+            is_op_id = ks == "Identifier" && Base.isoperator(Symbol(txt))
             cls = JS.is_keyword(k) ? "kw" :
                   ks == "Comment" ? "com" :
                   (prev_at || ks == "@") ? "macro" :
+                  prev_sym ? "sym" :
+                  (ks == ":" && nextk == "Identifier") ? "sym" :        # :gray  :cyan  :dash
                   JS.is_number(k) ? "num" :
-                  (occursin("String", ks) || ks in ("Char", "\"", "'", "`")) ? "str" :
-                  JS.is_operator(k) ? "op" : ""
+                  (occursin("String", ks) || occursin("Char", ks) || ks in ("\"", "`")) ? "str" :
+                  (ks == "Identifier" && !is_op_id && nextk == "(") ? "fn" :   # f(…)  lines!(…)
+                  (is_op_id || JS.is_operator(k)) ? "op" :
+                  (ks == "Identifier" && !isempty(txt) && isuppercase(first(txt))) ? "type" : ""
             prev_at = (ks == "@")
+            prev_sym = (cls == "sym" && ks == ":")
             isempty(cls) ? print(io, _esc(txt)) :
                 print(io, "<span class=\"hl-", cls, "\">", _esc(txt), "</span>")
         end
