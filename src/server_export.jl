@@ -23,6 +23,9 @@ const _EXPORT_CSS = """
 .exp-code{margin:14px 0;border:1px solid var(--border);border-radius:8px;background:var(--bg2);overflow:hidden;}
 .exp-src{margin:0;padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);overflow-x:auto;}
 .exp-src code{font-family:'Cascadia Code','Fira Code',monospace;font-size:.82rem;color:var(--text);white-space:pre;}
+.exp-src .hl-kw{color:#c586c0;} .exp-src .hl-com{color:#6a9955;font-style:italic;}
+.exp-src .hl-num{color:#b5cea8;} .exp-src .hl-str{color:#ce9178;}
+.exp-src .hl-macro{color:#4ec9b0;} .exp-src .hl-op{color:#9aa6c0;}
 .exp-out{font-size:.86rem;} .exp-out .out,.exp-out .val,.exp-out .err{padding:8px 14px;}
 .exp-out .out{color:var(--dim);} .exp-out .val{color:var(--green);} .exp-out .err{color:var(--red);}
 .exp-out pre{margin:0;white-space:pre-wrap;} .exp-out .dispwrap,.disp.img{padding:10px 14px;}
@@ -52,6 +55,36 @@ function _export_table_html(spec)
     return String(take!(io))
 end
 
+# Server-side Julia syntax highlighting for the SELF-CONTAINED export: tokenize with the
+# `JuliaSyntax` bundled in Base (no dependency, no JS, works offline) and wrap each interesting
+# token in a `<span class="hl-…">`; whitespace/punctuation pass through as escaped text. A macro
+# call (`@name`) colours both the `@` and the following name. Any tokenizer hiccup falls back to
+# plain escaped source, so a syntactically-incomplete cell still exports.
+function _highlight_julia(code::AbstractString)
+    isempty(code) && return ""
+    try
+        JS = Base.JuliaSyntax
+        io = IOBuffer()
+        prev_at = false
+        for t in JS.tokenize(code)
+            txt = code[t.range]
+            k = JS.kind(t); ks = string(k)
+            cls = JS.is_keyword(k) ? "kw" :
+                  ks == "Comment" ? "com" :
+                  (prev_at || ks == "@") ? "macro" :
+                  JS.is_number(k) ? "num" :
+                  (occursin("String", ks) || ks in ("Char", "\"", "'", "`")) ? "str" :
+                  JS.is_operator(k) ? "op" : ""
+            prev_at = (ks == "@")
+            isempty(cls) ? print(io, _esc(txt)) :
+                print(io, "<span class=\"hl-", cls, "\">", _esc(txt), "</span>")
+        end
+        return String(take!(io))
+    catch
+        return _esc(code)
+    end
+end
+
 function export_html(nb::LiveNotebook; include_source::Bool = true)
     lock(nb.lock) do
         title = _esc(nb.report.title)
@@ -69,8 +102,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
                 print(io, "<section class=\"exp-md\">", markdown_html(c.source, c.interp), "</section>")
             else
                 print(io, "<section class=\"exp-code\">")
-                (include_source && !isempty(strip(c.source))) &&
-                    print(io, "<pre class=\"exp-src\"><code>", _esc(c.source), "</code></pre>")
+                # Honour BOTH the global `?source=0` toggle AND the per-cell `hidecode` flag (the
+                # 🙈 toggle) — a cell whose code is hidden in the notebook exports output-only.
+                (include_source && !(:hidecode in c.flags) && !isempty(strip(c.source))) &&
+                    print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
                 print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
                 if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot
                     png = _snapshot(nb.id, c.id)
