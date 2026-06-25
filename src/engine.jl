@@ -48,10 +48,11 @@ struct CellOutput
     backtrace::Union{String,Nothing}
     duration_ms::Float64          # wall-clock eval time
     trace::Vector{Any}            # `@trace` rows ({line,name,value}); empty unless cell is traced
+    stderr::String                # captured stderr / `@warn` output (shown as a warnings block)
 end
-# Back-compat constructor for the 9-arg form (callers that don't produce trace rows).
+# Back-compat constructor for the 9-arg form (callers that don't produce trace rows / stderr).
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[])
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "")
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);

@@ -229,6 +229,16 @@ end
         @test r3.exception !== nothing
     end
 
+    @testset "stderr / @warn is captured (separate from stdout, cell still succeeds)" begin
+        r = run_capture(Module(:Warns), "@warn \"heads up\"\n6 * 7")
+        @test r.exception === nothing           # a warning is not an error
+        @test r.value_repr == "42"
+        @test occursin("heads up", r.stderr)
+        @test isempty(r.stdout)                 # the warning went to stderr, not stdout
+        # a clean cell has empty stderr
+        @test isempty(run_capture(Module(:NoWarns), "1 + 1").stderr)
+    end
+
     @testset "markdown {{ }} interpolation: reads, deps, reactive capture" begin
         r = parse_report("#%% code id=a\nx = 21 * 2\n\n#%% md id=m\nThe answer is {{x}}.")
         build_dependencies!(r)

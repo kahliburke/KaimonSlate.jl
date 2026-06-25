@@ -169,6 +169,26 @@ nv() = [(n, v) for (_, n, v) in rows()]
         @test nv() == [("result", "42")]
     end
 
+    @testset "cell ending in a value-returning let/if returns that value (the try_gram bug)" begin
+        # A cell that is just `let … expr end` must return the let's value, not nothing.
+        v = @tr begin
+            let a = 3
+                a * 2
+            end
+        end
+        @test v == 6
+        # ending in an `if` returns the taken branch's value.
+        g(x) = @tr begin
+            if x > 0
+                x * 10
+            else
+                -1
+            end
+        end
+        @test g(4) == 40
+        @test g(-2) == -1
+    end
+
     @testset "wire form" begin
         @tr begin
             n = 2

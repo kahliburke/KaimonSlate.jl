@@ -87,7 +87,7 @@ function _eval_capture(mod::Module, source::AbstractString)
     chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in r.binds]
     return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
-                      r.backtrace, r.duration_ms, collect(r.trace))
+                      r.backtrace, r.duration_ms, collect(r.trace), r.stderr)
 end
 
 # ── Kernel: the execution backend ─────────────────────────────────────────────

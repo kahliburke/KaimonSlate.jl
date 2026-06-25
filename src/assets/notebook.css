@@ -123,12 +123,13 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cid { color:var(--dim); font-family:monospace; }
 .CodeMirror { height:auto; font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
 .output { font-size:.84rem; }
-.output .out, .output .val, .output .err { padding:8px 12px; border-top:1px solid var(--border); }
+.output .out, .output .val, .output .err, .output .warn { padding:8px 12px; border-top:1px solid var(--border); }
 .output pre { margin:0; white-space:pre-wrap; overflow-x:auto; }
 .output .out { color:var(--dim); } .output .val { color:var(--green); }
 .output .err { color:var(--red); background:rgba(229,117,117,.06); }
-.output .err .srcref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
-.output .err .srcref:hover { color:#fff; }
+.output .warn { color:var(--gold); background:rgba(255,215,0,.06); font-size:.86rem; }
+.output .err .srcref, .output .warn .srcref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
+.output .err .srcref:hover, .output .warn .srcref:hover { color:#fff; }
 .dispwrap { padding:10px 12px; border-top:1px solid var(--border); }
 .echarts:not(:empty) { padding:8px 6px; border-top:1px solid var(--border); }
 .echart { height:340px; width:100%; }

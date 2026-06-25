@@ -264,7 +264,7 @@ function _wire_to_output(wire)
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in wire.binds]
     return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
                       binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms),
-                      collect(wire.trace))
+                      collect(wire.trace), String(wire.stderr))
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString)

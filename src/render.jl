@@ -42,6 +42,9 @@ function output_html(cell::Cell)
     o === nothing && return ""
     io = IOBuffer()
     isempty(o.stdout) || print(io, "<div class=\"out\"><pre>", _esc(o.stdout), "</pre></div>")
+    # Captured stderr / `@warn` output — a distinct warnings block (not an error: the cell may
+    # still have succeeded). VS Code source links in any `@ file:line` notices are made clickable.
+    isempty(o.stderr) || print(io, "<div class=\"warn\"><pre>", _linkify_trace(o.stderr), "</pre></div>")
     if isempty(o.display) && !isempty(o.value_repr)
         print(io, "<div class=\"val\"><pre>", _esc(o.value_repr), "</pre></div>")
     end

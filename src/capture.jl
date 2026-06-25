@@ -13,7 +13,8 @@
 # the same way. What a captured object can `show` as (e.g. a CairoMakie figure →
 # image/png) is orthogonal — that lives in the worker's own project env.
 
-import REPL   # for `REPL.softscope` — REPL-style cell eval (stdlib; always available)
+import REPL       # for `REPL.softscope` — REPL-style cell eval (stdlib; always available)
+import Logging    # to capture a cell's `@warn`/`@info` onto the redirected stderr (stdlib)
 
 const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
 
@@ -134,6 +135,13 @@ function run_capture(mod::Module, source::AbstractString)
     original = stdout
     (rd, wr) = redirect_stdout()
     reader = @async read(rd, String)
+    # Also capture stderr — `@warn`/`@info`/`@error` and any `print(stderr,…)` (deprecation and
+    # soft-scope notices, user warnings). redirect_stderr catches direct writes; a `ConsoleLogger`
+    # on that redirected stream (installed for the eval task below) catches the logging macros,
+    # whose default logger would otherwise hold the original stderr.
+    origerr = stderr
+    (rde, wre) = redirect_stderr()
+    ereader = @async read(rde, String)
 
     # Collect `@bind` controls declared during this eval — the namespace's injected
     # `__slate_bind` pushes to this sink. Absent on bare modules (e.g. tests) → no-op.
@@ -149,13 +157,19 @@ function run_capture(mod::Module, source::AbstractString)
     btrace = nothing
     t0 = time_ns()
     try
-        value = _eval_cell_source(mod, source)
+        # `ConsoleLogger(stderr)` — `stderr` is the redirected pipe now, so the macros land in
+        # `ereader`. Non-colored (a pipe isn't a color tty), so no ANSI escapes reach the browser.
+        Logging.with_logger(Logging.ConsoleLogger(stderr)) do
+            value = _eval_cell_source(mod, source)
+        end
     catch e
         err = e
         btrace = catch_backtrace()
     finally
         redirect_stdout(original)
+        redirect_stderr(origerr)
         close(wr)
+        close(wre)
         popdisplay(capture)
     end
     binds = sinkref === nothing ? NamedTuple[] : copy(sinkref[])
@@ -164,6 +178,7 @@ function run_capture(mod::Module, source::AbstractString)
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
     stdout_str = fetch(reader)
+    stderr_str = fetch(ereader)
     dur_ms = (time_ns() - t0) / 1e6
 
     # Capture the return value: an ECharts spec / a table are kept raw (reduced to
@@ -218,5 +233,5 @@ function run_capture(mod::Module, source::AbstractString)
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
-            duration_ms = dur_ms, trace = trace)
+            duration_ms = dur_ms, trace = trace, stderr = stderr_str)
 end
