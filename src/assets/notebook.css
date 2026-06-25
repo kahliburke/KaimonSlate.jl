@@ -130,10 +130,15 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .output .warn { color:var(--gold); background:rgba(255,215,0,.06); font-size:.86rem; }
 .output .err .srcref, .output .warn .srcref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
 .output .err .srcref:hover, .output .warn .srcref:hover { color:#fff; }
-/* Clickable error → jump to the offending line in the editor. */
-.output .err.errjumpable { cursor:pointer; }
-.output .err .errjump { margin-top:6px; font-size:.74rem; color:var(--accent); opacity:.75; }
-.output .err.errjumpable:hover .errjump { opacity:1; text-decoration:underline; }
+/* Error message syntax coloring (the .err block default is red). */
+.output .err { color:#e69a99; }
+.output .err .err-type { color:#ff8f6b; font-weight:600; }     /* the exception type (UndefVarError …) */
+.output .err .err-id { color:#e5c07b; }                        /* `backticked` names/types */
+.output .err .err-suggest { color:var(--dim); font-style:italic; }
+.output .err .err-bt { color:#7e8499; font-size:.92em; }       /* the dimmed backtrace */
+/* The `string:N` cell-line reference — itself the clickable jump. */
+.output .err .cellref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
+.output .err .cellref:hover { color:#fff; }
 /* The offending source line, tinted in CodeMirror while the cell is errored (+ a brief flash on jump). */
 .CodeMirror-linebackground.cm-errorline { background:rgba(229,117,117,.16); box-shadow:inset 3px 0 0 var(--red); }
 .CodeMirror-linebackground.cm-errorline-flash { background:rgba(255,215,0,.30); transition:background .9s ease-out; }

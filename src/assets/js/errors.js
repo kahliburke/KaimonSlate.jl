@@ -25,32 +25,30 @@ function _applyErrorLine(c, ed) {
 }
 window._applyErrorLine = _applyErrorLine;
 
-// Scroll to a cell's offending line and flash it.
-function scrollToErrorLine(cellId) {
+// Scroll a cell's editor to `line1` (1-based) and flash it.
+function jumpToCellLine(cellId, line1) {
   const cellEl = document.getElementById('cell-' + cellId);
   if (cellEl) cellEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  const c = (typeof _cellById === 'function') ? _cellById(cellId) : null;
   const ed = window.editors[cellId];
-  if (ed && ed.addLineClass && c && c.errorLine) {
-    const ln = c.errorLine - 1;
-    if (ln >= 0 && ed.lineCount && ln < ed.lineCount()) {
-      try {
-        ed.scrollIntoView({ line: ln, ch: 0 }, 80);
-        ed.addLineClass(ln, 'background', 'cm-errorline-flash');
-        setTimeout(() => { try { ed.removeLineClass(ln, 'background', 'cm-errorline-flash'); } catch (_) {} }, 1000);
-      } catch (_) {}
-    }
+  const ln = line1 - 1;
+  if (ed && ed.addLineClass && ln >= 0 && ed.lineCount && ln < ed.lineCount()) {
+    try {
+      ed.scrollIntoView({ line: ln, ch: 0 }, 80);
+      ed.addLineClass(ln, 'background', 'cm-errorline-flash');
+      setTimeout(() => { try { ed.removeLineClass(ln, 'background', 'cm-errorline-flash'); } catch (_) {} }, 1000);
+    } catch (_) {}
   }
 }
-window.scrollToErrorLine = scrollToErrorLine;
+window.jumpToCellLine = jumpToCellLine;
 
-// Click an error message → jump to the offending line. A real `path.jl:line` link (.srcref) keeps
-// its VS Code behavior; clicking anywhere else in the error block jumps within the cell.
+// Click the `string:N` reference in a backtrace → jump to that line in the cell. (Real
+// `path.jl:line` links keep their VS Code `.srcref` behavior — they're a different element.)
 document.addEventListener('click', e => {
   if (!e.target.closest) return;
-  if (e.target.closest('.srcref')) return;
-  const err = e.target.closest('.output .err.errjumpable');
-  if (!err) return;
-  const cell = err.closest('.cell');
-  if (cell && cell.dataset && cell.dataset.cid) scrollToErrorLine(cell.dataset.cid);
+  const ref = e.target.closest('.cellref');
+  if (!ref) return;
+  e.preventDefault();
+  const cell = ref.closest('.cell');
+  const line = parseInt(ref.dataset.line, 10);
+  if (cell && cell.dataset && cell.dataset.cid && line) jumpToCellLine(cell.dataset.cid, line);
 });

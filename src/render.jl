@@ -50,15 +50,35 @@ function output_html(cell::Cell)
     end
     isempty(o.display) || print(io, "<div class=\"dispwrap\">", _render_chunks(o.display), "</div>")
     if o.exception !== nothing
-        el = _cell_error_line(o)
-        # `errjumpable` + `data-errline` let the browser tint the offending line in the editor and
-        # scroll/flash to it on click (errors.js). `el` is the cell's own source line (a `string:N`).
-        print(io, el === nothing ? "<div class=\"err\">" : "<div class=\"err errjumpable\" data-errline=\"$(el)\">")
-        print(io, "<pre>", _esc(o.exception))
-        (o.backtrace === nothing || isempty(o.backtrace)) || print(io, "\n", _linkify_trace(o.backtrace))
-        print(io, "</pre>")
-        el === nothing || print(io, "<div class=\"errjump\">↦ jump to line ", el, "</div>")
-        print(io, "</div>")
+        # The message is syntax-coloured (error type, `backticked` names, Suggestion line); the
+        # backtrace is dimmed and its `string:N` (the cell's own line) is itself the clickable jump.
+        print(io, "<div class=\"err\"><pre>", _render_exc_html(o.exception))
+        (o.backtrace === nothing || isempty(o.backtrace)) ||
+            print(io, "<span class=\"err-bt\">\n", _linkify_trace(o.backtrace), "</span>")
+        print(io, "</pre></div>")
+    end
+    return String(take!(io))
+end
+
+# Colour an already-escaped line's `` `backticked` `` names (identifiers/types Julia quotes in its
+# error text) — the backticks drop, the content gets the `err-id` accent.
+_color_ticks(s::AbstractString) =
+    replace(s, r"`[^`]*`" => m -> "<span class=\"err-id\">" * chop(m; head = 1, tail = 1) * "</span>")
+
+# Render an exception message as coloured HTML: the leading error TYPE (`UndefVarError`, `MethodError`,
+# …) is set apart, `Suggestion:` lines are dimmed, and quoted names are accented. Everything is escaped.
+function _render_exc_html(exc::AbstractString)
+    io = IOBuffer()
+    for (i, raw) in enumerate(split(exc, '\n'))
+        i > 1 && print(io, '\n')
+        m = i == 1 ? match(r"^([A-Za-z_][A-Za-z0-9_]*)([:(].*)$", raw) : nothing
+        if startswith(lstrip(raw), "Suggestion:")
+            print(io, "<span class=\"err-suggest\">", _color_ticks(_esc(raw)), "</span>")
+        elseif m !== nothing
+            print(io, "<span class=\"err-type\">", _esc(m.captures[1]), "</span>", _color_ticks(_esc(m.captures[2])))
+        else
+            print(io, _color_ticks(_esc(raw)))
+        end
     end
     return String(take!(io))
 end
@@ -75,17 +95,21 @@ function _cell_error_line(o::CellOutput)
     return nothing
 end
 
-# Make `path.jl:line` references in a backtrace clickable → open in VS Code. Escapes the text,
-# then wraps each source location in a `vscode://file/<abspath>:<line>` link (expanding `~`).
+# Make source locations in a backtrace clickable: `path.jl:line` → open in VS Code; `string:N`
+# (our cell eval `filename`) → jump to that line IN THIS CELL (errors.js wires `.cellref`).
 function _linkify_trace(bt::AbstractString)
     home = homedir()
-    return replace(_esc(bt), r"((?:~|/)[\w./ \-]*\.jl):(\d+)" => function (m)
+    s = replace(_esc(bt), r"((?:~|/)[\w./ \-]*\.jl):(\d+)" => function (m)
         p = match(r"^(.*\.jl):(\d+)$", m)
         p === nothing && return m
         path, line = String(p.captures[1]), String(p.captures[2])
         ap = startswith(path, "~") ? home * path[2:end] : path
         isabspath(ap) && isfile(ap) || return m   # skip Base's relative ./foo.jl etc. — only real files
         "<a class=\"srcref\" href=\"vscode://file" * ap * ":" * line * "\" title=\"open in VS Code\">" * m * "</a>"
+    end)
+    return replace(s, r"\bstring:(\d+)\b" => function (m)
+        ln = String(match(r"\d+", m).match)
+        "<a class=\"cellref\" data-line=\"" * ln * "\" title=\"jump to line " * ln * " in this cell\">" * m * "</a>"
     end)
 end
 
