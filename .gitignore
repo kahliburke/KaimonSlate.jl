@@ -14,3 +14,7 @@
 # personal scratch / interim planning docs (not part of the repo)
 TODO.md
 VISION.md
+
+# CM6 bundle build (node deps; the built artifact is committed under src/assets/js/)
+build/cm6/node_modules/
+build/cm6/package-lock.json

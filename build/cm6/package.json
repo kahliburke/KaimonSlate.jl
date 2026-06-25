@@ -1,0 +1,13 @@
+{
+  "name": "kaimonslate-cm6-bundle",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Pre-built CodeMirror 6 bundle (editor + Julia/Lezer highlighting) vendored as src/assets/js/cm6.bundle.js",
+  "scripts": { "build": "esbuild entry.js --bundle --format=iife --global-name=CM6 --minify --outfile=../../src/assets/js/cm6.bundle.js" },
+  "dependencies": {
+    "@codemirror/state": "^6", "@codemirror/view": "^6", "@codemirror/commands": "^6",
+    "@codemirror/language": "^6", "@codemirror/autocomplete": "^6", "@codemirror/search": "^6",
+    "@lezer/highlight": "^1", "@plutojl/lezer-julia": "^1"
+  },
+  "devDependencies": { "esbuild": "^0.24" }
+}
