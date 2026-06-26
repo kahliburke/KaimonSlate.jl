@@ -331,9 +331,11 @@ function _renderView() {
   if (!v || !v.q) ul.innerHTML = _DOC_HINT;
   else if (!v.results.length) ul.innerHTML = '<li class="docempty">No matches — try different words.</li>';
   else ul.innerHTML = v.results.map((r, i) => {
+    // Tag only meaningful relevance: exact/name matches. The raw fusion (RRF) score is tiny and
+    // near-uniform (~0.04) — useless to a human — so semantic-only hits show no number; the list
+    // order already conveys relevance.
     const right = r.exact ? '<span class="k exact">exact</span>'
-                : r._nameMatch ? '<span class="k exact">name</span>'
-                : `<span class="k">${(Number(r.score) || 0).toFixed(2)}</span>`;
+                : r._nameMatch ? '<span class="k exact">name</span>' : '';
     const label = (r.module && r.module !== r.name) ? `${_escc(r.module)}.<b>${_escc(r.name)}</b>` : `<b>${_escc(r.name)}</b>`;
     return `<li class="${i === v.sel && !v.rec ? 'on' : ''}" data-i="${i}"><span class="docname">${label}${right}</span></li>`;
   }).join('');
