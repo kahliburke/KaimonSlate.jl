@@ -5,12 +5,14 @@
   "scripts": {
     "docs:dev": "vitepress dev build/.documenter",
     "docs:build": "vitepress build build/.documenter",
-    "docs:preview": "vitepress preview build/.documenter"
+    "docs:preview": "vitepress preview build/.documenter",
+    "docs:assets": "node generate_assets.mjs"
   },
   "devDependencies": {
     "mermaid": "^11.12.3",
     "vitepress": "^1.6.3",
     "vitepress-plugin-mermaid": "^2.0.17",
-    "vitepress-plugin-tabs": "^0.5.0"
+    "vitepress-plugin-tabs": "^0.5.0",
+    "playwright": "^1.61.1"
   }
 }
