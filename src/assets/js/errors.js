@@ -4,13 +4,31 @@
 // to and flashes it. Plain code cells have an always-on editor (window.editors[id]); @bind cells
 // don't, so for those a click just scrolls to the cell.
 
-// Called from the cell render effect (notebook.js) after output swaps in. Tints the offending line
-// (CM6 line decoration via markErrorLine/clearErrorLine, editor.js). The faint overlay stays as long
-// as the cell is errored — regardless of whether the user has navigated in / is editing (CM6 maps
-// the decoration through edits); it clears when the cell re-runs without error.
+// Called from the cell render effect (notebook.js) after output swaps in. Marks two lines via CM6
+// line decorations (editor.js): the ORIGIN — the actual offending line, possibly in another cell —
+// gets the brighter `cm-errorline-origin`; the call site in THIS cell (when distinct) gets the faint
+// `cm-errorline`. The origin is read from the rendered error message (`.errjump` carries the origin
+// cell id + line — see render.jl). Both persist regardless of navigation/edit (CM6 maps them) and
+// clear when the cell re-runs clean. `_originMarks` lets a cell clear the origin mark it owns.
+const _originMarks = {};   // erroredCellId -> origin cellId it currently marks
 function _applyErrorLine(c) {
   if (!c || !window.editors[c.id]) return;
-  c.errorLine ? window.markErrorLine(c.id, c.errorLine) : window.clearErrorLine(c.id);
+  const cellEl = document.querySelector('.cell[data-cid="' + c.id + '"]');
+  const ej = cellEl && cellEl.querySelector('.errjump');
+  const oCid = ej && ej.dataset.cid, oLine = ej && parseInt(ej.dataset.line, 10);
+  const prev = _originMarks[c.id];
+  if (prev && prev !== oCid) { window.clearOriginLine(prev); delete _originMarks[c.id]; }   // origin moved/cleared
+  if (c.errorLine && oCid && oLine && window.editors[oCid]) {
+    window.markOriginLine(oCid, oLine);                                    // bright: the actual offending line
+    _originMarks[c.id] = oCid;
+    (oCid !== c.id || oLine !== c.errorLine)                              // faint call site only when distinct
+      ? window.markErrorLine(c.id, c.errorLine) : window.clearErrorLine(c.id);
+  } else if (c.errorLine) {
+    window.markErrorLine(c.id, c.errorLine);                              // no origin info → faint own line
+  } else {
+    window.clearErrorLine(c.id);
+    if (prev) { window.clearOriginLine(prev); delete _originMarks[c.id]; }
+  }
 }
 window._applyErrorLine = _applyErrorLine;
 

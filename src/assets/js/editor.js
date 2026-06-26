@@ -168,7 +168,9 @@
   }
 
   // ── error-line decoration (replaces CM5 addLineClass) ──────────────────────────
-  const setErr = StateEffect.define(), setFlash = StateEffect.define();
+  // Three independent line marks: `err` (faint, the call site in the cell that threw), `origin`
+  // (brighter, the actual offending line — may be a DIFFERENT cell), and `flash` (transient pulse).
+  const setErr = StateEffect.define(), setFlash = StateEffect.define(), setOrigin = StateEffect.define();
   const lineDeco = cls => Decoration.line({ class: cls });
   const mkField = (effect, cls) => StateField.define({
     create: () => Decoration.none,
@@ -184,10 +186,13 @@
   });
   const errField = mkField(setErr, 'cm-errorline');
   const flashField = mkField(setFlash, 'cm-errorline-flash');
+  const originField = mkField(setOrigin, 'cm-errorline-origin');
 
   const _validLine = (view, n) => n >= 1 && n <= view.state.doc.lines;
   window.markErrorLine = (id, line1) => { const v = editors[id]; if (v) v.dispatch({ effects: setErr.of(_validLine(v, line1) ? line1 : null) }); };
   window.clearErrorLine = (id) => { const v = editors[id]; if (v) v.dispatch({ effects: setErr.of(null) }); };
+  window.markOriginLine = (id, line1) => { const v = editors[id]; if (v) v.dispatch({ effects: setOrigin.of(_validLine(v, line1) ? line1 : null) }); };
+  window.clearOriginLine = (id) => { const v = editors[id]; if (v) v.dispatch({ effects: setOrigin.of(null) }); };
   window.flashLine = (id, line1) => {
     const v = editors[id]; if (!v || !_validLine(v, line1)) return;
     const off = v.state.doc.line(line1).from;
@@ -212,7 +217,7 @@
       doc: opts.doc || '',
       extensions: [
         history(), drawSelection(), bracketMatching(), closeBrackets(), indentOnInput(),
-        indentUnit.of('    '), EditorState.tabSize.of(4), errField, flashField,
+        indentUnit.of('    '), EditorState.tabSize.of(4), errField, originField, flashField,
         ...lang,
         autocompletion({ override: [juliaComplete], icons: true }),
         keymap.of([

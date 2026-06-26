@@ -149,6 +149,10 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
    CM6 applies the class to the `.cm-line` element via a line Decoration. */
 .cm-editor .cm-line.cm-errorline { background:rgba(229,117,117,.12); box-shadow:inset 3px 0 0 var(--red);
   transition:background .35s ease; }
+/* The actual offending line (error origin — may be a different cell than the one that threw):
+   a touch brighter + a bolder gutter bar to distinguish it from faint call-site lines. */
+.cm-editor .cm-line.cm-errorline-origin { background:rgba(240,104,94,.22); box-shadow:inset 4px 0 0 #ff6b6b;
+  transition:background .35s ease; }
 /* Error / jump flash: an orange-red highlight that fades IN then back OUT (a pulse) rather than
    appearing and abruptly cutting; settles onto the faint overlay above when the line is errored. */
 @keyframes cm-errorflash {
