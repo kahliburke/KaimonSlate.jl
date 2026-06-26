@@ -5,13 +5,17 @@ a task to the AI agent.
 
 ## Open a notebook
 
+Under **Kaimon** (the [recommended setup](installation.md)) the notebook server is already
+running — just open your browser to **`http://127.0.0.1:8765`**. The index page lists open
+notebooks; click one to enter it, or type a path to open (or create) another. You can also
+ask the **💬 agent** to open one for you.
+
+*Standalone* (no Kaimon)? Start the server yourself, then open the printed URL:
+
 ```julia
 using KaimonSlate
-KaimonSlate.serve_notebook("intro.jl")
+KaimonSlate.serve_notebook("intro.jl")   # serves at http://127.0.0.1:8765
 ```
-
-Open the printed URL (default `http://127.0.0.1:8765`). The index page lists open
-notebooks; click one to enter it, or type a path to open another.
 
 ![A KaimonSlate notebook: code, a slider widget, an inline ECharts chart, a table, and an error cell](./assets/overview.png)
 

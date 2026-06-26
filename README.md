@@ -27,11 +27,13 @@ two talk over the Gate (ZMQ).
 
 ## As a Kaimon extension (recommended)
 
-The full experience — per-notebook gate workers **and** the AI agent. Register this project
-in `~/.config/kaimon/extensions.json` (or the Extensions tab); Kaimon manages the subprocess
-and exposes `slate.open` / `slate.list` / `slate.close` to the agent. Each notebook runs in
-its own gate worker, pinned to the Julia project the notebook file lives in
-(`Base.current_project`). See the [installation guide](https://kahliburke.github.io/KaimonSlate.jl/dev/installation).
+The full experience — per-notebook gate workers **and** the AI agent. **Zero-setup**:
+`using KaimonSlate` auto-registers it with Kaimon (if Kaimon is installed), so you just launch
+Kaimon and open the browser to `http://127.0.0.1:8765` — no hand-editing config, no manual
+`serve_notebook`. Kaimon manages the subprocess and exposes `slate.open` / `slate.list` /
+`slate.close` to the agent; each notebook runs in its own gate worker, pinned to the Julia
+project the notebook file lives in (`Base.current_project`). See the
+[installation guide](https://kahliburke.github.io/KaimonSlate.jl/dev/installation).
 
 ## Standalone (quick look)
 

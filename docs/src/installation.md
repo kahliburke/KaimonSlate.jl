@@ -16,38 +16,38 @@ is also available for a quick look without Kaimon.
 
 ## Recommended: as a Kaimon extension
 
-This is the path most users want. Kaimon manages the KaimonSlate subprocess, gives each
-notebook its own worker, and exposes the notebook to the agent.
+This is the path most users want, and it's **zero-setup** — you don't hand-edit any config or
+type `serve_notebook` at a REPL. Kaimon manages the KaimonSlate subprocess, starts the server,
+gives each notebook its own worker, and exposes the notebook to the agent.
 
 1. **Install Kaimon** and make sure it runs (see the Kaimon docs). Log in the `claude` CLI
    and/or start Ollama if you want the agent.
 
-2. **Get KaimonSlate.** Clone it (or `Pkg.add` it into an environment Kaimon can see):
+2. **Install KaimonSlate** into an environment Kaimon can see:
 
    ```julia
    using Pkg
    Pkg.add(url = "https://github.com/kahliburke/KaimonSlate.jl")
+   using KaimonSlate   # on load, it registers itself with Kaimon if Kaimon is installed
    ```
 
-3. **Register it as an extension.** Point Kaimon at the KaimonSlate.jl project directory (the
-   one containing `kaimon.toml`) — either through the **Extensions tab** in the Kaimon UI
-   (easiest) or by adding the path to `~/.config/kaimon/extensions.json`. The bundled
-   `kaimon.toml` declares the `slate` namespace and the tools/event wiring:
+   On load KaimonSlate **auto-registers** — it adds itself to Kaimon's extension list
+   (`~/.config/kaimon/extensions.json`) so there's nothing to wire up by hand. (It's
+   idempotent; opt out with `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`, or register a specific
+   checkout explicitly with [`register_extension`](@ref).)
 
-   ```toml
-   [extension]
-   namespace = "slate"
-   module    = "KaimonSlate"
-   ```
+3. **Launch Kaimon.** It loads the `slate` namespace, **auto-starts the notebook server**, and
+   the agent gains the `slate.*` tools (`slate.open` / `slate.list` / `slate.close`, plus the
+   per-notebook `slate_add_cell` / `slate_edit_cell` / `slate_run` / `slate_view` / …).
 
-4. **Reload extensions.** Kaimon loads the `slate` namespace and the agent gains the
-   `slate.*` tools — `slate.open`, `slate.list`, `slate.close`, plus the per-notebook
-   `slate_add_cell` / `slate_edit_cell` / `slate_run` / `slate_view` / … Each notebook runs
-   in its own gate worker, pinned to the Julia project its `.jl` file lives in.
+4. **Open the browser** to the server's index — `http://127.0.0.1:8765` by default
+   (configurable with `KAIMONSLATE_PORT`). The index lists open notebooks and lets you open
+   more by path; click one to start working. Or just **ask the agent** to open a notebook for
+   you (`slate.open`) — the **💬 agent** chat pane is right there in the UI.
 
-Now ask the agent to open a notebook (`slate.open`), or open one yourself — the **💬 agent**
-chat pane is available in the UI. See [The AI Agent](agent.md) for the full tool surface and
-the model / permission options.
+You normally never call `serve_notebook` or `start_server` yourself — those are for the
+standalone path below. See [The AI Agent](agent.md) for the full tool surface and the model /
+permission options.
 
 ## Standalone (without Kaimon)
 

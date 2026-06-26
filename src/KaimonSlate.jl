@@ -24,6 +24,8 @@ As a Kaimon extension, `create_tools` exposes `slate.open` / `slate.list` /
 """
 module KaimonSlate
 
+import JSON
+
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
 include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRender)
@@ -38,7 +40,54 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand
 
-export serve_notebook, LiveNotebook, expand
+export serve_notebook, LiveNotebook, expand, register_extension
+
+# ── Auto-registration as a Kaimon extension ───────────────────────────────────
+# The intended path is zero-setup: install KaimonSlate, and if Kaimon is present on
+# this machine it registers itself in Kaimon's extension list — then the user just
+# launches Kaimon and opens the browser. No hand-editing of config, no manual
+# `serve_notebook`. Detection is simply "Kaimon's config dir exists".
+
+const _KAIMON_DIR = joinpath(homedir(), ".config", "kaimon")
+
+"""
+    register_extension(; auto_start=true, enabled=true, project_path=pkgdir(KaimonSlate)) -> Bool
+
+Add this package to Kaimon's extension registry (`~/.config/kaimon/extensions.json`) so Kaimon
+loads the `slate.*` tools automatically — no hand-wiring. **Idempotent**: returns `false`
+(nothing written) if Kaimon isn't installed here or the entry already exists, and `true` when an
+entry is added. Runs automatically on load (see `__init__`); call it explicitly to (re)register a
+specific `project_path` or to flip `auto_start`.
+"""
+function register_extension(; auto_start::Bool = true, enabled::Bool = true,
+                            project_path = pkgdir(@__MODULE__))
+    isdir(_KAIMON_DIR) || return false                       # Kaimon not installed on this machine
+    project_path === nothing && return false                 # can't locate ourselves (unusual)
+    path = abspath(String(project_path))
+    file = joinpath(_KAIMON_DIR, "extensions.json")
+    data = isfile(file) ? (try; JSON.parsefile(file); catch; Dict{String,Any}(); end) : Dict{String,Any}()
+    exts = get(data, "extensions", nothing)
+    exts isa AbstractVector || (exts = Any[])
+    any(e -> e isa AbstractDict && get(e, "project_path", nothing) == path, exts) && return false  # already there
+    push!(exts, Dict("project_path" => path, "enabled" => enabled, "auto_start" => auto_start))
+    data["extensions"] = exts
+    write(file, JSON.json(data, 2))
+    @info "Registered KaimonSlate as a Kaimon extension — launch Kaimon and open the browser." file
+    return true
+end
+
+# Auto-register on first load when Kaimon is present, so installing + loading the package once is
+# all it takes. Best-effort and idempotent — never breaks loading; opt out with
+# `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`.
+function __init__()
+    get(ENV, "KAIMONSLATE_NO_AUTOREGISTER", "0") in ("1", "true") && return nothing
+    try
+        register_extension()
+    catch e
+        @debug "KaimonSlate auto-registration skipped" exception = (e, catch_backtrace())
+    end
+    return nothing
+end
 
 # ── Single-server hub ─────────────────────────────────────────────────────────
 # The extension serves *all* notebooks from one HTTP 2.0 server on one port,
