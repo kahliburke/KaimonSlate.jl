@@ -101,6 +101,25 @@ async function elShot(page, selector, name) {
   try { await loc.waitFor({ state: 'visible', timeout: 8000 }); await loc.screenshot({ path: join(OUT, name) }); log(`✓ ${name}`) }
   catch (e) { log(`! ${name} skipped: ${e.message.split('\n')[0]}`) }
 }
+// Capture a full-height side panel (position:fixed, height:100vh) cropped to its CONTENT — the
+// panels otherwise screenshot a tall column of blank space below the rows. Temporarily collapse the
+// fixed height (and any flex:1 growable middle, e.g. the agent transcript) so the element's box
+// shrinks to its content, screenshot, then restore. `growSel` is the inner element to un-grow.
+async function panelShot(page, selector, name, growSel = null) {
+  await page.evaluate(({ selector, growSel }) => {
+    const el = document.querySelector(selector); if (!el) return
+    el.dataset._h = el.style.height; el.dataset._mh = el.style.maxHeight
+    el.style.height = 'auto'; el.style.maxHeight = 'none'
+    if (growSel) { const g = el.querySelector(growSel); if (g) { g.dataset._f = g.style.flex; g.style.flex = '0 0 auto' } }
+  }, { selector, growSel })
+  await sleep(250)
+  await elShot(page, selector, name)
+  await page.evaluate(({ selector, growSel }) => {
+    const el = document.querySelector(selector); if (!el) return
+    el.style.height = el.dataset._h || ''; el.style.maxHeight = el.dataset._mh || ''
+    if (growSel) { const g = el.querySelector(growSel); if (g) g.style.flex = g.dataset._f || '' }
+  }, { selector, growSel })
+}
 
 async function main() {
   const server = startServer()
@@ -150,7 +169,7 @@ async function main() {
           await page.evaluate(() => window.toggleHistory && window.toggleHistory())
           await page.waitForSelector('#histpanel.open .hrow', { timeout: 6000 })
           await sleep(500)
-          await elShot(page, '#histpanel', 'history-panel.png')
+          await panelShot(page, '#histpanel', 'history-panel.png')
           await page.evaluate(() => window.toggleHistory && window.toggleHistory())
         } catch (e) { log('! history-panel skipped:', e.message.split('\n')[0]) }
 
@@ -206,7 +225,7 @@ async function main() {
               row('JSON3', '1.14.0', false) + row('StatsBase', '0.34.3', false) + row('Tables', '1.11.1', false)
           })
           await sleep(500)
-          await elShot(page, '#pkgpanel', 'packages-panel.png')
+          await panelShot(page, '#pkgpanel', 'packages-panel.png')
           await page.evaluate(() => document.getElementById('pkgpanel').classList.remove('open'))
         } catch (e) { log('! packages-panel skipped:', e.message.split('\n')[0]) }
 
@@ -227,7 +246,7 @@ async function main() {
             if (!document.getElementById('agentpanel').classList.contains('open')) toggleAgent()
           })
           await sleep(700)
-          await elShot(page, '#agentpanel', 'agent-panel.png')
+          await panelShot(page, '#agentpanel', 'agent-panel.png', '.apmsgs')
           await page.evaluate(() => { if (document.getElementById('agentpanel').classList.contains('open')) toggleAgent() })
         } catch (e) { log('! agent-panel skipped:', e.message.split('\n')[0]) }
       }
@@ -237,7 +256,7 @@ async function main() {
         try {
           await page.evaluate(() => window.togglePalette && window.togglePalette())
           await sleep(600)
-          await elShot(page, '.palette', 'controls-palette.png')
+          await panelShot(page, '.palette', 'controls-palette.png')
         } catch (e) { log('! controls-palette skipped:', e.message.split('\n')[0]) }
       }
       await page.context().close()

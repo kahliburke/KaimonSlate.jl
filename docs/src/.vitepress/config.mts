@@ -21,6 +21,14 @@ const LOGO_SRC = 'assets/slate-logo.svg'
 // the Release URL works in CI). Generated demo media (screenshots + clips) live under the
 // docs-assets Release in CI, or public/assets/ locally — never in the repo. webm/mp4 become an
 // autoplaying, looping, muted `<video>` (a silent screencast); images become `<img>`.
+// Native UI widths (CSS px) of panel/dialog shots → display each at its real width so the captured
+// 2x screenshots render at a CONSISTENT font size instead of being fit-scaled to the column by
+// different amounts. Keyed by filename (Documenter strips any `#w=` fragment before we see the src).
+const SHOT_WIDTHS: Record<string, number> = {
+  'agent-panel.png': 380, 'packages-panel.png': 480, 'history-panel.png': 420,
+  'controls-palette.png': 300, 'command-palette.png': 560, 'export-dialog.png': 520,
+  'settings.png': 520,
+}
 function slateAssetsPlugin(md: MarkdownIt, assetBase: string) {
   md.renderer.rules.image = function (
     tokens: Token[],
@@ -40,7 +48,9 @@ function slateAssetsPlugin(md: MarkdownIt, assetBase: string) {
         if (m[2] === 'webm' || m[2] === 'mp4') {
           return `<video :src="'${url}'" class="slate-clip" autoplay loop muted playsinline controls aria-label="${alt}"></video>\n`
         }
-        return `<img class="slate-shot" :src="'${url}'" alt="${alt}" />\n`
+        const w = SHOT_WIDTHS[m[1]]
+        const style = w ? ` style="width:${w}px;max-width:100%"` : ''
+        return `<img class="slate-shot" :src="'${url}'" alt="${alt}"${style} />\n`
       }
     }
     return self.renderToken(tokens, idx, options)
