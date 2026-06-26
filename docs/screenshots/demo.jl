@@ -29,6 +29,14 @@ xs = range(0, 2π; length = n)
 echart(:line, round.(collect(xs); digits = 2), round.(sin.(xs); digits = 3);
        smooth = true, title = "sin(x), $(n) samples")
 
+#%% md id=mdinterp
+## Markdown + interpolation
+
+Markdown cells render GFM tables, LaTeX math, and **double-brace interpolation** of live
+Julia values. With **{{ n }}** samples, the mean of sine over one period is
+{{ round(sum(sin.(range(0, 2π; length = n))) / n; digits = 3) }} — and the math
+typesets: $\int_0^\pi \sin x \, dx = 2$.
+
 #%% code id=table
 slate_table([(x = round(x; digits = 2), sinx = round(sin(x); digits = 3))
              for x in range(0, π; length = 7)])
