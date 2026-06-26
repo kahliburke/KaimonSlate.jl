@@ -51,14 +51,18 @@ function output_html(cell::Cell)
     isempty(o.display) || print(io, "<div class=\"dispwrap\">", _render_chunks(o.display), "</div>")
     if o.exception !== nothing
         # The message is syntax-coloured (error type, `backticked` names, Suggestion line); the
-        # backtrace is dimmed. BOTH the message (`errjump`) and the backtrace's `string:N`
-        # (`cellref`) jump to the cell's offending line on click (errors.js).
-        el = _cell_error_line(o)
+        # backtrace is dimmed. The message (`errjump`) jumps to the error's ORIGIN — the deepest
+        # in-notebook frame (closest to where it actually fired, possibly another cell); the
+        # backtrace's `cell:<id>:N` frames (`cellref`) each jump to their own cell (errors.js).
+        org = _error_origin(o)
         print(io, "<div class=\"err\"><pre>")
-        if el === nothing
+        if org === nothing
             print(io, _render_exc_html(o.exception))
         else
-            print(io, "<span class=\"err-msg errjump\" data-line=\"", el, "\" title=\"jump to line ", el, "\">",
+            cid, ln = org
+            print(io, "<span class=\"err-msg errjump\"",
+                  (isempty(cid) ? "" : " data-cid=\"" * cid * "\""), " data-line=\"", ln,
+                  "\" title=\"jump to the error origin (line ", ln, isempty(cid) ? "" : " in cell " * cid, ")\">",
                   _render_exc_html(o.exception), "</span>")
         end
         (o.backtrace === nothing || isempty(o.backtrace)) ||
@@ -104,6 +108,22 @@ function _cell_error_line(o::CellOutput, cellid::AbstractString = "")
         end
         m = match(r"\bstring:(\d+)", s)        # legacy / interpolation eval filename
         m === nothing || return parse(Int, m.captures[1])
+    end
+    return nothing
+end
+
+# Where the error actually fired, as close to the source as the notebook can show: the TOPMOST
+# (innermost) `cell:<id>:N` frame — the deepest in-notebook location. For an error inside another
+# cell's function that's the defining cell; for one that surfaced in package code it's the cell that
+# called in (the nearest editable edge). Returns `(cellid, line)`, `("", line)` for a legacy
+# `string:N` frame (no cell), or `nothing`. Used for the error-message jump target.
+function _error_origin(o::CellOutput)
+    for s in (o.backtrace, o.exception)
+        s === nothing && continue
+        m = match(r"\bcell:([\w\-]+):(\d+)", s)
+        m === nothing || return (String(m.captures[1]), parse(Int, m.captures[2]))
+        m = match(r"\bstring:(\d+)", s)
+        m === nothing || return ("", parse(Int, m.captures[1]))
     end
     return nothing
 end

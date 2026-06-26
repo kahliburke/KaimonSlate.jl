@@ -192,7 +192,7 @@
     const v = editors[id]; if (!v || !_validLine(v, line1)) return;
     const off = v.state.doc.line(line1).from;
     v.dispatch({ selection: { anchor: off }, effects: [setFlash.of(line1), EditorView.scrollIntoView(off, { y: 'center' })] });
-    setTimeout(() => { try { v.dispatch({ effects: setFlash.of(null) }); } catch (_) {} }, 1000);
+    setTimeout(() => { try { v.dispatch({ effects: setFlash.of(null) }); } catch (_) {} }, 1300);  // > the 1.2s flash animation
     v.focus();
   };
 

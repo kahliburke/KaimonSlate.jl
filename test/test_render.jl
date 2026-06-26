@@ -131,6 +131,12 @@ include(joinpath(HERE, "..", "src", "render.jl")); using .ReportRender
         # _cell_error_line picks THIS cell's frame.
         @test ReportRender._cell_error_line(eo, "b") == 3
         @test ReportRender._cell_error_line(eo, "a") == 1
+        # _error_origin is the TOPMOST (innermost) cell frame — closest to where it fired.
+        @test ReportRender._error_origin(eo) == ("a", 1)
+        # the error message jumps to that origin cell (data-cid), not the displaying cell.
+        cb = Cell("b", CODE, "tripwire()"); cb.output = eo
+        oh = output_html(cb)
+        @test occursin("errjump", oh) && occursin("data-cid=\"a\"", oh) && occursin("data-line=\"1\"", oh)
         # _linkify_trace turns each frame into a cellref carrying its own cell id.
         lt = ReportRender._linkify_trace(bt)
         @test occursin("class=\"cellref\" data-cid=\"a\" data-line=\"1\"", lt)

@@ -5,11 +5,12 @@
 // don't, so for those a click just scrolls to the cell.
 
 // Called from the cell render effect (notebook.js) after output swaps in. Tints the offending line
-// (CM6 line decoration via markErrorLine/clearErrorLine, editor.js). Suppressed while editing — the
-// line numbers may no longer match the error.
+// (CM6 line decoration via markErrorLine/clearErrorLine, editor.js). The faint overlay stays as long
+// as the cell is errored — regardless of whether the user has navigated in / is editing (CM6 maps
+// the decoration through edits); it clears when the cell re-runs without error.
 function _applyErrorLine(c) {
   if (!c || !window.editors[c.id]) return;
-  (c.errorLine && c.state !== 'edited') ? window.markErrorLine(c.id, c.errorLine) : window.clearErrorLine(c.id);
+  c.errorLine ? window.markErrorLine(c.id, c.errorLine) : window.clearErrorLine(c.id);
 }
 window._applyErrorLine = _applyErrorLine;
 

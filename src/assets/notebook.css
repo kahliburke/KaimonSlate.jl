@@ -147,8 +147,16 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .output .err .err-msg.errjump:hover .err-type { text-decoration:underline; text-underline-offset:2px; }
 /* The offending source line, tinted in CodeMirror 6 while the cell is errored (+ a brief flash on jump).
    CM6 applies the class to the `.cm-line` element via a line Decoration. */
-.cm-editor .cm-line.cm-errorline { background:rgba(229,117,117,.16); box-shadow:inset 3px 0 0 var(--red); }
-.cm-editor .cm-line.cm-errorline-flash { background:rgba(255,215,0,.30); transition:background .9s ease-out; }
+.cm-editor .cm-line.cm-errorline { background:rgba(229,117,117,.12); box-shadow:inset 3px 0 0 var(--red);
+  transition:background .35s ease; }
+/* Error / jump flash: an orange-red highlight that fades IN then back OUT (a pulse) rather than
+   appearing and abruptly cutting; settles onto the faint overlay above when the line is errored. */
+@keyframes cm-errorflash {
+  0%   { background:rgba(255,110,70,0); }
+  18%  { background:rgba(255,110,70,.48); }
+  100% { background:rgba(255,110,70,0); }
+}
+.cm-editor .cm-line.cm-errorline-flash { animation:cm-errorflash 1.2s ease-out; }
 .dispwrap { padding:10px 12px; border-top:1px solid var(--border); }
 .echarts:not(:empty) { padding:8px 6px; border-top:1px solid var(--border); }
 .echart { height:340px; width:100%; }
