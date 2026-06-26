@@ -25,6 +25,8 @@ changes that slip past the op-level checkpoints.
 The history panel lists checkpoints newest-first. Select one to see a **line diff** against
 its parent. The current state is marked; drafts are dimmed.
 
+![The history panel listing checkpoints with source icons, newest first](./assets/history-panel.png)
+
 ## Restoring
 
 Restoring is **non-destructive**: the current state is pushed onto the undo stack and the

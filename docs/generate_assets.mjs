@@ -85,7 +85,9 @@ async function runNotebook(page, id) {
     const cs = (window.__slateState && window.__slateState.cells) || []
     return cs.length > 0 && cs.every((c) => c.state !== 'running' && c.state !== 'stale')
   }, { timeout: 90_000 }).catch(() => {})
-  await page.addStyleTag({ content: '.warn{display:none!important}' })
+  // Hide the standalone-only world-age .warn block, and the fixed bottom-right Docs launcher
+  // (it's clutter in shots and Playwright pins it mid-image on full-page captures).
+  await page.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
   await sleep(1400)
 }
 async function cellShot(page, cid, name) {
@@ -114,7 +116,7 @@ async function main() {
     for (const [id, shots] of Object.entries(CELL_SHOTS)) {
       const page = await (await newContext(browser)).newPage()
       await runNotebook(page, id)
-      if (id === 'demo') await page.screenshot({ path: join(OUT, 'overview.png'), fullPage: true }), log('✓ overview.png')
+      if (id === 'demo') { await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: join(OUT, 'overview.png') }); log('✓ overview.png') }   // viewport, not the giant full page
       for (const [cid, name] of Object.entries(shots)) await cellShot(page, cid, name)
 
       // driven captures, per notebook
@@ -180,17 +182,20 @@ async function main() {
       const page = await ctx.newPage()
       await page.goto(`${BASE}/n/demo`, { waitUntil: 'domcontentloaded' })   // cells already FRESH (state persists)
       await page.waitForSelector('.cell[data-cid="chart"] canvas, .cell[data-cid="chart"] svg', { timeout: 20_000 }).catch(() => {})
-      await page.addStyleTag({ content: '.warn{display:none!important}' })
-      // Put the slider cell near the top so the chart cell below fills the rest of the frame.
-      await page.locator('.cell[data-cid="slider"]').evaluate((el) => el.scrollIntoView({ block: 'start' }))
-      await page.evaluate(() => window.scrollBy(0, -80))
+      await page.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+      // Put the controls cell near the top so the chart cell below fills the rest of the frame.
+      await page.locator('.cell[data-cid="controls"]').evaluate((el) => el.scrollIntoView({ block: 'start' }))
+      await page.evaluate(() => window.scrollBy(0, -70))
       await sleep(900)
-      const slider = page.locator('.cell[data-cid="slider"] input[type="range"]').first()
-      if (await slider.count()) {
-        await slider.focus()
-        for (let i = 0; i < 18; i++) { await slider.press('ArrowRight'); await sleep(170) }
-        await sleep(400)
-        for (let i = 0; i < 12; i++) { await slider.press('ArrowLeft'); await sleep(170) }
+      const controls = page.locator('.cell[data-cid="controls"]')
+      const freq = controls.locator('input[type="range"]').first()
+      if (await freq.count()) {
+        await freq.focus()
+        for (let i = 0; i < 14; i++) { await freq.press('ArrowRight'); await sleep(180) }   // crank the frequency — the wave compresses
+        await sleep(500)
+        const cos = controls.locator('input[type="checkbox"]').first()
+        if (await cos.count()) { await cos.click({ force: true }); await sleep(1000) }       // toggle the cosine series on
+        for (let i = 0; i < 10; i++) { await freq.press('ArrowLeft'); await sleep(180) }     // ease it back down
       } else { log('! no range input for reactivity clip'); await sleep(1500) }
       await sleep(700)
       const video = page.video()

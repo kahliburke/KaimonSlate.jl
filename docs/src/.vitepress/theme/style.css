@@ -115,3 +115,19 @@
   font-family: var(--vp-font-family-mono);
   font-size: 0.95rem;
 }
+
+/* ── Generated demo media (screenshots + clips) ──────────────────────────── */
+.vp-doc .slate-shot,
+.vp-doc .slate-clip {
+  display: block;
+  max-width: 100%;
+  margin: 1.25rem auto;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.28);
+}
+/* Widget shots are small — don't blow them up to full column width. */
+.vp-doc .slate-shot[alt^="widget:"] {
+  max-width: 380px;
+  margin: 0.5rem auto;
+}

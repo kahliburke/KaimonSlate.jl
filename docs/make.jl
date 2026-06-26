@@ -53,6 +53,7 @@ makedocs(;
             "Architecture" => "architecture.md",
             "Reactive Cells" => "reactivity.md",
             "Widgets & @bind" => "widgets.md",
+            "Charts & Tables" => "visualization.md",
             "The AI Agent" => "agent.md",
             "Time Machine" => "history.md",
             "Export" => "export.md",

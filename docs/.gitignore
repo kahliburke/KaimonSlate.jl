@@ -5,12 +5,17 @@ src/.vitepress/dist/
 Manifest.toml
 package-lock.json
 .render_cache.json
-# Generated demo assets are hosted via the docs-assets GitHub Release, not committed.
-# (The committed logo lives at src/public/assets/slate-logo.svg and is NOT matched here.)
+# Generated demo assets (screenshots + clips) are produced by docs/generate_assets.mjs and hosted
+# via the docs-assets GitHub Release — never committed. make.jl mirrors src/assets/ → src/public/
+# assets/ for local preview, so both are ignored. (The committed logo src/public/assets/slate-logo.svg
+# is an .svg and is NOT matched here.)
 src/assets/*.gif
 src/assets/*.mp4
 src/assets/*.webm
 src/assets/*.png
+src/assets/*.jpg
 src/public/assets/*.gif
 src/public/assets/*.mp4
 src/public/assets/*.webm
+src/public/assets/*.png
+src/public/assets/*.jpg

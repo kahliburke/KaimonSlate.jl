@@ -41,12 +41,18 @@ again to clear.
 This is the navigation companion to reactivity: the engine already restales the *downstream*
 cone on a change; the 🔗 view lets you trace *upstream* to find a cause.
 
+![Dependency-chain focus: only the selected cell's precursors and dependents are shown](./assets/deps-cone.png)
+
 ## Widgets drive reactivity
 
 A `@bind` control is just another writer. Changing `@bind n Slider(1:100)` restales every
 cell that reads `n` and recomputes them — the same machinery as editing a cell. The defining
 cell itself only re-runs if it *also* reads the control (e.g. `@bind d Slider(1:a)` reading
 `a`). See [Widgets & @bind](widgets.md).
+
+Drag the slider and the downstream chart recomputes and animates in place — live:
+
+![Dragging a slider re-renders the dependent chart live](./assets/reactivity.webm)
 
 ## Async updates
 

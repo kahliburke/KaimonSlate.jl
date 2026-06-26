@@ -20,22 +20,24 @@ function gram_schmidt(V::Matrix{Float64}; tol = 1e-10)   # types, kwargs, commen
     return Q
 end
 
-#%% code id=slider
-@bind n Slider(4:2:60; default = 24, label = "samples")
+#%% code id=controls
+@bind freq Slider(1:0.5:8; default = 2, label = "frequency")
+@bind showcos Toggle(false; label = "cosine", on = "shown", off = "hidden")
+@bind hue ColorPicker("#56d364"; label = "color")
 
 #%% code id=chart
-# Reads `n` — re-renders live as you drag the slider.
-xs = range(0, 2π; length = n)
-echart(:line, round.(collect(xs); digits = 2), round.(sin.(xs); digits = 3);
-       smooth = true, title = "sin(x), $(n) samples")
+# Reads freq, showcos, hue — recomputes live as you drag the slider or toggle the controls.
+x = range(0, 2π; length = 240)
+waves = [series(:line, collect(x), round.(sin.(freq .* x); digits = 3); name = "sin", smooth = true, color = hue)]
+showcos && push!(waves, series(:line, collect(x), round.(cos.(freq .* x); digits = 3); name = "cos", smooth = true))
+echart(waves...; title = "frequency = $freq", legend = true)
 
 #%% md id=mdinterp
 ## Markdown + interpolation
 
 Markdown cells render GFM tables, LaTeX math, and **double-brace interpolation** of live
-Julia values. With **{{ n }}** samples, the mean of sine over one period is
-{{ round(sum(sin.(range(0, 2π; length = n))) / n; digits = 3) }} — and the math
-typesets: $\int_0^\pi \sin x \, dx = 2$.
+Julia values. At frequency **{{ freq }}** the wave's period is
+{{ round(2π / freq; digits = 2) }} — and the math typesets: $\int_0^\pi \sin x \, dx = 2$.
 
 #%% code id=table
 slate_table([(x = round(x; digits = 2), sinx = round(sin(x); digits = 3))

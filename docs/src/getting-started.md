@@ -13,6 +13,8 @@ KaimonSlate.serve_notebook("intro.jl")
 Open the printed URL (default `http://127.0.0.1:8765`). The index page lists open
 notebooks; click one to enter it, or type a path to open another.
 
+![A KaimonSlate notebook: code, a slider widget, an inline ECharts chart, a table, and an error cell](./assets/overview.png)
+
 ## Add and run a cell
 
 Click **＋ cell** (or press `b` in command mode to add below the selection). Type some

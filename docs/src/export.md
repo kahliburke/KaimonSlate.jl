@@ -81,5 +81,5 @@ The route is `GET /api/<id>/export.standalone.jl`.
 - ECharts snapshots are captured from the live canvas as you view the notebook, so open a
   cell's chart at least once before exporting (HTML, PDF, or standalone) to ensure its snapshot
   is current.
-- Markdown `{{ echart(…) }}` / `{{ slate_table(…) }}` interpolations are client-hydrated and
-  appear as static placeholders in HTML; scalar and image interpolations embed directly.
+- Markdown chart / table interpolations (double-brace `echart(…)` / `slate_table(…)`) are
+  client-hydrated and appear as static placeholders in HTML; scalar and image interpolations embed directly.

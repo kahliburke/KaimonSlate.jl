@@ -39,6 +39,52 @@ Press **⌘K** and type "bind" to insert any of these as a snippet — at the cu
 selected code cell, or into a fresh cell.
 :::
 
+## Gallery
+
+Each control as it renders in a cell:
+
+**`Slider(0:100; default = 42, label = "samples")`**
+![widget: Slider](./assets/widget-slider.png)
+
+**`NumberField(0, 100, 12; label = "count")`**
+![widget: NumberField](./assets/widget-numberfield.png)
+
+**`Checkbox(true; label = "I agree")`**
+![widget: Checkbox](./assets/widget-checkbox.png)
+
+**`Toggle(true; label = "stream", on = "Live", off = "Paused")`**
+![widget: Toggle](./assets/widget-toggle.png)
+
+**`TextField("Ada"; label = "name")`**
+![widget: TextField](./assets/widget-textfield.png)
+
+**`TextArea("…"; label = "notes")`**
+![widget: TextArea](./assets/widget-textarea.png)
+
+**`Select(["red", "green", "blue"]; label = "color")`**
+![widget: Select](./assets/widget-select.png)
+
+**`Radio(["S", "M", "L"], "M"; label = "size")`**
+![widget: Radio](./assets/widget-radio.png)
+
+**`MultiSelect(["x", "y", "z"], ["x", "z"]; label = "tags")`**
+![widget: MultiSelect](./assets/widget-multiselect.png)
+
+**`MultiCheckBox(["a", "b", "c"], ["b"]; label = "flags")`**
+![widget: MultiCheckBox](./assets/widget-multicheckbox.png)
+
+**`ColorPicker("#56d364"; label = "tint")`**
+![widget: ColorPicker](./assets/widget-colorpicker.png)
+
+**`DateField("2026-06-05"; label = "date")`**
+![widget: DateField](./assets/widget-datefield.png)
+
+**`TimeField("09:30"; label = "time")`**
+![widget: TimeField](./assets/widget-timefield.png)
+
+**`Button("Run")`**
+![widget: Button](./assets/widget-button.png)
+
 ## Mixed cells
 
 A cell can declare binds *and* run code. The control(s) render at the top and the cell's
@@ -59,6 +105,8 @@ variable stays single-sourced). Arrange controls into columns by dropping betwee
 Open the **🎛 Controls palette** (top bar or ⌘K) to see every `@bind` declared across the
 notebook, its live value, and where it's surfaced. Click a chip to jump to its defining
 cell; drag a chip into a cell to surface it; drop it back on the palette to remove it.
+
+![The Controls palette listing every @bind widget with its live value](./assets/controls-palette.png)
 
 ## How it stays in sync
 

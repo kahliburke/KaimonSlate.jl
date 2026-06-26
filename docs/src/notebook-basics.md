@@ -4,11 +4,16 @@
 
 - **Code cells** evaluate Julia. The last expression's value renders below, along with
   stdout and any rich display (images, ECharts, tables, LaTeX).
-- **Markdown cells** render GitHub-flavored markdown with LaTeX math and `{{ … }}`
+- **Markdown cells** render GitHub-flavored markdown with LaTeX math and double-brace
   interpolation of Julia values.
 
 Toggle a cell's type with the header button (`M↓` / `{·}`) or press `m` / `y` in command
 mode.
+
+A code cell shows an always-on editor with tree-based Julia highlighting (CodeMirror 6 + the
+Lezer Julia grammar), the run button, timing, and state badge:
+
+![A code cell with Julia syntax highlighting, run button, timing, and FRESH badge](./assets/editor-highlighting.png)
 
 ## Command mode vs. edit mode
 
@@ -55,7 +60,7 @@ big = rand(1000, 1000);   # no 1000×1000 dump
 
 ## Markdown interpolation
 
-Inside a markdown cell, `{{ expr }}` splices a Julia value into the rendered output:
+Inside a markdown cell, a double-brace `expr` block splices a Julia value into the rendered output:
 
 ```markdown
 Mean: {{ round(mean(data); digits=2) }}
@@ -64,14 +69,20 @@ Mean: {{ round(mean(data); digits=2) }}
 {{ slate_table(df) }}       <!-- an interactive table -->
 ```
 
-Scalars render inline; images, charts, and tables render as blocks. Math interpolation
-works too: `$\mu = {{ mu }}$`.
+Scalars render inline; images, charts, and tables render as blocks. Interpolation works
+inside math (`$…$`) too.
+
+![A markdown cell with interpolated values and typeset LaTeX math](./assets/markdown.png)
 
 ## Completion
 
 Tab-completion uses Julia's REPL completions against the live kernel **plus** the cell's own
 local bindings (assignments, loop/comprehension variables, function parameters) so names
-complete even before the cell has run. LaTeX/emoji shortcuts work — type `\pi`⇥ → `π`.
+complete even before the cell has run. The popup carries a docstring preview, and method
+completions insert tab-through argument placeholders. LaTeX/emoji shortcuts work — type
+`\pi`⇥ → `π`.
+
+![The completion popup with a docstring preview card](./assets/completion.png)
 
 ## Renaming cells
 

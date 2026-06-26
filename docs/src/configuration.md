@@ -10,11 +10,14 @@ localStorage.
 | **Live-update debounce** | Minimum delay (ms) between live recomputes while dragging a control. Higher = fewer recomputes on a slow kernel. |
 | **Full page width** | Use the full window width instead of the centered column. |
 | **Theme** | Dark (default). |
+| **Editor syntax** | Syntax-highlighting palette for the editor — Dark+, Monokai, Dracula, or Nord. |
 | **Agent model** | Sonnet / Opus / Haiku, plus any locally-installed Ollama model. |
 | **Agent permissions** | `lab` / `auto` / `default` / `bypass` preset for the agent. |
 
 Model and permission changes [reap the agent](agent.md) so the next message respawns on the
 new setting (the transcript is kept).
+
+![The Settings modal](./assets/settings.png)
 
 ## Serving
 

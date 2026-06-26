@@ -63,7 +63,7 @@ updates patch outputs in place (preserving editor state and scroll).
 
 `output_html` renders a code cell's captured value, stdout, errors, and rich display chunks
 (images as base64, HTML, LaTeX). `markdown_html` renders markdown cells with GFM tables,
-KaTeX math, and `{{ … }}` interpolation. Interactive ECharts and tables are hydrated
+KaTeX math, and double-brace interpolation. Interactive ECharts and tables are hydrated
 client-side from per-cell specs. The same rendering powers [HTML/PDF export](export.md).
 
 ## The AI agent
