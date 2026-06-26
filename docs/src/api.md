@@ -22,8 +22,37 @@ KaimonSlate.NotebookServer.close_notebook!
 KaimonSlate.NotebookServer.stop_hub
 ```
 
-## Everything else
+## Top-level
 
 ```@autodocs
 Modules = [KaimonSlate]
+```
+
+The sections below document the internal submodules. These are not part of the stable public
+API — they're listed for contributors and the curious. Each `@autodocs` block picks up every
+remaining docstring in its module (the entry points above are not repeated).
+
+## Notebook server
+
+The HTTP/WebSocket serving layer, live-notebook state, history, and agent integration.
+
+```@autodocs
+Modules = [KaimonSlate.NotebookServer, KaimonSlate.NotebookServer.SlateHistory]
+```
+
+## Report engine
+
+The reactive evaluation core — parsing `.jl` notebooks, the dependency graph, kernels, cells,
+binds, and paged tables.
+
+```@autodocs
+Modules = [KaimonSlate.ReportEngine]
+```
+
+## Report rendering
+
+Turning evaluated cells into HTML/markdown output.
+
+```@autodocs
+Modules = [KaimonSlate.ReportRender]
 ```

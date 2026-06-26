@@ -36,7 +36,13 @@ end
 # Step 1: Generate markdown only — skip VitePress so we can patch config first.
 makedocs(;
     sitename = "KaimonSlate.jl",
-    modules = [KaimonSlate, KaimonSlate.NotebookServer],
+    modules = [
+        KaimonSlate,
+        KaimonSlate.NotebookServer,
+        KaimonSlate.NotebookServer.SlateHistory,
+        KaimonSlate.ReportEngine,
+        KaimonSlate.ReportRender,
+    ],
     remotes = nothing,
     format = DocumenterVitepress.MarkdownVitepress(;
         repo = "https://github.com/kahliburke/KaimonSlate.jl",

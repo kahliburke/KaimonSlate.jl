@@ -1,7 +1,21 @@
+<div align="center">
+
+<img src="docs/src/public/assets/slate-logo.svg" alt="KaimonSlate logo" width="120"/>
+
 # KaimonSlate.jl
+
+[![Docs (dev)](https://img.shields.io/badge/docs-dev-blue.svg)](https://kahliburke.github.io/KaimonSlate.jl/dev/)
+[![Documentation](https://github.com/kahliburke/KaimonSlate.jl/actions/workflows/Docs.yml/badge.svg?branch=main)](https://github.com/kahliburke/KaimonSlate.jl/actions/workflows/Docs.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+</div>
 
 A warm-session, **reactive** Julia notebook with a live browser UI — packaged as a
 [Kaimon](https://github.com/…/Kaimon.jl) extension.
+
+📖 **Documentation:** <https://kahliburke.github.io/KaimonSlate.jl/dev/>
+*(GitHub Pages serves the docs once the repository is public — the site already builds and
+deploys to the `gh-pages` branch on every push to `main`.)*
 
 Edit a cell or drag a `@bind` widget and only the *downstream* cells recompute
 (pruned dependency graph). Makie/MIME figures and interactive ECharts render inline.
