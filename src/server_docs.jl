@@ -59,29 +59,10 @@ upsert path doesn't), so lexical name/substring search AND module filters work. 
 best-effort if FTS is unavailable. The auto-index path calls this; the manual `index_docs` tool too."
 ensure_docs_fts!() = (try; _kt(:qdrant_ensure_fts_coverage, Dict("collection" => _DOCS_COLLECTION)); catch; end; nothing)
 
-"Semantic (vector) search of the docs index → {module,name,doc,score} matches. `modules` (when
-non-empty) scopes the search to those packages via a Qdrant `metadata.module` any-of filter."
-function _semantic_docs(query::AbstractString; limit::Int = 8, modules::AbstractVector = String[])
-    vec = try; _embed(query); catch; return Dict{String,Any}[]; end
-    args = Dict{String,Any}("collection" => _DOCS_COLLECTION, "vector" => vec, "limit" => limit)
-    isempty(modules) || (args["filter"] = Dict("must" => [Dict("key" => "metadata.module",
-        "match" => Dict("any" => String[string(m) for m in modules]))]))
-    res = _kt_json(_kt(:qdrant_search, args))
-    hits = res isa AbstractVector ? res :
-           something(_field(res, "result"), _field(res, "hits"), Any[])
-    out = Dict{String,Any}[]
-    for h in hits
-        p = something(_field(h, "payload"), h)
-        push!(out, Dict("module" => string(something(_field(p, "module"), "")),
-                        "name"   => string(something(_field(p, "name"), "")),
-                        "doc"    => string(something(_field(p, "doc"), "")),
-                        "score"  => something(_field(h, "score"), 0.0)))
-    end
-    return out
-end
-
-# One FTS hit (its `text` payload is "Module.name\ndoc") → {module,name,doc,score,lexical}.
-function _fts_record(h)
+# Map one `search_code` structured hit → {module,name,doc,score}. The indexed `text` payload is
+# "Module.name\ndoc" (see index_docs!), so module/name/doc are recovered from it (the hit's own
+# `name` field wins for the symbol when present).
+function _doc_record(h)
     name = string(something(_field(h, "name"), ""))
     text = string(something(_field(h, "text"), ""))
     nl = findfirst('\n', text)
@@ -91,40 +72,30 @@ function _fts_record(h)
     modname = i === nothing ? "" : String(SubString(head, 1, prevind(head, i)))
     isempty(name) && i !== nothing && (name = String(SubString(head, nextind(head, i))))
     return Dict{String,Any}("module" => modname, "name" => name, "doc" => doc,
-                            "score" => something(_field(h, "score"), 0.0), "lexical" => true)
+                            "score" => something(_field(h, "score"), 0.0))
 end
 
-"Lexical (FTS) search of the docs index — matches a bare name/module fragment the embedding buries.
-`modules` (when non-empty) scopes to those packages via a `metadata.module` any-of filter."
-function _fts_docs(query::AbstractString; limit::Int = 20, modules::AbstractVector = String[])
-    # `qdrant_fts_search` was folded into `search_code` (mode="lexical", format="structured");
-    # the structured hits carry name/text/score, which `_fts_record` reads.
-    args = Dict{String,Any}("collection" => _DOCS_COLLECTION, "query" => String(query),
-                            "limit" => limit, "mode" => "lexical", "format" => "structured")
+"Hybrid docs search over the `slate_docs` index. ONE `search_code` call now does the query embed,
+the semantic+lexical fusion, and span-dedup — replacing the old `_embed` + `_semantic_docs` +
+`_fts_docs` + hand-rolled fusion (per Kaimon's SEARCH_INTEGRATION_NOTES two-tool model). `modules`
+(when non-empty) scopes to those packages via a `metadata.module` any-of `filters` on BOTH engines —
+pass the notebook's in-scope set (`_inscope_modules`) so a query can't surface another notebook's
+packages from the shared index. Notes: `collection` is required (the service endpoint has no
+workspace binding); `embedding_model` must match `index_docs!` (qwen3-embedding:0.6b) or the
+semantic arm degrades to lexical-only — which still returns name/substring hits."
+function search_docs(query::AbstractString; limit::Int = 8, modules::AbstractVector = String[])
+    _agent_available() || return Dict{String,Any}[]
+    q = strip(String(query)); isempty(q) && return Dict{String,Any}[]
+    args = Dict{String,Any}("collection" => _DOCS_COLLECTION, "query" => q, "mode" => "hybrid",
+                            "format" => "structured", "embedding_model" => _DOCS_MODEL, "limit" => limit)
     isempty(modules) || (args["filters"] = Dict("module" => String[string(m) for m in modules]))
     hits = try
         _kt_json(_kt(:search_code, args))
     catch
-        return Dict{String,Any}[]   # FTS unavailable (old Kaimon / uncovered) → semantic-only
+        return Dict{String,Any}[]   # search index unavailable → no docs (caller falls back to lexical UI)
     end
     hits isa AbstractVector || return Dict{String,Any}[]
-    return Dict{String,Any}[_fts_record(h) for h in hits]
-end
-
-"Hybrid docs search: lexical (FTS name/substring) ∪ semantic (vector), lexical floated, deduped.
-`modules` (when non-empty) scopes BOTH engines to those packages — pass the notebook's in-scope
-set (`_inscope_modules`) so a query can't surface another notebook's packages from the shared index."
-function search_docs(query::AbstractString; limit::Int = 8, modules::AbstractVector = String[])
-    _agent_available() || return Dict{String,Any}[]
-    q = strip(String(query)); isempty(q) && return Dict{String,Any}[]
-    lex = _fts_docs(q; modules = modules)
-    sem = _semantic_docs(q; limit = limit, modules = modules)
-    seen = Set{Tuple{String,String}}(); out = Dict{String,Any}[]
-    for d in Iterators.flatten((lex, sem))           # lexical first → name matches outrank pure-semantic
-        k = (string(d["module"]), string(d["name"])); k in seen && continue
-        push!(seen, k); push!(out, d)
-    end
-    return first(out, max(limit, min(length(lex), 12)))   # keep lexical hits; cap the tail
+    return Dict{String,Any}[_doc_record(h) for h in first(hits, limit)]
 end
 
 # A docstring (markdown) → safe HTML for the help viewer. Empty in → empty out.
