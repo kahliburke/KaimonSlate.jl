@@ -1,7 +1,8 @@
-# Time Machine
+# Timeline
 
 Every edit to a notebook is captured to a durable, content-addressed history — a built-in
-"time machine" you open with the **🕘** button.
+**Timeline** you open with the **🕘** button: scrub back through every checkpoint, diff,
+restore, or replay the notebook building itself up from scratch.
 
 ## What gets recorded
 

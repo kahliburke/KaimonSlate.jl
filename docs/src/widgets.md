@@ -61,7 +61,8 @@ Each control as it renders in a cell:
 **`TextArea("…"; label = "notes")`**
 ![widget: TextArea](./assets/widget-textarea.png)
 
-**`Select(["red", "green", "blue"]; label = "color")`**
+**`Select(["red", "green", "blue"], "green"; label = "color")`** — the default is the second
+*positional* argument (as with `Radio`/`MultiSelect`); `label` is a keyword.
 ![widget: Select](./assets/widget-select.png)
 
 **`Radio(["S", "M", "L"], "M"; label = "size")`**

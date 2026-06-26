@@ -23,7 +23,7 @@ Declare a control in a cell; the bound name holds its live value, and any cell t
 @bind notes TextArea("multi\nline\nnotes"; label = "notes")
 
 #%% code id=select
-@bind color Select(["red", "green", "blue"]; default = "green", label = "color")
+@bind color Select(["red", "green", "blue"], "green"; label = "color")
 
 #%% code id=radio
 @bind size Radio(["S", "M", "L"], "M"; label = "size")

@@ -5,7 +5,7 @@ layout: home
 hero:
   name: KaimonSlate.jl
   text: Reactive Julia notebooks, in the browser
-  tagline: A live, reactive notebook that edits a plain .jl file — with @bind widgets, ECharts & Makie figures, a built-in time machine, and an AI agent that builds cells alongside you.
+  tagline: A live, reactive notebook that edits a plain .jl file — with @bind widgets, ECharts & Makie figures, a built-in timeline, and an AI agent that builds cells alongside you.
   actions:
     - theme: brand
       text: Get Started
@@ -31,7 +31,7 @@ features:
     title: Interactive figures
     details: ECharts for interactive, in-browser charts that animate on reactive updates; CairoMakie for static scientific figures. Both flow through one image interface — so the agent can see your plots, and exports embed them.
   - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
-    title: A built-in time machine
+    title: A built-in timeline
     details: Every edit is captured to a durable, content-addressed history. Scrub the rail, diff any checkpoint, restore non-destructively, or ▶ replay the whole buildup of the notebook.
   - icon: <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
     title: Plain .jl, shared with your editor

@@ -31,6 +31,8 @@ The panel shows the environment with **provenance**, in two groups:
 
 The status line reads e.g. `3 notebook · 41 from parent` (or `· detached`).
 
+![The Packages panel: notebook packages and inherited parent-project packages, with provenance](./assets/packages-panel.png)
+
 - **Add** — `Pkg.add` in the notebook's own env (forking first if needed), then the notebook
   re-runs so a `using` lights up live. The first add can take a while (seed + resolve +
   precompile); the kernel dot pulses while it works.

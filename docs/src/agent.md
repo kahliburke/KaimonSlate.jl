@@ -5,6 +5,8 @@ agent** pane drives the notebook through the *same* operations you use — addin
 running, and deleting cells one at a time. It is a live collaborator, not a file-rewriter:
 you watch each cell appear and run.
 
+![The agent pane: a chat turn adds a slider and a chart cell, with tool calls shown as friendly chips](./assets/agent-panel.png)
+
 ## How it works
 
 The agent is a consumer of Kaimon's agent service. A chat turn is forwarded to an agent

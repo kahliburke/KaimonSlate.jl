@@ -104,11 +104,12 @@ export default withMermaid(defineConfig({
         text: 'Guide',
         items: [
           { text: 'Notebook Basics', link: '/notebook-basics' },
+          { text: 'Command Palette & Help', link: '/palette-and-help' },
           { text: 'Reactive Cells', link: '/reactivity' },
           { text: 'Widgets & @bind', link: '/widgets' },
           { text: 'Charts & Tables', link: '/visualization' },
           { text: 'The AI Agent', link: '/agent' },
-          { text: 'Time Machine', link: '/history' },
+          { text: 'Timeline', link: '/history' },
           { text: 'Export', link: '/export' },
           { text: 'Packages', link: '/packages' },
           { text: 'Configuration', link: '/configuration' },

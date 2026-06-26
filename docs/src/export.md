@@ -30,6 +30,8 @@ browser print. A small dialog (remembered between exports) offers:
 - **Body text** — *Auto* (compact for two-column), *Large*, *Normal*, *Compact*, *Small*.
 - **Code listings** — *Normal* / *Small* / *Smaller* / *Tiny* font, or *Hidden* (outputs only).
 
+![The PDF export dialog: theme, layout, body-text and code-listing options](./assets/export-dialog.png)
+
 Highlights:
 
 - **Vector figures** — CairoMakie figures embed as **PDF** (fonts embedded, crisp at any

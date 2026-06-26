@@ -157,9 +157,79 @@ async function main() {
         // settings modal
         try {
           await page.evaluate(() => window.openSettings && window.openSettings())
-          await elShot(page, '.setmodal', 'settings.png')
+          await elShot(page, '#setbg .setmodal', 'settings.png')
           await page.evaluate(() => window.closeSettings && window.closeSettings())
         } catch (e) { log('! settings skipped:', e.message.split('\n')[0]) }
+
+        // command palette (⌘K) — fuzzy command list with shortcut hints
+        try {
+          await page.evaluate(() => window.openPalette && window.openPalette())
+          await page.waitForSelector('#cmdbg .cmdpal', { timeout: 6000 })
+          await page.evaluate(() => { const i = document.querySelector('#cmdbg input'); if (i) i.value = '' })
+          await sleep(400)
+          await elShot(page, '#cmdbg .cmdpal', 'command-palette.png')
+          await page.keyboard.press('Escape')
+        } catch (e) { log('! command-palette skipped:', e.message.split('\n')[0]) }
+
+        // help / docs dock (⌘⇧K) — populate with a real docstring lookup so the card has content
+        try {
+          await page.evaluate(() => window.openDocs && window.openDocs())
+          await page.waitForSelector('#docpanel', { timeout: 6000 })
+          await page.evaluate(() => window.helpLookup && window.helpLookup('sort'))
+          await page.waitForSelector('#docpanel .docmd', { timeout: 6000 }).catch(() => {})
+          await sleep(700)
+          await elShot(page, '#docpanel', 'help-docs.png')
+          await page.evaluate(() => window.minimizeDocs && window.minimizeDocs())
+        } catch (e) { log('! help-docs skipped:', e.message.split('\n')[0]) }
+
+        // export dialog (the PDF export modal — shown without triggering a download)
+        try {
+          await page.evaluate(() => document.getElementById('pdfbg')?.classList.add('show'))
+          await sleep(400)
+          await elShot(page, '#pdfbg .modal', 'export-dialog.png')
+          await page.evaluate(() => document.getElementById('pdfbg')?.classList.remove('show'))
+        } catch (e) { log('! export-dialog skipped:', e.message.split('\n')[0]) }
+
+        // packages panel (📦) — the standalone demo is detached (empty), so paint a representative
+        // forked-environment state with the real markup so the provenance grouping is visible.
+        try {
+          await page.evaluate(() => {
+            const p = document.getElementById('pkgpanel'); p.classList.add('open')
+            document.getElementById('pkgstatus').textContent = '2 notebook · 5 from parent'
+            const row = (n, v, rm) => `<div class="pkgrow"><span class="pkgname">${n}</span><span class="pkgver">${v}</span>` +
+              (rm ? '<button class="cdel" title="remove">✕</button>' : '') + '</div>'
+            document.getElementById('pkglist').innerHTML =
+              '<div class="pkggrouphdr">Notebook adds</div>' +
+              row('CSV', '0.10.14', true) + row('Plots', '1.40.5', true) +
+              '<div class="pkggrouphdr">Parent project <span class="pkgpath">MyAnalysis</span></div>' +
+              row('DataFrames', '1.6.1', false) + row('Distributions', '0.25.109', false) +
+              row('JSON3', '1.14.0', false) + row('StatsBase', '0.34.3', false) + row('Tables', '1.11.1', false)
+          })
+          await sleep(500)
+          await elShot(page, '#pkgpanel', 'packages-panel.png')
+          await page.evaluate(() => document.getElementById('pkgpanel').classList.remove('open'))
+        } catch (e) { log('! packages-panel skipped:', e.message.split('\n')[0]) }
+
+        // agent pane (💬) — the standalone server has no live agent, so inject a representative
+        // transcript and let the REAL renderer draw it (authentic markup, illustrative content).
+        try {
+          await page.evaluate(() => {
+            agentMsgs = [
+              { role: 'user', text: 'Plot a sine wave with an adjustable frequency.' },
+              { role: 'think', text: 'A slider for the frequency, then a chart cell that reads it.' },
+              { role: 'assistant', text: "I'll add a frequency slider and a chart cell below it." },
+              { role: 'tool', text: '➕ add cell', code: '@bind freq Slider(1:20; default = 3, label = "frequency")' },
+              { role: 'tool', text: '➕ add cell', code: 'echart(line(0:0.1:2π, sin.(freq .* (0:0.1:2π))))' },
+              { role: 'tool', text: '🖼 view figure' },
+              { role: 'assistant', text: 'Done — drag the slider and the wave recomputes live.' },
+            ]
+            renderAgentMsgs()
+            if (!document.getElementById('agentpanel').classList.contains('open')) toggleAgent()
+          })
+          await sleep(700)
+          await elShot(page, '#agentpanel', 'agent-panel.png')
+          await page.evaluate(() => { if (document.getElementById('agentpanel').classList.contains('open')) toggleAgent() })
+        } catch (e) { log('! agent-panel skipped:', e.message.split('\n')[0]) }
       }
 
       if (id === 'widgets') {
