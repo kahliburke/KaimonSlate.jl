@@ -7,6 +7,9 @@
 <!-- Diagnostics capture FIRST, so it catches the earliest errors; pushed to the server for
      the slate.diag MCP tool. -->
 <script src="/assets/js/diag.js"></script>
+<!-- Apply the saved Slate UI theme BEFORE any CSS paints, so there's no dark→light flash. The
+     palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default. -->
+<script>try{var _t=localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>
 <!-- Inline SVG favicon (data URI → no extra request, no /favicon.ico 404). -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23569cd6'/><text x='50' y='73' font-size='62' text-anchor='middle' fill='%23ffffff' font-family='monospace'>S</text></svg>"/>
 <!-- All third-party assets are served locally from /assets/vendor/* (the server fetches +
@@ -135,15 +138,10 @@
     <span class="rt"><input type="checkbox" id="setwide"/></span></div>
   <div class="setrow"><label title="Pick up edits to the project's /src (Revise) and mark affected cells stale">Hot-reload project /src</label>
     <span class="rt"><input type="checkbox" id="sethotreload"/></span></div>
-  <div class="setrow"><label>Theme</label>
-    <select id="settheme"><option value="dark">Dark (default)</option></select></div>
-  <div class="setrow"><label title="Colour palette for code syntax highlighting in the editor">Editor syntax</label>
-    <select id="setsyntax">
-      <option value="dark-plus">Dark+ (default)</option>
-      <option value="monokai">Monokai</option>
-      <option value="dracula">Dracula</option>
-      <option value="nord">Nord</option>
-    </select></div>
+  <div class="setrow"><label title="Overall colour theme for the Slate notebook UI">Theme</label>
+    <select id="settheme"><!-- options populated from SLATE_UI_THEMES (settings.js) --></select></div>
+  <div class="setrow"><label title="Theme for code syntax highlighting in the editor — token colours and editor chrome">Editor syntax</label>
+    <select id="setsyntax"><!-- options populated from the cm6 theme registry (settings.js) --></select></div>
   <div class="setrow"><label>Agent model</label>
     <select id="setmodel">
       <option value="">Sonnet (default)</option>

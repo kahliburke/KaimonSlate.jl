@@ -8,25 +8,31 @@
   const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration,
           keymap, defaultKeymap, history, historyKeymap, indentWithTab, toggleComment,
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
-          syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes,
+          syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
           completionStatus, startCompletion, acceptCompletion, snippet } = CM;
 
-  // ── syntax palette (Settings → Editor syntax). A Compartment so the choice hot-swaps across all
+  // ── code-highlight theme (Settings → Editor syntax). Each theme is a COMPLETE look — token
+  //    colours AND editor chrome (background, gutter, selection, active line, caret) — defined once
+  //    in cm6's `slateThemes`. Two Compartments (tokens + chrome) let the choice hot-swap across all
   //    live editors without rebuilding the views. `slateSyntaxTheme` persists the selection. ──────
-  const themeComp = new Compartment();
-  const SYNTAX_THEMES = juliaThemes || { 'dark-plus': juliaHighlightStyle };
-  window._syntaxThemeNames = Object.keys(SYNTAX_THEMES);
+  const themeComp = new Compartment();    // token colours (HighlightStyle)
+  const chromeComp = new Compartment();   // editor chrome (EditorView.theme)
+  const THEMES = slateThemes || { 'dark-plus': { style: juliaHighlightStyle, chrome: [] } };
+  // Exposed for settings.js to build the dropdown — [{name,label}] in declared order.
+  window._syntaxThemes = slateThemeMeta || Object.keys(THEMES).map(name => ({ name, label: name }));
+  window._syntaxThemeNames = window._syntaxThemes.map(t => t.name);
   const curSyntaxTheme = () => {
     const n = localStorage.getItem('slateSyntaxTheme');
-    return (n && SYNTAX_THEMES[n]) ? n : 'dark-plus';
+    return (n && THEMES[n]) ? n : 'dark-plus';
   };
-  const styleFor = name => syntaxHighlighting(SYNTAX_THEMES[name] || juliaHighlightStyle);
+  const styleFor = name => syntaxHighlighting((THEMES[name] || THEMES['dark-plus']).style || juliaHighlightStyle);
+  const chromeFor = name => (THEMES[name] || THEMES['dark-plus']).chrome || [];
   window.setSyntaxTheme = (name) => {
-    if (!SYNTAX_THEMES[name]) return;
+    if (!THEMES[name]) return;
     localStorage.setItem('slateSyntaxTheme', name);
     for (const v of Object.values(window.editors || {})) {
-      try { v.dispatch({ effects: themeComp.reconfigure(styleFor(name)) }); } catch (_) {}
+      try { v.dispatch({ effects: [themeComp.reconfigure(styleFor(name)), chromeComp.reconfigure(chromeFor(name))] }); } catch (_) {}
     }
   };
 
@@ -210,7 +216,11 @@
   // ── editor factory ─────────────────────────────────────────────────────────────
   function mkEditor(parent, opts) {
     opts = opts || {};
-    const lang = opts.markdown ? [] : [julia(), themeComp.of(styleFor(curSyntaxTheme()))];
+    // Chrome applies to every editor (code + markdown) so the panel reads coherently; tokens only
+    // matter for code, but the compartment is harmless on a markdown editor (no Julia tree).
+    const cur = curSyntaxTheme();
+    const themed = [chromeComp.of(chromeFor(cur)), themeComp.of(styleFor(cur))];
+    const lang = opts.markdown ? themed : [julia(), ...themed];
     const cellKeys = (opts.keys || []).map(k => ({ key: k.key, run: () => { k.run(); return true; } }));
     const view = new EditorView({
       parent,

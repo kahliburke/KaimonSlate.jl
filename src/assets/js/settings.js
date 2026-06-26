@@ -1,3 +1,28 @@
+// ── Slate UI theme ──────────────────────────────────────────────────────────────
+// Registry for the Settings → Theme dropdown. Each name (except "midnight", the bare default)
+// has a matching `html[data-slate-theme="<name>"]` palette block in notebook.css. `dark` is
+// advisory metadata. Keep this list in sync with those CSS blocks.
+const SLATE_UI_THEMES = [
+  { name: 'midnight', label: 'Midnight (default)', dark: true },
+  { name: 'graphite', label: 'Graphite', dark: true },
+  { name: 'nord', label: 'Nord', dark: true },
+  { name: 'dracula', label: 'Dracula', dark: true },
+  { name: 'solarized-dark', label: 'Solarized Dark', dark: true },
+  { name: 'daylight', label: 'Daylight', dark: false },
+  { name: 'solarized-light', label: 'Solarized Light', dark: false },
+];
+const _SLATE_THEME_NAMES = new Set(SLATE_UI_THEMES.map(t => t.name));
+function curSlateTheme() {
+  const n = localStorage.getItem('slateTheme');
+  return (n && _SLATE_THEME_NAMES.has(n)) ? n : 'midnight';
+}
+function setSlateTheme(name) {
+  if (!_SLATE_THEME_NAMES.has(name)) return;
+  localStorage.setItem('slateTheme', name);
+  if (name === 'midnight') delete document.documentElement.dataset.slateTheme;
+  else document.documentElement.dataset.slateTheme = name;
+}
+
 // ── Settings modal ────────────────────────────────────────────────────────────
 function openSettings() {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
@@ -10,12 +35,19 @@ function openSettings() {
   const hr = document.getElementById('sethotreload');
   hr.checked = !(nbState && nbState.hotreload === false);
   hr.onchange = () => api('POST', '/api/hotreload', { enabled: hr.checked }).catch(() => {});
+  // Overall Slate UI theme — applied by toggling html[data-slate-theme] (palette in notebook.css),
+  // persisted as `slateTheme`, and re-applied at load by the inline head script (no flash).
   const th = document.getElementById('settheme');
-  th.value = localStorage.getItem('slateTheme') || 'dark';
-  th.onchange = () => localStorage.setItem('slateTheme', th.value);   // real themes land later
-  // Editor syntax palette — live-applied across all editors via window.setSyntaxTheme (editor.js).
+  th.innerHTML = SLATE_UI_THEMES.map(t => `<option value="${t.name}">${t.label}</option>`).join('');
+  th.value = curSlateTheme();
+  th.onchange = () => setSlateTheme(th.value);
+  // Editor syntax theme — options come from the cm6 theme registry (window._syntaxThemes), so adding
+  // a theme in entry.js surfaces here automatically. Live-applied across all editors (tokens + chrome)
+  // via window.setSyntaxTheme (editor.js).
   const syn = document.getElementById('setsyntax');
   if (syn) {
+    const themes = window._syntaxThemes || [{ name: 'dark-plus', label: 'Dark+ (default)' }];
+    syn.innerHTML = themes.map(t => `<option value="${t.name}">${t.label}</option>`).join('');
     syn.value = localStorage.getItem('slateSyntaxTheme') || 'dark-plus';
     syn.onchange = () => { window.setSyntaxTheme && window.setSyntaxTheme(syn.value); };
   }
