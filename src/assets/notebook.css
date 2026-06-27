@@ -96,7 +96,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
            display:flex; align-items:center; gap:9px; padding:6px 8px 6px 12px; border-radius:13px;
            background:var(--bg2); border:1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
            box-shadow:0 6px 22px rgba(0,0,0,.42); font-size:.78rem; color:var(--text);
-           max-width:min(560px,92vw); font-variant-numeric:tabular-nums; cursor:pointer; }
+           max-width:min(560px,92vw); font-variant-numeric:tabular-nums; cursor:pointer; user-select:none; }
 .runchip:hover { border-color:var(--accent); }
 .runchiptext { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .runchiptext b { color:var(--accent); }
