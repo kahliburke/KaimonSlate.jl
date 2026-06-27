@@ -335,6 +335,21 @@ function patchCells(cells) {
     renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] });
   });
 }
+// `cellpre:` — an agent add/edit, shown BEFORE its eval finishes. Upsert by id: replace an
+// existing cell in place (edit → the new source renders now), or splice a new one at `index`
+// (add → the cell appears stale instead of being invisible until the run ends). The live
+// `cellrun:`/`celldone:` events then patch it as the eval progresses. Idempotent / safe if the
+// post-eval full-state pull arrives later (it just supersedes this).
+function onCellPre(index, cell) {
+  if (!nbState || !cell) return;
+  const cells = (nbState.cells || []).slice();
+  const at = cells.findIndex(c => c.id === cell.id);
+  if (at >= 0) cells[at] = cell;                                          // edit: replace in place
+  else cells.splice(Math.max(0, Math.min(index | 0, cells.length)), 0, cell);   // add: insert at index
+  _publishState({ ...nbState, cells });
+}
+window.onCellPre = onCellPre;
+
 function _publishState(state) {
   nbState = state;
   // Remember this notebook's file path so a reconnect after a server restart can ask the server

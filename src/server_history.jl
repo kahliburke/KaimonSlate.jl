@@ -266,7 +266,7 @@ end
 
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →
 # persist back to the `.jl`.
-function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString)
+function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString; announce::Bool = false)
     cells = nb.report.cells
     idx = findfirst(c -> c.id == id, cells)
     idx === nothing && return nb
@@ -279,6 +279,9 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
     new_full = serialize_report(nb.report)
     cells[idx].source = saved
     update_source!(nb.report, new_full)
+    # announce=true → show the edited source (stale) in the browser BEFORE the eval, so an
+    # agent edit of a slow cell isn't stuck showing the old code until the run finishes.
+    announce && _announce_cell!(nb, something(findfirst(c -> c.id == id, nb.report.cells), 0))
     eval_stale!(nb.report, nb.kernel)
     _persist!(nb)
     _autoindex!(nb)                      # a new `using` in this cell → pick up its docs

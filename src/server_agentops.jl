@@ -11,13 +11,33 @@ function _gen_id(report::Report)
     end
 end
 
-# A structural change at index `idx` reorders state, so conservatively restale
-# everything from there on, recompute, and persist.
-function _commit_structure!(nb::LiveNotebook, idx::Int)
+# Push a cell's CURRENT (pre-eval) state to the browser as a targeted `cellpre:` upsert, so an
+# agent add/edit is VISIBLE — the new source, marked stale — BEFORE its (possibly long) eval
+# finishes. Without it the browser only learns the change from the post-eval version bump
+# (`celldone:`/`patchCells` can only UPDATE an existing cell, never insert one; and an edit's
+# new source isn't shown until the run ends). A targeted event — not a version bump — is used on
+# purpose: a mid-eval `GET /api/state` runs `sync_from_file!`, and the change isn't on disk yet,
+# so it would roll back. The browser inserts (add) or replaces in place (edit) by cell id.
+function _announce_cell!(nb::LiveNotebook, idx::Int)
+    (1 <= idx <= length(nb.report.cells)) || return nb
+    try
+        bindref, hostednames = _bind_index(nb.report)
+        _broadcast(nb, "cellpre:" * JSON.json(Dict(
+            "index" => idx - 1,                         # browser cells[] is 0-based
+            "cell" => cell_json(nb.report.cells[idx], bindref, hostednames))))
+    catch
+    end
+    return nb
+end
+
+# A structural change at index `idx` reorders state, so conservatively restale everything from
+# there on, recompute, and persist. `announce` shows the cell at `idx` (stale) before eval.
+function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false)
     build_dependencies!(nb.report)
     for (i, c) in enumerate(nb.report.cells)
         i >= idx && (c.state = STALE)
     end
+    announce && _announce_cell!(nb, idx)
     eval_stale!(nb.report, nb.kernel)
     _persist!(nb)
     _autoindex!(nb)                      # added/edited cell may introduce a new `using`
@@ -292,7 +312,9 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         cell = Cell(_gen_id(nb.report), kind == "md" ? MARKDOWN : CODE, String(source))
         _snapshot!(nb)
         insert!(cells, i + 1, cell)
-        _commit_structure!(nb, i + 1)        # build deps, restale from here, eval, one write
+        # announce=true → push the new cell to the browser BEFORE eval, so a long-running
+        # added cell is visible (stale) immediately instead of only when its eval finishes.
+        _commit_structure!(nb, i + 1; announce = true)
         return cell.id
     end
     rej === nothing || return rej
@@ -308,7 +330,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
-        edit_cell!(nb, id, source)
+        edit_cell!(nb, id, source; announce = true)   # show the edited source before its eval finishes
         return nothing
     end
     rej === nothing || return rej
