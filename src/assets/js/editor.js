@@ -235,7 +235,7 @@
           ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below
           { key: 'Escape', run: (v) => { v.contentDOM.blur(); return true; } },   // exit edit → command mode
           // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
-          { key: 'Mod-Shift-k', run: () => { window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
+          { key: 'Mod-Shift-k', run: () => { window.__docsHotkey = Date.now(); window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
           { key: 'Mod-/', run: toggleComment }, { key: 'Ctrl-/', run: toggleComment },
           // Tab: accept the open completion → else trigger one when a word/`\`/`.` precedes the
           // cursor → else fall through to indent. Restores CM5's Tab-to-complete. (macOS eats

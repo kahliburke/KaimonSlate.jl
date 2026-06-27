@@ -402,7 +402,7 @@ function _helpRecordHtml(r) {
       '</div></div>';
   }
   return `<div class="dochead"><h4>${title}</h4>${kind}</div>${body}${exports}` +
-    '<div class="hint">↵ insert name · click a <code>ref</code> or export to drill in · ‹ › or esc to go back</div>';
+    '<div class="hint">↵ open · double-click a result to insert its name · click a <code>ref</code> or export to drill in · ‹ › or esc to go back</div>';
 }
 // Make identifiers in a docstring clickable (drill-in via the #docdetail delegation):
 //  • an inline `code` span that is itself a single name → the whole span links;
@@ -471,16 +471,31 @@ document.getElementById('docdetail').addEventListener('click', e => {
 });
 // Related-items rail: a chip drills into that name.
 document.getElementById('docrelated').addEventListener('click', e => { const c = e.target.closest('.relchip'); if (c && c.dataset.name) helpLookup(c.dataset.name); });
-// No as-you-type search — it's an expensive embedding+FTS query. Enter runs it.
+// Auto-search as you type, DEBOUNCED 500ms — the docs search is an expensive embedding+FTS query,
+// so we coalesce keystrokes rather than fire per-character. Enter still works: it forces an
+// immediate search on a new query, or opens the selected result once the query has been searched.
+let _docDebounce = null;
+document.getElementById('docin').addEventListener('input', () => {
+  clearTimeout(_docDebounce);
+  _docDebounce = setTimeout(() => {
+    const q = document.getElementById('docin').value.trim();
+    if (q && q !== _docLastQ) _runDocSearch();   // new query settled → search
+  }, 500);
+});
 document.getElementById('docin').addEventListener('keydown', e => {
   const v = _view(), sel = v ? v.sel : 0;
   if (e.key === 'ArrowDown') { e.preventDefault(); _select(sel + 1); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); _select(sel - 1); }
   else if (e.key === 'Enter') {
     e.preventDefault();
+    clearTimeout(_docDebounce);                  // pre-empt the pending debounced search
     const q = document.getElementById('docin').value.trim();
-    if (q && q !== _docLastQ) _runDocSearch();   // first Enter on a new query → search
-    else _docPick();                              // already searched → open the selected result
+    if (q && q !== _docLastQ) { _runDocSearch(); return; }   // new query → search
+    // Already searched: OPEN the selected result (drill into its docs). Enter must never paste into
+    // the editor — double-click a result for that. (Now that search runs as-you-type, Enter would
+    // otherwise hit the old insert path immediately.)
+    const r = v && (v.rec || (v.results && v.results[v.sel]));
+    if (r) helpLookup(_lookupName(r));
   }
 });
 // Esc anywhere in the open dock closes it (minimizes) — users expect Escape to dismiss the popup,
@@ -495,9 +510,18 @@ _restoreDocs();
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
   if (mod && (e.key === 'k' || e.key === 'K')) {                          // ⌘K palette · ⌘⇧K docs
-    e.preventDefault();
-    if (!e.shiftKey) openPalette();
-    else openDocsAtCursor();                                              // ⌘⇧K on a symbol → its help
+    if (e.shiftKey) {
+      // ⌘⇧K: when a cell editor is focused, the editor's OWN Mod-Shift-k binding already handled this
+      // (it opens the dock, which BLURS the editor — so a focus check here runs too late). That binding
+      // stamps `__docsHotkey`; if it just fired (same keypress), bail so we don't call openDocsAtCursor a
+      // second time and toggle the dock straight back shut. Outside an editor, we own the shortcut.
+      if (window.__docsHotkey && Date.now() - window.__docsHotkey < 250) return;
+      e.preventDefault();
+      openDocsAtCursor();
+    } else {
+      e.preventDefault();
+      openPalette();
+    }
   }
   else if (mod && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAll(); }         // ⌘↵  run stale (⌘⇧↵ is run+add-below, handled elsewhere)
   else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
