@@ -333,14 +333,40 @@ end
 # crew agents share one notebook; `_AGENT_ROUTES` already maps each id → this nb.
 # `model` ("" = service default = sonnet) binds at spawn only — an already-running
 # crew agent keeps its model until reaped (the UI kills it on a model-setting change).
+# The agent's working dir = the notebook's PROJECT ROOT (the dir holding the active Project.toml),
+# NOT the notebook file's own directory. The `lab` preset runs Claude Code in `acceptEdits` mode,
+# which only auto-accepts edits inside the workspace (cwd); rooting at the project lets the agent
+# co-edit the notebook's module code under `src/` — for a notebook in `…/notebooks/foo.jl`, `src/`
+# would otherwise be `../src`, outside the workspace, and an unattended agent can't get approval.
+# Falls back to the notebook's own directory when there is no enclosing project (detached).
+function _agent_cwd(path::AbstractString)
+    d = dirname(abspath(path))
+    proj = Base.current_project(d)
+    return proj === nothing ? d : dirname(proj)
+end
 function _ensure_agent!(nb::LiveNotebook; crew::AbstractString = "", model::AbstractString = "",
                         permission::AbstractString = "")
     label = String(crew)
     existing = get(nb.agents, label, "")
-    isempty(existing) || return existing
+    if !isempty(existing)
+        # Reuse the bound agent ONLY if it's still alive. A dead session — its `claude` exited, or
+        # Kaimon's agent service restarted under us — must not be sent into (that's the "endpoint not
+        # available" / silent failure); close + forget it here so we spawn a fresh one below and chat
+        # self-heals. If we can't even check the status (service hiccup), assume it's gone and respawn.
+        alive = try
+            String(get(_agent_call(:agent_status, Dict{String,Any}("agent_id" => existing)), "status", "")) != "dead"
+        catch
+            false
+        end
+        alive && return existing
+        try; _agent_call(:agent_close, Dict{String,Any}("agent_id" => existing)); catch; end   # free the id
+        lock(_AGENT_LOCK) do
+            delete!(_AGENT_ROUTES, existing); delete!(_AGENT_CREW, existing); delete!(nb.agents, label)
+        end
+    end
     aid = isempty(label) ? "slate-$(nb.id)" : "slate-$(nb.id)-$(label)"
     open_args = Dict{String,Any}(
-            "cwd" => dirname(abspath(nb.path)),
+            "cwd" => _agent_cwd(nb.path),
             "id"  => aid,
             # Kaimon M4 permission preset. "lab" (the default) allows the agent the Kaimon
             # MCP tools (slate.*/ex/qdrant) + file edits — enough to drive + introspect the
