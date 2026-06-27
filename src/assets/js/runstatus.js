@@ -108,6 +108,9 @@
     renderChip(); renderTimers(); renderCellBars(activeCell());
   };
 
+  // Click the floating chip → scroll to + select the currently-running cell.
+  window.onChipClick = function () { const id = activeCell(); if (id) jumpTo(id); };
+
   // Stop the run. The only worker-level halt is a restart (kills the namespace); restartWorker()
   // runs its own confirm + loading flow, so just delegate to it.
   window.cancelRun = function () {
