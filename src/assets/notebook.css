@@ -612,6 +612,11 @@ input.toggle:checked::after { left:18px; }
 .pkgname { font-family:'Cascadia Code',monospace; color:var(--text); font-size:.84rem; }
 .pkgver { color:var(--dim); font-size:.74rem; margin-left:auto; font-family:monospace; }
 .pkgrow .cdel { margin-left:4px; }
+/* Per-cell live progress bar (slate_progress / @progress), shown atop a running cell. */
+.cellprog { display:flex; align-items:center; gap:8px; padding:4px 10px 6px; font-size:.76rem; }
+.cellprogtrack { flex:0 0 160px; height:5px; background:var(--bg3); border-radius:3px; overflow:hidden; }
+.cellprogtrack > span { display:block; height:100%; width:0; background:var(--accent); transition:width .15s ease; }
+.cellprogmsg { color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .pkggrouphdr { display:flex; align-items:center; gap:8px; color:var(--accent); font-size:.7rem; font-weight:600;
   text-transform:uppercase; letter-spacing:.06em; margin:12px 4px 4px; padding-bottom:3px; border-bottom:1px solid var(--border); }
 .pkggrouphdr:first-child { margin-top:2px; }
