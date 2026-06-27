@@ -117,19 +117,41 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb
     end
-    kernel = _select_kernel(path, r)
-    eval_stale!(r, kernel)               # initial full run
-    nb = LiveNotebook(nbid, String(path), r, kernel, 0, String[], String[],
+    # Open INSTANTLY: hand the browser the notebook with cells un-run and boot the kernel + do the
+    # initial full run in the BACKGROUND, pushing results live as they land (same hydrate pattern as
+    # a self-contained `.jl`). A heavy notebook — slow worker boot, long-running cells — no longer
+    # blocks the user from getting in. The `hydrating` flag tells the UI a background run is underway.
+    r.meta["hydrating"] = true
+    nb = LiveNotebook(nbid, String(path), r, InProcessKernel(), 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                       Dict{String,String}())
-    # Seed the durable history with the initial state, so the very first edit has a
-    # parent to diff against and the "buildup" replay starts from the true origin.
-    _history!(nb; source = "open")
     # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
     register_refresh!(r.id, vars -> server_refresh(nb, vars))
     register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))   # parent /src reloaded (Revise)
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
-    _autoindex!(nb)                      # background: index project deps + used packages' docs
+    @async begin
+        try
+            kernel = _select_kernel(path, r)         # boot the (gate) worker
+            lock(nb.lock) do
+                nb.kernel = kernel
+                eval_stale!(nb.report, kernel)       # initial full run
+                delete!(nb.report.meta, "hydrating")
+                nb.version += 1
+            end
+            # Seed the durable history with the initial run state, so the first edit has a parent to
+            # diff against and the "buildup" replay starts from the true origin.
+            _history!(nb; source = "open")
+            _autoindex!(nb)                          # background: index project deps + used packages' docs
+        catch e
+            lock(nb.lock) do
+                nb.report.meta["hydrate_error"] = sprint(showerror, e)
+                delete!(nb.report.meta, "hydrating")
+                nb.version += 1
+            end
+            @warn "KaimonSlate: initial run failed" exception = (e, catch_backtrace())
+        end
+        try; _broadcast(nb, string(nb.version)); catch; end   # nudge the browser to pull the now-live cells
+    end
     return nb
 end
 

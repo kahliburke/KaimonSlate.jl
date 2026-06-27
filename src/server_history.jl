@@ -253,6 +253,9 @@ function state_json(nb::LiveNotebook)
             [cell_json(c, bindref, hostednames) for c in nb.report.cells]
         end
         meta["hydrating"] = true
+        # "env" = reconstructing a self-contained bundle's environment (shows a frozen preview);
+        # "run" = a normal open whose initial full run is happening in the background.
+        meta["hydratingKind"] = haskey(nb.report.meta, "preview") ? "env" : "run"
         return meta
     end
     bindref, hostednames = _bind_index(nb.report)

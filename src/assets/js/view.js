@@ -361,7 +361,9 @@ function updateChrome(state) {
   _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
   if (state.hydrating) {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
-    hb.innerHTML = '<span class="hydspin"></span>Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…';
+    hb.innerHTML = '<span class="hydspin"></span>' + (state.hydratingKind === 'run'
+      ? 'Running the notebook — cells go live as they finish…'
+      : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…');
     document.body.classList.add('hydrating');
   } else if (state.hydrateError) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
