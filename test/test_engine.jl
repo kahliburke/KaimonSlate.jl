@@ -1,6 +1,7 @@
 # Standalone tests for the report engine model + parser (no project deps).
 # Run:  julia --startup-file=no test/report/test_engine.jl
 using Test
+import Logging
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
@@ -160,6 +161,24 @@ mean(data)
         id1 = r1.cells[1].id
         r2 = parse_report(serialize_report(r1))   # id now written explicitly
         @test r2.cells[1].id == id1
+    end
+
+    @testset "progress-logging bridge → cell meter" begin
+        rec = Tuple{Float64,String}[]
+        lg = ReportEngine._ProgressLogger(Logging.NullLogger(), (f, m) -> push!(rec, (f, m)))
+        Logging.with_logger(lg) do
+            Logging.@logmsg Logging.LogLevel(-1) "train" progress = 0.0
+            Logging.@logmsg Logging.LogLevel(-1) "train" progress = 0.5
+            Logging.@logmsg Logging.LogLevel(-1) "train" progress = "done"
+            @info "ordinary log — not progress"        # must NOT reach the sink
+        end
+        @test rec == [(0.0, "train"), (0.5, "train"), (1.0, "train")]
+        @test ReportEngine._progress_frac("done") == 1.0
+        @test ReportEngine._progress_frac(nothing) == 0.0
+        @test ReportEngine._progress_frac(NaN) == 0.0
+        @test ReportEngine._progress_frac(2.0) == 1.0          # clamped
+        @test ReportEngine._progress_frac(-1.0) == 0.0
+        @test ReportEngine._progress_sink(Module(:Bare))(0.5, "x") === nothing   # no slate_progress → no-op
     end
 
 end

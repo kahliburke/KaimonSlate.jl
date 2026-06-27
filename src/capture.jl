@@ -115,6 +115,45 @@ function _is_quiet_cell(source::AbstractString)
     return false
 end
 
+# ── Progress protocol bridge ─────────────────────────────────────────────────
+# Julia's de-facto progress standard (ProgressLogging.jl, consumed by Pluto / VS Code /
+# Juno / TerminalLoggers) is a LOG RECORD carrying a `progress` value (a Float 0..1,
+# `nothing`, or "done") at `LogLevel(-1)`, identified by its log `id`. We wrap the cell's
+# eval logger to intercept those records and funnel them into the SAME sink as a manual
+# `slate_progress(frac; msg)` call — so a plain `@progress for …` loop, or any library that
+# speaks the protocol, drives the cell meter with ZERO extra work. Everything else passes
+# through to the parent (console) logger untouched. No dep on ProgressLogging: we match the
+# `:progress` kwarg, which IS the wire protocol.
+struct _ProgressLogger <: Logging.AbstractLogger
+    parent::Logging.AbstractLogger
+    sink                       # (frac::Float64, msg::String) -> Any  (the cell's progress channel)
+end
+Logging.shouldlog(::_ProgressLogger, _...) = true                          # filter in handle_message
+Logging.min_enabled_level(l::_ProgressLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
+Logging.catch_exceptions(l::_ProgressLogger) = Logging.catch_exceptions(l.parent)
+
+_progress_frac(p) = p === nothing                  ? 0.0 :
+                    p isa AbstractString           ? (p == "done" ? 1.0 : 0.0) :
+                    p isa Real                     ? (isnan(p) ? 0.0 : clamp(Float64(p), 0.0, 1.0)) : 0.0
+
+function Logging.handle_message(l::_ProgressLogger, level, message, _module, group, id, file, line; kwargs...)
+    if haskey(kwargs, :progress)                                            # a progress record → cell meter
+        try; l.sink(_progress_frac(kwargs[:progress]), message === nothing ? "" : string(message)); catch; end
+        return nothing                                                      # consume (don't echo to stderr)
+    end
+    Logging.shouldlog(l.parent, level, _module, group, id) &&
+        Logging.handle_message(l.parent, level, message, _module, group, id, file, line; kwargs...)
+    return nothing
+end
+
+# The progress sink for `mod`: the namespace's injected `slate_progress` (in-process → live cell
+# update; worker → PUB on the gate stream), or a no-op on a bare module (tests).
+function _progress_sink(mod::Module)
+    isdefined(mod, :slate_progress) || return (_f, _m) -> nothing
+    sp = getfield(mod, :slate_progress)
+    return (f, m) -> (try; Base.invokelatest(sp, f; msg = m); catch; end)
+end
+
 """
     run_capture(mod, source) -> NamedTuple
 
@@ -160,7 +199,10 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     try
         # `ConsoleLogger(stderr)` — `stderr` is the redirected pipe now, so the macros land in
         # `ereader`. Non-colored (a pipe isn't a color tty), so no ANSI escapes reach the browser.
-        Logging.with_logger(Logging.ConsoleLogger(stderr)) do
+        # Console logger for @warn/@info/@error (→ ereader), wrapped so ProgressLogging
+        # `@progress`/`progress=…` records drive the cell meter instead of printing.
+        _logger = _ProgressLogger(Logging.ConsoleLogger(stderr), _progress_sink(mod))
+        Logging.with_logger(_logger) do
             value = _eval_cell_source(mod, source, filename)
         end
     catch e
