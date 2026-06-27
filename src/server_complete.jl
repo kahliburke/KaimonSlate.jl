@@ -236,7 +236,9 @@ function _make_router(h::Hub)
     end)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     HTTP.register!(router, "POST", "/api/{id}/cell/{cid}", req -> _withnb(h, req, nb -> begin
-        edit_cell!(nb, HTTP.getparam(req, "cid"), get(_body(req), "source", "")); _json(state_json(nb))
+        b = _body(req)
+        edit_cell!(nb, HTTP.getparam(req, "cid"), get(b, "source", ""); force = get(b, "force", false) === true)
+        _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/complete", req -> _withnb(h, req, nb -> begin
         body = _body(req)
