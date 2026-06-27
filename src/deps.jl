@@ -21,15 +21,43 @@ function _has_parse_error(ex)
     return any(_has_parse_error, ex.args)
 end
 
-# Cells that change the namespace or run external code (`using` / `import` /
-# `include`) are treated as barriers (§6.7): the imported names, global config
-# (e.g. Makie themes via `set_theme!`), and side effects aren't fully visible to
-# binding analysis, so downstream cells must conservatively depend on them.
+# `include(...)` runs external code whose definitions aren't visible to static analysis,
+# so a cell containing one is a barrier (downstream cells conservatively depend on it).
+# (`using`/`import` are handled precisely in the statement loop — see `_import_names` — so
+# a self-contained `import X` no longer chains every cell below it.)
 function _is_barrier_expr(ex)
     ex isa Expr || return false
-    (ex.head === :using || ex.head === :import) && return true
     ex.head === :call && !isempty(ex.args) && ex.args[1] === :include && return true
     return any(_is_barrier_expr, ex.args)
+end
+
+# Leaf name a dotted/`as` import path binds: `A.B.C` → :C, `M as L` → :L.
+_leaf_name(s::Symbol) = s
+_leaf_name(e::Expr) = e.head === :. ? (e.args[end] isa Symbol ? e.args[end] : nothing) :
+                      e.head === :as ? _leaf_name(e.args[end]) : nothing
+_leaf_name(::Any) = nothing
+
+# Names a top-level `import`/`using` brings into scope (to record as WRITES), or `nothing`
+# if it brings an UNKNOWABLE set — a plain `using X` pulls in X's exports, invisible to static
+# analysis, so that stays a barrier. Returns `:notimport` for non-import statements.
+#   import X            → [:X]          using X: a, b   → [:a, :b]
+#   import X: a, b      → [:a, :b]      import X as L    → [:L]
+#   using X             → nothing (barrier)
+function _import_names(ex)
+    (ex isa Expr && (ex.head === :import || ex.head === :using)) || return :notimport
+    names = Symbol[]
+    for a in ex.args
+        if a isa Expr && a.head === :(:)              # `M: a, b` — bring the listed names
+            for nm in a.args[2:end]
+                s = _leaf_name(nm); s === nothing || push!(names, s)
+            end
+        elseif ex.head === :import                    # `import M` / `import A.B` / `import M as L`
+            s = _leaf_name(a); s === nothing || push!(names, s)
+        else
+            return nothing                            # plain `using X` → unknowable exports → barrier
+        end
+    end
+    return names
 end
 
 # Base name of an assignment/index/field target (`data[i]` → :data, `a.b.c` → :a).
@@ -125,6 +153,12 @@ function _infer_bindings_uncached!(cell::Cell)
     nonbind = Any[]
     for s in stmts
         s isa LineNumberNode && continue
+        imp = _import_names(s)
+        if imp !== :notimport                 # a top-level using/import
+            imp === nothing ? push!(cell.flags, :opaque) :    # plain `using X` → barrier
+                              union!(cell.writes, imp)        # binds known names → just writes
+            continue
+        end
         bm = _bind_macrocall(s)
         om = bm === nothing ? _onclick_macrocall(s) : nothing
         cm = (bm === nothing && om === nothing) ? _onchange_macrocall(s) : nothing

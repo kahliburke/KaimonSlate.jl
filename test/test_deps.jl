@@ -79,8 +79,10 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test getproperty(r.mod, :independent) == 99
     end
 
-    @testset "using/import/include cells are barriers" begin
-        for src in ("using Statistics", "import Dates", "include(\"x.jl\")")
+    @testset "wildcard using / include are barriers" begin
+        # A plain `using X` pulls in unknowable exports, and `include` runs unseen code →
+        # both must stay barriers (downstream conservatively depends).
+        for src in ("using Statistics", "include(\"x.jl\")")
             c = Cell("c", CODE, src); infer_bindings!(c)
             @test :opaque in c.flags
         end
@@ -90,6 +92,25 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :opaque in findcell(r, "setup").flags
         @test "setup" in findcell(r, "b").deps               # downstream depends on the using
         @test "b" in dependents_of(r, Set(["setup"]))        # editing it restales downstream
+    end
+
+    @testset "precise import binds names, is NOT a blanket barrier" begin
+        # `import X` / `import X: a` / `using X: a` bring KNOWN names → recorded as writes, so a
+        # self-contained import doesn't chain every cell below it (only cells that USE the name dep).
+        for (src, name) in (("import Dates", :Dates), ("import Dates: now", :now),
+                            ("using Dates: now", :now), ("import Dates as D", :D))
+            c = Cell("c", CODE, src); infer_bindings!(c)
+            @test !(:opaque in c.flags)
+            @test name in c.writes
+        end
+        r = parse_report("#%% code id=imp\nimport Dates\n" *
+                         "#%% code id=user\nDates.today()\n" *
+                         "#%% code id=indep\nz = 1")
+        build_dependencies!(r)
+        @test !(:opaque in findcell(r, "imp").flags)
+        @test "imp" in findcell(r, "user").deps               # a cell that USES Dates depends on the import
+        @test isempty(findcell(r, "indep").deps)              # an unrelated cell does NOT
+        @test !("indep" in dependents_of(r, Set(["imp"])))    # re-running the import won't restale it
     end
 
     @testset "opaque cell becomes a barrier" begin
