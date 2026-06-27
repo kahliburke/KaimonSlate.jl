@@ -5,12 +5,13 @@ using Test
 using KaimonSlate
 import REPL
 const NS = KaimonSlate.NotebookServer
+const RE = KaimonSlate.ReportEngine   # completion.jl (`_comp_text`/`slate_completions`) is shared engine+worker → it lives here
 
 # Insert-text for a LaTeX/emoji completion of `s` (mirrors the /complete path):
 # the unique symbol when `s` is an exact sequence, else the candidate names.
 function _latex(s)
     comps, _, _ = REPL.REPLCompletions.completions(s, lastindex(s), Main)
-    filter(!isempty, String[NS._comp_text(c) for c in comps])
+    filter(!isempty, String[RE._comp_text(c) for c in comps])
 end
 
 @testset "cell-local completion" begin
