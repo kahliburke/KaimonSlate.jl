@@ -120,6 +120,13 @@
     <button class="pclose" onclick="toggleAct()" title="close">✕</button></div>
   <div id="actlog" class="actlog"></div>
 </aside>
+<!-- Floating "currently running" chip — shows the active cell, elapsed, and slate_progress(frac; msg). -->
+<div id="runchip" class="runchip" style="display:none">
+  <span class="rspin"></span>
+  <span id="runchiptext" class="runchiptext"></span>
+  <span class="runchipbar"><span id="runchipfill"></span></span>
+  <button id="runchipstop" class="runchipstop" onclick="window.cancelRun && window.cancelRun()" title="stop the run (restarts the worker)">✕</button>
+</div>
 <aside id="pkgpanel" class="logpanel">
   <div class="aphead"><strong>📦 Packages</strong><span id="pkgstatus" class="hint"></span>
     <button class="pclose" onclick="togglePackages()" title="close">✕</button></div>

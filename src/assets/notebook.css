@@ -90,6 +90,20 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .act-done .acticon { color:var(--green); }
 .act-err .acticon, .act-err .actdetail { color:var(--red); }
 
+/* Floating "currently running" chip — bottom-centre so it clears the bottom-right docs launcher. */
+.runchip { position:fixed; left:50%; transform:translateX(-50%); bottom:18px; z-index:60;
+           display:flex; align-items:center; gap:9px; padding:6px 8px 6px 12px; border-radius:13px;
+           background:var(--bg2); border:1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+           box-shadow:0 6px 22px rgba(0,0,0,.42); font-size:.78rem; color:var(--text);
+           max-width:min(560px,92vw); font-variant-numeric:tabular-nums; }
+.runchiptext { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.runchiptext b { color:var(--accent); }
+.runchipbar { width:84px; height:5px; border-radius:3px; flex:0 0 auto; overflow:hidden;
+              background:color-mix(in srgb, var(--accent) 20%, var(--bg)); }
+.runchipbar > span { display:block; height:100%; width:0; background:var(--accent); transition:width .2s ease, opacity .2s; }
+.runchipstop { flex:0 0 auto; padding:2px 8px; border-radius:8px; line-height:1; font-size:.8rem; }
+.runchipstop:hover { background:var(--red); color:#fff; border-color:var(--red); }
+
 button { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px;
          padding:4px 12px; cursor:pointer; font-size:.82rem; }
 button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid var(--border);

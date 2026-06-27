@@ -324,6 +324,7 @@ function connectLive() {
     if (e.data.startsWith('runbatch:')) { window.onRunBatch && window.onRunBatch(parseInt(e.data.slice(9), 10) || 0); return; }   // N cells about to run → stable k/N
     if (e.data.startsWith('cellrun:')) { window.onCellRun && window.onCellRun(e.data.slice(8)); return; }   // a cell started running (live status)
     if (e.data.startsWith('celldone:')) { try { const c = JSON.parse(e.data.slice(9)); patchCells([c]); window.onCellDone && window.onCellDone(c); } catch (_) {} return; }   // a cell finished — patch + status
+    if (e.data.startsWith('cellprog:')) { try { const p = JSON.parse(e.data.slice(9)); window.onCellProgress && window.onCellProgress(p.frac, p.msg); } catch (_) {} return; }   // a cell's slate_progress(frac; msg)
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
     if (e.data.startsWith('js:')) { try { const r = JSON.parse(e.data.slice(3)); window._slateEvalJs && window._slateEvalJs(r.reqid, r.code); } catch (_) {} return; }   // slate.eval_js: run agent JS in this tab
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // (fallback) full pull

@@ -9,6 +9,10 @@
   const running = new Map();     // cellId -> start time (performance.now)
   let total = 0, done = 0, errs = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone)
   let tick = null, idleTimer = null;
+  let prog = { frac: 0, msg: '' };     // latest slate_progress(frac; msg) for the running cell
+
+  // The cell currently executing (the most recently started) — runs are sequential.
+  const activeCell = () => { let last = null; for (const id of running.keys()) last = id; return last; };
 
   const now = () => performance.now();
   const fmt = (ms) => ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
@@ -23,7 +27,7 @@
     if (tick) return;
     tick = setInterval(() => {
       if (!active()) { clearInterval(tick); tick = null; }
-      renderPill(); renderTimers();
+      renderPill(); renderTimers(); renderChip();
     }, 150);
   }
 
@@ -49,9 +53,33 @@
   function renderTimers() {
     for (const [id, t] of running) {
       const b = document.querySelector(`.cell[data-cid="${id}"] .badge`);
-      if (b) b.textContent = 'running ' + fmt(now() - t);
+      if (b) b.textContent = 'running ' + fmt(now() - t) + (id === activeCell() && prog.frac > 0 ? ' · ' + Math.round(prog.frac * 100) + '%' : '');
     }
   }
+
+  // Floating "currently running" chip: which cell, how long, and its slate_progress bar + message.
+  function renderChip() {
+    const chip = document.getElementById('runchip'); if (!chip) return;
+    const id = activeCell();
+    if (!id) { chip.style.display = 'none'; return; }
+    const t = running.get(id), el = t ? fmt(now() - t) : '';
+    const txt = document.getElementById('runchiptext'), fill = document.getElementById('runchipfill');
+    if (txt) txt.innerHTML = `<b>${esc(id)}</b> · ${el}` + (prog.msg ? ` · ${esc(prog.msg)}` : '');
+    if (fill) { fill.style.width = (prog.frac > 0 ? Math.round(prog.frac * 100) : 0) + '%'; fill.style.opacity = prog.frac > 0 ? '1' : '0'; }
+    chip.style.display = 'flex';
+  }
+
+  // A running cell reported progress via slate_progress(frac; msg).
+  window.onCellProgress = function (frac, msg) {
+    prog = { frac: typeof frac === 'number' ? frac : 0, msg: msg || '' };
+    renderChip(); renderTimers();
+  };
+
+  // Stop the run. The only worker-level halt is a restart (kills the namespace); restartWorker()
+  // runs its own confirm + loading flow, so just delegate to it.
+  window.cancelRun = function () {
+    try { if (typeof restartWorker === 'function') restartWorker(); } catch (_) {}
+  };
 
   // The server announced a run of N cells. Reset the batch counters (a fresh streak) and show the pill.
   window.onRunBatch = function (n) {
@@ -65,9 +93,10 @@
     clearTimeout(idleTimer);
     if (total === 0) total = 1;           // a one-off run with no batch announcement → degrade gracefully
     running.set(id, now());
+    prog = { frac: 0, msg: '' };          // fresh cell → reset any prior progress
     setLive(id, 'running');               // pulsing border via the store
     activity('run', id, '');
-    ensureTick(); renderPill();
+    ensureTick(); renderPill(); renderChip();
   };
 
   // A cell FINISHED (cell is its full cell_json — patchCells has already merged it).
@@ -79,7 +108,8 @@
     const errored = cell.state === 'errored';
     if (errored) errs++;
     activity(errored ? 'err' : 'done', id, errored ? 'errored' : (t ? fmt(now() - t) : 'done'));
-    renderPill();
+    prog = { frac: 0, msg: '' };
+    renderPill(); renderChip();
     // Batch drained → end the streak shortly (a small delay absorbs the gap between sequential cells
     // and back-to-back batches, so the pill doesn't flicker). `errs` persists so the error pill stays.
     if (!active()) { clearTimeout(idleTimer); idleTimer = setTimeout(() => { total = 0; done = 0; renderPill(); }, 600); }

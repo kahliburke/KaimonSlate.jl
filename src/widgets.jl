@@ -241,7 +241,7 @@ end
 # the SET of names, the widget constructors, and the `@bind` macro are defined here
 # once. Returns the per-notebook bind sink Ref (run_capture toggles it per eval).
 function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
-                                slate_query, slate_refresh)
+                                slate_query, slate_refresh, slate_progress = (frac; msg = "") -> nothing)
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
     Core.eval(m, :(const series = $series))       # ECharts DSL series builder (echarts_dsl.jl)
@@ -249,6 +249,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const SlateTable = $SlateTable))
     Core.eval(m, :(const slate_query = $slate_query))
     Core.eval(m, :(const slate_refresh = $slate_refresh))
+    Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress
     Core.eval(m, :(const Widget = $Widget))
     Core.eval(m, :(const Choice = $Choice))
     Core.eval(m, :(const Selection = $Selection))

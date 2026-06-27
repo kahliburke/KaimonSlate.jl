@@ -112,6 +112,7 @@ function _ensure_poller!()
                 pending = Dict{String,Set{String}}()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
+                prog = Dict{String,Tuple{Float64,String}}()   # slate_progress: keep the LATEST per notebook
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
                 # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
@@ -132,6 +133,9 @@ function _ensure_poller!()
                         end
                     elseif m.channel == "slate_revise_err"    # a /src save didn't parse/apply
                         srcerr[rid] = String(m.data)
+                    elseif m.channel == "slate_progress"      # a running cell's slate_progress(frac; msg)
+                        parts = split(String(m.data), "|"; limit = 2)
+                        prog[rid] = (something(tryparse(Float64, parts[1]), 0.0), length(parts) > 1 ? String(parts[2]) : "")
                     end
                 end
                 for (rid, vars) in pending
@@ -142,6 +146,9 @@ function _ensure_poller!()
                 end
                 for (rid, msg) in srcerr
                     _do_src_error(rid, msg)
+                end
+                for (rid, (frac, msg)) in prog
+                    _do_userprog(rid, frac, msg)
                 end
             catch
                 sleep(0.25)   # error backoff — wait_stream_messages! parks on its own, so this

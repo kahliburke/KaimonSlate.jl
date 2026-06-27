@@ -46,7 +46,8 @@ function _new_ns()
     _populate_notebook_ns!(m;
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query,
-        slate_refresh = (vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")))
+        slate_refresh = (vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")),
+        slate_progress = (frac; msg = "") -> KaimonGate._publish_stream("slate_progress", string(Float64(frac), "|", msg)))
     return m
 end
 const _NS = Ref{Module}(_new_ns())

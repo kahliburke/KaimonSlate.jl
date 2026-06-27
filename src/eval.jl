@@ -10,6 +10,7 @@ export eval_report!, eval_cell!, report_module, reset_module!
 export Kernel, InProcessKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
 export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
+export register_userprog!, unregister_userprog!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
 #
@@ -54,6 +55,20 @@ function _emit_run_batch(report_id::AbstractString, n::Integer)
     return nothing
 end
 
+# In-cell progress: a running cell can call `slate_progress(frac; msg)` (frac ∈ 0..1) to report how
+# far along it is; the server relays it to the UI (a bar on the cell + the "currently running" chip).
+# Same out-of-band registry pattern; the callback takes (frac::Float64, msg::String).
+const _USERPROG_REGISTRY = Dict{String,Any}()
+register_userprog!(report_id::AbstractString, cb) = (_USERPROG_REGISTRY[String(report_id)] = cb; nothing)
+unregister_userprog!(report_id::AbstractString) = (delete!(_USERPROG_REGISTRY, String(report_id)); nothing)
+function _do_userprog(report_id::AbstractString, frac, msg)
+    cb = get(_USERPROG_REGISTRY, String(report_id), nothing)
+    cb === nothing && return nothing
+    f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
+    try; cb(f, String(msg)); catch; end
+    return nothing
+end
+
 # Parent-project /src hot-reload: the worker's Revise watcher fires `files_changed`; the
 # server registers a per-report callback (out-of-band, like refresh) that applies the
 # revisions and invalidates the cells that read the changed definitions.
@@ -82,7 +97,8 @@ function _new_module(report::Report)
     rid = report.id
     _populate_notebook_ns!(m;
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
-        slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars))
+        slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars),
+        slate_progress = (frac; msg = "") -> _do_userprog(rid, frac, msg))
     return m
 end
 
