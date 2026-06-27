@@ -113,6 +113,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
                           Dict{String,String}())
         register_refresh!(r.id, vars -> server_refresh(nb, vars))
         register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))
+        register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
         _load_chat_log!(nb)
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb
@@ -128,13 +129,15 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
     register_refresh!(r.id, vars -> server_refresh(nb, vars))
     register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))   # parent /src reloaded (Revise)
+    register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     @async begin
         try
             kernel = _select_kernel(path, r)         # boot the (gate) worker
+            lock(nb.lock) do; nb.kernel = kernel; nb.version += 1; end
+            try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
             lock(nb.lock) do
-                nb.kernel = kernel
-                eval_stale!(nb.report, kernel)       # initial full run
+                eval_stale!(nb.report, kernel)       # initial full run (streams cells)
                 delete!(nb.report.meta, "hydrating")
                 nb.version += 1
             end
@@ -212,6 +215,24 @@ function server_refresh(nb::LiveNotebook, vars)
         msg = "refresh:" * JSON.json(Dict("cells" => cells))
     end
     isempty(msg) || _broadcast(nb, msg)
+    return nothing
+end
+
+# Live per-cell run status (registered via `register_progress!` per notebook): `eval_cell!` calls
+# this as each cell STARTS and FINISHES running. A start pushes a lightweight `cellrun:<id>` so the
+# UI marks that cell live (spinner + ticking timer + the topbar run pill); a finish pushes the single
+# cell's fresh `celldone:<cell_json>` so its result/error lights up the INSTANT it lands, mid-run,
+# instead of only when the whole run ends. Best-effort — a push must never disturb evaluation.
+function _broadcast_progress(nb::LiveNotebook, cell)
+    try
+        if cell.state == RUNNING
+            _broadcast(nb, "cellrun:" * cell.id)
+        else
+            bindref, hostednames = _bind_index(nb.report)
+            _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames)))
+        end
+    catch
+    end
     return nothing
 end
 

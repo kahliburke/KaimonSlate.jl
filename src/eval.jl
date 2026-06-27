@@ -9,6 +9,7 @@
 export eval_report!, eval_cell!, report_module, reset_module!
 export Kernel, InProcessKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
+export register_progress!, unregister_progress!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
 #
@@ -23,6 +24,20 @@ unregister_refresh!(report_id::AbstractString) = (delete!(_REFRESH_REGISTRY, Str
 function _do_refresh(report_id::AbstractString, vars)
     cb = get(_REFRESH_REGISTRY, report_id, nothing)
     cb === nothing || cb(Symbol[Symbol(v) for v in vars])
+    return nothing
+end
+
+# Live run progress: `eval_cell!` announces each cell as it STARTS running and when it FINISHES,
+# so the server can stream a per-cell status to the browser (which cell is live, its result the
+# instant it lands) instead of one update at the end of a whole run. Registered per report id,
+# out-of-band, so the engine needn't know about the SSE layer. The callback takes the Cell.
+const _PROGRESS_REGISTRY = Dict{String,Any}()
+register_progress!(report_id::AbstractString, cb) = (_PROGRESS_REGISTRY[String(report_id)] = cb; nothing)
+unregister_progress!(report_id::AbstractString) = (delete!(_PROGRESS_REGISTRY, String(report_id)); nothing)
+function _emit_progress(report_id::AbstractString, cell)
+    cb = get(_PROGRESS_REGISTRY, report_id, nothing)
+    cb === nothing && return nothing
+    try; cb(cell); catch; end   # progress is best-effort — a push failure must never break eval
     return nothing
 end
 
@@ -227,6 +242,7 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     # Bind cells are ordinary code now: `@bind x W(…)` runs, assigns `x`, and reports
     # its control through the capture channel (`output.binds`). No special path.
     cell.state = RUNNING
+    _emit_progress(report.id, cell)   # announce: this cell is now running (live status stream)
     # `trace` flag: wrap the source in `@trace begin … end` so eval returns a SlateTrace of
     # inline values (the cell's normal output is replaced by the trace table). Dependency
     # analysis is untouched — it parses the ORIGINAL `cell.source`, never this wrapped form.
@@ -240,6 +256,7 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     cell.output = eval_capture(kernel, report, src, "cell:" * cell.id)
     cell.binds = cell.output.binds
     cell.state = cell.output.exception === nothing ? FRESH : ERRORED
+    _emit_progress(report.id, cell)   # announce: finished (the result/error can light up immediately)
     return cell
 end
 

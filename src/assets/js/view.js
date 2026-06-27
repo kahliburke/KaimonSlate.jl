@@ -353,8 +353,17 @@ function updateChrome(state) {
   document.title = (state.title ? state.title + ' · ' : '') + 'Kaimon Slate';   // browser tab
   const w = state.worker || {}, dot = document.getElementById('wdot');
   if (dot) {
-    dot.className = 'wdot ' + (w.kind === 'inproc' ? 'inproc' : (w.connected ? 'up' : 'down')) + (_busy > 0 ? ' busy' : '');
-    dot.title = w.kind === 'gate' ? ('worker :' + w.port + (w.connected ? ' · connected' : ' · disconnected')) : 'in-process kernel';
+    // Worker dot semantics: green = connected (incl. while a run streams — we ARE connected),
+    // blue = in-process kernel OR the gate worker still BOOTING (hydrating), red = a genuine
+    // disconnect of a live notebook only. So a not-yet-connected gate worker shows a "starting"
+    // blue pulse during hydration, never the alarming red.
+    const cls = w.kind === 'inproc' ? 'inproc'
+              : w.connected ? 'up'
+              : (state.hydrating ? 'inproc busy' : 'down');
+    dot.className = 'wdot ' + cls + (_busy > 0 ? ' busy' : '');
+    dot.title = w.kind === 'gate'
+              ? ('worker :' + w.port + (w.connected ? ' · connected' : (state.hydrating ? ' · starting…' : ' · disconnected')))
+              : 'in-process kernel';
   }
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const hb = document.getElementById('hydbanner');

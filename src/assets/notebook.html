@@ -39,6 +39,7 @@
 <div class="topbar">
   <a class="brand" href="/" title="all notebooks"><span class="brandmark">S</span>Slate</a>
   <span id="wdot" class="wdot" title=""></span>
+  <span id="runpill" class="runpill" style="display:none" onclick="toggleAct()" title="run status — click for the activity log"></span>
   <h1 id="title">Notebook</h1>
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
@@ -49,6 +50,7 @@
     <button onclick="toggleTopMenu(event)" title="more actions">☰</button>
     <div id="topmenu" class="topmenu">
       <button onclick="togglePackages();closeTopMenu()">📦 Packages</button>
+      <button onclick="toggleAct();closeTopMenu()">📋 Activity log</button>
       <button onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
       <button onclick="toggleHistory();closeTopMenu()">🕘 History</button>
       <hr>
@@ -111,6 +113,12 @@
     <button id="logtail" class="hbtn" onclick="toggleTail()" title="auto-scroll to newest">⤓ tail</button>
     <button class="pclose" onclick="toggleLog()" title="close">✕</button></div>
   <pre id="logbox" class="logbox"></pre>
+</aside>
+<aside id="actpanel" class="logpanel">
+  <div class="aphead"><strong>📋 Activity</strong><span class="hint">live run feed</span>
+    <button class="hbtn" onclick="document.getElementById('actlog').innerHTML=''" title="clear">⌫ clear</button>
+    <button class="pclose" onclick="toggleAct()" title="close">✕</button></div>
+  <div id="actlog" class="actlog"></div>
 </aside>
 <aside id="pkgpanel" class="logpanel">
   <div class="aphead"><strong>📦 Packages</strong><span id="pkgstatus" class="hint"></span>
@@ -221,6 +229,7 @@
 <script src="/assets/js/outputs.js"></script>
 <script src="/assets/js/agent.js"></script>
 <script src="/assets/js/panels.js"></script>
+<script src="/assets/js/runstatus.js"></script>
 <script src="/assets/js/inspect.js"></script>
 <script src="/assets/js/dragdrop.js"></script>
 <script src="/assets/js/trace.js"></script>
