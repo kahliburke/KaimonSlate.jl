@@ -84,7 +84,8 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .actline:hover { background:var(--ovl); }
 .actts { color:var(--dim); flex:0 0 auto; font-variant-numeric:tabular-nums; opacity:.8; }
 .acticon { flex:0 0 auto; width:1em; text-align:center; }
-.actid { color:var(--accent); flex:0 0 auto; }
+.actid { color:var(--accent); flex:0 0 auto; cursor:pointer; }
+.actid:hover { text-decoration:underline; }
 .actdetail { color:var(--dim); flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; }
 .act-run .acticon { color:var(--green); }
 .act-done .acticon { color:var(--green); }

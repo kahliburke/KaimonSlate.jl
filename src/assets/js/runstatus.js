@@ -10,9 +10,13 @@
   let total = 0, done = 0, errs = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone)
   let tick = null, idleTimer = null;
   let prog = { frac: 0, msg: '' };     // latest slate_progress(frac; msg) for the running cell
+  const erroredIds = [];               // cells that errored this streak (for the pill to jump through)
+  let errCursor = 0;
 
   // The cell currently executing (the most recently started) — runs are sequential.
   const activeCell = () => { let last = null; for (const id of running.keys()) last = id; return last; };
+  // Scroll to + select a cell (clicking a run-status indicator should take you there).
+  const jumpTo = (id) => { try { window.selectCell && window.selectCell(id, true); } catch (_) {} };
 
   const now = () => performance.now();
   const fmt = (ms) => ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
@@ -84,8 +88,15 @@
   // The server announced a run of N cells. Reset the batch counters (a fresh streak) and show the pill.
   window.onRunBatch = function (n) {
     clearTimeout(idleTimer);
-    total = n; done = 0; errs = 0;
+    total = n; done = 0; errs = 0; erroredIds.length = 0; errCursor = 0;
     ensureTick(); renderPill();
+  };
+
+  // Pill click: while running, open the activity feed to watch; once a run has errored, step through
+  // the errored cells (each click jumps to the next, scrolling it into view).
+  window.onPillClick = function () {
+    if (!active() && erroredIds.length) { jumpTo(erroredIds[errCursor % erroredIds.length]); errCursor++; return; }
+    window.toggleAct && window.toggleAct();
   };
 
   // A cell STARTED running.
@@ -106,7 +117,7 @@
     done++;
     setLive(id, cell.state);              // clear the transient running → real state
     const errored = cell.state === 'errored';
-    if (errored) errs++;
+    if (errored) { errs++; if (!erroredIds.includes(id)) erroredIds.push(id); }
     activity(errored ? 'err' : 'done', id, errored ? 'errored' : (t ? fmt(now() - t) : 'done'));
     prog = { frac: 0, msg: '' };
     renderPill(); renderChip();
@@ -124,7 +135,7 @@
     const line = document.createElement('div');
     line.className = 'actline act-' + kind;
     line.innerHTML = `<span class="actts">${ts}</span><span class="acticon">${icon}</span>` +
-      `<span class="actid">${esc(id)}</span><span class="actdetail">${esc(detail)}</span>`;
+      `<span class="actid" data-cid="${esc(id)}" title="jump to cell">${esc(id)}</span><span class="actdetail">${esc(detail)}</span>`;
     box.appendChild(line);
     while (box.children.length > 600) box.removeChild(box.firstChild);
     if (atBottom) box.scrollTop = box.scrollHeight;
@@ -134,4 +145,10 @@
   window.toggleAct = function () {
     const p = document.getElementById('actpanel'); if (p) p.classList.toggle('open');
   };
+
+  // Click a cell id in the activity feed → jump to that cell.
+  const _actlog = document.getElementById('actlog');
+  if (_actlog) _actlog.addEventListener('click', (e) => {
+    const a = e.target.closest('.actid'); if (a && a.dataset.cid) jumpTo(a.dataset.cid);
+  });
 })();
