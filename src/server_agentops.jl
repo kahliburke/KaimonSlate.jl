@@ -24,6 +24,27 @@ function _commit_structure!(nb::LiveNotebook, idx::Int)
     return nb
 end
 
+# Structural commit for reorder / add / delete. Rebuilds the dependency graph (cheap — the per-cell
+# analysis is memoized) and re-evaluates ONLY the cells whose dependency set actually CHANGED, plus
+# their transitive dependents. For a pure move, an empty-cell insert, or a leaf delete nothing
+# changes → no re-evaluation at all (instant). This replaces the old `_commit_structure!` path that
+# restaled everything by POSITION and re-ran the whole notebook on every click.
+function _commit_reorder!(nb::LiveNotebook)
+    old = Dict{String,Set{String}}(c.id => copy(c.deps) for c in nb.report.cells)
+    build_dependencies!(nb.report)
+    changed = Set{String}(c.id for c in nb.report.cells if get(old, c.id, nothing) != c.deps)
+    if !isempty(changed)
+        restale = dependents_of(nb.report, changed)   # the changed cells + everything downstream
+        for c in nb.report.cells
+            c.id in restale && (c.state = STALE)
+        end
+        eval_stale!(nb.report, nb.kernel)
+        _autoindex!(nb)
+    end
+    _persist!(nb)
+    return nb
+end
+
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
 function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
@@ -32,9 +53,10 @@ function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractStr
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
     cell = Cell(nid, kind == "md" ? MARKDOWN : CODE, "")
+    cell.state = FRESH                               # empty cell: nothing to run (don't show it stale)
     pos = before ? max(1, i) : i + 1                 # insert above (at `i`) or below the reference
     insert!(cells, pos, cell)
-    _commit_structure!(nb, pos)
+    _commit_reorder!(nb)                             # empty cell defines nothing → no restale/re-eval
     return cell.id
 end
 
@@ -383,7 +405,7 @@ function delete_cell!(nb::LiveNotebook, id::AbstractString)
     i = _index_of(nb.report.cells, id); i === nothing && return nb
     _snapshot!(nb; label = "delete $id")
     deleteat!(nb.report.cells, i)
-    _commit_structure!(nb, max(1, i))
+    _commit_reorder!(nb)   # recomputes only the deleted cell's (now-broken) dependents, if any
 end
 
 _n_cells(n) = "$(n) cell$(n == 1 ? "" : "s")"
@@ -402,7 +424,7 @@ function delete_cells!(nb::LiveNotebook, ids; verb::AbstractString = "delete")
     for i in Iterators.reverse(idxs)
         deleteat!(cells, i)
     end
-    _commit_structure!(nb, max(1, first(idxs)))
+    _commit_reorder!(nb)   # recomputes only the removed cells' (now-broken) dependents, if any
     return nb
 end
 
@@ -436,7 +458,7 @@ function move_cell!(nb::LiveNotebook, id::AbstractString, dir::AbstractString)
     (j < 1 || j > length(cells)) && return nb
     _snapshot!(nb)
     cells[i], cells[j] = cells[j], cells[i]
-    _commit_structure!(nb, min(i, j))
+    _commit_reorder!(nb)                             # reorder doesn't change reactive values
 end
 
 # Move `id` to just before/after `target_id` (drag-and-drop).
@@ -448,7 +470,7 @@ function move_cell_rel!(nb::LiveNotebook, id::AbstractString, target_id::Abstrac
     j = _index_of(cells, target_id)
     p = j === nothing ? length(cells) + 1 : (before ? j : j + 1)
     insert!(cells, p, c)
-    _commit_structure!(nb, min(i, p))
+    _commit_reorder!(nb)                             # reorder doesn't change reactive values
 end
 
 # Set the `controls=` layout of one or more cells (drag-to-host: add / move /

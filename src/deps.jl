@@ -67,7 +67,29 @@ end
 Populate `cell.reads` / `cell.writes` for a code cell. On parse/analysis failure
 the cell is flagged `:opaque` (treated as a barrier in the graph).
 """
+# Reads/writes/opaque depend ONLY on a cell's source (+ kind), so the (expensive) ExpressionExplorer
+# pass is memoized by source hash. Without this, `build_dependencies!` re-analyzed every cell on each
+# call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
+# on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
+# → recompute).
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool}}()
+const _BIND_CACHE_LOCK = ReentrantLock()
 function infer_bindings!(cell::Cell)
+    h = hash(cell.source) ⊻ hash(cell.kind)
+    hit = lock(_BIND_CACHE_LOCK) do; get(_BIND_CACHE, cell.id, nothing); end
+    if hit !== nothing && hit[1] == h
+        empty!(cell.reads);  union!(cell.reads,  hit[2])
+        empty!(cell.writes); union!(cell.writes, hit[3])
+        hit[4] ? push!(cell.flags, :opaque) : delete!(cell.flags, :opaque)
+        return cell
+    end
+    _infer_bindings_uncached!(cell)
+    lock(_BIND_CACHE_LOCK) do
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags)
+    end
+    return cell
+end
+function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.writes)
     delete!(cell.flags, :opaque)
     if cell.kind == MARKDOWN
