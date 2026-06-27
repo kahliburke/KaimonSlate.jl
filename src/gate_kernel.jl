@@ -127,7 +127,7 @@ function _ensure_poller!()
                 pending = Dict{String,Set{String}}()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
-                prog = Dict{String,Tuple{Float64,String}}()   # slate_progress: keep the LATEST per notebook
+                prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
                 # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
@@ -148,9 +148,12 @@ function _ensure_poller!()
                         end
                     elseif m.channel == "slate_revise_err"    # a /src save didn't parse/apply
                         srcerr[rid] = String(m.data)
-                    elseif m.channel == "slate_progress"      # a running cell's slate_progress(frac; msg)
-                        parts = split(String(m.data), "|"; limit = 2)
-                        prog[rid] = (something(tryparse(Float64, parts[1]), 0.0), length(parts) > 1 ? String(parts[2]) : "")
+                    elseif m.channel == "slate_progress"      # "id|frac|done|msg" — one bar per id
+                        parts = split(String(m.data), "|"; limit = 4)
+                        if length(parts) == 4
+                            prog[(rid, String(parts[1]))] =
+                                (something(tryparse(Float64, parts[2]), 0.0), String(parts[4]), parts[3] == "1")
+                        end
                     end
                 end
                 for (rid, vars) in pending
@@ -162,8 +165,8 @@ function _ensure_poller!()
                 for (rid, msg) in srcerr
                     _do_src_error(rid, msg)
                 end
-                for (rid, (frac, msg)) in prog
-                    _do_userprog(rid, frac, msg)
+                for ((rid, bid), (frac, msg, done)) in prog
+                    _do_userprog(rid, frac, msg, bid, done)
                 end
             catch e
                 # Surface a persistent failure (this class of bug — a missing/renamed Kaimon

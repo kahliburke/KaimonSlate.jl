@@ -47,7 +47,9 @@ function _new_ns()
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query,
         slate_refresh = (vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")),
-        slate_progress = (frac; msg = "") -> KaimonGate._publish_stream("slate_progress", string(Float64(frac), "|", msg)))
+        # wire: "id|frac|done|msg" (id/frac/done are |-free; msg is the rest — split limit=4)
+        slate_progress = (frac; msg = "", id = "", done = false) ->
+            KaimonGate._publish_stream("slate_progress", string(id, "|", Float64(frac), "|", done === true ? 1 : 0, "|", msg)))
     return m
 end
 const _NS = Ref{Module}(_new_ns())

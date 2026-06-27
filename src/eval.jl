@@ -61,11 +61,11 @@ end
 const _USERPROG_REGISTRY = Dict{String,Any}()
 register_userprog!(report_id::AbstractString, cb) = (_USERPROG_REGISTRY[String(report_id)] = cb; nothing)
 unregister_userprog!(report_id::AbstractString) = (delete!(_USERPROG_REGISTRY, String(report_id)); nothing)
-function _do_userprog(report_id::AbstractString, frac, msg)
+function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = false)
     cb = get(_USERPROG_REGISTRY, String(report_id), nothing)
     cb === nothing && return nothing
     f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
-    try; cb(f, String(msg)); catch; end
+    try; cb(f, String(msg), String(id), done === true); catch; end
     return nothing
 end
 
@@ -98,7 +98,7 @@ function _new_module(report::Report)
     _populate_notebook_ns!(m;
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars),
-        slate_progress = (frac; msg = "") -> _do_userprog(rid, frac, msg))
+        slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, frac, msg, id, done))
     return m
 end
 

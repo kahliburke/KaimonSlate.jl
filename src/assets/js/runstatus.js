@@ -9,7 +9,8 @@
   const running = new Map();     // cellId -> start time (performance.now)
   let total = 0, done = 0, errs = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone)
   let tick = null, idleTimer = null;
-  let prog = { frac: 0, msg: '' };     // latest slate_progress(frac; msg) for the running cell
+  const bars = new Map();              // bar id -> {frac,msg}  (one per @withprogress scope / slate_progress id)
+  let prog = { frac: 0, msg: '' };     // the latest update (drives the chip + badge %)
   const erroredIds = [];               // cells that errored this streak (for the pill to jump through)
   let errCursor = 0;
 
@@ -73,23 +74,22 @@
     chip.style.display = 'flex';
   }
 
-  // A thin progress bar + message ON the running cell itself (not just the floating chip).
-  // Injected directly into the cell DOM (like renderTimers' badge update — survives until the
-  // cell re-renders on completion); removed in clearCellBar on finish / next run.
-  function renderCellBar(id) {
-    const cell = document.querySelector(`.cell[data-cid="${id}"]`);
+  // Progress bars ON the running cell itself — one ROW per active bar id (so nested
+  // `@withprogress` scopes / parallel tasks each get their own). Injected directly into the cell
+  // DOM (like renderTimers' badge update); removed in clearCellBar on finish / next run.
+  function renderCellBars(id) {
+    const cell = id && document.querySelector(`.cell[data-cid="${id}"]`);
     if (!cell) return;
-    let bar = cell.querySelector(':scope > .cellprog');
-    if (!(prog.frac > 0 || prog.msg)) { bar && bar.remove(); return; }
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.className = 'cellprog';
-      bar.innerHTML = '<div class="cellprogtrack"><span></span></div><span class="cellprogmsg"></span>';
-      cell.insertBefore(bar, cell.firstChild);   // a banner at the top of the cell
+    let box = cell.querySelector(':scope > .cellprog');
+    if (bars.size === 0) { box && box.remove(); return; }
+    if (!box) { box = document.createElement('div'); box.className = 'cellprog'; cell.insertBefore(box, cell.firstChild); }
+    let html = '';
+    for (const b of bars.values()) {
+      const pct = b.frac > 0 ? Math.round(b.frac * 100) : 0;
+      html += `<div class="cellprogrow"><div class="cellprogtrack"><span style="width:${pct}%"></span></div>` +
+        `<span class="cellprogmsg">${esc(b.msg || '')}${b.frac > 0 ? (b.msg ? ' · ' : '') + pct + '%' : ''}</span></div>`;
     }
-    bar.querySelector('.cellprogtrack > span').style.width = (prog.frac > 0 ? Math.round(prog.frac * 100) : 0) + '%';
-    bar.querySelector('.cellprogmsg').textContent =
-      (prog.msg || '') + (prog.frac > 0 ? (prog.msg ? ' · ' : '') + Math.round(prog.frac * 100) + '%' : '');
+    box.innerHTML = html;
   }
   function clearCellBar(id) {
     const cell = id && document.querySelector(`.cell[data-cid="${id}"]`);
@@ -97,10 +97,15 @@
     if (bar) bar.remove();
   }
 
-  // A running cell reported progress via slate_progress(frac; msg).
-  window.onCellProgress = function (frac, msg) {
-    prog = { frac: typeof frac === 'number' ? frac : 0, msg: msg || '' };
-    renderChip(); renderTimers(); renderCellBar(activeCell());
+  // A running cell reported progress: {frac, msg, id, done}. `done` ends a scope → drop its bar;
+  // otherwise upsert the bar for `id`. `prog` tracks the latest update for the chip/badge.
+  window.onCellProgress = function (p) {
+    p = p || {};
+    const id = p.id || '';
+    if (p.done) bars.delete(id);
+    else bars.set(id, { frac: typeof p.frac === 'number' ? p.frac : 0, msg: p.msg || '' });
+    prog = { frac: typeof p.frac === 'number' ? p.frac : 0, msg: p.msg || '' };
+    renderChip(); renderTimers(); renderCellBars(activeCell());
   };
 
   // Stop the run. The only worker-level halt is a restart (kills the namespace); restartWorker()
@@ -129,6 +134,7 @@
     if (total === 0) total = 1;           // a one-off run with no batch announcement → degrade gracefully
     running.set(id, now());
     prog = { frac: 0, msg: '' };          // fresh cell → reset any prior progress
+    bars.clear();                         // a run is sequential → start each cell's bars fresh
     clearCellBar(id);                     // drop any stale per-cell bar from a previous run
     setLive(id, 'running');               // pulsing border via the store
     activity('run', id, '');
@@ -140,7 +146,8 @@
     const id = cell.id, t = running.get(id);
     running.delete(id);
     done++;
-    clearCellBar(id);                     // remove the per-cell progress bar
+    bars.clear();
+    clearCellBar(id);                     // remove the per-cell progress bar(s)
     setLive(id, cell.state);              // clear the transient running → real state
     const errored = cell.state === 'errored';
     if (errored) { errs++; if (!erroredIds.includes(id)) erroredIds.push(id); }

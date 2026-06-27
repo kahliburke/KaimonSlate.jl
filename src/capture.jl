@@ -126,7 +126,7 @@ end
 # `:progress` kwarg, which IS the wire protocol.
 struct _ProgressLogger <: Logging.AbstractLogger
     parent::Logging.AbstractLogger
-    sink                       # (frac::Float64, msg::String) -> Any  (the cell's progress channel)
+    sink                       # (id, frac::Float64, msg::String, done::Bool) -> Any  (cell progress channel)
 end
 Logging.shouldlog(::_ProgressLogger, _...) = true                          # filter in handle_message
 Logging.min_enabled_level(l::_ProgressLogger) = min(Logging.LogLevel(-1), Logging.min_enabled_level(l.parent))
@@ -138,7 +138,12 @@ _progress_frac(p) = p === nothing                  ? 0.0 :
 
 function Logging.handle_message(l::_ProgressLogger, level, message, _module, group, id, file, line; kwargs...)
     if haskey(kwargs, :progress)                                            # a progress record → cell meter
-        try; l.sink(_progress_frac(kwargs[:progress]), message === nothing ? "" : string(message)); catch; end
+        p = kwargs[:progress]
+        # The log `id` keys the bar — each `@withprogress` scope (nested loops, parallel tasks) has
+        # its own, so they render as separate bars. `progress="done"` ends a scope → remove its bar
+        # (else each new nested scope's fresh id would pile up).
+        bid = id === nothing ? "" : string(id)
+        try; l.sink(bid, _progress_frac(p), message === nothing ? "" : string(message), p === "done"); catch; end
         return nothing                                                      # consume (don't echo to stderr)
     end
     Logging.shouldlog(l.parent, level, _module, group, id) &&
@@ -149,9 +154,9 @@ end
 # The progress sink for `mod`: the namespace's injected `slate_progress` (in-process → live cell
 # update; worker → PUB on the gate stream), or a no-op on a bare module (tests).
 function _progress_sink(mod::Module)
-    isdefined(mod, :slate_progress) || return (_f, _m) -> nothing
+    isdefined(mod, :slate_progress) || return (_i, _f, _m, _d) -> nothing
     sp = getfield(mod, :slate_progress)
-    return (f, m) -> (try; Base.invokelatest(sp, f; msg = m); catch; end)
+    return (i, f, m, d) -> (try; Base.invokelatest(sp, f; msg = m, id = i, done = d); catch; end)
 end
 
 """

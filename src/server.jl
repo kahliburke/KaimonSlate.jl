@@ -115,7 +115,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
         register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))
         register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
         register_runbatch!(r.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))
-        register_userprog!(r.id, (frac, msg) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg))); catch; end))
+        register_userprog!(r.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
         _load_chat_log!(nb)
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb

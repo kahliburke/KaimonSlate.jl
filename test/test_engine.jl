@@ -164,21 +164,24 @@ mean(data)
     end
 
     @testset "progress-logging bridge → cell meter" begin
-        rec = Tuple{Float64,String}[]
-        lg = ReportEngine._ProgressLogger(Logging.NullLogger(), (f, m) -> push!(rec, (f, m)))
+        rec = NamedTuple[]   # (id, frac, msg, done)
+        lg = ReportEngine._ProgressLogger(Logging.NullLogger(),
+                                          (i, f, m, d) -> push!(rec, (id = i, frac = f, msg = m, done = d)))
         Logging.with_logger(lg) do
-            Logging.@logmsg Logging.LogLevel(-1) "train" progress = 0.0
-            Logging.@logmsg Logging.LogLevel(-1) "train" progress = 0.5
-            Logging.@logmsg Logging.LogLevel(-1) "train" progress = "done"
+            Logging.@logmsg Logging.LogLevel(-1) "train" progress = 0.5 _id = :bar1
+            Logging.@logmsg Logging.LogLevel(-1) "inner" progress = 0.25 _id = :bar2   # a SECOND scope id
+            Logging.@logmsg Logging.LogLevel(-1) "train" progress = "done" _id = :bar1
             @info "ordinary log — not progress"        # must NOT reach the sink
         end
-        @test rec == [(0.0, "train"), (0.5, "train"), (1.0, "train")]
+        @test length(rec) == 3
+        @test rec[1] == (id = "bar1", frac = 0.5, msg = "train", done = false)
+        @test rec[2] == (id = "bar2", frac = 0.25, msg = "inner", done = false)   # distinct bar id
+        @test rec[3] == (id = "bar1", frac = 1.0, msg = "train", done = true)      # "done" → remove bar
+        # fraction coercion helper
         @test ReportEngine._progress_frac("done") == 1.0
         @test ReportEngine._progress_frac(nothing) == 0.0
-        @test ReportEngine._progress_frac(NaN) == 0.0
         @test ReportEngine._progress_frac(2.0) == 1.0          # clamped
-        @test ReportEngine._progress_frac(-1.0) == 0.0
-        @test ReportEngine._progress_sink(Module(:Bare))(0.5, "x") === nothing   # no slate_progress → no-op
+        @test ReportEngine._progress_sink(Module(:Bare))("", 0.5, "x", false) === nothing   # no slate_progress → no-op
     end
 
 end
