@@ -296,9 +296,15 @@ kernel's namespace from the prior eval. (First run: all cells stale ⇒ full eva
 """
 function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     prepare!(kernel, report)
+    # Static markdown (no `{{ }}` interpolations ⇒ no reads) depends on nothing, so render it FIRST.
+    # Otherwise it sits STALE behind slow code cells for the whole run — prose looks "unrun" until the
+    # end, which reads as broken now that runs stream cell-by-cell.
+    for c in report.cells
+        c.kind == MARKDOWN && c.state == STALE && isempty(c.reads) && eval_cell!(report, c, kernel)
+    end
     for c in report.cells
         if c.kind == MARKDOWN
-            c.state == STALE && eval_cell!(report, c, kernel)   # re-resolve {{ }} interpolations
+            c.state == STALE && eval_cell!(report, c, kernel)   # interpolating md → after its deps ran
         elseif c.state == STALE
             eval_cell!(report, c, kernel)
         end
