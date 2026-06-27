@@ -97,6 +97,21 @@ end
 const _GATE_SESSION = Dict{String,String}()
 const _POLLER = Ref{Any}(nothing)
 
+# Pull the next batch of gate-stream messages. Prefer the event-driven blocking
+# `wait_stream_messages!` (parks on the SUB FDs — near-zero idle CPU) when the Kaimon build
+# provides it; otherwise fall back to the non-blocking `drain_stream_messages!` + a short sleep.
+# Without this fallback, a Kaimon that only exposes `drain_stream_messages!` makes the poller
+# throw every loop — silently swallowed below — so ALL worker stream events (slate_refresh /
+# slate_progress / hot-reload) are dropped and reactivity + the progress meter go dead.
+function _stream_messages(K, mgr)
+    if isdefined(K, Symbol("wait_stream_messages!"))
+        return K.wait_stream_messages!(mgr; idle_timeout = 0.25)
+    end
+    msgs = K.drain_stream_messages!(mgr)
+    isempty(msgs) && sleep(0.05)         # avoid a busy-spin while idle
+    return msgs
+end
+
 # Single background task: drain the gate stream and dispatch `slate_refresh`
 # events (published by a worker's async cell) to the matching notebook.
 function _ensure_poller!()
@@ -118,7 +133,7 @@ function _ensure_poller!()
                 # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
                 # latency than a timer). The ceiling self-heals a park left stale if the health
                 # task recreates a SUB socket. (Was: drain + sleep(0.05) → ~28% idle CPU on -t auto.)
-                for m in K.wait_stream_messages!(_manager(); idle_timeout = 0.25)
+                for m in _stream_messages(K, _manager())
                     rid = get(_GATE_SESSION, m.session_name, nothing)
                     rid === nothing && continue
                     if m.channel == "slate_refresh"
@@ -150,9 +165,11 @@ function _ensure_poller!()
                 for (rid, (frac, msg)) in prog
                     _do_userprog(rid, frac, msg)
                 end
-            catch
-                sleep(0.25)   # error backoff — wait_stream_messages! parks on its own, so this
-                              # only fires on a transient failure (e.g. an FD error), never idle.
+            catch e
+                # Surface a persistent failure (this class of bug — a missing/renamed Kaimon
+                # stream API — silently killed all worker events before). maxlog keeps it quiet.
+                @warn "Kaimon Slate: gate-stream poller error — worker events (reactivity/progress/hot-reload) may be lost" exception = (e, catch_backtrace()) maxlog = 3
+                sleep(0.25)   # backoff
             end
         end
     end
