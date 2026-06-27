@@ -126,7 +126,7 @@ function cellHeaderInner(c) {
   const other = c.kind === 'md' ? 'code' : 'md';
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
-  const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}')" title="run (⇧⏎)">▶</button>` : '';
+  const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
   const bu = surfaceableNames(c);
   const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
   const _someOn = bu.some(n => _present.has(n));

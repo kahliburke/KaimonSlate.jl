@@ -1,10 +1,11 @@
-async function runCell(id) {
+// `force` (the ▶ play button) re-evaluates even when the source is unchanged. Shift-Enter and
+// the keyboard/palette flow leave it false: a clean cell isn't re-run (just commits any edit +
+// advances), so stepping through a notebook doesn't redundantly recompute expensive cells.
+async function runCell(id, force = false) {
   if (_hydrating) return;                      // env still reconstructing — preview is read-only
   const before = _cellById(id);                // shape BEFORE the run (from the live state)
   setState(id, 'running');
-  // force:true — an explicit run always re-evaluates, even if the source is unchanged (no more
-  // nudging the text to re-trigger a cell). Editing/committing source goes through other paths.
-  const state = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || ''), force: true });
+  const state = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || ''), force: !!force });
   const after = (state.cells || []).find(c => c.id === id);
   // A code cell that gains (or loses) @bind widgets — or flips kind — changes its DOM
   // *structure*: the in-place patch (updateStates) can't inject the widget rows, so the
