@@ -68,8 +68,13 @@
     const id = activeCell();
     if (!id) { chip.style.display = 'none'; return; }
     const t = running.get(id), el = t ? fmt(now() - t) : '';
-    const txt = document.getElementById('runchiptext'), fill = document.getElementById('runchipfill');
-    if (txt) txt.innerHTML = `<b>${esc(id)}</b> · ${el}` + (prog.msg ? ` · ${esc(prog.msg)}` : '');
+    // Update STABLE child elements via textContent — never rebuild the text with innerHTML, or the
+    // 150ms tick would destroy/recreate the id mid-click and swallow clicks on it (the rest of the
+    // chip clicked fine because those elements are stable).
+    const idEl = document.getElementById('runchipid'), meta = document.getElementById('runchipmeta'),
+      fill = document.getElementById('runchipfill');
+    if (idEl && idEl.textContent !== id) idEl.textContent = id;
+    if (meta) meta.textContent = ` · ${el}` + (prog.msg ? ` · ${prog.msg}` : '');
     if (fill) { fill.style.width = (prog.frac > 0 ? Math.round(prog.frac * 100) : 0) + '%'; fill.style.opacity = prog.frac > 0 ? '1' : '0'; }
     chip.style.display = 'flex';
   }

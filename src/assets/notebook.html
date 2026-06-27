@@ -123,7 +123,7 @@
 <!-- Floating "currently running" chip — shows the active cell, elapsed, and slate_progress(frac; msg). -->
 <div id="runchip" class="runchip" style="display:none" onclick="window.onChipClick && window.onChipClick()" title="jump to the running cell">
   <span class="rspin"></span>
-  <span id="runchiptext" class="runchiptext"></span>
+  <span id="runchiptext" class="runchiptext"><b id="runchipid"></b><span id="runchipmeta"></span></span>
   <span class="runchipbar"><span id="runchipfill"></span></span>
   <button id="runchipstop" class="runchipstop" onclick="event.stopPropagation(); window.cancelRun && window.cancelRun()" title="stop the run (restarts the worker)">✕</button>
 </div>
