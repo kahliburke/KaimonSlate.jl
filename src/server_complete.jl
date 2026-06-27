@@ -648,7 +648,7 @@ function close_notebook!(h::Hub, id::AbstractString)
         nb === nothing && return false
         _close_listeners(nb)
         _close_agent!(nb)
-        unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id); unregister_progress!(nb.report.id)
+        unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id); unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
         try; shutdown!(nb.kernel); catch; end
         delete!(h.notebooks, id)
         return true
@@ -661,7 +661,7 @@ end
 function stop_hub(h::Hub)
     lock(h.lock) do
         for nb in values(h.notebooks)
-            _close_listeners(nb); unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id); unregister_progress!(nb.report.id)
+            _close_listeners(nb); unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id); unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
             try; shutdown!(nb.kernel); catch; end
         end
         empty!(h.notebooks)

@@ -295,6 +295,8 @@ Evaluate only `STALE` code cells, in document order, through `kernel`. Unchanged
 kernel's namespace from the prior eval. (First run: all cells stale ⇒ full eval.)
 """
 function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
+    nbatch = count(c -> c.state == STALE, report.cells)   # cells about to run → UI shows a stable k/N
+    nbatch > 0 && _emit_run_batch(report.id, nbatch)
     prepare!(kernel, report)
     # Static markdown (no `{{ }}` interpolations ⇒ no reads) depends on nothing, so render it FIRST.
     # Otherwise it sits STALE behind slow code cells for the whole run — prose looks "unrun" until the

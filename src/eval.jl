@@ -9,7 +9,7 @@
 export eval_report!, eval_cell!, report_module, reset_module!
 export Kernel, InProcessKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
-export register_progress!, unregister_progress!
+export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
 #
@@ -38,6 +38,19 @@ function _emit_progress(report_id::AbstractString, cell)
     cb = get(_PROGRESS_REGISTRY, report_id, nothing)
     cb === nothing && return nothing
     try; cb(cell); catch; end   # progress is best-effort — a push failure must never break eval
+    return nothing
+end
+
+# Run-batch size: how many cells `eval_stale!` is about to evaluate, announced ONCE at the start of a
+# run so the UI's progress reads a stable "k / N" (N = total to run) instead of guessing from the
+# sequential per-cell stream. Same out-of-band registry pattern.
+const _RUNBATCH_REGISTRY = Dict{String,Any}()
+register_runbatch!(report_id::AbstractString, cb) = (_RUNBATCH_REGISTRY[String(report_id)] = cb; nothing)
+unregister_runbatch!(report_id::AbstractString) = (delete!(_RUNBATCH_REGISTRY, String(report_id)); nothing)
+function _emit_run_batch(report_id::AbstractString, n::Integer)
+    cb = get(_RUNBATCH_REGISTRY, report_id, nothing)
+    cb === nothing && return nothing
+    try; cb(n); catch; end
     return nothing
 end
 
@@ -237,6 +250,7 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
         exprs = _md_interp_exprs(cell.source)
         cell.interp = isempty(exprs) ? CellOutput[] : interpolate(kernel, report, exprs)
         cell.state = FRESH
+        _emit_progress(report.id, cell)   # md renders instantly → patch it live (don't leave it "stale")
         return cell
     end
     # Bind cells are ordinary code now: `@bind x W(…)` runs, assigns `x`, and reports

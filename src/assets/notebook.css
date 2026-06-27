@@ -63,8 +63,9 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
              border-radius:7px; background:var(--accent); color:#fff; font-weight:700; font-size:.95rem;
              font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 /* ── Run-status pill (topbar) + Activity log feed ─────────────────────────────── */
-.runpill { display:inline-flex; align-items:center; gap:7px; flex:0 0 auto; cursor:pointer;
-           font-size:.74rem; font-weight:600; padding:3px 10px; border-radius:11px; white-space:nowrap;
+.runpill { display:inline-flex; align-items:center; justify-content:flex-start; gap:7px; flex:0 0 auto;
+           min-width:150px; cursor:pointer; font-size:.74rem; font-weight:600; padding:3px 10px;
+           border-radius:11px; white-space:nowrap; font-variant-numeric:tabular-nums;
            border:1px solid var(--border); background:var(--bg3); color:var(--dim); }
 .runpill.running { color:var(--strong); border-color:color-mix(in srgb, var(--accent) 55%, var(--border));
                    background:color-mix(in srgb, var(--accent) 14%, var(--bg3)); }
