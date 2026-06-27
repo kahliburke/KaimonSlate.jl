@@ -133,7 +133,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))   # parent /src reloaded (Revise)
     register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
     register_runbatch!(r.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
-    register_userprog!(r.id, (frac, msg) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg))); catch; end))
+    register_userprog!(r.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     @async begin
         try
