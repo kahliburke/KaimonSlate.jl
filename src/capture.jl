@@ -220,7 +220,9 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         close(wre)
         popdisplay(capture)
     end
-    binds = sinkref === nothing ? NamedTuple[] : copy(sinkref[])
+    # Guard `sinkref[] === nothing` too (a cold-worker race can leave the bind sink uninitialised),
+    # else `copy(nothing)` throws and the whole eval errors. Mirrors the trace-sink guard below.
+    binds = (sinkref === nothing || sinkref[] === nothing) ? NamedTuple[] : copy(sinkref[])
     sinkref === nothing || (sinkref[] = nothing)
     # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])

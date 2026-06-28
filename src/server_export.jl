@@ -126,8 +126,13 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
                 print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
                 if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot
                     png = _snapshot(nb.id, c.id)
-                    png === nothing || print(io, "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,",
-                                                  Base64.base64encode(png), "\"/></div>")
+                    if png === nothing                    # headless export (no tab rendered it) → don't silently drop
+                        print(io, "<div class=\"disp\" style=\"padding:10px 14px;color:var(--dim);font-style:italic\">",
+                              "[chart not captured — open this notebook in a browser, then re-export]</div>")
+                    else
+                        print(io, "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,",
+                              Base64.base64encode(png), "\"/></div>")
+                    end
                 end
                 for spec in _table_specs(c)
                     print(io, _export_table_html(spec))
