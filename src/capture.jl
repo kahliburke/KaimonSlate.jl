@@ -18,6 +18,22 @@ import Logging    # to capture a cell's `@warn`/`@info` onto the redirected stde
 
 const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
 
+# ── Output size caps ─────────────────────────────────────────────────────────
+# A cell that accidentally produces a giant result (a printed 10⁷-element loop, the text repr of a
+# huge array, a multi-MB HTML dump) otherwise ships megabytes back over the gate and renders them
+# into the page — bloating /state and freezing the tab. We cap each text stream at the worker, before
+# any of it travels, with a clear truncation notice. The full value still lives in the namespace.
+const _MAX_OUT_CHARS = 100_000      # per text stream: stdout, stderr, value repr
+const _MAX_HTML_BYTES = 400_000     # per text/html | text/latex output chunk
+
+function _cap_text(s::AbstractString, limit::Int = _MAX_OUT_CHARS)
+    str = String(s)
+    n = length(str)
+    n <= limit && return str
+    return string(first(str, limit), "\n\n… ⚠ truncated — ", n - limit,
+                  " more characters. (Assign the result to a variable, or use `first(x, n)`, to inspect it.)")
+end
+
 # Evaluate a cell's `source` the way the REPL does, NOT like a file `include_string`:
 # `REPL.softscope` rewrites top-level soft-scope assignments so a `for`/`while` can update an
 # existing global without `local`/`global` (matching the REPL / IJulia / Pluto — the behaviour
@@ -227,8 +243,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
-    stdout_str = fetch(reader)
-    stderr_str = fetch(ereader)
+    stdout_str = _cap_text(fetch(reader))
+    stderr_str = _cap_text(fetch(ereader))
     dur_ms = (time_ns() - t0) / 1e6
 
     # Capture the return value: an ECharts spec / a table are kept raw (reduced to
@@ -260,8 +276,11 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     value_repr = ""
     if err === nothing && value !== nothing && !quiet && isempty(chunks) && isempty(echarts) && isempty(tables)
         try
+            # `:displaysize` bounds how much `show` even generates for big containers (≈40 rows),
+            # then `_cap_text` is the hard ceiling for anything still huge (e.g. a giant String value).
             value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
-                                           context = :limit => true)
+                                           context = (:limit => true, :displaysize => (40, 160)))
+            value_repr = _cap_text(value_repr)
         catch
         end
     end
@@ -279,6 +298,17 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
                                 Base.StackTraces.lookup(ip)), btrace)
         tb = k === nothing ? btrace : btrace[1:max(1, k - 1)]
         bt = sprint((io, t) -> Base.show_backtrace(io, t), tb)
+    end
+
+    # Cap oversized text/html | text/latex chunks: truncating mid-markup would break the DOM, so an
+    # over-limit chunk is replaced by a notice (the page can't render multi-MB HTML usefully anyway).
+    for i in eachindex(chunks)
+        (m, data) = chunks[i]
+        if (m == "text/html" || m == "text/latex") && length(data) > _MAX_HTML_BYTES
+            kb = round(Int, length(data) / 1024)
+            chunks[i] = ("text/html",
+                Vector{UInt8}("<div class=\"disp html\"><em>⚠ output too large to display ($(kb) KB) — truncated. Assign it to a variable to inspect.</em></div>"))
+        end
     end
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,

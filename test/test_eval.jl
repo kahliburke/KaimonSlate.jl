@@ -224,6 +224,32 @@ end
         @test re.exception !== nothing && occursin("boom", re.exception)
     end
 
+    @testset "oversized output is capped (not shipped/rendered whole)" begin
+        cap = ReportEngine._MAX_OUT_CHARS
+        # A giant printed stream is truncated with a notice.
+        rs = run_capture(Module(:CapStdout), "print('x' ^ $(cap * 3))")
+        @test length(rs.stdout) < cap + 200 && occursin("truncated", rs.stdout)
+        # A giant value repr stays bounded (Julia's :limit/:displaysize and/or our hard cap).
+        rv = run_capture(Module(:CapVal), "'y' ^ $(cap * 3)")
+        @test length(rv.value_repr) < cap + 200
+        # The hard backstop itself: truncates with a notice past the limit, leaves small text alone.
+        @test length(ReportEngine._cap_text("z"^(cap + 50))) < cap + 200
+        @test occursin("truncated", ReportEngine._cap_text("z"^(cap + 50)))
+        @test ReportEngine._cap_text("small") == "small"
+        # A small value is untouched.
+        ro = run_capture(Module(:CapSmall), "\"hello\"")
+        @test ro.value_repr == "\"hello\""
+        # An over-limit text/html chunk becomes a notice, not multi-MB of markup.
+        big = ReportEngine._MAX_HTML_BYTES + 5000
+        rh = run_capture(Module(:CapHtml), """
+        struct H end
+        Base.show(io::IO, ::MIME"text/html", ::H) = write(io, '<' * 'a' ^ $(big))
+        H()
+        """)
+        html = String(copy(first(t for t in rh.mime if t[1] == "text/html")[2]))
+        @test length(html) < 1000 && occursin("too large", html)
+    end
+
     @testset "REPL soft-scope: top-level loop assigns a global without `local`" begin
         # Cells eval with REPL soft-scope semantics (not file `include_string`), so a top-level
         # `for`/`while` can update an existing global — the behaviour users expect from a notebook.
