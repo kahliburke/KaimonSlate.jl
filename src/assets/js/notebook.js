@@ -319,5 +319,4 @@ if (nbHost) {
       requestAnimationFrame(pin);
     }
   });
-  console.log('[preact] phase 2+3 — <Notebook> owns #nb (editors preserved across updates)');
 }
