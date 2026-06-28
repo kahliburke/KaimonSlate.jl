@@ -50,3 +50,18 @@ end
         @test "\\alpha" in _latex("\\al")
     end
 end
+
+@testset "output image externalization" begin
+    import Base64
+    png = Base64.base64encode(UInt8[0x89, 0x50, 0x4e, 0x47, 0x01, 0x02, 0x03])   # arbitrary bytes
+    html = "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,$png\"/></div>"
+    out = NS._externalize_blobs("nbX", html)
+    @test occursin("/api/nbX/blob/", out)          # data-URI replaced with a cached blob URL
+    @test !occursin("data:image", out)
+    m = match(r"/api/nbX/blob/([0-9a-f]+)", out)
+    @test m !== nothing
+    b = NS.blob_get("nbX/" * m.captures[1])
+    @test b !== nothing && b[1] == "image/png" && b[2] == Base64.base64decode(png)
+    @test NS._externalize_blobs("", html) == html   # empty nbid → unchanged (export path keeps inline base64)
+    @test NS._externalize_blobs("nbX", "<p>no images</p>") == "<p>no images</p>"
+end

@@ -142,17 +142,47 @@ _bind_json(spec::BindSpec, hosts::Vector{String}) =
                      "params" => spec.params, "value" => spec.value,
                      "hosted" => !isempty(hosts), "hostedby" => hosts)
 
+# ── Content-addressed blob store for output images ───────────────────────────────
+# Plot rasters (CairoMakie `image/png`) are otherwise inlined into every cell's output HTML as
+# base64 data-URIs — for a plot-heavy notebook that bloats the /state payload to megabytes, re-sent
+# in full on every reload. Instead we pull each inlined image out into a content-addressed store and
+# reference it by `/api/<id>/blob/<hash>` with an immutable cache header: the /state JSON shrinks
+# ~10×, and a browser RELOAD serves the images from disk cache (never re-requests them). The hash is
+# content-derived, so a changed plot gets a fresh URL and caching stays correct.
+const _BLOBS = Dict{String,Tuple{String,Vector{UInt8}}}()   # "id/hash" → (mime, bytes)
+const _BLOB_LOCK = ReentrantLock()
+const _BLOB_RE = r"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)"
+function _blob_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8})
+    lock(_BLOB_LOCK) do
+        length(_BLOBS) > 800 && empty!(_BLOBS)   # crude cap; content-addressed keys re-populate on next render
+        _BLOBS[String(key)] = (String(mime), bytes)
+    end
+end
+blob_get(key::AbstractString) = lock(_BLOB_LOCK) do; get(_BLOBS, String(key), nothing); end
+# Replace inlined base64 image data-URIs in `html` with cached `/api/<nbid>/blob/<hash>` URLs.
+function _externalize_blobs(nbid::AbstractString, html::AbstractString)
+    (isempty(nbid) || !occursin("data:image", html)) && return html
+    replace(html, _BLOB_RE => function (s)
+        m = match(_BLOB_RE, s)
+        bytes = try; Base64.base64decode(m.captures[2]); catch; return s; end
+        h = string(hash(bytes); base = 16)
+        _blob_put!(string(nbid, "/", h), m.captures[1], bytes)
+        string("/api/", nbid, "/blob/", h)
+    end)
+end
+
 # `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable name →
 # the cell ids that surface it via `controls=` (so each can collapse to a chip / jump link).
+# `nbid` (when non-empty) externalizes inlined output images to cached blob URLs (see above).
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
-                   multidef::Set{String} = Set{String}())
+                   multidef::Set{String} = Set{String}(), nbid::AbstractString = "")
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
         "source"  => c.source,
         "state"   => lowercase(string(c.state)),
-        "output"  => c.kind == MARKDOWN ? markdown_html(c.source, c.interp) : output_html(c),
+        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(c.source, c.interp) : output_html(c)),
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
@@ -270,7 +300,7 @@ function state_json(nb::LiveNotebook)
     bindref, hostednames = _bind_index(nb.report)
     md = Set{String}(get(nb.report.meta, "multidef", String[]))   # names defined in 2+ cells → per-cell flag
     meta["multidefCells"] = get(nb.report.meta, "multidef_cells", Dict{String,Vector{String}}())   # name → defining cells (popup)
-    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md) for c in nb.report.cells]
+    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id) for c in nb.report.cells]
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     return meta
 end

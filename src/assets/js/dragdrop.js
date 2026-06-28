@@ -265,7 +265,26 @@ document.addEventListener('dragend', () => {
 });
 
 if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
-reload();
+
+// Persist & restore scroll position + selected cell per notebook, so a reload lands you back where
+// you were instead of snapping to the top. Keyed on the notebook's path.
+const _posKey = () => 'slatePos:' + location.pathname;
+let _posT = 0;
+function _savePos() {
+  try { localStorage.setItem(_posKey(), JSON.stringify({ y: Math.round(window.scrollY), sel: window.selectedId || null })); } catch (_) {}
+}
+addEventListener('scroll', () => { clearTimeout(_posT); _posT = setTimeout(_savePos, 200); }, { passive: true });
+addEventListener('pagehide', _savePos);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') _savePos(); });
+function _restorePos() {
+  let p; try { p = JSON.parse(localStorage.getItem(_posKey()) || 'null'); } catch (_) { return; }
+  if (!p) return;
+  if (p.sel && typeof selectCell === 'function' && cellIds().includes(p.sel)) selectCell(p.sel, false);   // select, don't scroll
+  if (typeof p.y === 'number') window.scrollTo(0, p.y);
+}
+
+// Restore position once the first render has laid the cells out (two frames: applyState → Preact commit).
+reload().then(() => requestAnimationFrame(() => requestAnimationFrame(_restorePos)));
 // Replay the buffered agent conversation first, then start live SSE — so a live
 // event can't be wiped by the replay's clear.
 loadAgentLog().finally(connectLive);

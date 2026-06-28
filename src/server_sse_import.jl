@@ -48,7 +48,8 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
     ch = Channel{String}(256)   # headroom so the slow-client resync tokens (see _broadcast) don't block
-    lock(nb.llock) do; push!(nb.listeners, ch); end
+    n = lock(nb.llock) do; push!(nb.listeners, ch); length(nb.listeners); end
+    @info "Kaimon Slate: browser connected" id = nb.id clients = n
     try
         write(stream, "data: $(nb.version)\n\n")
         while true
@@ -57,8 +58,9 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
         end
     catch
     finally
-        lock(nb.llock) do; filter!(c -> c !== ch, nb.listeners); end
+        left = lock(nb.llock) do; filter!(c -> c !== ch, nb.listeners); length(nb.listeners); end
         close(ch)
+        @info "Kaimon Slate: browser disconnected" id = nb.id clients = left
     end
     return nothing
 end

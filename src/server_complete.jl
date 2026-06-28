@@ -235,6 +235,13 @@ function _make_router(h::Hub)
         present ? _html(read(_ASSET, String)) : HTTP.Response(302, ["Location" => "/"])   # not open → home
     end)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
+    # Content-addressed output image (see server_history.jl `_externalize_blobs`): immutable, so the
+    # browser caches it forever — a reload re-uses the cached image instead of re-downloading it.
+    HTTP.register!(router, "GET", "/api/{id}/blob/{hash}", req -> begin
+        b = blob_get(string(HTTP.getparam(req, "id"), "/", HTTP.getparam(req, "hash")))
+        b === nothing && return HTTP.Response(404, "no such blob")
+        HTTP.Response(200, ["Content-Type" => b[1], "Cache-Control" => "public, max-age=31536000, immutable"], b[2])
+    end)
     HTTP.register!(router, "POST", "/api/{id}/cell/{cid}", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         edit_cell!(nb, HTTP.getparam(req, "cid"), get(b, "source", ""); force = get(b, "force", false) === true)
@@ -615,7 +622,10 @@ function start_hub(; host = "127.0.0.1", port = 8765)
         elseif startswith(target, "/api/import-standalone")   # long-lived SSE; raw Stream, not router
             _sse_import(stream, h)
         else
+            t0 = time()
             handle(stream)
+            dt = time() - t0      # includes the body WRITE — surfaces slow transfers, not just slow compute
+            dt > 1.0 && @warn "Kaimon Slate: slow request" target round_ms = round(Int, dt * 1000)
         end
     end
     h.server = server
