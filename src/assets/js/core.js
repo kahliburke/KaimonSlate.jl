@@ -324,6 +324,15 @@ window.typesetVisible = (el, key) => {
   if (r.top < (window.innerHeight || 800) + 300 && r.bottom > -300) typeset(el);
   else window.typesetSoon(el, key);
 };
+// Synchronously typeset every cell currently in/near the viewport — call right AFTER a programmatic
+// scroll (e.g. position restore), before paint, so deferred math doesn't render late and shift.
+window.typesetInView = () => {
+  const h = window.innerHeight || 800;
+  for (const el of document.querySelectorAll('.cell .md, .cell .output')) {
+    const r = el.getBoundingClientRect();
+    if (r.top < h + 300 && r.bottom > -300) try { typeset(el); } catch (_) {}
+  }
+};
 
 // KaTeX may finish loading after the first render; typeset everything once it's in (off the
 // critical path — a big notebook's math would otherwise be one long task on the load event).

@@ -298,8 +298,10 @@ function _restorePos() {
     }
     if (typeof p.y === 'number') window.scrollTo(0, p.y);
   };
-  apply();
-  setTimeout(apply, 350);   // re-apply once async content (images/editors) settles, so we land exactly
+  // Scroll, then typeset the now-visible cells synchronously (before paint) so their deferred math
+  // doesn't render late and shift, then re-apply to correct for the height the math added.
+  apply(); window.typesetInView && window.typesetInView(); apply();
+  setTimeout(() => { window.typesetInView && window.typesetInView(); apply(); }, 350);   // settle async content
 }
 
 // Restore position once the first render has laid the cells out (two frames: applyState → Preact commit).
