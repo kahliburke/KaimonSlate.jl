@@ -222,7 +222,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     }
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
     const out = el.querySelector('.output');
-    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetVisible(out, c.id); }
+    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell

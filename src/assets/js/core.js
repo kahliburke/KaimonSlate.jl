@@ -324,6 +324,34 @@ window.typesetVisible = (el, key) => {
   if (r.top < (window.innerHeight || 800) + 300 && r.bottom > -300) typeset(el);
   else window.typesetSoon(el, key);
 };
+// Jupyter-style scrolled output: a tall TEXT block (stdout / value repr / warnings) is clamped to a
+// max height with an in-place scroll + an Expand/Collapse toggle, so a big-but-not-massive result
+// doesn't shove the whole page down. Figures, tables, and errors are left at full height. Idempotent
+// per render — measures at natural height, (re)adds or removes the toggle as the content changes.
+window._clampOutputs = (root) => {
+  if (!root) return;
+  const MAX = 480;   // px — ~30em; matches the .clamped CSS
+  root.querySelectorAll('.out, .val, .warn').forEach(b => {
+    b.classList.remove('clamped');                       // measure at natural height
+    const over = b.scrollHeight > MAX + 16;
+    let btn = b.nextElementSibling;
+    const hasBtn = btn && btn.classList && btn.classList.contains('outexpand');
+    if (over) {
+      if (!b.classList.contains('expanded')) b.classList.add('clamped');
+      if (!hasBtn) {
+        btn = document.createElement('button');
+        btn.className = 'outexpand';
+        btn.textContent = b.classList.contains('expanded') ? '⤡ Collapse' : '⤢ Expand';
+        btn.onclick = () => {
+          const ex = b.classList.toggle('expanded');
+          b.classList.toggle('clamped', !ex);
+          btn.textContent = ex ? '⤡ Collapse' : '⤢ Expand';
+        };
+        b.after(btn);
+      }
+    } else if (hasBtn) { btn.remove(); b.classList.remove('expanded'); }
+  });
+};
 // Synchronously typeset every cell currently in/near the viewport — call right AFTER a programmatic
 // scroll (e.g. position restore), before paint, so deferred math doesn't render late and shift.
 window.typesetInView = () => {

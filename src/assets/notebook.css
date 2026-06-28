@@ -241,6 +241,12 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .tocempty { padding:18px 14px; color:var(--dim); font-size:.82rem; line-height:1.55; }
 .tocempty span { opacity:.7; }
 .tocempty code { background:var(--bg3); border-radius:3px; padding:0 4px; }
+/* Jupyter-style scrolled output: clamp tall text blocks with an in-place scroll + Expand toggle.
+   (Markdown is authored prose — intentionally NOT clamped.) */
+.out.clamped, .val.clamped, .warn.clamped { max-height:30em; overflow:auto; }
+.outexpand { display:block; margin:1px 0 7px; font-size:.72rem; padding:2px 9px; background:var(--bg3);
+  border:1px solid var(--border); border-radius:5px; color:var(--dim); cursor:pointer; }
+.outexpand:hover { color:var(--text); border-color:var(--accent); }
 .toc-hit { animation:toc-flash 1.4s ease-out; border-radius:4px; }
 @keyframes toc-flash { 0%,30% { background:rgba(86,156,214,.22); } 100% { background:transparent; } }
 .cm-editor .cm-scroller { font-family:inherit; line-height:1.5; }
