@@ -84,6 +84,39 @@ function _prettyTool(name) {
   if (/[ A-Z]/.test(s) && !s.includes('_')) return s;
   return s.replace(/_/g, ' ');
 }
+// Lightweight, safe markdown → HTML for agent responses: fenced/inline code, bold/italic, links,
+// headers, lists, paragraphs. Code and math ($…$, $$…$$, \(…\), \[…\]) are stashed BEFORE any
+// markdown processing so they survive verbatim — math is left escaped-but-raw for KaTeX, which
+// typeset() runs over the pane after render. Everything is HTML-escaped throughout (XSS-safe).
+function mdLite(src) {
+  src = String(src == null ? '' : src);
+  const stash = [];
+  const keep = h => { stash.push(h); return '' + (stash.length - 1) + ''; };
+  src = src.replace(/```(\w*)\r?\n?([\s\S]*?)```/g, (_, _l, code) =>
+    keep('<pre class="apcode"><code>' + _esca(code.replace(/\s+$/, '')) + '</code></pre>'));
+  // math spans — kept as escaped raw text (delimiters intact) for KaTeX, NOT markdown-processed
+  src = src.replace(/\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\$[^$\n]+?\$|\\\([^\n]+?\\\)/g, m => keep(_esca(m)));
+  src = src.replace(/`([^`]+)`/g, (_, c) => keep('<code>' + _esca(c) + '</code>'));
+  const inline = s => _esca(s)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  let html = '', para = [], list = null;
+  const fp = () => { if (para.length) { html += '<p>' + para.map(inline).join('<br>') + '</p>'; para = []; } };
+  const fl = () => { if (list) { html += `<${list.t}>` + list.items.map(i => '<li>' + inline(i) + '</li>').join('') + `</${list.t}>`; list = null; } };
+  for (const ln of src.split('\n')) {
+    const ph = ln.match(/^(\d+)$/), h = ln.match(/^(#{1,6})\s+(.*)$/);
+    const ul = ln.match(/^\s*[-*]\s+(.*)$/), ol = ln.match(/^\s*\d+\.\s+(.*)$/);
+    if (ph) { fp(); fl(); html += stash[+ph[1]]; }
+    else if (h) { fp(); fl(); html += '<div class="apmd-h">' + inline(h[2]) + '</div>'; }
+    else if (ul) { fp(); if (!list || list.t !== 'ul') { fl(); list = { t: 'ul', items: [] }; } list.items.push(ul[1]); }
+    else if (ol) { fp(); if (!list || list.t !== 'ol') { fl(); list = { t: 'ol', items: [] }; } list.items.push(ol[1]); }
+    else if (!ln.trim()) { fp(); fl(); }
+    else { fl(); para.push(ln); }
+  }
+  fp(); fl();
+  return html.replace(/(\d+)/g, (_, i) => stash[+i]);   // restore spans that landed inline
+}
 function renderAgentMsgs() {
   const el = document.getElementById('apmsgs');
   let html = agentMsgs.map(m => {
@@ -92,6 +125,7 @@ function renderAgentMsgs() {
     return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
     : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}${m.result ? `<pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(m.result)}</pre>` : ''}</div>`
+    : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
     :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
   }).join('');
   if (agentWorking) {
@@ -100,6 +134,9 @@ function renderAgentMsgs() {
       `<button class="apstop" style="margin-left:10px;cursor:pointer" onclick="agentStop()">${_stopArmed ? '⛔ Force stop' : '⏹ Stop'}</button></div>`;
   }
   el.innerHTML = html;
+  // Render LaTeX in the assistant replies (math was stashed verbatim through mdLite). typeset is
+  // idempotent over already-rendered KaTeX, so re-running each delta only touches new text nodes.
+  if (window.typeset) el.querySelectorAll('.apmd').forEach(m => { try { typeset(m); } catch (_) {} });
   el.scrollTop = el.scrollHeight;
 }
 // Replay the buffered conversation after a page reload (in-memory agentMsgs is

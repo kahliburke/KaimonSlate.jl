@@ -517,6 +517,21 @@ input.toggle:checked::after { left:18px; }
    bar; the badge names the speaker. Solo/default agent ('' crew) renders unchanged. */
 .apmsg.lane { border-left:2px solid hsl(var(--ch,210) 60% 55%); }
 .apmsg.img.lane, .apmsg.tool.lane { padding-left:9px; }
+/* Markdown-rendered assistant replies: block layout drives the spacing, so drop the inherited
+   pre-wrap (it would double the <p>/<br> gaps). Compact margins keep the chat dense. */
+.apmd { white-space:normal; }
+.apmd p { margin:0 0 .5em; }
+.apmd p:last-child, .apmd ul:last-child, .apmd ol:last-child, .apmd pre:last-child { margin-bottom:0; }
+.apmd .apmd-h { font-weight:600; margin:.6em 0 .3em; }
+.apmd ul, .apmd ol { margin:.2em 0 .5em; padding-left:1.4em; }
+.apmd li { margin:.1em 0; }
+.apmd code { background:#0d1120; border:1px solid var(--bg3); border-radius:4px; padding:0 4px;
+  font-family:'Cascadia Code',monospace; font-size:.82em; }
+.apmd a { color:var(--accent); }
+.apmd pre.apcode { margin:.4em 0; padding:7px 9px; background:#0d1120; border:1px solid var(--bg3);
+  border-radius:6px; overflow:auto; max-height:320px; }
+.apmd pre.apcode code { background:none; border:none; padding:0; font-size:.78rem; line-height:1.45;
+  white-space:pre; }
 .crewbadge { display:inline-block; margin-right:6px; padding:0 6px; border-radius:5px;
   font-size:.66rem; font-weight:600; letter-spacing:.02em; vertical-align:1px;
   color:hsl(var(--ch,210) 70% 82%); background:hsl(var(--ch,210) 55% 22%); }
