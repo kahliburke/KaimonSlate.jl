@@ -151,7 +151,9 @@ _bind_json(spec::BindSpec, hosts::Vector{String}) =
 # content-derived, so a changed plot gets a fresh URL and caching stays correct.
 const _BLOBS = Dict{String,Tuple{String,Vector{UInt8}}}()   # "id/hash" → (mime, bytes)
 const _BLOB_LOCK = ReentrantLock()
-const _BLOB_RE = r"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)"
+# Match a whole `<img …src="data:image/…;base64,…"…>` so we can swap the src for a blob URL AND
+# inject width/height (reserving the aspect-ratio box → no layout shift when the image loads).
+const _IMG_RE = r"<img([^>]*?)src=\"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)\"([^>]*)>"
 function _blob_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8})
     lock(_BLOB_LOCK) do
         length(_BLOBS) > 800 && empty!(_BLOBS)   # crude cap; content-addressed keys re-populate on next render
@@ -159,15 +161,26 @@ function _blob_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UIn
     end
 end
 blob_get(key::AbstractString) = lock(_BLOB_LOCK) do; get(_BLOBS, String(key), nothing); end
-# Replace inlined base64 image data-URIs in `html` with cached `/api/<nbid>/blob/<hash>` URLs.
+# Intrinsic (w, h) of a PNG from its IHDR header, else nothing — lets the <img> reserve its box.
+function _png_dims(b::Vector{UInt8})
+    (length(b) >= 24 && b[1] == 0x89 && b[2] == 0x50) || return nothing
+    w = (Int(b[17]) << 24) | (Int(b[18]) << 16) | (Int(b[19]) << 8) | Int(b[20])
+    h = (Int(b[21]) << 24) | (Int(b[22]) << 16) | (Int(b[23]) << 8) | Int(b[24])
+    (w > 0 && h > 0) ? (w, h) : nothing
+end
+# Replace inlined base64 image <img>s in `html` with cached `/api/<nbid>/blob/<hash>` URLs, adding
+# width/height so the layout reserves space before the (async, cached) image loads.
 function _externalize_blobs(nbid::AbstractString, html::AbstractString)
     (isempty(nbid) || !occursin("data:image", html)) && return html
-    replace(html, _BLOB_RE => function (s)
-        m = match(_BLOB_RE, s)
-        bytes = try; Base64.base64decode(m.captures[2]); catch; return s; end
+    replace(html, _IMG_RE => function (s)
+        m = match(_IMG_RE, s)
+        pre, mime, b64, post = m.captures
+        bytes = try; Base64.base64decode(b64); catch; return s; end
         h = string(hash(bytes); base = 16)
-        _blob_put!(string(nbid, "/", h), m.captures[1], bytes)
-        string("/api/", nbid, "/blob/", h)
+        _blob_put!(string(nbid, "/", h), mime, bytes)
+        dim = _png_dims(bytes)
+        sz = dim === nothing ? "" : string(" width=\"", dim[1], "\" height=\"", dim[2], "\"")
+        string("<img", pre, "src=\"/api/", nbid, "/blob/", h, "\"", sz, post, ">")
     end)
 end
 

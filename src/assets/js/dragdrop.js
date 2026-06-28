@@ -270,17 +270,36 @@ if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add(
 // you were instead of snapping to the top. Keyed on the notebook's path.
 const _posKey = () => 'slatePos:' + location.pathname;
 let _posT = 0;
+// Anchor to the cell sitting at the top of the viewport + its pixel offset — robust to layout
+// differences between save and restore (lazy editors / async images), unlike a raw scrollY.
+function _topAnchor() {
+  let best = null, bestTop = -Infinity;
+  for (const el of document.querySelectorAll('.cell')) {
+    const t = el.getBoundingClientRect().top;
+    if (t <= 8 && t > bestTop) { best = el; bestTop = t; }   // last cell whose top is at/above the fold
+  }
+  if (!best) { best = document.querySelector('.cell'); bestTop = best ? best.getBoundingClientRect().top : 0; }
+  return best ? { id: best.dataset.cid, off: Math.round(bestTop) } : null;
+}
 function _savePos() {
-  try { localStorage.setItem(_posKey(), JSON.stringify({ y: Math.round(window.scrollY), sel: window.selectedId || null })); } catch (_) {}
+  try { localStorage.setItem(_posKey(), JSON.stringify({ y: Math.round(window.scrollY), sel: window.selectedId || null, anchor: _topAnchor() })); } catch (_) {}
 }
 addEventListener('scroll', () => { clearTimeout(_posT); _posT = setTimeout(_savePos, 200); }, { passive: true });
-addEventListener('pagehide', _savePos);
+addEventListener('pagehide', _savePos);                                                       // fires on reload/unload
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') _savePos(); });
 function _restorePos() {
   let p; try { p = JSON.parse(localStorage.getItem(_posKey()) || 'null'); } catch (_) { return; }
   if (!p) return;
   if (p.sel && typeof selectCell === 'function' && cellIds().includes(p.sel)) selectCell(p.sel, false);   // select, don't scroll
-  if (typeof p.y === 'number') window.scrollTo(0, p.y);
+  const apply = () => {
+    if (p.anchor && p.anchor.id) {
+      const el = document.getElementById('cell-' + p.anchor.id);
+      if (el) { window.scrollTo(0, Math.max(0, window.scrollY + el.getBoundingClientRect().top - (p.anchor.off || 0))); return; }
+    }
+    if (typeof p.y === 'number') window.scrollTo(0, p.y);
+  };
+  apply();
+  setTimeout(apply, 350);   // re-apply once async content (images/editors) settles, so we land exactly
 }
 
 // Restore position once the first render has laid the cells out (two frames: applyState → Preact commit).

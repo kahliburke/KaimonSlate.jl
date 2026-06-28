@@ -53,15 +53,21 @@ end
 
 @testset "output image externalization" begin
     import Base64
-    png = Base64.base64encode(UInt8[0x89, 0x50, 0x4e, 0x47, 0x01, 0x02, 0x03])   # arbitrary bytes
-    html = "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,$png\"/></div>"
+    # A real PNG header (8-byte sig + IHDR with width=640, height=480) so _png_dims reads dimensions.
+    pngbytes = UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+                     0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+                     0x00, 0x00, 0x02, 0x80, 0x00, 0x00, 0x01, 0xe0]   # 640 × 480
+    png = Base64.base64encode(pngbytes)
+    html = "<div class=\"disp img\"><img alt=\"output\" src=\"data:image/png;base64,$png\"/></div>"
     out = NS._externalize_blobs("nbX", html)
     @test occursin("/api/nbX/blob/", out)          # data-URI replaced with a cached blob URL
     @test !occursin("data:image", out)
+    @test occursin("width=\"640\"", out) && occursin("height=\"480\"", out)   # dims reserved → no layout shift
     m = match(r"/api/nbX/blob/([0-9a-f]+)", out)
     @test m !== nothing
     b = NS.blob_get("nbX/" * m.captures[1])
-    @test b !== nothing && b[1] == "image/png" && b[2] == Base64.base64decode(png)
+    @test b !== nothing && b[1] == "image/png" && b[2] == pngbytes
+    @test NS._png_dims(pngbytes) == (640, 480)
     @test NS._externalize_blobs("", html) == html   # empty nbid → unchanged (export path keeps inline base64)
     @test NS._externalize_blobs("nbX", "<p>no images</p>") == "<p>no images</p>"
 end

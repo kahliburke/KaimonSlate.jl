@@ -214,9 +214,11 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cm-editor { font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
 /* Static stand-in shown until a cell's CodeMirror is lazily mounted (big-notebook fast load).
    Matches the editor's metrics so the swap is visually seamless. */
+/* `white-space:pre` (not pre-wrap) so the placeholder's line count — and thus height — matches the
+   non-wrapping CodeMirror editor that replaces it; otherwise long lines wrap, the cell is taller,
+   and it jumps (layout shift) when the editor mounts. */
 .cm-placeholder { margin:0; padding:6px 8px; font-family:'Cascadia Code','Fira Code',monospace;
-  font-size:.86rem; line-height:1.5; white-space:pre-wrap; word-break:break-word; color:var(--text);
-  tab-size:4; overflow:hidden; }
+  font-size:.86rem; line-height:1.5; white-space:pre; color:var(--text); tab-size:4; overflow:hidden; }
 .cm-editor .cm-scroller { font-family:inherit; line-height:1.5; }
 /* Selection / active-line / background are owned by the chosen code-highlight theme (cm6 slateThemes
    → editor.js chromeComp), so each theme reads coherently. Only error-line tints live here. */
