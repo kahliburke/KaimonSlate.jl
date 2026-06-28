@@ -218,10 +218,15 @@ page_columns(p::SqlPagedProvider) = p.columns
 # Escape a search term for a LIKE pattern (single-quote + LIKE metacharacters).
 _like_arg(s) = "%" * lowercase(replace(string(s), "'" => "''", "\\" => "\\\\", "%" => "\\%", "_" => "\\_")) * "%"
 
+# Quote a SQL identifier (column name) safely — double any internal `"`. Column names come from the
+# query schema, but the user controls the SQL passed to `slate_query`, so an alias with a `"` would
+# otherwise break out of the quoted identifier.
+_sql_ident(name) = "\"" * replace(string(name), "\"" => "\"\"") * "\""
+
 function _sql_where(p::SqlPagedProvider, req::PageRequest)
     isempty(req.search) && return ""
     arg = _like_arg(req.search)
-    conds = ["LOWER(CAST(\"$(c.name)\" AS VARCHAR)) LIKE '$arg' ESCAPE '\\'" for c in p.columns]
+    conds = ["LOWER(CAST($(_sql_ident(c.name)) AS VARCHAR)) LIKE '$arg' ESCAPE '\\'" for c in p.columns]
     return " WHERE (" * join(conds, " OR ") * ")"
 end
 
@@ -233,7 +238,7 @@ function fetch_page(p::SqlPagedProvider, req::PageRequest)
     total = isempty(cnt) ? 0 : Int(cnt[1].n)
     order = ""
     if req.sort_col > 0 && req.sort_col <= length(p.columns)
-        order = " ORDER BY \"$(p.columns[req.sort_col].name)\" " * (req.sort_desc ? "DESC" : "ASC")
+        order = " ORDER BY $(_sql_ident(p.columns[req.sort_col].name)) " * (req.sort_desc ? "DESC" : "ASC")
     end
     off = (req.page - 1) * req.page_size
     cur = Base.invokelatest(DB.execute, p.conn,

@@ -6,7 +6,17 @@ function _broadcast(nb::LiveNotebook, msg::AbstractString)
     lock(nb.llock) do
         for ch in nb.listeners
             try
-                isopen(ch) && Base.n_avail(ch) < 32 && put!(ch, String(msg))
+                isopen(ch) || continue
+                n = Base.n_avail(ch)
+                if n < 32
+                    put!(ch, String(msg))                 # normal: deliver the message
+                elseif n < 200
+                    # Slow client: stop forwarding patches (they'd back up), but enqueue ONE bare
+                    # version token so it re-pulls full state on catch-up — recovering any dropped
+                    # NON-idempotent patch (refresh:/celldone:/cellprog:) instead of going stale.
+                    put!(ch, string(nb.version))
+                end
+                # else: queue already deep with resync tokens — the pending resync covers this msg.
             catch
             end
         end
@@ -37,7 +47,7 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     HTTP.setheader(stream, "Content-Type" => "text/event-stream")
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
-    ch = Channel{String}(32)
+    ch = Channel{String}(256)   # headroom so the slow-client resync tokens (see _broadcast) don't block
     lock(nb.llock) do; push!(nb.listeners, ch); end
     try
         write(stream, "data: $(nb.version)\n\n")
