@@ -44,7 +44,7 @@
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
-  <button onclick="toggleTOC()" title="table of contents — jump to a heading">📑 Contents</button>
+  <button onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
   <button onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
   <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
   <div class="menuwrap">
@@ -84,7 +84,10 @@
 </div>
 <div id="selcount" class="selcount" title="multiple cells selected — c copy · x cut · v paste · dd delete"></div>
 <aside id="tocpanel" class="tocpanel">
-  <div class="phead"><strong>📑 Contents</strong>
+  <div class="phead">
+    <button id="tocback" class="tocnav" onclick="navBack()" title="back (⌘⇧←)" disabled>◀</button>
+    <button id="tocfwd" class="tocnav" onclick="navFwd()" title="forward (⌘⇧→)" disabled>▶</button>
+    <strong>Contents</strong>
     <button class="pclose" onclick="toggleTOC()" title="close">✕</button></div>
   <div id="toclist" class="toclist"></div>
 </aside>

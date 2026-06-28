@@ -65,4 +65,34 @@ document.addEventListener('DOMContentLoaded', () => {
     const it = e.target.closest('.tocitem');
     if (it) _tocJump(it.dataset.cell, +it.dataset.hi);
   });
+  _navSyncButtons();
 });
+
+// ── Selected-cell navigation history (⌘⇧← / ⌘⇧→ and the TOC ◀ ▶ buttons) ──────────
+// A browser-style back/forward stack of the cells you've selected. selectCell() records here;
+// back/forward move a pointer without re-recording (the _navLock guard). Stale ids (deleted cells)
+// are skipped over.
+let _nav = [], _navPos = -1, _navLock = false;
+window._navRecord = function (id) {
+  if (_navLock || !id || _nav[_navPos] === id) return;
+  _nav = _nav.slice(0, _navPos + 1);
+  _nav.push(id); _navPos = _nav.length - 1;
+  if (_nav.length > 200) { _nav.shift(); _navPos--; }
+  _navSyncButtons();
+};
+function _navGo(dir) {
+  const ids = (typeof cellIds === 'function') ? cellIds() : [];
+  let p = _navPos + dir;
+  while (p >= 0 && p < _nav.length && ids.length && !ids.includes(_nav[p])) p += dir;   // skip deleted cells
+  if (p < 0 || p >= _nav.length) return;
+  _navPos = p; _navLock = true;
+  try { window.selectCell && window.selectCell(_nav[p], true); } finally { _navLock = false; }
+  _navSyncButtons();
+}
+window.navBack = () => _navGo(-1);
+window.navFwd = () => _navGo(1);
+function _navSyncButtons() {
+  const b = document.getElementById('tocback'), f = document.getElementById('tocfwd');
+  if (b) b.disabled = _navPos <= 0;
+  if (f) f.disabled = _navPos >= _nav.length - 1;
+}
