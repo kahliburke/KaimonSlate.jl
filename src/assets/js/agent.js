@@ -117,7 +117,9 @@ function mdLite(src) {
   fp(); fl();
   return html.replace(/(\d+)/g, (_, i) => stash[+i]);   // restore spans that landed inline
 }
+let _suppressAgentRender = false;   // set during bulk replay (loadAgentLog) → render once at the end
 function renderAgentMsgs() {
+  if (_suppressAgentRender) return;   // skip per-event re-renders during a replay (O(n²) markdown+KaTeX)
   const el = document.getElementById('apmsgs');
   let html = agentMsgs.map(m => {
     const lane = m.crew ? ` lane` : '';
@@ -146,7 +148,12 @@ async function loadAgentLog() {
     const r = await api('GET', '/api/agent-log');
     if (!r || !r.events || !r.events.length) return;
     agentMsgs = []; setWorking(false);
-    for (const line of r.events) { try { agentEvent(JSON.parse(line)); } catch (_) {} }
+    // Replay the whole log building agentMsgs, but render the DOM only ONCE at the end — otherwise
+    // each of the hundreds of events triggers a full markdown+KaTeX re-render (was ~7.5s on a big log).
+    _suppressAgentRender = true;
+    try { for (const line of r.events) { try { agentEvent(JSON.parse(line)); } catch (_) {} } }
+    finally { _suppressAgentRender = false; }
+    renderAgentMsgs();
   } catch (_) {}
 }
 const agentStatus = s => { document.getElementById('apstatus').textContent = s || ''; };
