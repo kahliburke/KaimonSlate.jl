@@ -17,9 +17,12 @@ const _REVISE_ENV = joinpath(@__DIR__, "worker_revise")
 # Per-worker TCP ports. A simple counter (no Sockets dep); collisions are unlikely
 # and surface as a worker bind error rather than silent crosstalk.
 const _GATE_PORT = Ref(9100)
+const _PORT_LOCK = ReentrantLock()
 function _next_ports()
-    p = _GATE_PORT[]; _GATE_PORT[] += 2
-    return (p, p + 1)
+    lock(_PORT_LOCK) do            # atomic bump — concurrent spawns must not grab the same port
+        p = _GATE_PORT[]; _GATE_PORT[] += 2
+        return (p, p + 1)
+    end
 end
 
 _kaimon() = getfield(Main, :Kaimon)
@@ -63,9 +66,10 @@ mutable struct GateKernel <: Kernel
     proc::Any        # worker Base.Process
     conn::Any        # Main.Kaimon REPLConnection
     logpath::String  # worker stdout/stderr log
+    lock::ReentrantLock   # serializes prepare!/respawn so concurrent callers can't double-spawn
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
                pending::Vector = Any[]) =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "")
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock())
 end
 
 # True when the notebook is running directly in its parent (no own packages yet).
@@ -259,14 +263,39 @@ function _connect!(k::GateKernel)
     error("GateKernel: could not reach worker on port $(k.port): $last")
 end
 
+# Kill a worker process (SIGTERM, then SIGKILL if it ignores it — e.g. wedged in precompile),
+# drop its routing entry, and clear conn/proc. Killing the process EOFs its stdout pipe, which
+# ends the log-pump task (no leak). Shared by respawn (prepare!) and shutdown!.
+function _kill_worker!(k::GateKernel)
+    if k.conn !== nothing
+        try; delete!(_GATE_SESSION, k.conn.name); catch; end
+    end
+    p = k.proc
+    if p !== nothing
+        try; process_running(p) && kill(p); catch; end
+        for _ in 1:20                              # up to ~1s grace
+            (try; !process_running(p); catch; true; end) && break
+            sleep(0.05)
+        end
+        try; process_running(p) && kill(p, Base.SIGKILL); catch; end
+    end
+    k.conn = nothing; k.proc = nothing
+    return nothing
+end
+
 function prepare!(k::GateKernel, report::Report)
-    if k.conn === nothing
-        _spawn_worker!(k)
-        _connect!(k)
-        _GATE_SESSION[k.conn.name] = report.id   # route this worker's stream events back to the notebook
-        _ensure_poller!()
-        _reconstruct_env!(k)                     # env dir absent but footer has a delta → rebuild it
-        _maybe_sync_parent!(k)                   # forked + parent drifted → re-resolve once, up front
+    lock(k.lock) do                               # serialize: concurrent callers must not double-spawn
+        # Spawn if never started, OR respawn if the worker died (OOM / segfault / user exit()) —
+        # otherwise a crashed worker would no-op here forever and every eval would error.
+        if k.conn === nothing || (k.proc !== nothing && !process_running(k.proc))
+            _kill_worker!(k)                      # tear down a dead/old proc before replacing (no leak/orphan)
+            _spawn_worker!(k)
+            _connect!(k)
+            _GATE_SESSION[k.conn.name] = report.id   # route this worker's stream events back to the notebook
+            _ensure_poller!()
+            _reconstruct_env!(k)                  # env dir absent but footer has a delta → rebuild it
+            _maybe_sync_parent!(k)                # forked + parent drifted → re-resolve once, up front
+        end
     end
     return nothing
 end
@@ -517,8 +546,9 @@ end
 "Kill the worker and close its gate connection."
 function shutdown!(k::GateKernel)
     K = _kaimon()
-    k.conn === nothing || (delete!(_GATE_SESSION, k.conn.name); try; K.send_shutdown!(k.conn); catch; end)
-    k.proc === nothing || (try; kill(k.proc); catch; end)
-    k.conn = nothing; k.proc = nothing
+    lock(k.lock) do
+        k.conn === nothing || (try; K.send_shutdown!(k.conn); catch; end)   # ask it to exit cleanly first
+        _kill_worker!(k)                                                    # then ensure it's gone (SIGTERM→SIGKILL)
+    end
     return nothing
 end
