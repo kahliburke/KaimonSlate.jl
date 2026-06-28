@@ -45,8 +45,32 @@ function renderTOC() {
     const d = h.level - minLvl;
     return `<div class="tocitem lvl${d}" style="padding-left:${d * 14 + 12}px" data-cell="${_tocEsc(h.cell)}" data-hi="${h.hi}" title="${_tocEsc(h.text)}">${_tocEsc(h.text)}</div>`;
   }).join('');
+  _tocSpy();
 }
 window.renderTOC = renderTOC;
+
+// Scroll-spy: highlight the section currently at the top of the viewport. The active heading is the
+// last one whose rendered element is at/above the topbar line; clicking still works independently.
+let _spyTick = 0;
+function _tocSpy() {
+  if (!_tocOpen) return;
+  const items = document.querySelectorAll('#toclist .tocitem');
+  let active = null, bestTop = -Infinity;
+  for (const it of items) {
+    const cellEl = document.getElementById('cell-' + it.dataset.cell);
+    if (!cellEl) continue;
+    const h = cellEl.querySelectorAll('.md h1,.md h2,.md h3,.md h4,.md h5,.md h6')[+it.dataset.hi];
+    if (!h) continue;
+    const top = h.getBoundingClientRect().top;
+    if (top <= 90 && top > bestTop) { bestTop = top; active = it; }   // nearest heading above the fold
+  }
+  if (!active && items.length) active = items[0];   // scrolled above the first heading → first section
+  for (const it of items) it.classList.toggle('active', it === active);
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+addEventListener('scroll', () => {
+  if (_tocOpen && !_spyTick) _spyTick = requestAnimationFrame(() => { _spyTick = 0; _tocSpy(); });
+}, { passive: true });
 
 function toggleTOC() {
   _tocOpen = !_tocOpen;

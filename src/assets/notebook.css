@@ -237,6 +237,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
   overflow:hidden; text-overflow:ellipsis; border-left:2px solid transparent; }
 .tocitem:hover { background:var(--bg3); color:var(--text); border-left-color:var(--accent); }
 .tocitem.lvl0 { color:var(--text); font-weight:600; }
+.tocitem.active { background:rgba(86,156,214,.16); color:var(--accent); border-left-color:var(--accent); }
 .tocempty { padding:18px 14px; color:var(--dim); font-size:.82rem; line-height:1.55; }
 .tocempty span { opacity:.7; }
 .tocempty code { background:var(--bg3); border-radius:3px; padding:0 4px; }
