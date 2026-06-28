@@ -622,7 +622,18 @@ input.toggle:checked::after { left:18px; }
 .cellprogmsg { color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 /* Multiply-defined global warning chip on a cell's toolbar. */
 .dupwarn { color:var(--yellow,#e3b341); font-size:.72rem; font-family:monospace; margin-left:8px;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40%; cursor:help; }
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40%; cursor:pointer; }
+.dupwarn:hover { text-decoration:underline; }
+.dupinfo { position:fixed; z-index:80; max-width:min(460px,90vw); background:var(--bg2);
+  border:1px solid color-mix(in srgb, var(--yellow,#e3b341) 50%, var(--border)); border-radius:9px;
+  box-shadow:0 8px 26px #0009; padding:9px 12px; font-size:.8rem; color:var(--text); }
+.dupinfo-h { color:var(--yellow,#e3b341); font-weight:600; margin-bottom:6px; }
+.dupinfo-row { margin:3px 0; }
+.dupinfo-row code { background:var(--bg3); padding:1px 5px; border-radius:4px; }
+.dupinfo-jump { color:var(--accent); cursor:pointer; font-family:monospace; }
+.dupinfo-jump:hover { text-decoration:underline; }
+.dupinfo-jump.self { color:var(--dim); cursor:default; text-decoration:none; }
+.dupinfo-foot { color:var(--dim); font-size:.72rem; margin-top:7px; border-top:1px solid var(--bg3); padding-top:6px; }
 .pkggrouphdr { display:flex; align-items:center; gap:8px; color:var(--accent); font-size:.7rem; font-weight:600;
   text-transform:uppercase; letter-spacing:.06em; margin:12px 4px 4px; padding-bottom:3px; border-bottom:1px solid var(--border); }
 .pkggrouphdr:first-child { margin-top:2px; }

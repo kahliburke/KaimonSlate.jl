@@ -136,7 +136,7 @@ function cellHeaderInner(c) {
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     (c.dupdefs && c.dupdefs.length
-      ? `<span class="dupwarn" title="also defined in another cell — one shared namespace, last definition wins. Rename to avoid surprises.">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
+      ? `<span class="dupwarn" onclick="window.dupInfo(event,'${c.id}')" title="defined in more than one cell — click for details">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +
@@ -351,6 +351,41 @@ function onCellPre(index, cell) {
   _publishState({ ...nbState, cells });
 }
 window.onCellPre = onCellPre;
+
+// Click the ⚠ multidef chip → a popup listing each colliding name and the cells that define it
+// (click a cell id to jump there). Dismissed on outside-click / Escape.
+function dupInfo(ev, cellId) {
+  ev.stopPropagation();
+  const st = window.__slateState || {};
+  const c = (st.cells || []).find(x => x.id === cellId);
+  const mc = st.multidefCells || {};
+  if (!c || !(c.dupdefs && c.dupdefs.length)) return;
+  const old = document.getElementById('dupinfo'); if (old) old.remove();
+  const rows = c.dupdefs.map(name =>
+    `<div class="dupinfo-row"><code>${_esc(name)}</code> — defined in ` +
+    (mc[name] || []).map(id => `<a class="dupinfo-jump${id === cellId ? ' self' : ''}" data-cid="${_esc(id)}">${_esc(id)}</a>`).join(', ') +
+    '</div>').join('');
+  const pop = document.createElement('div');
+  pop.id = 'dupinfo'; pop.className = 'dupinfo';
+  pop.innerHTML = '<div class="dupinfo-h">Defined in multiple cells</div>' + rows +
+    '<div class="dupinfo-foot">One shared namespace — the last cell to run wins. Rename to avoid surprises.</div>';
+  document.body.appendChild(pop);
+  const r = ev.target.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 12)) + 'px';
+  pop.style.top = (r.bottom + 6) + 'px';
+  pop.addEventListener('click', e => {
+    const a = e.target.closest('.dupinfo-jump');
+    if (a) { try { selectCell(a.dataset.cid, true); } catch (_) {} pop.remove(); }
+  });
+  setTimeout(() => {
+    const close = e => { if (!pop.contains(e.target)) cleanup(); };
+    const esc = e => { if (e.key === 'Escape') cleanup(); };
+    const cleanup = () => { pop.remove(); document.removeEventListener('mousedown', close); document.removeEventListener('keydown', esc); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', esc);
+  }, 0);
+}
+window.dupInfo = dupInfo;
 
 function _publishState(state) {
   nbState = state;

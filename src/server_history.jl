@@ -267,6 +267,7 @@ function state_json(nb::LiveNotebook)
     end
     bindref, hostednames = _bind_index(nb.report)
     md = Set{String}(get(nb.report.meta, "multidef", String[]))   # names defined in 2+ cells → per-cell flag
+    meta["multidefCells"] = get(nb.report.meta, "multidef_cells", Dict{String,Vector{String}}())   # name → defining cells (popup)
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md) for c in nb.report.cells]
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     return meta

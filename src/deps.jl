@@ -249,11 +249,13 @@ function build_dependencies!(report::Report)
     # Names defined by 2+ code cells — a shared-namespace collision (last writer wins), a silent
     # footgun (an edit to one looks like dead reactivity). Count DISTINCT cells per name (each
     # cell's `writes` is a Set). Stashed on meta (runtime-only; never serialized) for the UI.
-    wcount = Dict{Symbol,Int}()
+    wcells = Dict{Symbol,Vector{String}}()
     for c in report.cells, w in c.writes
-        wcount[w] = get(wcount, w, 0) + 1
+        push!(get!(wcells, w, String[]), c.id)
     end
-    report.meta["multidef"] = Set{String}(string(w) for (w, n) in wcount if n >= 2)
+    report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)
+    report.meta["multidef_cells"] =                       # name → the cells defining it (for the UI popup)
+        Dict{String,Vector{String}}(string(w) => ids for (w, ids) in wcells if length(ids) >= 2)
     return report
 end
 
