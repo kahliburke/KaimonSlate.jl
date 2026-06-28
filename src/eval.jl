@@ -130,8 +130,9 @@ function _eval_capture(mod::Module, source::AbstractString, filename::AbstractSt
     r = run_capture(mod, source, filename)
     chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in r.binds]
+    overflow = hasproperty(r, :overflow) ? collect(r.overflow) : Any[]   # full results saved to disk (gate worker too)
     return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
-                      r.backtrace, r.duration_ms, collect(r.trace), r.stderr)
+                      r.backtrace, r.duration_ms, collect(r.trace), r.stderr, overflow)
 end
 
 # ── Kernel: the execution backend ─────────────────────────────────────────────

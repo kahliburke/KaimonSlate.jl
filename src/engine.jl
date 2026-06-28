@@ -49,10 +49,13 @@ struct CellOutput
     duration_ms::Float64          # wall-clock eval time
     trace::Vector{Any}            # `@trace` rows ({line,name,value}); empty unless cell is traced
     stderr::String                # captured stderr / `@warn` output (shown as a warnings block)
+    overflow::Vector{Any}         # full results saved to disk when an output was truncated (kind,path,bytes,clipped)
 end
-# Back-compat constructor for the 9-arg form (callers that don't produce trace rows / stderr).
+# Back-compat constructors (callers that omit trace/stderr, or trace/stderr but not overflow).
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "")
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[])
+CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr) =
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[])
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);

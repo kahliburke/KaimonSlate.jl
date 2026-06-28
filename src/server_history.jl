@@ -184,6 +184,38 @@ function _externalize_blobs(nbid::AbstractString, html::AbstractString)
     end)
 end
 
+# ── Overflow files (full results for truncated output) ───────────────────────────
+# A truncated output's FULL result is written to a temp file by the worker (capture.jl); the path
+# rides back in `CellOutput.overflow`. We register path-by-name here (confined: the serve route only
+# hands out files we registered) and build a small access bar — open in a new tab / VS Code / download.
+const _OUTFILES = Dict{String,String}()   # "id/<hashfile>" → absolute path
+_outfile_put!(nbid, name, path) = lock(_BLOB_LOCK) do
+    length(_OUTFILES) > 4000 && empty!(_OUTFILES)
+    _OUTFILES[string(nbid, "/", name)] = String(path)
+end
+outfile_get(key) = lock(_BLOB_LOCK) do; get(_OUTFILES, String(key), nothing); end
+_ovget(e, k, default = nothing) = e isa AbstractDict ? get(e, String(k), get(e, k, default)) :
+                                  (hasproperty(e, k) ? getproperty(e, k) : default)
+function _overflow_bar(nbid::AbstractString, entries)
+    isempty(nbid) && return ""
+    items = String[]
+    for e in entries
+        path = String(_ovget(e, :path, "")); isfile(path) || continue
+        name = basename(path); _outfile_put!(nbid, name, path)
+        url = string("/api/", nbid, "/output/", name)
+        kind = String(_ovget(e, :kind, "output"))
+        kb = round(Int, Int(_ovget(e, :bytes, 0)) / 1024)
+        clipped = _ovget(e, :clipped, false) === true
+        ext = endswith(path, ".html") ? "html" : "txt"
+        push!(items, string(
+            "<span class=\"ovitem\">⚠ full ", kind, " (", kb, " KB", clipped ? ", clipped at cap" : "", "): ",
+            "<a href=\"", url, "\" target=\"_blank\" rel=\"noopener\">open ↗</a> · ",
+            "<a href=\"vscode://file", path, "\">editor</a> · ",
+            "<a href=\"", url, "\" download=\"", kind, "-", name, "\">download</a></span>"))
+    end
+    isempty(items) ? "" : string("<div class=\"ovbar\">", join(items, ""), "</div>")
+end
+
 # `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable name →
 # the cell ids that surface it via `controls=` (so each can collapse to a chip / jump link).
 # `nbid` (when non-empty) externalizes inlined output images to cached blob URLs (see above).
@@ -234,6 +266,11 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     if c.kind == CODE && !isempty(multidef)
         dup = sort!(String[string(w) for w in c.writes if string(w) in multidef])
         isempty(dup) || (d["dupdefs"] = dup)
+    end
+    # Truncated outputs → append an access bar (open ↗ / editor / download) to the rendered output.
+    if c.kind == CODE && c.output !== nothing && !isempty(c.output.overflow)
+        bar = _overflow_bar(nbid, c.output.overflow)
+        isempty(bar) || (d["output"] = String(d["output"]) * bar)
     end
     return d
 end

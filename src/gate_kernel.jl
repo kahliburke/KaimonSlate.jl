@@ -318,9 +318,10 @@ function _wire_to_output(wire)
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", "gate returned no value", nothing, 0.0)
     chunks = MimeChunk[MimeChunk(String(m), Vector{UInt8}(bytes)) for (m, bytes) in wire.mime]
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in wire.binds]
+    overflow = hasproperty(wire, :overflow) ? collect(wire.overflow) : Any[]
     return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
                       binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms),
-                      collect(wire.trace), String(wire.stderr))
+                      collect(wire.trace), String(wire.stderr), overflow)
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string")

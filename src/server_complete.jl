@@ -242,6 +242,13 @@ function _make_router(h::Hub)
         b === nothing && return HTTP.Response(404, "no such blob")
         HTTP.Response(200, ["Content-Type" => b[1], "Cache-Control" => "public, max-age=31536000, immutable"], b[2])
     end)
+    # Full result for a truncated output — only serves temp files WE registered (no path traversal).
+    HTTP.register!(router, "GET", "/api/{id}/output/{name}", req -> begin
+        path = outfile_get(string(HTTP.getparam(req, "id"), "/", HTTP.getparam(req, "name")))
+        (path === nothing || !isfile(path)) && return HTTP.Response(404, "no such output")
+        mime = endswith(path, ".html") ? "text/html; charset=utf-8" : "text/plain; charset=utf-8"
+        HTTP.Response(200, ["Content-Type" => mime, "Cache-Control" => "public, max-age=31536000, immutable"], read(path))
+    end)
     HTTP.register!(router, "POST", "/api/{id}/cell/{cid}", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         edit_cell!(nb, HTTP.getparam(req, "cid"), get(b, "source", ""); force = get(b, "force", false) === true)

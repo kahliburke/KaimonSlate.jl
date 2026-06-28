@@ -255,6 +255,11 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .outexpand { display:block; margin:1px 0 7px; font-size:.72rem; padding:2px 9px; background:var(--bg3);
   border:1px solid var(--border); border-radius:5px; color:var(--dim); cursor:pointer; }
 .outexpand:hover { color:var(--text); border-color:var(--accent); }
+/* Access bar for a truncated output's full result (open in new tab / VS Code / download). */
+.ovbar { padding:6px 12px; border-top:1px dashed var(--border); font-size:.76rem; color:var(--dim);
+  background:rgba(255,215,0,.05); display:flex; flex-direction:column; gap:3px; }
+.ovbar a { color:var(--accent); text-decoration:none; }
+.ovbar a:hover { text-decoration:underline; }
 .toc-hit { animation:toc-flash 1.4s ease-out; border-radius:4px; }
 @keyframes toc-flash { 0%,30% { background:rgba(86,156,214,.22); } 100% { background:transparent; } }
 .cm-editor .cm-scroller { font-family:inherit; line-height:1.5; }

@@ -229,6 +229,9 @@ end
         # A giant printed stream is truncated with a notice.
         rs = run_capture(Module(:CapStdout), "print('x' ^ $(cap * 3))")
         @test length(rs.stdout) < cap + 200 && occursin("truncated", rs.stdout)
+        # …and its FULL result is saved to a temp file (for the open-in-tab/editor/download bar).
+        ovf = first(e for e in rs.overflow if e.kind == "stdout")
+        @test isfile(ovf.path) && ovf.bytes > cap && !ovf.clipped
         # A giant value repr stays bounded (Julia's :limit/:displaysize and/or our hard cap).
         rv = run_capture(Module(:CapVal), "'y' ^ $(cap * 3)")
         @test length(rv.value_repr) < cap + 200

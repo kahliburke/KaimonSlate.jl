@@ -23,15 +23,41 @@ const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
 # huge array, a multi-MB HTML dump) otherwise ships megabytes back over the gate and renders them
 # into the page — bloating /state and freezing the tab. We cap each text stream at the worker, before
 # any of it travels, with a clear truncation notice. The full value still lives in the namespace.
-const _MAX_OUT_CHARS = 100_000      # per text stream: stdout, stderr, value repr
-const _MAX_HTML_BYTES = 400_000     # per text/html | text/latex output chunk
+const _MAX_OUT_CHARS = 100_000      # per text stream: stdout, stderr, value repr (RENDERED to page)
+const _MAX_HTML_BYTES = 400_000     # per text/html | text/latex output chunk (RENDERED to page)
+# Hard ceiling on the FULL result we keep on disk for "open the full output" (new tab / editor /
+# download). Configurable from the UI (server pushes the user's setting into this Ref). Beyond it,
+# even the saved file is clipped — guards against a pathological multi-GB repr eating the disk.
+const _MAX_KEEP_BYTES = Ref(50_000_000)
 
-function _cap_text(s::AbstractString, limit::Int = _MAX_OUT_CHARS)
-    str = String(s)
-    n = length(str)
-    n <= limit && return str
-    return string(first(str, limit), "\n\n… ⚠ truncated — ", n - limit,
-                  " more characters. (Assign the result to a variable, or use `first(x, n)`, to inspect it.)")
+_cap_text(s::AbstractString, limit::Int = _MAX_OUT_CHARS) =
+    (str = String(s); length(str) <= limit ? str :
+     string(first(str, limit), "\n\n… ⚠ truncated — ", length(str) - limit, " more characters."))
+
+# Persist an oversized result so the UI can offer the full thing. Writes (up to _MAX_KEEP_BYTES) to a
+# content-addressed temp file; returns (path, bytes_kept, clipped) or nothing on failure. Same dir on
+# every machine since worker + server share the filesystem (the server serves/links the path).
+_overflow_dir() = (d = joinpath(tempdir(), "kaimon-slate-overflow"); mkpath(d); d)
+function _write_overflow(content::AbstractString, ext::AbstractString)
+    try
+        data = codeunits(String(content))
+        cap = _MAX_KEEP_BYTES[]
+        clipped = length(data) > cap
+        kept = clipped ? data[1:cap] : data
+        path = joinpath(_overflow_dir(), string(string(hash(kept); base = 16), ".", ext))
+        isfile(path) || write(path, kept)
+        return (path, length(kept), clipped)
+    catch
+        return nothing
+    end
+end
+# Cap a text stream for display AND record an overflow file (for full access) when it's over-limit.
+function _cap_keep!(overflow::Vector, kind::AbstractString, full::AbstractString, ext::AbstractString = "txt")
+    s = String(full)
+    length(s) <= _MAX_OUT_CHARS && return s
+    info = _write_overflow(s, ext)
+    info === nothing || push!(overflow, (kind = kind, path = info[1], bytes = info[2], clipped = info[3]))
+    return string(first(s, _MAX_OUT_CHARS), "\n\n… ⚠ truncated for display — full result available below.")
 end
 
 # Evaluate a cell's `source` the way the REPL does, NOT like a file `include_string`:
@@ -243,8 +269,9 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
-    stdout_str = _cap_text(fetch(reader))
-    stderr_str = _cap_text(fetch(ereader))
+    overflow = NamedTuple[]                       # full results saved to disk for "open full output"
+    stdout_str = _cap_keep!(overflow, "stdout", fetch(reader), "txt")
+    stderr_str = _cap_keep!(overflow, "stderr", fetch(ereader), "txt")
     dur_ms = (time_ns() - t0) / 1e6
 
     # Capture the return value: an ECharts spec / a table are kept raw (reduced to
@@ -280,7 +307,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
             # then `_cap_text` is the hard ceiling for anything still huge (e.g. a giant String value).
             value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
                                            context = (:limit => true, :displaysize => (40, 160)))
-            value_repr = _cap_text(value_repr)
+            value_repr = _cap_keep!(overflow, "value", value_repr, "txt")
         catch
         end
     end
@@ -305,13 +332,15 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     for i in eachindex(chunks)
         (m, data) = chunks[i]
         if (m == "text/html" || m == "text/latex") && length(data) > _MAX_HTML_BYTES
+            info = _write_overflow(String(copy(data)), "html")
+            info === nothing || push!(overflow, (kind = "output", path = info[1], bytes = info[2], clipped = info[3]))
             kb = round(Int, length(data) / 1024)
             chunks[i] = ("text/html",
-                Vector{UInt8}("<div class=\"disp html\"><em>⚠ output too large to display ($(kb) KB) — truncated. Assign it to a variable to inspect.</em></div>"))
+                Vector{UInt8}("<div class=\"disp html\"><em>⚠ output too large to render ($(kb) KB) — full result available below.</em></div>"))
         end
     end
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
-            duration_ms = dur_ms, trace = trace, stderr = stderr_str)
+            duration_ms = dur_ms, trace = trace, stderr = stderr_str, overflow = overflow)
 end
