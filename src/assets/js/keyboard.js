@@ -41,7 +41,7 @@ function setEditing(id, on) {
 }
 function enterEdit(id) {
   const c = _cellById(id); if (!c) return;
-  if (c.kind === 'code' && !hasBinds(c)) { const ed = editors[id]; if (ed) ed.focus(); }
+  if (c.kind === 'code' && !hasBinds(c)) { const ed = window.ensureEditor ? window.ensureEditor(id) : editors[id]; if (ed) ed.focus(); }
   else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
 }
 document.addEventListener('keydown', e => {

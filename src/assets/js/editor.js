@@ -208,9 +208,20 @@
   };
 
   // ── clean accessors the rest of the UI uses ───────────────────────────────────
-  window.edText = id => { const v = editors[id]; return v ? v.state.doc.toString() : ''; };
+  // Force a deferred editor to mount NOW (lazy hydration — see notebook.js <Editor>), returning the
+  // live view. Used by any path that needs the real editor before idle hydration reaches the cell.
+  window.ensureEditor = id => {
+    if (editors[id]) return editors[id];
+    window.hydrateNow && window.hydrateNow('ed:' + id);          // run its queued mount immediately
+    const m = window._editorMount && window._editorMount[id];
+    if (!editors[id] && m) m();                                  // belt-and-suspenders if it wasn't queued
+    return editors[id] || null;
+  };
+  // edText falls back to the last server source for a not-yet-mounted (lazy) editor — an unmounted
+  // cell has no local edits, so its text IS its source. Keeps save/run/backup correct pre-hydration.
+  window.edText = id => { const v = editors[id]; return v ? v.state.doc.toString() : ((window.srcMap && window.srcMap[id]) || ''); };
   window.edSetText = (id, s) => { const v = editors[id]; if (v && v.state.doc.toString() !== s) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: s } }); };
-  window.edFocus = id => { const v = editors[id]; if (v) v.focus(); };
+  window.edFocus = id => { const v = window.ensureEditor(id); if (v) v.focus(); };
   window.edInsert = (id, text) => { const v = editors[id]; if (!v) return; v.dispatch(v.state.replaceSelection(text)); v.focus(); };
 
   // ── ⌘-click go-to-definition ────────────────────────────────────────────────────

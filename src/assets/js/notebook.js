@@ -78,34 +78,56 @@ function _animateCollapse(el, collapse) {
   }
 }
 
-// <Editor>: a CodeMirror created ONCE into a host div and preserved. The component renders a
-// stable empty host and never re-renders it (empty-dep effect), so cursor/undo/scroll/the
-// signature-placeholder state survive notebook updates. Keyed by cell id at the call site.
+// <Editor>: a CodeMirror created into a host div and preserved. To keep a large notebook from
+// freezing on load (each CM6 mount costs ~tens of ms), the real editor is mounted LAZILY — a cheap
+// static <pre> placeholder shows the code immediately, and the EditorView is created when the cell
+// nears the viewport (IntersectionObserver), when something needs it (ensureEditor), or during idle
+// background hydration (hydrateSoon) — whichever comes first. The placeholder is plain DOM appended
+// in the effect (NOT Preact's vdom — the returned host stays empty), so reconciliation never
+// disturbs the editor we append. Once mounted, cursor/undo/scroll survive notebook updates.
 function Editor({ cell }) {
   const ref = useRef(null);
   useEffect(() => {
-    ref.current.querySelector('.cm-editor')?.remove();        // guard against a stacked editor in a reused host
-    let primed = false;
-    const view = window.mkEditor(ref.current, {
-      doc: cell.source, cellId: cell.id,
-      onDoc: () => { if (primed && window.edText(cell.id) !== cell.source) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); } },
-      onFocus: () => window.setEditing(cell.id, true),
-      onBlur: () => window.setEditing(cell.id, false),
-      keys: [
-        { key: 'Shift-Enter', run: () => window.runCell(cell.id) },
-        { key: 'Shift-Mod-Enter', run: () => window.runAndAddBelow(cell.id) },
-        { key: 'Shift-Ctrl-Enter', run: () => window.runAndAddBelow(cell.id) },
-        { key: 'Shift-Mod--', run: () => window.splitCell(cell.id, view) },
-        { key: 'Shift-Ctrl--', run: () => window.splitCell(cell.id, view) },
-      ],
-    });
-    setTimeout(() => primed = true, 0);
-    // Apply a pending unsaved-edit restore (restore.js): a prior session's in-flight text.
-    const pend = window._pendingRestore && window._pendingRestore[cell.id];
-    if (pend != null) { window.edSetText(cell.id, pend); window.setState && window.setState(cell.id, 'edited'); delete window._pendingRestore[cell.id]; }
+    const host = ref.current;
+    host.querySelector('.cm-editor')?.remove();               // guard against a stacked editor in a reused host
+    const ph = document.createElement('pre');
+    ph.className = 'cm-placeholder'; ph.textContent = cell.source || '';
+    host.appendChild(ph);
+    let view = null;
+    const mount = () => {
+      if (view) return view;
+      try { io.disconnect(); } catch (_) {}
+      const p = host.querySelector('.cm-placeholder'); if (p) p.remove();
+      let primed = false;
+      view = window.mkEditor(host, {
+        doc: cell.source, cellId: cell.id,
+        onDoc: () => { if (primed && window.edText(cell.id) !== cell.source) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); } },
+        onFocus: () => window.setEditing(cell.id, true),
+        onBlur: () => window.setEditing(cell.id, false),
+        keys: [
+          { key: 'Shift-Enter', run: () => window.runCell(cell.id) },
+          { key: 'Shift-Mod-Enter', run: () => window.runAndAddBelow(cell.id) },
+          { key: 'Shift-Ctrl-Enter', run: () => window.runAndAddBelow(cell.id) },
+          { key: 'Shift-Mod--', run: () => window.splitCell(cell.id, view) },
+          { key: 'Shift-Ctrl--', run: () => window.splitCell(cell.id, view) },
+        ],
+      });
+      setTimeout(() => primed = true, 0);
+      // Apply a pending unsaved-edit restore (restore.js): a prior session's in-flight text.
+      const pend = window._pendingRestore && window._pendingRestore[cell.id];
+      if (pend != null) { window.edSetText(cell.id, pend); window.setState && window.setState(cell.id, 'edited'); delete window._pendingRestore[cell.id]; }
+      return view;
+    };
+    // ensureEditor(id) and the IO both call the (idempotent) mount; register so ensureEditor finds it.
+    (window._editorMount || (window._editorMount = {}))[cell.id] = mount;
+    const io = new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) mount(); }, { rootMargin: '600px 0px' });
+    io.observe(host);
+    window.hydrateSoon && window.hydrateSoon('ed:' + cell.id, mount);   // background fallback for off-screen cells
     return () => {
+      try { io.disconnect(); } catch (_) {}
+      if (window._editorMount) delete window._editorMount[cell.id];
       if (window.editors[cell.id] === view) delete window.editors[cell.id];
-      try { view.destroy(); } catch (_) {}
+      try { view && view.destroy(); } catch (_) {}
     };
   }, []);
   return html`<div ref=${ref}></div>`;
@@ -161,6 +183,8 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
       const _mine = window.edText(c.id);
       if (_eq(_mine, _prevSrc)) window.edSetText(c.id, c.source);                       // no local edits → fast-forward to the new source
       else if (!_eq(_mine, c.source) && window.slateLiveConflict) window.slateLiveConflict(c.id, _mine, c.source);   // both changed → reconcile modal
+    } else if (!window.editors[c.id] && !_eq(c.source, _prevSrc)) {
+      const ph = el.querySelector('.cm-placeholder'); if (ph) ph.textContent = c.source || '';   // not yet hydrated → keep placeholder current
     }
     const badge = el.querySelector('.badge');     // header renders c.state; reflect the live state
     if (badge && badge.textContent !== state) badge.textContent = state;
@@ -171,7 +195,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
         // Dispose any inline `{{ echart }}` instances before the innerHTML swap orphans their nodes
         // (their ECharts instance + zrender would otherwise leak on every markdown re-render).
         md.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
-        last.current.out = h; window._swapOutput(md, h); window.typeset(md);
+        last.current.out = h; window._swapOutput(md, h); window.typesetSoon(md, c.id);
       }
       return;
     }
@@ -198,7 +222,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     }
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
     const out = el.querySelector('.output');
-    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typeset(out); }
+    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetSoon(out, c.id); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell

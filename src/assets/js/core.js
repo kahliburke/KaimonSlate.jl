@@ -290,8 +290,35 @@ function typeset(el) {
     });
   } catch (e) {}
 }
-// KaTeX may finish loading after the first render; typeset everything once it's in.
-window.addEventListener('load', () => typeset(document.getElementById('nb')));
+// ── Background hydration scheduler ──────────────────────────────────────────────
+// A big notebook's per-cell setup (mounting CodeMirror editors, typesetting KaTeX) costs ~tens of
+// ms each — doing it ALL in the first render batch freezes the tab for seconds before anything
+// paints. Instead, that work is ENQUEUED here and drained in small time-budgeted chunks during
+// idle time: the page paints immediately (static placeholders + server-rendered HTML) and stays
+// responsive while editors/math fill in behind it. Work is keyed + de-duped (newest fn wins).
+const _hydQ = new Map();
+let _hydPumping = false;
+const _ric = window.requestIdleCallback || (f => setTimeout(() => f({ timeRemaining: () => 10 }), 16));
+function _pumpHyd(deadline) {
+  const budget = 14, t0 = performance.now();        // ≤14ms/chunk keeps each task well under a frame
+  for (const [k, fn] of _hydQ) {
+    _hydQ.delete(k);
+    try { fn(); } catch (_) {}
+    const left = (deadline && deadline.timeRemaining) ? deadline.timeRemaining() : (budget - (performance.now() - t0));
+    if (performance.now() - t0 > budget || left < 3) break;
+  }
+  if (_hydQ.size) _ric(_pumpHyd); else _hydPumping = false;
+}
+// Enqueue keyed work to run during idle time.
+window.hydrateSoon = (key, fn) => { _hydQ.set(key, fn); if (!_hydPumping) { _hydPumping = true; _ric(_pumpHyd); } };
+// Run a queued task NOW, jumping the idle queue — for a cell the user is about to interact with.
+window.hydrateNow = key => { const fn = _hydQ.get(key); if (fn) { _hydQ.delete(key); try { fn(); } catch (_) {} return true; } return false; };
+// Typeset KaTeX off the critical path (text paints first; math fills in a tick later).
+window.typesetSoon = (el, key) => { if (el) window.hydrateSoon('ts:' + (key || ''), () => typeset(el)); };
+
+// KaTeX may finish loading after the first render; typeset everything once it's in (off the
+// critical path — a big notebook's math would otherwise be one long task on the load event).
+window.addEventListener('load', () => window.typesetSoon(document.getElementById('nb'), '__all__'));
 // Align the agent drawer's top with the first content cell (as positioned when scrolled
 // to the top), so the drawer never covers the menu bar and lines up with the notebook.
 // Measured off the real first cell — robust to topbar height, page padding, cell margins,
