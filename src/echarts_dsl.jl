@@ -38,9 +38,18 @@ _iscat(x) = !isempty(x) && all(e -> e isa AbstractString || e isa Symbol, x)
 _str(s) = s isa Symbol ? String(s) : s
 _cataxis(xs) = Dict{String,Any}("type" => "category", "data" => collect(xs))
 
+# Pair x and y into ECharts `[x,y]` points, with a clear error on a length mismatch instead of a
+# deep `eachindex(x,y)` DimensionMismatch from inside the DSL.
+function _xy(kind, x, y)
+    length(x) == length(y) ||
+        throw(ArgumentError("echart(:$kind, x, y): x and y must be equal length, got $(length(x)) and $(length(y))"))
+    return [[x[i], y[i]] for i in eachindex(x, y)]
+end
+
 # Type-7 (linear-interpolation) five-number summary for a boxplot category — Base only.
 function _q5(v)
     s = sort!(collect(Float64, v)); n = length(s)
+    n == 0 && throw(ArgumentError("echart(:boxplot, …): a category has no samples (empty vector)"))
     q(p) = (h = (n - 1) * p + 1; lo = floor(Int, h); hi = min(ceil(Int, h), n); s[lo] + (h - lo) * (s[hi] - s[lo]))
     [s[1], q(0.25), q(0.5), q(0.75), s[n]]
 end
@@ -53,8 +62,9 @@ function _heatmap!(opt, layout, args)
     elseif length(args) == 3 && args[3] isa AbstractMatrix
         z = args[3]; xs = string.(collect(args[1])); ys = string.(collect(args[2]))
     else
-        return
+        throw(ArgumentError("echart(:heatmap, …) expects a Matrix or (xlabels, ylabels, Matrix)"))
     end
+    isempty(z) && throw(ArgumentError("echart(:heatmap, …): empty matrix"))
     nr, nc = size(z)
     opt["data"] = [[j - 1, i - 1, z[i, j]] for i in 1:nr for j in 1:nc]
     lo, hi = extrema(z)
@@ -104,13 +114,15 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
         if _iscat(x)
             layout["xAxis"] = _cataxis(x); opt["data"] = collect(y)
         else
-            opt["data"] = [[x[i], y[i]] for i in eachindex(x, y)]
+            opt["data"] = _xy(k, x, y)
         end
     elseif k == "scatter" && length(args) == 2
         x, y = args
-        opt["data"] = [[x[i], y[i]] for i in eachindex(x, y)]
+        opt["data"] = _xy(:scatter, x, y)
     elseif k == "pie" && length(args) == 2
         labels, vals = args
+        length(labels) == length(vals) ||
+            throw(ArgumentError("echart(:pie, labels, values): equal length required, got $(length(labels)) and $(length(vals))"))
         opt["data"] = [Dict{String,Any}("name" => string(labels[i]), "value" => vals[i]) for i in eachindex(labels, vals)]
     elseif k == "heatmap"
         _heatmap!(opt, layout, args)
@@ -129,8 +141,7 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
     elseif length(args) == 1
         opt["data"] = _ec(only(args))
     elseif length(args) >= 2 && args[1] isa AbstractVector && args[2] isa AbstractVector
-        x, y = args[1], args[2]
-        opt["data"] = [[x[i], y[i]] for i in eachindex(x, y)]
+        opt["data"] = _xy(kind, args[1], args[2])
     end
     for (kk, vv) in kwargs
         opt[String(kk)] = _ec(vv)

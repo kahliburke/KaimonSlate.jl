@@ -23,7 +23,7 @@ const _REFRESH_REGISTRY = Dict{String,Any}()
 register_refresh!(report_id::AbstractString, cb) = (_REFRESH_REGISTRY[String(report_id)] = cb; nothing)
 unregister_refresh!(report_id::AbstractString) = (delete!(_REFRESH_REGISTRY, String(report_id)); nothing)
 function _do_refresh(report_id::AbstractString, vars)
-    cb = get(_REFRESH_REGISTRY, report_id, nothing)
+    cb = get(_REFRESH_REGISTRY, String(report_id), nothing)   # registry keys are String (sibling _do_* convert too)
     cb === nothing || cb(Symbol[Symbol(v) for v in vars])
     return nothing
 end

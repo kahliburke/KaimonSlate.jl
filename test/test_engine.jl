@@ -163,6 +163,17 @@ mean(data)
         @test r2.cells[1].id == id1
     end
 
+    @testset "ECharts DSL — clear ArgumentError on bad input" begin
+        S = ReportEngine.series
+        @test_throws ArgumentError S(:line, [1, 2, 3], [1, 2])       # mismatched x/y
+        @test_throws ArgumentError S(:scatter, [1], [1, 2])
+        @test_throws ArgumentError S(:pie, ["a", "b"], [1])
+        @test_throws ArgumentError S(:boxplot, ["a"], [Float64[]])   # empty samples → no five-number summary
+        @test_throws ArgumentError S(:heatmap, [1, 2, 3])            # not a matrix
+        @test_throws ArgumentError S(:heatmap, zeros(0, 0))          # empty matrix
+        @test S(:line, [1, 2, 3], [4, 5, 6]) !== nothing             # valid still builds
+    end
+
     @testset "progress-logging bridge → cell meter" begin
         rec = NamedTuple[]   # (id, frac, msg, done)
         lg = ReportEngine._ProgressLogger(Logging.NullLogger(),

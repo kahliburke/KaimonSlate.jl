@@ -574,6 +574,10 @@ _json(x) = HTTP.Response(200, ["Content-Type" => "application/json"], JSON.json(
 # HTTP 2.0: request body is a BytesBody wrapper; read it as a String.
 function _body(req)
     s = String(req.body)
-    return isempty(s) ? Dict{String,Any}() : JSON.parse(s)
+    isempty(s) && return Dict{String,Any}()
+    # Tolerate malformed or non-object bodies: every handler does `get(body, key, …)`, so a bad
+    # parse or a JSON array/scalar (`[1,2]`, `"x"`, `5`) must degrade to an empty dict, not 500.
+    v = try; JSON.parse(s); catch; nothing; end
+    return v isa AbstractDict ? v : Dict{String,Any}()
 end
 

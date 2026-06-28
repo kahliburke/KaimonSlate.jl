@@ -9,6 +9,11 @@
 # Footer layout (terminal, like `Slate.env`): an open marker, the gzip'd archive as base64
 # wrapped into commented lines, then a close marker. `parse_report` strips any `Slate.*`
 # block, so a standalone `.jl` still opens as an ordinary notebook.
+import SHA
+# Self-contained content hash (this file is also `include`d standalone in tests, where the
+# SlateHistory module isn't present — so don't reach into it).
+_bundle_sha(s) = bytes2hex(SHA.sha2_256(codeunits(String(s))))
+
 const _BUNDLE_OPEN = "# ╔═╡ Slate.bundle"
 const _BUNDLE_CLOSE = "# ╚═╡ Slate.bundle"
 
@@ -271,11 +276,13 @@ function _extract_bundle!(b64::AbstractString, dir::AbstractString)
     return _attach_git_repo(dir)                     # clone repo.gitbundle + wire origin
 end
 
-# Content-addressed cache dir under the depot for a bundle payload, keyed by a hash of the
+# Content-addressed cache dir under the depot for a bundle payload, keyed by a SHA-256 of the
 # bundle bytes: identical content reuses the same extracted env (instant reopen), a changed
-# bundle lands in a fresh dir. Mirrors `notebook_env_dir`'s depot convention.
+# bundle lands in a fresh dir. Uses SHA (like history.jl) — NOT `hash`, which is non-cryptographic,
+# unstable across Julia versions/sessions (cache would never hit → rebuilds + orphan dirs), and
+# collision-prone (a collision would serve the WRONG environment).
 function _bundle_cache_dir(b64::AbstractString)
-    key = string(hash(b64) % 0xffffffffffffffff; base = 16, pad = 16)
+    key = _bundle_sha(b64)
     return joinpath(first(Base.DEPOT_PATH), "environments", "kaimonslate-bundles", key)
 end
 

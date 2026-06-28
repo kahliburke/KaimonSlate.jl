@@ -138,7 +138,9 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
         print(io, "</article><script>window.addEventListener('load',function(){",
               "if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[",
               "{left:'\$\$',right:'\$\$',display:true},{left:'\\\\[',right:'\\\\]',display:true},",
-              "{left:'\$',right:'\$',display:false},{left:'\\\\(',right:'\\\\)',display:false}],throwOnError:false});});",
+              "{left:'\$',right:'\$',display:false},{left:'\\\\(',right:'\\\\)',display:false}],",
+              # don't math-render code listings / table cells (a literal $x$ in code)
+              "ignoredClasses:['exp-src','exp-table'],throwOnError:false});});",
               "</script></body></html>")
         return String(take!(io))
     end

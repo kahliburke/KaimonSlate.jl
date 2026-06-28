@@ -243,7 +243,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/complete", req -> _withnb(h, req, nb -> begin
         body = _body(req)
         code = String(get(body, "code", ""))
-        pos = clamp(Int(get(body, "pos", ncodeunits(code))), 0, ncodeunits(code))
+        # `Int(...)` throws InexactError on a JSON float (`pos: 3.5`); round + tryparse defensively.
+        n = ncodeunits(code)
+        pos = clamp(round(Int, something(tryparse(Float64, string(get(body, "pos", n))), Float64(n))), 0, n)
         pstart, prefix, dotted = _id_prefix(code, pos)
         # Completion resolves WHERE the cells eval (the worker, for a gate kernel), so
         # `using`'d packages and evaluated bindings complete — not just server-side globals.

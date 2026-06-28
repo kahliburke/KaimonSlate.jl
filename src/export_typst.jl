@@ -26,7 +26,10 @@ const _MITEX_SHIMS = raw"""
 
 # Escape a Julia string for a Typst double-quoted string literal (\ and " only; Typst
 # strings interpret \\, \", \n, … so backslashes MUST be doubled).
-_typ_str(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"")
+# Escape for a Typst "…" string literal. Must also escape newlines/tabs — a literal can't span a
+# raw newline, so a multiline table cell / bind value (a wrapped string, a vector repr) would
+# otherwise produce invalid `.typ` and fail the WHOLE PDF export.
+_typ_str(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => "\\n", "\r" => "\\r", "\t" => "\\t")
 
 # Built-in style presets. `article` is the default single-column research-note look;
 # `report` is roomier with a larger title. `columns` (1 or 2) lays the body out in one
