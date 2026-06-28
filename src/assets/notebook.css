@@ -519,6 +519,8 @@ input.toggle:checked::after { left:18px; }
 .apmsg.img.lane, .apmsg.tool.lane { padding-left:9px; }
 /* Markdown-rendered assistant replies: block layout drives the spacing, so drop the inherited
    pre-wrap (it would double the <p>/<br> gaps). Compact margins keep the chat dense. */
+/* ⌘ held → link cursor over code editors, signalling ⌘-click go-to-definition is live. */
+body.modkey .cm-content { cursor: pointer; }
 .apmd { white-space:normal; }
 .apmd p { margin:0 0 .5em; }
 .apmd p:last-child, .apmd ul:last-child, .apmd ol:last-child, .apmd pre:last-child { margin-bottom:0; }

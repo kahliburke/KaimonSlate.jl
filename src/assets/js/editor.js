@@ -213,6 +213,47 @@
   window.edFocus = id => { const v = editors[id]; if (v) v.focus(); };
   window.edInsert = (id, text) => { const v = editors[id]; if (!v) return; v.dispatch(v.state.replaceSelection(text)); v.focus(); };
 
+  // ── ⌘-click go-to-definition ────────────────────────────────────────────────────
+  // Find the cell that defines top-level `name` — nearest PRIOR definer (the reactive last-writer),
+  // else nearest forward — and jump to its defining line. Cell-granular & name-based: resolves
+  // notebook globals/functions, not locals inside a function body. Returns true if it navigated.
+  window.gotoDef = function (name, fromCellId) {
+    const cells = (typeof nbState !== 'undefined' && nbState && nbState.cells) || [];
+    if (!cells.length) return false;
+    const idx = cells.findIndex(c => c.id === fromCellId);
+    const has = c => c.kind === 'code' && Array.isArray(c.defs) && c.defs.includes(name);
+    let tgt = null;
+    for (let i = (idx < 0 ? cells.length - 1 : idx); i >= 0; i--) if (has(cells[i])) { tgt = cells[i]; break; }
+    if (!tgt) for (let i = (idx < 0 ? 0 : idx + 1); i < cells.length; i++) if (has(cells[i])) { tgt = cells[i]; break; }
+    if (!tgt || typeof jumpToCellLine !== 'function') return false;
+    jumpToCellLine(tgt.id, _defLine(tgt.source || '', name));
+    return true;
+  };
+  // Best-effort line of the definition within a cell's source: a keyword def (function/struct/…),
+  // an assignment, a short-form function, or `@bind name`; else first mention; else line 1.
+  function _defLine(src, name) {
+    const e = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const t = '(?![A-Za-z0-9_!])';   // identifier-end (Julia names may end in `!`, so `\b` won't do)
+    const pats = [
+      new RegExp('^\\s*(?:function|macro|const|global|local|mutable\\s+struct|struct|abstract\\s+type|primitive\\s+type)\\s+@?' + e + t),
+      new RegExp('^\\s*@?' + e + t + '\\s*(?:::[^=\\n]*)?=(?!=)'),   // assignment (incl. typed), not ==
+      new RegExp('^\\s*' + e + '\\s*\\('),                          // short-form function def
+      new RegExp('^\\s*@bind\\s+' + e + t),
+    ];
+    const any = new RegExp('(?<![A-Za-z0-9_])' + e + t);
+    const lines = src.split('\n');
+    let fb = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (pats.some(p => p.test(lines[i]))) return i + 1;
+      if (!fb && any.test(lines[i])) fb = i + 1;
+    }
+    return fb || 1;
+  }
+  // ⌘ held → link cursor over editors, signalling click-to-navigate is live.
+  addEventListener('keydown', e => { if (e.key === 'Meta') document.body.classList.add('modkey'); });
+  addEventListener('keyup',   e => { if (e.key === 'Meta') document.body.classList.remove('modkey'); });
+  addEventListener('blur',    () => document.body.classList.remove('modkey'));
+
   // ── editor factory ─────────────────────────────────────────────────────────────
   function mkEditor(parent, opts) {
     opts = opts || {};
@@ -244,6 +285,21 @@
           { key: 'Ctrl-Space', run: startCompletion }, { key: 'Alt-Space', run: startCompletion },
           indentWithTab, ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap,
         ]),
+        EditorView.domEventHandlers({
+          // ⌘-click an identifier → jump to the cell that defines it (else fall through to normal click).
+          mousedown(event, view) {
+            if (!event.metaKey || opts.markdown) return false;
+            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+            if (pos == null) return false;
+            const w = view.state.wordAt(pos);
+            if (!w) return false;
+            let name = view.state.doc.sliceString(w.from, w.to);
+            if (view.state.doc.sliceString(w.to, w.to + 1) === '!') name += '!';   // Julia bang functions
+            if (!/^[A-Za-z_]/.test(name)) return false;
+            if (window.gotoDef && window.gotoDef(name, opts.cellId)) { event.preventDefault(); return true; }
+            return false;
+          },
+        }),
         EditorView.updateListener.of(u => {
           if (u.docChanged && opts.onDoc) opts.onDoc(u.state.doc.toString());
           if (u.focusChanged && opts.onFocus && u.view.hasFocus) opts.onFocus();

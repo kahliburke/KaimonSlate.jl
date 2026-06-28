@@ -157,6 +157,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
+        # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor.
+        "defs"    => c.kind == CODE ? sort!(String[string(w) for w in c.writes]) : String[],
     )
     if !isempty(c.controls)
         # resolve each column's names to (defining cell, spec); drop unknown names + empty columns
