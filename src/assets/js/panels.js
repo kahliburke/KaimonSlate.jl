@@ -278,18 +278,23 @@ async function _probe() {
     try { state = await r.json(); } catch (_) { return; }
   } else { _setConnStatus('Waiting for the server…'); return; }
   if (!state || !_connDown) return;                // nothing usable, or a concurrent probe already recovered
-  // The HTTP server answered — but the WORKER may still be coming up (reconstructing a standalone's
-  // env, or a gate kernel reconnecting). Keep the modal up, with progress, until it's actually live.
+  // The HTTP server answered with usable state — get the user BACK INTO the notebook immediately,
+  // even if a background run (hydrating) or worker boot is still finishing. Those stream in live (the
+  // hydrating banner + `celldone:` patches + a version bump on completion) rather than trapping the
+  // user behind a modal. Mutating actions stay gated by `_hydrating` until the run completes.
   const w = state.worker || {};
-  if (state.hydrating) { _setConnStatus('Server is back — reconstructing the environment & packages…'); return; }
-  if (!(w.kind === 'inproc' || w.connected)) { _setConnStatus('Server is back — starting the worker process…'); return; }
-  // Fully recovered: server up + worker live.
   _connDown = false;
   clearTimeout(_graceTimer); clearInterval(_probeTimer); _graceTimer = _probeTimer = null;
   connectLive();                                 // fresh SSE — the old one gave up on the 404
   updateStates(state);                           // resync (editors preserved)
   window.reconcileBackup && window.reconcileBackup(state);   // if boot 404'd, restore unsaved edits now that we have state
-  if (_modalShown) { const m = document.getElementById('disconnmodal'); if (m) m.style.display = 'none'; toast('Reconnected — worker live, synced', 3000, 'ok'); }
+  if (_modalShown) {
+    const m = document.getElementById('disconnmodal'); if (m) m.style.display = 'none';
+    const msg = state.hydrating ? 'Reconnected — finishing the run in the background…'
+              : (w.kind === 'inproc' || w.connected) ? 'Reconnected — worker live, synced'
+              : 'Reconnected — worker still starting…';
+    toast(msg, 3000, 'ok');
+  }
   _modalShown = false;
 }
 // Server is up but doesn't have this notebook (empty registry after a restart). Ask it to
