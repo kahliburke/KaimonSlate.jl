@@ -346,7 +346,12 @@ window._clampOutputs = (root) => {
           const ex = b.classList.toggle('expanded');
           b.classList.toggle('clamped', !ex);
           btn.textContent = ex ? '⤡ Collapse' : '⤢ Expand';
-          if (!ex) btn.scrollIntoView({ block: 'nearest' });   // collapse → keep the toggle where the eye is
+          if (!ex) {                                            // collapse → don't strand the viewport
+            const head = b.closest('.cell') && b.closest('.cell').querySelector('.cellhead');
+            const r = head && head.getBoundingClientRect();
+            if (r && r.top < 56) window.scrollTo({ top: window.scrollY + r.top - 60 });   // header scrolled off → bring it back
+            else btn.scrollIntoView({ block: 'nearest' });      // header still visible → just keep the toggle in view
+          }
         };
         b.after(btn);
       }

@@ -265,6 +265,7 @@ document.addEventListener('dragend', () => {
 });
 
 if (localStorage.getItem('slateFullWidth') === '1') document.body.classList.add('fullwidth');
+if (localStorage.getItem('slateWrapOutput') === '1') document.body.classList.add('wrap-output');   // opt-in: wrap wide output
 
 // Persist & restore scroll position + selected cell per notebook, so a reload lands you back where
 // you were instead of snapping to the top. Keyed on the notebook's path.

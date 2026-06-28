@@ -31,6 +31,12 @@ function openSettings() {
   const wide = document.getElementById('setwide');
   wide.checked = document.body.classList.contains('fullwidth');
   wide.onchange = () => { document.body.classList.toggle('fullwidth', wide.checked); localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0'); };
+  // Wrap wide text output (default off → matrices/wide tables scroll horizontally instead of wrapping).
+  const wrap = document.getElementById('setwrap');
+  if (wrap) {
+    wrap.checked = document.body.classList.contains('wrap-output');
+    wrap.onchange = () => { document.body.classList.toggle('wrap-output', wrap.checked); localStorage.setItem('slateWrapOutput', wrap.checked ? '1' : '0'); };
+  }
   // Per-notebook: pick up parent /src edits (Revise) and mark affected cells stale (default on).
   const hr = document.getElementById('sethotreload');
   hr.checked = !(nbState && nbState.hotreload === false);

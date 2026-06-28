@@ -243,15 +243,15 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .tocempty code { background:var(--bg3); border-radius:3px; padding:0 4px; }
 /* Jupyter-style scrolled output: clamp tall text blocks with an in-place scroll + Expand toggle.
    (Markdown is authored prose — intentionally NOT clamped.) */
-.out.clamped, .val.clamped, .warn.clamped { max-height:30em; overflow:auto; }
-/* Theme-agnostic scrollbars on in-cell scroll areas + the TOC list. A translucent mid-gray stays
-   visible on ANY theme (reads light on dark backgrounds, dark on light) — unlike a theme var that
-   can blend into the background. */
-.out.clamped, .val.clamped, .warn.clamped, .toclist { scrollbar-width:thin; scrollbar-color:rgba(180,180,180,.65) transparent; }
-.out.clamped::-webkit-scrollbar, .val.clamped::-webkit-scrollbar, .warn.clamped::-webkit-scrollbar, .toclist::-webkit-scrollbar { width:11px; height:11px; }
-.out.clamped::-webkit-scrollbar-track, .val.clamped::-webkit-scrollbar-track, .warn.clamped::-webkit-scrollbar-track, .toclist::-webkit-scrollbar-track { background:transparent; }
-.out.clamped::-webkit-scrollbar-thumb, .val.clamped::-webkit-scrollbar-thumb, .warn.clamped::-webkit-scrollbar-thumb, .toclist::-webkit-scrollbar-thumb { background:rgba(180,180,180,.65); border:2px solid transparent; background-clip:content-box; border-radius:7px; }
-.out.clamped::-webkit-scrollbar-thumb:hover, .val.clamped::-webkit-scrollbar-thumb:hover, .warn.clamped::-webkit-scrollbar-thumb:hover, .toclist::-webkit-scrollbar-thumb:hover { background:rgba(205,205,205,.9); background-clip:content-box; }
+.out.clamped, .val.clamped, .warn.clamped { max-height:30em; }
+/* Theme-agnostic scrollbars. The output block itself is the SINGLE scroll container (both axes — see
+   the `overflow:auto` below), so the horizontal bar sits at the bottom of the VISIBLE clamped box
+   instead of hidden below the fold. Translucent light-gray reads on any theme. */
+.output .out, .output .val, .output .warn, .output .err, .toclist { scrollbar-width:thin; scrollbar-color:rgba(180,180,180,.65) transparent; }
+.output .out::-webkit-scrollbar, .output .val::-webkit-scrollbar, .output .warn::-webkit-scrollbar, .output .err::-webkit-scrollbar, .toclist::-webkit-scrollbar { width:11px; height:11px; }
+.output .out::-webkit-scrollbar-track, .output .val::-webkit-scrollbar-track, .output .warn::-webkit-scrollbar-track, .output .err::-webkit-scrollbar-track, .toclist::-webkit-scrollbar-track { background:transparent; }
+.output .out::-webkit-scrollbar-thumb, .output .val::-webkit-scrollbar-thumb, .output .warn::-webkit-scrollbar-thumb, .output .err::-webkit-scrollbar-thumb, .toclist::-webkit-scrollbar-thumb { background:rgba(180,180,180,.65); border:2px solid transparent; background-clip:content-box; border-radius:7px; }
+.output .out::-webkit-scrollbar-thumb:hover, .output .val::-webkit-scrollbar-thumb:hover, .output .warn::-webkit-scrollbar-thumb:hover, .output .err::-webkit-scrollbar-thumb:hover, .toclist::-webkit-scrollbar-thumb:hover { background:rgba(205,205,205,.9); background-clip:content-box; }
 .outexpand { display:block; margin:1px 0 7px; font-size:.72rem; padding:2px 9px; background:var(--bg3);
   border:1px solid var(--border); border-radius:5px; color:var(--dim); cursor:pointer; }
 .outexpand:hover { color:var(--text); border-color:var(--accent); }
@@ -261,8 +261,13 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 /* Selection / active-line / background are owned by the chosen code-highlight theme (cm6 slateThemes
    → editor.js chromeComp), so each theme reads coherently. Only error-line tints live here. */
 .output { font-size:.84rem; }
-.output .out, .output .val, .output .err, .output .warn { padding:8px 12px; border-top:1px solid var(--border); }
-.output pre { margin:0; white-space:pre-wrap; overflow-x:auto; }
+/* Each output block is its OWN scroll box (both axes): a wide matrix scrolls horizontally, and a tall
+   one (`.clamped`) scrolls vertically — both bars on the same box, so neither is hidden. */
+.output .out, .output .val, .output .err, .output .warn { padding:8px 12px; border-top:1px solid var(--border); overflow:auto; }
+/* Default: DON'T wrap — wide output (matrices, wide tables-as-text) scrolls horizontally instead of
+   wrapping into an unreadable mess. Opt in to wrapping via Settings → "Wrap text output". */
+.output pre { margin:0; white-space:pre; }
+body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .output .out { color:var(--dim); } .output .val { color:var(--green); }
 .output .err { color:var(--red); background:rgba(229,117,117,.06); }
 .output .warn { color:var(--gold); background:rgba(255,215,0,.06); font-size:.86rem; }
