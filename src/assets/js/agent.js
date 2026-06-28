@@ -91,7 +91,7 @@ function renderAgentMsgs() {
     const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
     return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
-    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}</div>`
+    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}${m.result ? `<pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(m.result)}</pre>` : ''}</div>`
     :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
   }).join('');
   if (agentWorking) {

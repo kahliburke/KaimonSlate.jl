@@ -91,7 +91,13 @@ async function _slateEvalJs(reqid, code) {
     if (v && typeof v.then === 'function') v = await v;          // await a returned Promise
     out.ok = true; out.result = _evalSafeJson(v);
   } catch (e) { out.error = String((e && e.stack) || e); }
-  if (logm) { logm.done = true; if (!out.ok) logm.text = '⚠ eval JS (error)'; if (typeof renderAgentMsgs === 'function') renderAgentMsgs(); }
+  if (logm) {
+    logm.done = true;
+    if (!out.ok) logm.text = '⚠ eval JS (error)';
+    logm.result = out.ok ? out.result : out.error;   // surface the returned value / error in the panel
+    logm.resultErr = !out.ok;
+    if (typeof renderAgentMsgs === 'function') renderAgentMsgs();
+  }
   try { await api('POST', '/api/eval-result', out); } catch (_) {}   // api() → _apipath injects NB_ID
 }
 window._slateEvalJs = _slateEvalJs;
