@@ -164,7 +164,9 @@ function request_live(nb::LiveNotebook, event::AbstractString, fields::AbstractD
     reqid = _live_reqid()
     ch = Channel{Any}(1)
     lock(_LIVE_LOCK) do; _LIVE_PENDING[reqid] = ch; end
-    timer = Timer(_ -> (isopen(ch) && close(ch)), timeout)   # wakes the take! when the browser is silent
+    # Wake the take! when the browser is silent — but DON'T close if a reply is already buffered
+    # (`isready`), or a reply landing right at the deadline would be discarded → caller sees nothing.
+    timer = Timer(_ -> (isopen(ch) && !isready(ch) && close(ch)), timeout)
     try
         _broadcast(nb, string(event, ":", JSON.json(merge(Dict{String,Any}("reqid" => reqid), fields))))
         return take!(ch)                 # the browser reply; throws once the timer closes the channel

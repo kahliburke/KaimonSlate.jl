@@ -165,8 +165,9 @@ end
 # Coerce a value from the browser (JSON number/string/bool/array) to the widget's type.
 function coerce_bind(w::Widget, v)
     if (w.kind == "slider" || w.kind == "number") && v isa Number
-        st = get(w.params, "step", 1)
-        return (st isa Integer && isinteger(v)) ? Int(round(v)) : float(v)
+        # Key the int-vs-float coercion on the widget's DEFAULT type, not `step`: a Float64 slider
+        # (`Slider(0.0, 10.0)`) defaults step to 1 (Integer), which previously truncated its values to Int.
+        return (w.default isa Integer && isinteger(v)) ? Int(round(v)) : float(v)
     elseif w.kind == "checkbox" || w.kind == "toggle"
         return v === true || v == 1
     elseif w.kind == "button"

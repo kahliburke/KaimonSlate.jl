@@ -321,10 +321,14 @@ at `target` (default: `<jl>.expanded/`): writes Project.toml + Manifest.toml, th
 package source under `local/`, the runnable notebook, and — when present — a `repo.gitbundle`
 (+ `git-remote.txt`) for attaching to the original repo. Returns the target dir.
 """
-function expand(jl_path::AbstractString; target::AbstractString = "")
+function expand(jl_path::AbstractString; target::AbstractString = "", force::Bool = false)
     txt = read(jl_path, String)
     b64 = _read_bundle_b64(txt)
     tdir = isempty(target) ? splitext(abspath(jl_path))[1] * ".expanded" : abspath(target)
+    # Don't silently overwrite into a non-empty dir (re-expanding over user edits would mix two
+    # states + leave unrelated files behind). Require force=true to extract into it.
+    (isdir(tdir) && !isempty(readdir(tdir)) && !force) &&
+        error("expand: target exists and is not empty: $tdir  (pass force=true to overwrite)")
     repo = _extract_bundle!(b64, tdir)               # unpack + clone the embedded git bundle
     @info "Expanded standalone notebook" target = tdir
     println("Expanded to: $tdir\n" *
