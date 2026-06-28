@@ -164,7 +164,8 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cell.collapsed .cellhead { opacity:.78; }
 /* Hide-code: editor hidden, output/figure (and any @bind control strip) shown — clean,
    interactive plots without the source. */
-.cell.codehidden > textarea, .cell.codehidden .cm-editor { display:none; }
+/* `!important` needed: CM6's base theme forces `.cm-editor { display:flex !important }`. */
+.cell.codehidden > textarea, .cell.codehidden .cm-editor { display:none !important; }
 .cellhead .hidecode.on { color:var(--accent); }
 .cellhead .trace.on { color:var(--accent); }
 
