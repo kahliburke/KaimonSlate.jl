@@ -21,18 +21,19 @@ async function addCell(after, kind, before, edit) {
   const state = await api('POST', '/api/cell-add', { after, kind, before: !!before });
   renderAll(state);
   const neu = (state.cells || []).map(c => c.id).find(id => !oldIds.has(id));
-  // renderAll restores the prior scroll on the next frame, so scroll to the new
-  // cell a frame later (otherwise the restore wins and it doesn't move).
-  // `nearest` jams a bottom-added cell against the viewport edge; nudge it up so a
-  // small gap stays below it (the .page bottom padding gives the room to scroll).
+  // renderAll restores the prior scroll on the next frame, so scroll to the new cell a frame
+  // later (otherwise the restore wins). Center it in the viewport — but if it's near the top of
+  // the document (can't center without scrolling past the top), just bring it to the top.
   if (neu) requestAnimationFrame(() => requestAnimationFrame(() => {
     selectCell(neu, false);
     if (edit) enterEdit(neu);
     const el = document.getElementById('cell-' + neu);
     if (el) {
-      el.scrollIntoView({ block: 'nearest' });
-      const gap = 90, overflow = el.getBoundingClientRect().bottom - (window.innerHeight - gap);
-      if (overflow > 0) window.scrollBy({ top: overflow, behavior: 'smooth' });
+      const r = el.getBoundingClientRect();
+      const block = (r.height >= window.innerHeight * 0.9) ? 'start'   // taller than the viewport → top
+                  : (window.scrollY + r.top < window.innerHeight / 2) ? 'start'   // near doc top → top
+                  : 'center';
+      el.scrollIntoView({ block, behavior: 'smooth' });
     }
   }));
   return neu;

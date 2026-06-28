@@ -426,6 +426,10 @@ function _reap_agents!(nb::LiveNotebook; keep_log::Bool = false)
 end
 _close_agent!(nb::LiveNotebook) = _reap_agents!(nb; keep_log = false)   # on notebook close
 
+# Last turn-start time per notebook id — so a `result`'s delayed busy-clear can't clobber the
+# busy flag of a NEWER turn that started inside its window (which would mislabel that turn's edits).
+const _AGENT_TURN = Dict{String,Float64}()
+
 """
     relay_agent_event(channel, data)
 
@@ -453,12 +457,14 @@ function relay_agent_event(channel::AbstractString, data)
     # makes to "agent" (not "external"). Clear shortly AFTER the turn ends, so the
     # watcher tick that picks up the agent's final save is still inside the window.
     if kind == "turn_started"
+        _AGENT_TURN[nb.id] = time()
         nb.agent_busy = true
     elseif kind == "result"
-        # Keep attributing edits to the agent for a bit after the turn ends — the
-        # final file-write often syncs a couple seconds late (watcher latency), and
-        # would otherwise be mislabeled "external".
-        @async (sleep(8.0); nb.agent_busy = false)
+        # Keep attributing edits to the agent for a bit after the turn ends — the final file-write
+        # often syncs a couple seconds late (watcher latency). Clear only if NO newer turn started
+        # meanwhile (else a stale timer would wrongly un-busy the new turn → edits mislabeled).
+        t = time()
+        @async (sleep(8.0); get(_AGENT_TURN, nb.id, 0.0) <= t && (nb.agent_busy = false))
     end
     # Always push live (token + tool-input deltas stream to the pane). Buffer for
     # reload-replay, but SKIP the liveness chunks (`data.delta == true` and
