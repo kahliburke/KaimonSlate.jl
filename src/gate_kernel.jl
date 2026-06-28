@@ -324,8 +324,11 @@ function _wire_to_output(wire)
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string")
-    prepare!(k, report)
     wire = try
+        # prepare! is INSIDE the try: a worker spawn/connect or env-reconstruction failure must
+        # surface as this cell's error, NOT propagate up through eval_stale!/sync_from_file! and 500
+        # the whole `state` request (which bricks the notebook in the browser).
+        prepare!(k, report)
         # `filename` is a kwarg on the worker tool — GateTool strips optional POSITIONAL args, so it
         # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
         _tool(k, "__slate_eval", Dict("source" => String(source), "filename" => String(filename)))
