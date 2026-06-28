@@ -315,6 +315,15 @@ window.hydrateSoon = (key, fn) => { _hydQ.set(key, fn); if (!_hydPumping) { _hyd
 window.hydrateNow = key => { const fn = _hydQ.get(key); if (fn) { _hydQ.delete(key); try { fn(); } catch (_) {} return true; } return false; };
 // Typeset KaTeX off the critical path (text paints first; math fills in a tick later).
 window.typesetSoon = (el, key) => { if (el) window.hydrateSoon('ts:' + (key || ''), () => typeset(el)); };
+// Typeset NOW when the element is in/near the viewport — so the math's height settles BEFORE paint
+// and the cell doesn't jump (layout shift) when KaTeX renders. Off-screen elements defer to idle:
+// their later typeset can't cause a *visible* shift, and they're done by the time you scroll there.
+window.typesetVisible = (el, key) => {
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  if (r.top < (window.innerHeight || 800) + 300 && r.bottom > -300) typeset(el);
+  else window.typesetSoon(el, key);
+};
 
 // KaTeX may finish loading after the first render; typeset everything once it's in (off the
 // critical path — a big notebook's math would otherwise be one long task on the load event).

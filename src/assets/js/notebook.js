@@ -195,7 +195,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
         // Dispose any inline `{{ echart }}` instances before the innerHTML swap orphans their nodes
         // (their ECharts instance + zrender would otherwise leak on every markdown re-render).
         md.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
-        last.current.out = h; window._swapOutput(md, h); window.typesetSoon(md, c.id);
+        last.current.out = h; window._swapOutput(md, h); window.typesetVisible(md, c.id);
       }
       return;
     }
@@ -222,7 +222,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     }
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
     const out = el.querySelector('.output');
-    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetSoon(out, c.id); }
+    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetVisible(out, c.id); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
