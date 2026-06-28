@@ -135,6 +135,8 @@ function cellHeaderInner(c) {
   return '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
+    (c.dupdefs && c.dupdefs.length
+      ? `<span class="dupwarn" title="also defined in another cell — one shared namespace, last definition wins. Rename to avoid surprises.">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +

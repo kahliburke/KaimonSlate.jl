@@ -620,6 +620,9 @@ input.toggle:checked::after { left:18px; }
 .cellprogtrack { flex:0 0 160px; height:5px; background:var(--bg3); border-radius:3px; overflow:hidden; }
 .cellprogtrack > span { display:block; height:100%; width:0; background:var(--accent); transition:width .15s ease; }
 .cellprogmsg { color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* Multiply-defined global warning chip on a cell's toolbar. */
+.dupwarn { color:var(--yellow,#e3b341); font-size:.72rem; font-family:monospace; margin-left:8px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40%; cursor:help; }
 .pkggrouphdr { display:flex; align-items:center; gap:8px; color:var(--accent); font-size:.7rem; font-weight:600;
   text-transform:uppercase; letter-spacing:.06em; margin:12px 4px 4px; padding-bottom:3px; border-bottom:1px solid var(--border); }
 .pkggrouphdr:first-child { margin-top:2px; }

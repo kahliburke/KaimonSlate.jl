@@ -246,6 +246,14 @@ function build_dependencies!(report::Report)
         :opaque in c.flags && (barrier = c.id)
         push!(seen, c.id)
     end
+    # Names defined by 2+ code cells — a shared-namespace collision (last writer wins), a silent
+    # footgun (an edit to one looks like dead reactivity). Count DISTINCT cells per name (each
+    # cell's `writes` is a Set). Stashed on meta (runtime-only; never serialized) for the UI.
+    wcount = Dict{Symbol,Int}()
+    for c in report.cells, w in c.writes
+        wcount[w] = get(wcount, w, 0) + 1
+    end
+    report.meta["multidef"] = Set{String}(string(w) for (w, n) in wcount if n >= 2)
     return report
 end
 

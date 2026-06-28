@@ -145,7 +145,8 @@ _bind_json(spec::BindSpec, hosts::Vector{String}) =
 # `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable name →
 # the cell ids that surface it via `controls=` (so each can collapse to a chip / jump link).
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
-                   hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}())
+                   hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
+                   multidef::Set{String} = Set{String}())
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
@@ -182,6 +183,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         own = Set(String(b.name) for b in c.binds)
         uses = sort!(unique!(String[String(s) for s in c.reads if haskey(bindref, String(s)) && !(String(s) in own)]))
         isempty(uses) || (d["binduses"] = uses)
+    end
+    # Names this cell defines that are ALSO defined by another cell — a silent footgun in a shared
+    # namespace (last-writer-wins). The UI flags it so collisions don't masquerade as dead reactivity.
+    if c.kind == CODE && !isempty(multidef)
+        dup = sort!(String[string(w) for w in c.writes if string(w) in multidef])
+        isempty(dup) || (d["dupdefs"] = dup)
     end
     return d
 end
@@ -259,7 +266,8 @@ function state_json(nb::LiveNotebook)
         return meta
     end
     bindref, hostednames = _bind_index(nb.report)
-    meta["cells"] = [cell_json(c, bindref, hostednames) for c in nb.report.cells]
+    md = Set{String}(get(nb.report.meta, "multidef", String[]))   # names defined in 2+ cells → per-cell flag
+    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md) for c in nb.report.cells]
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     return meta
 end

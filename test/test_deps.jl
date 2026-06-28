@@ -126,4 +126,17 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test "a" in findcell(r, "bad").deps         # barrier depends on everything before
     end
 
+    @testset "multidef: names defined in 2+ cells are flagged" begin
+        r = parse_report("#%% code id=a\nx = 1\ng() = 1\n#%% code id=b\nx = 2\n#%% code id=c\nz = 3")
+        build_dependencies!(r)
+        md = r.meta["multidef"]
+        @test "x" in md            # defined in cells a and b
+        @test !("g" in md)         # single definer
+        @test !("z" in md)         # single definer
+        # single-cell notebook → nothing flagged
+        r2 = parse_report("#%% code id=a\nx = 1\ny = 2")
+        build_dependencies!(r2)
+        @test isempty(r2.meta["multidef"])
+    end
+
 end
