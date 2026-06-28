@@ -346,6 +346,7 @@ window._clampOutputs = (root) => {
           const ex = b.classList.toggle('expanded');
           b.classList.toggle('clamped', !ex);
           btn.textContent = ex ? '⤡ Collapse' : '⤢ Expand';
+          if (!ex) btn.scrollIntoView({ block: 'nearest' });   // collapse → keep the toggle where the eye is
         };
         b.after(btn);
       }

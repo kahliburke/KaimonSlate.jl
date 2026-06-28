@@ -244,6 +244,14 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 /* Jupyter-style scrolled output: clamp tall text blocks with an in-place scroll + Expand toggle.
    (Markdown is authored prose — intentionally NOT clamped.) */
 .out.clamped, .val.clamped, .warn.clamped { max-height:30em; overflow:auto; }
+/* Theme-agnostic scrollbars on in-cell scroll areas + the TOC list. A translucent mid-gray stays
+   visible on ANY theme (reads light on dark backgrounds, dark on light) — unlike a theme var that
+   can blend into the background. */
+.out.clamped, .val.clamped, .warn.clamped, .toclist { scrollbar-width:thin; scrollbar-color:rgba(180,180,180,.65) transparent; }
+.out.clamped::-webkit-scrollbar, .val.clamped::-webkit-scrollbar, .warn.clamped::-webkit-scrollbar, .toclist::-webkit-scrollbar { width:11px; height:11px; }
+.out.clamped::-webkit-scrollbar-track, .val.clamped::-webkit-scrollbar-track, .warn.clamped::-webkit-scrollbar-track, .toclist::-webkit-scrollbar-track { background:transparent; }
+.out.clamped::-webkit-scrollbar-thumb, .val.clamped::-webkit-scrollbar-thumb, .warn.clamped::-webkit-scrollbar-thumb, .toclist::-webkit-scrollbar-thumb { background:rgba(180,180,180,.65); border:2px solid transparent; background-clip:content-box; border-radius:7px; }
+.out.clamped::-webkit-scrollbar-thumb:hover, .val.clamped::-webkit-scrollbar-thumb:hover, .warn.clamped::-webkit-scrollbar-thumb:hover, .toclist::-webkit-scrollbar-thumb:hover { background:rgba(205,205,205,.9); background-clip:content-box; }
 .outexpand { display:block; margin:1px 0 7px; font-size:.72rem; padding:2px 9px; background:var(--bg3);
   border:1px solid var(--border); border-radius:5px; color:var(--dim); cursor:pointer; }
 .outexpand:hover { color:var(--text); border-color:var(--accent); }
