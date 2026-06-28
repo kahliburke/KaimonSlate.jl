@@ -44,6 +44,7 @@
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
+  <button onclick="toggleTOC()" title="table of contents — jump to a heading">📑 Contents</button>
   <button onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
   <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
   <div class="menuwrap">
@@ -82,6 +83,11 @@
   </div>
 </div>
 <div id="selcount" class="selcount" title="multiple cells selected — c copy · x cut · v paste · dd delete"></div>
+<aside id="tocpanel" class="tocpanel">
+  <div class="phead"><strong>📑 Contents</strong>
+    <button class="pclose" onclick="toggleTOC()" title="close">✕</button></div>
+  <div id="toclist" class="toclist"></div>
+</aside>
 <div class="page"><div id="nb"></div></div>
 <aside id="palette" class="palette">
   <div class="phead"><strong>Controls</strong><span id="palette-count" class="hint"></span>
@@ -241,6 +247,7 @@
 <script src="/assets/js/dragdrop.js"></script>
 <script src="/assets/js/trace.js"></script>
 <script src="/assets/js/errors.js"></script>
+<script src="/assets/js/toc.js"></script>
 <!-- Preact app (ESM module). Strangler-fig: coexists with the classic scripts above
      and takes over the UI island by island until the vanilla code is retired. -->
 <script type="module" src="/assets/js/app.js"></script>

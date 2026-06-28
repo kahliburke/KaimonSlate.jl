@@ -269,6 +269,7 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
     window.syncAgentTop && window.syncAgentTop();
+    window._tocOpen && window.renderTOC && window.renderTOC();   // keep the open TOC in sync with edits
   });
   const coneCount = cone ? cone.size : (cells || []).length;
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}

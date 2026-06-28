@@ -76,6 +76,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'v') { e.preventDefault(); pasteCells(); }             // paste below the active cell
   else if (k === 'm') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'md') toggleType(selectedId, 'md'); }
   else if (k === 'y') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'code') toggleType(selectedId, 'code'); }
+  else if (k === 'o') { e.preventDefault(); window.toggleTOC && window.toggleTOC(); }   // table of contents
   else if (k === 'M') { e.preventDefault(); mergeBelow(selectedId); }    // Shift-M: merge with cell below
   else if (k === 'd') { e.preventDefault();
     if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }   // delCell deletes the whole selection

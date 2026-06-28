@@ -125,6 +125,7 @@ function paletteCommands() {
     { label: 'Search docs…', key: '⌘⇧K', run: openDocs },
     { label: 'Toggle agent panel', key: '⌘⇧A', run: toggleAgent },
     { label: 'Toggle controls palette', key: '⌘⇧F', run: togglePalette },
+    { label: 'Table of contents', key: 'o', run: toggleTOC },
     { label: 'Undo', key: '⌘Z', run: undoNb },
     { label: 'Redo', key: '⌘⇧Z', run: redoNb },
     { label: 'Add code cell below', key: 'b', run: () => addCell(sel || '', 'code') },
