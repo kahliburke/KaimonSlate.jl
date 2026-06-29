@@ -429,31 +429,34 @@ end
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →
 # persist back to the `.jl`.
 function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString; announce::Bool = false, force::Bool = false)
-    cells = nb.report.cells
-    idx = findfirst(c -> c.id == id, cells)
-    idx === nothing && return nb
-    cells[idx].source == String(source) || _snapshot!(nb)
-    # Build the new full source with this cell swapped, WITHOUT disturbing report
-    # state first — otherwise update_source! compares the new source to itself,
-    # sees "unchanged", and never marks the cell stale (so it never re-runs).
-    saved = cells[idx].source
-    cells[idx].source = String(source)
-    new_full = serialize_report(nb.report)
-    cells[idx].source = saved
-    update_source!(nb.report, new_full)
-    # force=true → re-run even when the source is unchanged (the explicit play/run button), so
-    # users don't have to nudge the text to re-trigger a cell. update_source! leaves an unchanged
-    # cell FRESH; mark it STALE so eval_stale! runs it.
-    if force
-        i = findfirst(c -> c.id == id, nb.report.cells)
-        i === nothing || (nb.report.cells[i].state = STALE)
+    # MUST hold nb.lock around the report mutation + persist: with async eval the runner / set_bind!
+    # (playhead) hold the lock intermittently, so an unlocked update_source!+_persist! here races them
+    # and can lose the edit (it temporarily reverts the source mid-serialize). Reentrant-safe — the
+    # agent edit path already wraps this in nb.lock.
+    lock(nb.lock) do
+        cells = nb.report.cells
+        idx = findfirst(c -> c.id == id, cells)
+        idx === nothing && return
+        cells[idx].source == String(source) || _snapshot!(nb)
+        # Build the new full source with this cell swapped, WITHOUT disturbing report state first —
+        # otherwise update_source! compares the new source to itself, sees "unchanged", and never
+        # marks the cell stale (so it never re-runs).
+        saved = cells[idx].source
+        cells[idx].source = String(source)
+        new_full = serialize_report(nb.report)
+        cells[idx].source = saved
+        update_source!(nb.report, new_full)
+        # force=true → re-run even when the source is unchanged (the explicit play/run button).
+        if force
+            i = findfirst(c -> c.id == id, nb.report.cells)
+            i === nothing || (nb.report.cells[i].state = STALE)
+        end
+        # announce=true → show the edited source (stale) before its eval finishes.
+        announce && _announce_cell!(nb, something(findfirst(c -> c.id == id, nb.report.cells), 0))
+        _eval!(nb)                       # non-blocking kick (safe inside the lock)
+        _persist!(nb)
     end
-    # announce=true → show the edited source (stale) in the browser BEFORE the eval, so an
-    # agent edit of a slow cell isn't stuck showing the old code until the run finishes.
-    announce && _announce_cell!(nb, something(findfirst(c -> c.id == id, nb.report.cells), 0))
-    _eval!(nb)
-    _persist!(nb)
-    _autoindex!(nb)                      # a new `using` in this cell → pick up its docs
+    _autoindex!(nb)                      # a new `using` in this cell → pick up its docs (outside lock)
     return nb
 end
 

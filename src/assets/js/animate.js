@@ -125,26 +125,57 @@
     }
 
     setManifest(m) {
-      const key = (m && m.framesUrl) || '';
-      if (key === this.key) return;                  // same animation — keep playing
-      this.key = key; this.manifest = m;
+      const key = (m && m.framesUrl) || '', lutKey = (m && m.lutUrl) || '';
+      const sameStack = (key === this.key), sameLut = (lutKey === this._lutKey);
+      this.manifest = m;
+      // Display config can change WITHOUT the frame stack changing (e.g. editing x/y ranges, title,
+      // clim, colormap), so always refresh it + the axes — don't early-return on a matching framesUrl.
       this.N = (m.shape && m.shape[0]) || 0;
       this.H = (m.shape && m.shape[1]) || 0;
       this.W = (m.shape && m.shape[2]) || 0;
       this.animId = m.animId || '';
-      this._lastFrame = -1;
       this.fps = m.fps || 30;
       this.times = (m.times && m.times.length === this.N) ? m.times : null;
-      this.loop = !(m.controls && m.controls.loop === false);
-      this.elLoop.classList.toggle('anim-on', this.loop);
-      this._wantAutoplay = !!(m.controls && m.controls.autoplay) &&
-        !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       this.dither = !(m.dither === false);
-      this.frames = null; this.lut = null; this.tex = null;     // force reload
+      // Only adopt the manifest's loop/autoplay on a NEW stack — don't override the user's live toggle
+      // or restart playback on an unrelated axis edit.
+      if (!sameStack) {
+        this.loop = !(m.controls && m.controls.loop === false);
+        this.elLoop.classList.toggle('anim-on', this.loop);
+        this._wantAutoplay = !!(m.controls && m.controls.autoplay) &&
+          !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      }
+      this._renderAxes();
+      if (sameStack) {
+        if (this.gl) {
+          this.gl.useProgram(this.prog);
+          this.gl.uniform1f(this.gl.getUniformLocation(this.prog, 'dither'), this.dither ? 1 : 0);
+        }
+        if (!sameLut) { this._lutKey = lutKey; this._reloadLut(); }   // colormap changed, frames didn't
+        this._draw();
+        return;                                       // frames unchanged → keep playing, config refreshed
+      }
+      // New frame stack → reset and (lazily) reload everything.
+      this.key = key; this._lutKey = lutKey;
+      this._lastFrame = -1;
+      this.frames = null; this.lut = null; this.tex = null;
       this.elScrub.max = String(Math.max(0, this.N - 1));
       this.layer = 0;
-      this._renderAxes();
       if (this.visible) this._ensureData();
+    }
+
+    // Re-fetch just the LUT (colormap changed but frames didn't) and recolor in place.
+    async _reloadLut() {
+      if (!this.manifest || !this.manifest.lutUrl) return;
+      try {
+        const lb = await fetch(this._url(this.manifest.lutUrl)).then(r => r.arrayBuffer());
+        this.lut = new Uint8Array(lb);
+        if (this.gl && this.lutTex) {
+          const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.lut);
+        }
+        this._drawCbar(); this._draw();
+      } catch (_) {}
     }
 
     async _ensureData() {

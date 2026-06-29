@@ -13,10 +13,12 @@
   let prog = { frac: 0, msg: '' };     // the latest update (drives the chip + badge %)
   const erroredIds = [];               // cells that errored this streak (for the pill to jump through)
   let errCursor = 0;
-  // Reveal delay: don't show ANY run-status (pill / pulsing border / chip / activity) until a run has
-  // lasted REVEAL_MS. Fast reactive evals — slider drags, a playhead bind driven at ~10 Hz — finish
-  // first and never flash; genuinely slow cells still reveal. General across every eval trigger.
-  let revealed = false, revealTimer = null;
+  // Reveal delay (PER CELL): don't show run-status until SOME cell has been running > REVEAL_MS. Each
+  // cell schedules its own timer on start and cancels it on finish — so a fast cell never flashes, and
+  // SUSTAINED fast churn (a playhead bind driving a cell at ~10 Hz) never accumulates into a reveal the
+  // way a streak-global timer would. A genuinely slow cell still trips its timer and reveals.
+  let revealed = false;
+  const cellReveal = new Map();        // cellId → pending reveal timer
   const REVEAL_MS = 140;
 
   // The cell currently executing (the most recently started) — runs are sequential.
@@ -41,11 +43,15 @@
     }, 150);
   }
 
-  // Schedule the first paint of run-status; if the run drains before it fires, it's cancelled (no flash).
-  function scheduleReveal() { if (revealed || revealTimer) return; revealTimer = setTimeout(reveal, REVEAL_MS); }
-  function cancelReveal() { if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; } }
+  // Schedule a per-cell reveal: if THIS cell is still running after REVEAL_MS, show the run-status.
+  function scheduleCellReveal(id) {
+    if (revealed || cellReveal.has(id)) return;
+    cellReveal.set(id, setTimeout(() => { cellReveal.delete(id); if (running.has(id)) reveal(); }, REVEAL_MS));
+  }
+  function clearCellReveal(id) { const t = cellReveal.get(id); if (t) { clearTimeout(t); cellReveal.delete(id); } }
+  function clearAllReveals() { for (const t of cellReveal.values()) clearTimeout(t); cellReveal.clear(); }
   function reveal() {
-    revealTimer = null; if (revealed) return; revealed = true;
+    if (revealed) return; revealed = true; clearAllReveals();
     for (const id of running.keys()) { setLive(id, 'running'); activity('run', id, ''); }   // catch up deferred starts
     ensureTick(); renderPill(); renderChip(); renderTimers();
   }
@@ -146,7 +152,7 @@
     clearTimeout(idleTimer);
     if (!active()) { done = 0; errs = 0; erroredIds.length = 0; errCursor = 0; }
     total = done + n;
-    scheduleReveal();                     // show only if the run outlasts REVEAL_MS
+    if (revealed) renderPill();           // reveal is per-cell now (onCellRun); just refresh the count
   };
 
   // Pill click: while running, open the activity feed to watch; once a run has errored, step through
@@ -167,13 +173,14 @@
     if (revealed) {                       // already showing → mark + log immediately
       setLive(id, 'running'); activity('run', id, '');
       ensureTick(); renderPill(); renderChip();
-    } else scheduleReveal();              // else defer; a fast cell finishes before the reveal fires
+    } else scheduleCellReveal(id);        // else defer; THIS cell cancels its reveal if it finishes fast
   };
 
   // A cell FINISHED (cell is its full cell_json — patchCells has already merged it).
   window.onCellDone = function (cell) {
     const id = cell.id, t = running.get(id);
     running.delete(id);
+    clearCellReveal(id);                  // a finished cell cancels its own pending reveal (fast → no flash)
     done++;
     bars.clear();
     clearCellBar(id);                     // remove the per-cell progress bar(s)
@@ -190,7 +197,7 @@
     if (!active()) {
       clearTimeout(idleTimer);
       if (revealed) idleTimer = setTimeout(() => { total = 0; done = 0; revealed = false; renderPill(); }, 600);
-      else { cancelReveal(); total = 0; done = 0; }   // nothing was ever shown → reset silently, re-arm next streak
+      else { clearAllReveals(); total = 0; done = 0; }   // nothing was ever shown → reset silently
     }
   };
 
