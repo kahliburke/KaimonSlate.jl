@@ -217,6 +217,13 @@ end
         build_dependencies!(op)
         @test :opaque in op.cells[1].flags
         @test ReportEngine._memo_key(op, op.cells[1]) == ""
+        # the `nocache` header tag opts a cell out, and round-trips through serialization
+        nc = parse_report("#%% code id=d nocache\nrand()")
+        build_dependencies!(nc)
+        @test :nocache in nc.cells[1].flags
+        @test ReportEngine._memo_key(nc, nc.cells[1]) == ""
+        @test occursin("nocache", serialize_report(nc))
+        @test :nocache in parse_report(serialize_report(nc)).cells[1].flags
     end
 
     @testset "run_capture wire form" begin

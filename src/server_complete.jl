@@ -367,6 +367,14 @@ function _make_router(h::Hub)
         eval_stale!(nb.report, nb.kernel)
         _json(state_json(nb))
     end))
+    # Set a cell's full tag set from the tag editor (known behaviour tags + free-form). Re-runs stale
+    # cells so a `trace` toggle takes effect in one round-trip.
+    HTTP.register!(router, "POST", "/api/{id}/tags/{cid}", req -> _withnb(h, req, nb -> begin
+        tags = get(_body(req), "tags", String[])
+        set_cell_tags!(nb, HTTP.getparam(req, "cid"), tags isa AbstractVector ? tags : String[])
+        eval_stale!(nb.report, nb.kernel)
+        _json(state_json(nb))
+    end))
     # Static export: a self-contained HTML document of the notebook (also the print →
     # PDF path — the browser's print dialog saves it as PDF). `?dl=1` downloads; `?source=0`
     # hides code. No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.

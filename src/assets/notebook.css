@@ -392,6 +392,23 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .ctlpop .ctlrow input { accent-color:var(--accent); cursor:pointer; }
 .ctlpop .ctlsub { font-size:.64rem; text-transform:uppercase; letter-spacing:.04em; color:var(--dim);
                   padding:7px 8px 3px; margin-top:3px; border-top:1px solid var(--bg3); }
+/* Cell tag editor (🏷) — reuses .ctlpop chrome */
+.tagpop { min-width:230px; }
+.tagpop .ctlrow span { display:flex; flex-direction:column; }
+.tagpop .tagdesc { font-size:.62rem; color:var(--dim); font-family:system-ui,sans-serif; letter-spacing:0; }
+.tagpop .tagchips { display:flex; flex-wrap:wrap; gap:5px; padding:4px 8px 6px; }
+.tagpop .tagnone { color:var(--dim); font-size:.72rem; }
+.tagpop .tagchip { display:inline-flex; align-items:center; gap:3px; background:var(--bg3); color:var(--text);
+                   border-radius:5px; padding:2px 4px 2px 7px; font-size:.74rem; font-family:'Cascadia Code',ui-monospace,monospace; }
+.tagpop .tagchip button { border:none; background:none; color:var(--dim); cursor:pointer; font-size:.85rem; padding:0 2px; }
+.tagpop .tagchip button:hover { color:var(--accent); }
+.tagpop .tagadd { display:flex; gap:5px; padding:4px 8px 6px; }
+.tagpop .taginput { flex:1; background:var(--bg); color:var(--text); border:1px solid var(--bg3); border-radius:5px;
+                    padding:3px 6px; font-size:.76rem; font-family:'Cascadia Code',ui-monospace,monospace; }
+.tagpop .tagaddbtn { border:1px solid var(--bg3); background:none; color:var(--dim); cursor:pointer;
+                     border-radius:5px; padding:2px 9px; font-size:.72rem; }
+.tagpop .tagaddbtn:hover { color:var(--accent); border-color:var(--accent); }
+.cellhead .tagbtn.on { color:var(--accent); }
 .cellhead .autoctl { color:var(--dim); }
 .cellhead .autoctl.on { color:var(--accent); }
 #nb { position:relative; }

@@ -80,6 +80,69 @@ async function applyControlPicker() {
   renderAll(await api('POST', '/api/controls', { map: { [id]: cols } }));
 }
 function hideControlPicker() { document.getElementById('ctlpop').classList.remove('show'); }
+
+// ── Cell tag editor (🏷) ────────────────────────────────────────────────────────────────────────
+// The `#%%` header isn't editable in the browser, so tags are set here: known behaviour tags as
+// checkboxes + free-form custom tags as chips. Each change POSTs the full tag set to /api/tags/<id>.
+// #tagpop lives outside #nb so it survives renderAll and stays open across edits.
+const TAG_INFO = [
+  ['collapsed', 'fold the whole cell'],
+  ['hidecode', 'hide the editor — show only the output'],
+  ['trace', 'trace — inspect each value (re-runs the cell)'],
+  ['nocache', "don't cache this cell (impure / side-effecting)"],
+];
+function _curTags(id) { const c = _cellById(id); return (c && c.tags) ? c.tags.slice() : []; }
+function _knownTagSet() { return new Set(TAG_INFO.map(t => t[0])); }
+
+function renderTagPop(pop, id) {
+  const tags = new Set(_curTags(id)), known = _knownTagSet();
+  const custom = _curTags(id).filter(t => !known.has(t));
+  const row = (n, desc) =>
+    `<label class="ctlrow"><input type="checkbox" data-tag="${n}"${tags.has(n) ? ' checked' : ''}>` +
+    `<span>${n}<span class="tagdesc">${_escc(desc)}</span></span></label>`;
+  pop.innerHTML =
+    '<div class="ctlhead">Cell tags</div>' +
+    TAG_INFO.map(t => row(t[0], t[1])).join('') +
+    '<div class="ctlsub">custom</div>' +
+    '<div class="tagchips">' +
+      (custom.length ? custom.map(t => `<span class="tagchip">${_escc(t)}<button data-del="${_escc(t)}" title="remove">×</button></span>`).join('')
+                     : '<span class="tagnone">none</span>') +
+    '</div>' +
+    '<div class="tagadd"><input type="text" class="taginput" placeholder="add tag…" maxlength="40"><button class="tagaddbtn">add</button></div>';
+  pop.querySelectorAll('input[data-tag]').forEach(cb => cb.onchange = () => applyTagChecks(id));
+  pop.querySelectorAll('.tagchip button').forEach(b => b.onclick = () => setTags(id, _curTags(id).filter(x => x !== b.dataset.del)));
+  const inp = pop.querySelector('.taginput'), add = pop.querySelector('.tagaddbtn');
+  const doAdd = () => { const v = inp.value.trim(); if (v) setTags(id, [...new Set([..._curTags(id), v])]); };
+  add.onclick = doAdd;
+  inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); doAdd(); } };
+}
+function applyTagChecks(id) {
+  const pop = document.getElementById('tagpop');
+  const checked = [...pop.querySelectorAll('input[data-tag]:checked')].map(cb => cb.dataset.tag);
+  const custom = _curTags(id).filter(t => !_knownTagSet().has(t));
+  setTags(id, [...new Set([...checked, ...custom])]);
+}
+async function setTags(id, tags) {
+  renderAll(await api('POST', '/api/tags/' + id, { tags }));
+  const pop = document.getElementById('tagpop');
+  if (pop.dataset.cell === id && pop.classList.contains('show')) renderTagPop(pop, id);   // refresh from new state
+}
+function openTagEditor(id, ev) {
+  if (ev) ev.stopPropagation();
+  const pop = document.getElementById('tagpop');
+  pop.dataset.cell = id;
+  renderTagPop(pop, id);
+  const anchor = (ev && ev.currentTarget) ? ev.currentTarget : document.querySelector(`#cell-${id} .tagbtn`);
+  const r = anchor.getBoundingClientRect();
+  pop.classList.add('show');
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  pop.style.top = Math.min(r.bottom + 5, window.innerHeight - h - 8) + 'px';
+}
+function hideTagEditor() { document.getElementById('tagpop').classList.remove('show'); }
+document.addEventListener('mousedown', e => {
+  if (!e.target.closest('#tagpop') && !e.target.closest('.tagbtn')) hideTagEditor();
+});
 // Fold / unfold a cell. Persisted in the .jl (header `collapsed` token) so it travels with the
 // notebook; the server returns fresh state and renderAll reflects it.
 async function toggleCollapse(id) {

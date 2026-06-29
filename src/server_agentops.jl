@@ -680,6 +680,28 @@ function set_trace!(nb::LiveNotebook, id::AbstractString, trace::Bool)
     return nb
 end
 
+# Replace a cell's user TAGS from the editor UI — the known behaviour tags (collapsed / hidecode /
+# trace / nocache) plus any free-form metadata. The only internal flag, `:opaque`, is re-derived by
+# dependency inference each eval, so it's preserved here. Toggling `trace` changes the eval result, so
+# re-stale the cell in that case (mirrors set_trace!).
+function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
+    lock(nb.lock) do
+        i = _index_of(nb.report.cells, id); i === nothing && return nb
+        c = nb.report.cells[i]
+        had_trace = :trace in c.flags
+        want = Set{Symbol}()
+        for t in tags
+            s = strip(String(t)); isempty(s) && continue
+            push!(want, Symbol(replace(s, r"[^A-Za-z0-9_]+" => "_")))
+        end
+        keep = Set(f for f in c.flags if f === :opaque)        # re-derived each eval — keep it
+        empty!(c.flags); union!(c.flags, keep); union!(c.flags, want)
+        (had_trace != (:trace in c.flags)) && (c.state = STALE)
+        _persist!(nb)
+    end
+    return nb
+end
+
 function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; source = nothing)
     cells = nb.report.cells
     i = _index_of(cells, id); i === nothing && return nb

@@ -210,32 +210,35 @@ function _parse_controls(s::AbstractString)
     return cols
 end
 
-"Parse a header line's trailing tokens into (kind, id, controls, collapsed, hidecode, trace)."
+# Flags Slate manages internally (never written to / read from the header). `:opaque` is re-derived
+# every eval by dependency inference, so it must never be serialized as a tag.
+const _INTERNAL_FLAGS = Set{Symbol}([:opaque])
+# Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
+# token is kept verbatim as a free-form tag — inert metadata that still round-trips.
+const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache)
+
+"Parse a header line's trailing tokens into (kind, id, controls, tags::Vector{Symbol}). Every token
+that isn't `id=`/`controls=`/`code`/`md` becomes a tag flag (known ones drive behaviour; the rest are
+free-form metadata that round-trips)."
 function _parse_header(rest::AbstractString)
     kind = CODE
     id = nothing
     controls = Vector{String}[]
-    collapsed = false
-    hidecode = false
-    trace = false
+    tags = Symbol[]
     for tok in split(strip(rest))
         if startswith(tok, "id=")
             id = tok[4:end]
         elseif startswith(tok, "controls=")
             controls = _parse_controls(tok[10:end])
-        elseif tok == "collapsed"           # folded in the UI (view-only; travels in the .jl)
-            collapsed = true
-        elseif tok == "hidecode"            # code editor hidden, output shown (clean plots)
-            hidecode = true
-        elseif tok == "trace"               # wrap cell in @trace on eval (inline value tracing)
-            trace = true
         elseif tok == "md" || tok == "markdown"
             kind = MARKDOWN
         elseif tok == "code"
             kind = CODE
+        else
+            push!(tags, Symbol(tok))        # collapsed | hidecode | trace | nocache | <free-form>
         end
     end
-    return kind, id, controls, collapsed, hidecode, trace
+    return kind, id, controls, tags
 end
 
 "Deterministic short id from a cell's content + position (used when none given)."
@@ -293,9 +296,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     had_header = false                    # current cell came from an explicit header
     body = String[]
 
-    coll = false                          # `collapsed` flag of the current explicit header
-    hidec = false                         # `hidecode` flag of the current explicit header
-    trc = false                           # `trace` flag of the current explicit header
+    tags = Symbol[]                       # header tag flags of the current explicit cell
     function flush!()
         trimmed = _strip_blank_edges(body)
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
@@ -304,24 +305,20 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
             id_ = cid === nothing ? _auto_id(kind, src, idx) : cid
             cell = Cell(id_, kind, src)
             cell.controls = ctrls
-            coll && push!(cell.flags, :collapsed)
-            hidec && push!(cell.flags, :hidecode)
-            trc && push!(cell.flags, :trace)
+            for t in tags; push!(cell.flags, t); end
             push!(report.cells, cell)
         end
         empty!(body)
         had_header = false
         ctrls = Vector{String}[]
-        coll = false
-        hidec = false
-        trc = false
+        tags = Symbol[]
     end
 
     for line in lines
         m = match(_HEADER, line)
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
-            kind, cid, ctrls, coll, hidec, trc = _parse_header(m.captures[1])
+            kind, cid, ctrls, tags = _parse_header(m.captures[1])
             explicit = true
             had_header = true
         elseif explicit                   # verbatim body of an explicit cell
@@ -393,9 +390,10 @@ _controls_str(cols) = join((length(col) == 1 ? col[1] : "[" * join(col, ",") * "
 function _cell_source(cell::Cell)
     header = "#%% $(_kind_token(cell.kind)) id=$(cell.id)"
     isempty(cell.controls) || (header *= " controls=" * _controls_str(cell.controls))
-    (:collapsed in cell.flags) && (header *= " collapsed")
-    (:hidecode in cell.flags) && (header *= " hidecode")
-    (:trace in cell.flags) && (header *= " trace")
+    # Known tags first (stable order), then any free-form ones (sorted); internal flags never emit.
+    for t in _KNOWN_TAGS; (t in cell.flags) && (header *= " " * string(t)); end
+    extra = sort!([string(f) for f in cell.flags if !(f in _INTERNAL_FLAGS) && !(f in _KNOWN_TAGS)])
+    for t in extra; header *= " " * t; end
     return isempty(cell.source) ? header : "$header\n$(cell.source)"
 end
 

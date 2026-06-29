@@ -315,6 +315,9 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
     (:trace in c.flags) && (d["trace"] = true)           # @trace-wrapped on eval (collects trace rows)
+    # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
+    # `:opaque` is inferred each eval, not a user tag, so it's excluded.
+    d["tags"] = sort!(String[string(f) for f in c.flags if f !== :opaque])
     if c.output !== nothing && c.output.exception !== nothing
         el = ReportRender._cell_error_line(c.output, c.id)   # offending cell line → editor highlight + jump
         el === nothing || (d["errorLine"] = el)
