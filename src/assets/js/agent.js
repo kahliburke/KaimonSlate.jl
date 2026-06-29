@@ -125,30 +125,44 @@ function mdLite(src) {
   return html.replace(/(\d+)/g, (_, i) => stash[+i]);   // restore spans that landed inline
 }
 let _suppressAgentRender = false;   // set during bulk replay (loadAgentLog) → render once at the end
+function _agentMsgHtml(m) {
+  const lane = m.crew ? ` lane` : '';
+  const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
+  return (
+      m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
+    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}${m.result ? `<pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(m.result)}</pre>` : ''}</div>`
+    : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
+    :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
+}
+const _nodeFromHtml = h => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstChild; };
 function renderAgentMsgs() {
   if (_suppressAgentRender) return;   // skip per-event re-renders during a replay (O(n²) markdown+KaTeX)
   const el = document.getElementById('apmsgs');
   // Stick to the bottom ONLY if you're already near it — so you can scroll up to read a streaming
   // reply without it yanking you back down. Scroll to the bottom and it resumes auto-following.
   const stick = (el.scrollHeight - el.scrollTop - el.clientHeight) < 80;
-  let html = agentMsgs.map(m => {
-    const lane = m.crew ? ` lane` : '';
-    const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
-    return (
-      m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
-    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}${m.result ? `<pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(m.result)}</pre>` : ''}</div>`
-    : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
-    :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
-  }).join('');
+  // Reconcile per-message: only (re)build a message node whose content changed, so EARLIER messages
+  // keep their live DOM — and the scroll position inside a tool-output/code block isn't reset to the
+  // top every streaming delta. Completed-and-rendered messages are skipped entirely (cheap streaming).
+  el.querySelectorAll(':scope > .apworking').forEach(n => n.remove());   // drop indicator → indices align
+  const changed = [];
+  for (let i = 0; i < agentMsgs.length; i++) {
+    const m = agentMsgs[i], node = el.children[i];
+    if (node && m.done && node.dataset.done === '1') continue;          // immutable completed msg → leave it
+    const html = _agentMsgHtml(m);
+    if (!node) { const n = _nodeFromHtml(html); n.dataset.h = html; n.dataset.done = m.done ? '1' : '0'; el.appendChild(n); changed.push(n); }
+    else if (node.dataset.h !== html) { const n = _nodeFromHtml(html); n.dataset.h = html; n.dataset.done = m.done ? '1' : '0'; el.replaceChild(n, node); changed.push(n); }
+    else node.dataset.done = m.done ? '1' : '0';
+  }
+  while (el.children.length > agentMsgs.length) el.removeChild(el.lastChild);   // drop trailing extras
   if (agentWorking) {
     const s = Math.max(0, Math.floor((Date.now() - agentT0) / 1000));
-    html += `<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` +
-      `<button class="apstop" style="margin-left:10px;cursor:pointer" onclick="agentStop()">${_stopArmed ? '⛔ Force stop' : '⏹ Stop'}</button></div>`;
+    const w = _nodeFromHtml(`<div class="apworking"><span class="dots"><i></i><i></i><i></i></span>working… ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` +
+      `<button class="apstop" style="margin-left:10px;cursor:pointer" onclick="agentStop()">${_stopArmed ? '⛔ Force stop' : '⏹ Stop'}</button></div>`);
+    el.appendChild(w);
   }
-  el.innerHTML = html;
-  // Render LaTeX in the assistant replies (math was stashed verbatim through mdLite). typeset is
-  // idempotent over already-rendered KaTeX, so re-running each delta only touches new text nodes.
-  if (window.typeset) el.querySelectorAll('.apmd').forEach(m => { try { typeset(m); } catch (_) {} });
+  // Typeset LaTeX only in the message nodes we just (re)built — completed ones keep their rendered math.
+  if (window.typeset) changed.forEach(n => { if (n.classList && n.classList.contains('apmd')) { try { typeset(n); } catch (_) {} } });
   if (stick) el.scrollTop = el.scrollHeight;
 }
 // Replay the buffered conversation after a page reload (in-memory agentMsgs is
