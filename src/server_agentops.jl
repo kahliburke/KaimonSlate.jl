@@ -239,9 +239,19 @@ function _outline_cell!(io::IO, c::Cell)
     kind = c.kind == MARKDOWN ? "md" : "code"
     print(io, "\nid=", rpad(c.id, 16), " [", kind, ",", lowercase(string(c.state)), "]")
     if c.kind == MARKDOWN
-        first = ""
-        for ln in split(c.source, '\n'); s = strip(ln); isempty(s) || (first = s; break); end
-        isempty(first) || print(io, "  ", _trunc(first, 90))
+        # The heading (first non-blank line) plus, when that's a heading, the first body sentence —
+        # a touch more context than a bare title.
+        head = ""; body = ""
+        for ln in split(c.source, '\n')
+            s = strip(ln); isempty(s) && continue
+            if isempty(head)
+                head = s; startswith(head, "#") || break        # prose cell → just its first line
+            elseif !startswith(s, "#")
+                body = s; break
+            end
+        end
+        isempty(head) || print(io, "  ", _trunc(head, 80))
+        isempty(body) || print(io, " — ", _trunc(body, 70))
     else
         defs = sort!(String[string(w) for w in c.writes])
         isempty(defs) || print(io, "  defines: ", _trunc(join(defs, ", "), 70))
