@@ -60,7 +60,30 @@ const _NS = Ref{Module}(_new_ns())
 
 "Evaluate a cell's source in the warm namespace; return the wire-form capture. `filename` (a
 kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`."
-__slate_eval(source::String; filename::String = "string") = run_capture(_NS[], source, filename)
+function __slate_eval(source::String; filename::String = "string")
+    cid = replace(filename, r"^cell:" => "")
+    local r
+    try
+        r = run_capture(_NS[], source, filename)
+    catch e
+        # Capture machinery itself threw (a worker/infra bug, NOT a normal cell error — those are
+        # captured inside run_capture). Log it loudly and return an error wire so the cell shows the
+        # failure and the worker keeps running, instead of the exception vanishing into the gate.
+        @error "slate eval: capture machinery threw" cell = cid exception = (e, catch_backtrace())
+        return (stdout = "", mime = Tuple{String,Vector{UInt8}}[], echarts = Any[], tables = Any[],
+                binds = NamedTuple[], value_repr = "",
+                exception = "internal capture error: " * sprint(showerror, e),
+                backtrace = nothing, duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[])
+    end
+    if r.exception !== nothing
+        @warn "slate eval: cell errored" cell = cid error = first(split(String(r.exception), '\n'))
+    else
+        @info "slate eval: ran cell" cell = cid ms = round(r.duration_ms; digits = 1)
+    end
+    isempty(r.overflow) ||
+        @info "slate eval: output truncated for display — full result saved" cell = cid items = [(String(e.kind), Int(e.bytes)) for e in r.overflow]
+    return r
+end
 
 "Apply a browser `@bind` value change: coerce against the widget, update the registry,
 and assign the global — via the namespace's injected `__slate_set_bind`. Returns the
@@ -70,7 +93,7 @@ function __slate_set_bind(name::String, value)
 end
 
 "Discard the namespace (full rebuild)."
-__slate_reset() = (_NS[] = _new_ns(); true)
+__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _NS[] = _new_ns(); true)
 
 # Flat scalar args only (the gate reflects the signature into an MCP schema — a
 # nested-Dict argument doesn't validate, so we pass page params individually).
@@ -439,6 +462,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int)
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate")
     _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
+    @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a
     # remote `:shutdown` (which calls `exit(0)` from the gate task). Flush each

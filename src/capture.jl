@@ -37,7 +37,9 @@ _cap_text(s::AbstractString, limit::Int = _MAX_OUT_CHARS) =
 # Persist an oversized result so the UI can offer the full thing. Writes (up to _MAX_KEEP_BYTES) to a
 # content-addressed temp file; returns (path, bytes_kept, clipped) or nothing on failure. Same dir on
 # every machine since worker + server share the filesystem (the server serves/links the path).
-_overflow_dir() = (d = joinpath(tempdir(), "kaimon-slate-overflow"); mkpath(d); d)
+# Under $HOME (not tempdir()): the gate worker is spawned with a controlled env and may resolve a
+# DIFFERENT tempdir() than the server, which would then fail to find the file. $HOME is shared.
+_overflow_dir() = (d = joinpath(homedir(), ".cache", "kaimon", "slate-overflow"); mkpath(d); d)
 function _write_overflow(content::AbstractString, ext::AbstractString)
     try
         data = codeunits(String(content))
