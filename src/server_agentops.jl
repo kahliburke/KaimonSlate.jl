@@ -302,14 +302,23 @@ return id + result. One file write (build the cell with its source up front) so 
 async file-watcher can't race the intermediate empty-cell state."
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
-                         caller::AbstractString = "", expected_version::Int = -1)
-    rej = nothing
+                         id::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1)
+    rej = nothing; errmsg = nothing
     cid = lock(nb.lock) do
         rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
         rej === nothing || return ""
         cells = nb.report.cells
+        # An explicit id is sanitized to `#%%`-header-safe chars and MUST be unique; else auto-generate.
+        nid = ""
+        if !isempty(strip(String(id)))
+            nid = replace(strip(String(id)), r"[^A-Za-z0-9_]+" => "_")
+            isempty(nid)                      && (errmsg = "id cannot be empty"; return "")
+            any(c -> c.id == nid, cells)      && (errmsg = "id '$(nid)' is already in use"; return "")
+        else
+            nid = _gen_id(nb.report)
+        end
         i = isempty(after) ? length(cells) : something(_index_of(cells, after), length(cells))
-        cell = Cell(_gen_id(nb.report), kind == "md" ? MARKDOWN : CODE, String(source))
+        cell = Cell(nid, kind == "md" ? MARKDOWN : CODE, String(source))
         _snapshot!(nb)
         insert!(cells, i + 1, cell)
         # announce=true → push the new cell to the browser BEFORE eval, so a long-running
@@ -317,6 +326,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         _commit_structure!(nb, i + 1; announce = true)
         return cell.id
     end
+    errmsg === nothing || return "⛔ $errmsg"
     rej === nothing || return rej
     _renew_floor!(nb, caller)
     _agent_push!(nb)
@@ -337,6 +347,23 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
     _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "edited id=$id →\n$(_result_of(nb, id))"
+end
+
+"Rename a cell's id (its label). Ids must be unique + `#%%`-header-safe; returns a status string."
+function agent_rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractString;
+                            caller::AbstractString = "", expected_version::Int = -1)
+    _cell_exists(nb, oldid) || return "(no cell id=$oldid)"
+    rej = nothing; ok = false; msg = ""
+    lock(nb.lock) do
+        rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        rej === nothing || return
+        ok, msg = rename_cell!(nb, oldid, newid)
+    end
+    rej === nothing || return rej
+    ok || return "⛔ rename failed: $msg"
+    _renew_floor!(nb, caller)
+    _agent_push!(nb)
+    return "renamed $oldid → $(replace(strip(String(newid)), r"[^A-Za-z0-9_]+" => "_"))"
 end
 
 "Run one cell (or recompute all stale if `id` empty); return the result(s)."

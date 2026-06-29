@@ -44,6 +44,24 @@ const NS = KaimonSlate.NotebookServer
             @test length(nb.report.cells) == n0
         end
 
+        @testset "add_cell with an explicit id; rename_cell" begin
+            r = NS.agent_add_cell!(nb, "1 + 1"; id = "my_sum")
+            @test occursin("id=my_sum", r)
+            @test NS._cell_exists(nb, "my_sum")
+            # a taken id errors (no cell added)
+            n0 = length(nb.report.cells)
+            r2 = NS.agent_add_cell!(nb, "2"; id = "my_sum")
+            @test occursin("already in use", r2) && length(nb.report.cells) == n0
+            # non-id characters fold to underscore
+            r3 = NS.agent_add_cell!(nb, "3"; id = "a b!c")
+            @test occursin("id=a_b_c", r3) && NS._cell_exists(nb, "a_b_c")
+            # rename: success, collision, missing
+            @test occursin("renamed my_sum → total", NS.agent_rename_cell!(nb, "my_sum", "total"))
+            @test NS._cell_exists(nb, "total") && !NS._cell_exists(nb, "my_sum")
+            @test occursin("already in use", NS.agent_rename_cell!(nb, "total", "a_b_c"))
+            @test occursin("no cell", NS.agent_rename_cell!(nb, "ghost", "x"))
+        end
+
         @testset "find_live by id and path" begin
             @test NS.find_live(hub, nb.id) === nb
             @test NS.find_live(hub, nbp) === nb

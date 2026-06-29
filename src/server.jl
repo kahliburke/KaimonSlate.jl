@@ -21,7 +21,7 @@ include("history.jl")   # module SlateHistory — durable content-addressed time
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
-export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!
+export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!
 export cell_image, set_snapshot!
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
