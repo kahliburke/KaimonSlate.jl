@@ -33,14 +33,19 @@ end
 # A structural change at index `idx` reorders state, so conservatively restale everything from
 # there on, recompute, and persist. `announce` shows the cell at `idx` (stale) before eval.
 function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false)
-    build_dependencies!(nb.report)
-    for (i, c) in enumerate(nb.report.cells)
-        i >= idx && (c.state = STALE)
+    # Hold nb.lock around deps + restale + persist: with async eval the runner / set_bind! hold the
+    # lock intermittently, so this must serialize against them (else the persist races and is lost,
+    # like the edit_cell! bug). Reentrant — the agent structural paths already hold nb.lock.
+    lock(nb.lock) do
+        build_dependencies!(nb.report)
+        for (i, c) in enumerate(nb.report.cells)
+            i >= idx && (c.state = STALE)
+        end
+        announce && _announce_cell!(nb, idx)
+        _eval!(nb)                       # kick the async runner (non-blocking; safe inside the lock)
+        _persist!(nb)
+        _autoindex!(nb)                  # added/edited cell may introduce a new `using`
     end
-    announce && _announce_cell!(nb, idx)
-    _eval!(nb)                           # kick the async runner (non-blocking; safe inside the lock)
-    _persist!(nb)
-    _autoindex!(nb)                      # added/edited cell may introduce a new `using`
     return nb
 end
 
@@ -50,18 +55,20 @@ end
 # changes → no re-evaluation at all (instant). This replaces the old `_commit_structure!` path that
 # restaled everything by POSITION and re-ran the whole notebook on every click.
 function _commit_reorder!(nb::LiveNotebook)
-    old = Dict{String,Set{String}}(c.id => copy(c.deps) for c in nb.report.cells)
-    build_dependencies!(nb.report)
-    changed = Set{String}(c.id for c in nb.report.cells if get(old, c.id, nothing) != c.deps)
-    if !isempty(changed)
-        restale = dependents_of(nb.report, changed)   # the changed cells + everything downstream
-        for c in nb.report.cells
-            c.id in restale && (c.state = STALE)
+    lock(nb.lock) do                     # serialize deps + restale + persist vs the async runner (reentrant)
+        old = Dict{String,Set{String}}(c.id => copy(c.deps) for c in nb.report.cells)
+        build_dependencies!(nb.report)
+        changed = Set{String}(c.id for c in nb.report.cells if get(old, c.id, nothing) != c.deps)
+        if !isempty(changed)
+            restale = dependents_of(nb.report, changed)   # the changed cells + everything downstream
+            for c in nb.report.cells
+                c.id in restale && (c.state = STALE)
+            end
+            _eval!(nb)                   # kick the async runner (non-blocking; safe inside the lock)
+            _autoindex!(nb)
         end
-        _eval!(nb)                       # kick the async runner (non-blocking; safe inside the lock)
-        _autoindex!(nb)
+        _persist!(nb)
     end
-    _persist!(nb)
     return nb
 end
 
@@ -552,10 +559,12 @@ function rename_cell!(nb::LiveNotebook, oldid::AbstractString, newid::AbstractSt
     i === nothing && return (false, "no such cell")
     nid == oldid && return (true, "")
     any(c -> c.id == nid, nb.report.cells) && return (false, "id $(nid) is already in use")
-    _snapshot!(nb)
-    nb.report.cells[i].id = String(nid)
-    build_dependencies!(nb.report)
-    _persist!(nb)
+    lock(nb.lock) do                     # serialize the mutation + persist vs the async runner (reentrant)
+        _snapshot!(nb)
+        nb.report.cells[i].id = String(nid)
+        build_dependencies!(nb.report)
+        _persist!(nb)
+    end
     return (true, "")
 end
 
@@ -637,13 +646,15 @@ end
 # names (`[[a,b],[c]]`); empty columns are dropped.
 function set_controls_map!(nb::LiveNotebook, map)
     isempty(map) && return nb
-    _snapshot!(nb)
-    for (id, cols) in map
-        i = _index_of(nb.report.cells, id); i === nothing && continue
-        cleaned = Vector{String}[String[String(n) for n in col] for col in cols]
-        nb.report.cells[i].controls = filter(!isempty, cleaned)
+    lock(nb.lock) do                     # serialize the mutation + persist vs the async runner
+        _snapshot!(nb)
+        for (id, cols) in map
+            i = _index_of(nb.report.cells, id); i === nothing && continue
+            cleaned = Vector{String}[String[String(n) for n in col] for col in cols]
+            nb.report.cells[i].controls = filter(!isempty, cleaned)
+        end
+        _persist!(nb)
     end
-    _persist!(nb)
     return nb
 end
 
