@@ -128,6 +128,63 @@ function Base.display(d::_CaptureDisplay, x)
     throw(MethodError(display, (d, x)))   # let the stack fall through to text
 end
 
+# A task-local capture display for the worker's PARALLEL evaluators. One instance is pushed onto the
+# display stack ONCE (at worker start); each `display(x)` routes to the CURRENT task's chunk vector
+# (set in task-local storage by DemuxCapture), so concurrent cells don't cross-capture. Non-cell tasks
+# (no `:slate_chunks`) fall through to the rest of the stack.
+struct _DemuxDisplay <: AbstractDisplay end
+function Base.display(d::_DemuxDisplay, x)
+    chunks = get(task_local_storage(), :slate_chunks, nothing)
+    (chunks !== nothing && _capture_rich!(chunks, x)) && return nothing
+    throw(MethodError(display, (d, x)))
+end
+
+# ── Output-capture strategy (pluggable) ─────────────────────────────────────────────────────────
+# `run_capture` redirects a cell's stdout/stderr/display while it evals. That's PROCESS-GLOBAL, fine
+# for the one-at-a-time in-process kernel — but the gate worker runs a POOL of cells at once, so it
+# needs TASK-LOCAL capture instead. Both implement the same 3-step contract; run_capture is otherwise
+# identical, so all the value/MIME/binds/trace/overflow logic is shared.
+abstract type OutputCapture end
+
+# Process-global redirect + pushdisplay — one cell at a time (in-process kernel, and the worker's
+# serial lane). Exactly the original behaviour.
+mutable struct RedirectCapture <: OutputCapture
+    disp::Any; orig_out::Any; rd::Any; wr::Any; reader::Any; orig_err::Any; rde::Any; wre::Any; ereader::Any
+    RedirectCapture() = new(ntuple(_ -> nothing, 9)...)
+end
+function _begin_capture!(c::RedirectCapture, chunks)
+    c.disp = _CaptureDisplay(chunks); pushdisplay(c.disp)
+    c.orig_out = stdout; (c.rd, c.wr) = redirect_stdout(); c.reader = @async read(c.rd, String)
+    c.orig_err = stderr; (c.rde, c.wre) = redirect_stderr(); c.ereader = @async read(c.rde, String)
+    return nothing
+end
+_logio(c::RedirectCapture) = stderr        # the (now redirected) stderr
+function _finish_capture!(c::RedirectCapture)
+    redirect_stdout(c.orig_out); redirect_stderr(c.orig_err)
+    close(c.wr); close(c.wre)
+    try; popdisplay(c.disp); catch; end
+    return (fetch(c.reader), fetch(c.ereader))
+end
+
+# Task-local capture via the worker's installed DemuxIO + _DemuxDisplay (see demux.jl). Concurrency-
+# safe: every key lives in THIS task's storage, so parallel evaluators never share a buffer. Requires
+# the demux to be installed as Base.stdout/stderr and a `_DemuxDisplay` on the stack (worker start).
+mutable struct DemuxCapture <: OutputCapture
+    out::IOBuffer; err::IOBuffer
+    DemuxCapture() = new(IOBuffer(), IOBuffer())
+end
+function _begin_capture!(c::DemuxCapture, chunks)
+    tls = task_local_storage()
+    tls[:slate_out] = c.out; tls[:slate_err] = c.err; tls[:slate_chunks] = chunks
+    return nothing
+end
+_logio(::DemuxCapture) = stderr            # stderr IS the demux → routes to this task's :slate_err
+function _finish_capture!(c::DemuxCapture)
+    tls = task_local_storage()
+    for k in (:slate_out, :slate_err, :slate_chunks); haskey(tls, k) && delete!(tls, k); end
+    return (String(take!(c.out)), String(take!(c.err)))
+end
+
 # Drop a trailing `# …` line comment, ignoring `#` inside a "…" string (so
 # `foo("#");` keeps its `;`). Only `"` strings are tracked — `'` is left alone to
 # avoid confusing adjoint (`a'`) with a char literal.
@@ -217,20 +274,13 @@ Returns the wire form:
   duration_ms::Float64)`. `binds` are the `@bind` controls declared this eval
 (`(name, kind, params, value)` each), for the host to render.
 """
-function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string")
+function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
+                     capture::OutputCapture = RedirectCapture())
     chunks = Tuple{String,Vector{UInt8}}[]
-    capture = _CaptureDisplay(chunks)
-    pushdisplay(capture)
-    original = stdout
-    (rd, wr) = redirect_stdout()
-    reader = @async read(rd, String)
-    # Also capture stderr — `@warn`/`@info`/`@error` and any `print(stderr,…)` (deprecation and
-    # soft-scope notices, user warnings). redirect_stderr catches direct writes; a `ConsoleLogger`
-    # on that redirected stream (installed for the eval task below) catches the logging macros,
-    # whose default logger would otherwise hold the original stderr.
-    origerr = stderr
-    (rde, wre) = redirect_stderr()
-    ereader = @async read(rde, String)
+    # Begin output capture (stdout/stderr + display) via the strategy: process-global redirect for the
+    # in-process/serial kernel, or task-local demux for the worker's parallel evaluators. The strategy
+    # captures the SAME `chunks` (display) + provides the stderr the logger writes to.
+    _begin_capture!(capture, chunks)
 
     # Collect `@bind` controls declared during this eval — the namespace's injected
     # `__slate_bind` pushes to this sink. Absent on bare modules (e.g. tests) → no-op.
@@ -244,13 +294,13 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     value = nothing
     err = nothing
     btrace = nothing
+    raw_out = ""; raw_err = ""
     t0 = time_ns()
     try
-        # `ConsoleLogger(stderr)` — `stderr` is the redirected pipe now, so the macros land in
-        # `ereader`. Non-colored (a pipe isn't a color tty), so no ANSI escapes reach the browser.
-        # Console logger for @warn/@info/@error (→ ereader), wrapped so ProgressLogging
-        # `@progress`/`progress=…` records drive the cell meter instead of printing.
-        _logger = _ProgressLogger(Logging.ConsoleLogger(stderr), _progress_sink(mod))
+        # ConsoleLogger on the captured stderr (`_logio`), so @warn/@info/@error land in this cell's
+        # stream. Non-colored (not a color tty), wrapped so ProgressLogging `@progress` records drive
+        # the cell meter instead of printing.
+        _logger = _ProgressLogger(Logging.ConsoleLogger(_logio(capture)), _progress_sink(mod))
         Logging.with_logger(_logger) do
             value = _eval_cell_source(mod, source, filename)
         end
@@ -258,11 +308,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         err = e
         btrace = catch_backtrace()
     finally
-        redirect_stdout(original)
-        redirect_stderr(origerr)
-        close(wr)
-        close(wre)
-        popdisplay(capture)
+        raw_out, raw_err = _finish_capture!(capture)
     end
     # Guard `sinkref[] === nothing` too (a cold-worker race can leave the bind sink uninitialised),
     # else `copy(nothing)` throws and the whole eval errors. Mirrors the trace-sink guard below.
@@ -272,8 +318,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
     overflow = NamedTuple[]                       # full results saved to disk for "open full output"
-    stdout_str = _cap_keep!(overflow, "stdout", fetch(reader), "txt")
-    stderr_str = _cap_keep!(overflow, "stderr", fetch(ereader), "txt")
+    stdout_str = _cap_keep!(overflow, "stdout", raw_out, "txt")
+    stderr_str = _cap_keep!(overflow, "stderr", raw_err, "txt")
     dur_ms = (time_ns() - t0) / 1e6
 
     # Capture the return value: an ECharts spec / a table are kept raw (reduced to

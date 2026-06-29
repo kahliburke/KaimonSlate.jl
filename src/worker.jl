@@ -34,6 +34,7 @@ include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value t
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
+include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (parallel evaluator I/O isolation)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 
@@ -174,7 +175,7 @@ function __slate_eval(source::String; filename::String = "string",
     end
     local r
     try
-        r = run_capture(_NS[], source, filename)
+        r = run_capture(_NS[], source, filename; capture = DemuxCapture())
     catch e
         # Capture machinery itself threw (a worker/infra bug, NOT a normal cell error — those are
         # captured inside run_capture). Log it loudly and return an error wire so the cell shows the
@@ -217,7 +218,7 @@ __slate_table_page(table_id::String, page::Int, page_size::Int, sort_col::Int, s
     _provider_page(table_id, PageRequest(page, page_size, sort_col, sort_desc, search))
 
 "Capture markdown `{{ }}` interpolation expressions (rich) — one wire-form each."
-__slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e) for e in exprs]
+__slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e; capture = DemuxCapture()) for e in exprs]
 
 "Completion candidates in the warm namespace → `(; items, from, to)` (see `slate_completions`)."
 __slate_complete(code::String, pos::Int) = slate_completions(_NS[], code, pos)
@@ -620,6 +621,12 @@ Run the worker gate over TCP, exposing the capture tools. Blocks (this is the
 worker process's main loop).
 """
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int)
+    # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
+    # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
+    # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
+    # all cell capture in this process MUST use DemuxCapture (RedirectCapture's restore can't redirect
+    # back to the custom IO).
+    try; install_demux!(); pushdisplay(_DemuxDisplay()); catch e; @warn "slate: demux install failed" exception = e; end
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate")
