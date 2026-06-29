@@ -290,10 +290,16 @@ function _agent_system_prompt(nb::LiveNotebook)
     toolset drives it — their schemas describe each; every slate tool takes `notebook="$(nb.id)"`.
 
     Change the notebook's CELLS through the slate tools (slate_add_cell / slate_edit_cell / slate_run /
-    slate_delete_cell / slate_rename_cell), not by hand-editing the .jl — that fights the running
-    engine. Everything ELSE in the project is fair game and encouraged when the task calls for it: read
-    and edit the package's `src/`, run code with `ex` / start a Julia session, and use the wider Kaimon
-    tools (search_code, goto_definition, run_tests, …).
+    slate_delete_cell / slate_rename_cell), not by hand-editing the .jl — that fights the running engine.
+
+    ITERATING ON THE PACKAGE'S OWN CODE: the notebook's worker is a LIVE Julia session in this project's
+    env with Revise active — it IS your REPL and test harness, so you don't need a separate session.
+      1. Edit the package's `src/` with your file tools (function bodies, struct changes, and new files
+         are all hot-reloaded). Add a dependency with the `pkg_add` tool.
+      2. Re-run the cell(s) that exercise the change (slate_run) to see new results live; if nothing
+         exercises it yet, add a small cell that calls it.
+    Use the wider Kaimon tools (search_code, goto_definition, run_tests, pkg_add, …) to navigate and
+    manage the project. (If a change genuinely doesn't take, ↻ Restart worker.)
 
     ORIENT: `slate_read(notebook="$(nb.id)")` maps the notebook — a compact OUTLINE (each cell's id,
     kind, what it DEFINES, a one-line result) plus a STATE TOKEN. It is NOT the full notebook; read the
