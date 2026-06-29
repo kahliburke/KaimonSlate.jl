@@ -35,7 +35,7 @@ using .ReportRender
 using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
                       find_live, notebook_digest,
-                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!,
+                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand
