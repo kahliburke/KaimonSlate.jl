@@ -130,7 +130,7 @@ function _agentMsgHtml(m) {
   const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
   return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
-    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}${m.result ? `<pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(m.result)}</pre>` : ''}</div>`
+    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.cid ? ` <span class="toolnav" data-cid="${_esca(m.cid)}" title="go to cell ${_esca(m.cid)}">→ ${_esca(m.cid)}</span>` : ''}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}${m.result ? `<pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(m.result)}</pre>` : ''}</div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
     :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
 }
@@ -165,6 +165,13 @@ function renderAgentMsgs() {
   if (window.typeset) changed.forEach(n => { if (n.classList && n.classList.contains('apmd')) { try { typeset(n); } catch (_) {} } });
   if (stick) el.scrollTop = el.scrollHeight;
 }
+// Click the "→ id" chip on an agent tool message → jump to the cell it added/edited/ran.
+(() => { const el = document.getElementById('apmsgs'); if (!el) return;
+  el.addEventListener('click', e => {
+    const t = e.target.closest('.toolnav'); if (!t || !t.dataset.cid) return;
+    try { window.selectCell && window.selectCell(t.dataset.cid, true); } catch (_) {}
+  });
+})();
 // Replay the buffered conversation after a page reload (in-memory agentMsgs is
 // gone, but the server kept every relayed envelope). Idempotent — clears first.
 async function loadAgentLog() {
@@ -245,6 +252,15 @@ function _extractCode(s) {
   }
   return '';
 }
+// Cell id a cell-tool call targets, from its args — for the click-to-navigate chip.
+function _argCid(args) {
+  if (!args || typeof args !== 'object') return '';
+  for (const k of ['cell', 'newid', 'id', 'after']) {
+    const v = args[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
+}
 function agentEvent(env) {
   if (!env) return;
   const d = env.data || {};
@@ -276,7 +292,7 @@ function agentEvent(env) {
     if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
     tm.title = _prettyTool(c.title || c.kind || tm.title || 'tool');
     tm.text = tm.title;
-    if (c.rawInput) tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code;
+    if (c.rawInput) { tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code; const cc = _argCid(c.rawInput); cc && (tm.cid = cc); }
   } else if (k === 'tool_input_delta') {
     // The call's arguments stream as raw JSON fragments — concatenate, then
     // tolerant-extract the field being written (source/code/new_string/…) so the
@@ -294,6 +310,12 @@ function agentEvent(env) {
       const inner = b && b.content;
       if (inner && inner.type === 'image' && inner.data)
         agentMsgs.push({ role: 'img', src: `data:${inner.mimeType || 'image/png'};base64,${inner.data}`, crew });
+      else if (tm && inner && inner.type === 'text' && inner.text) {
+        // The cell tools return "added id=X" / "edited id=X" / "renamed a → b" — the authoritative
+        // affected/created cell id; prefer it over the args guess for the navigate-to-cell chip.
+        const m2 = String(inner.text).match(/\bid=(\w+)|renamed \w+ → (\w+)/);
+        if (m2) tm.cid = m2[1] || m2[2];
+      }
     }
   } else if (k === 'plan') {
     const lines = (d.entries || []).map(e => `• ${e.content}${e.status === 'completed' ? ' ✓' : ''}`).join('\n');

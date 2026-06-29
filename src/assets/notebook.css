@@ -564,6 +564,10 @@ input.toggle:checked::after { left:18px; }
 .apmsg.tool .toolcode { margin:4px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#cdd3e6; }
 .apmsg.tool .toolresult { margin:2px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-left:2px solid var(--accent); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--green,#56d364); }
 .apmsg.tool .toolresult.err { border-left-color:var(--red,#e57575); color:var(--red,#e57575); }
+/* Click-to-navigate chip on an agent tool message (the cell it added/edited/ran). */
+.apmsg.tool .toolnav { cursor:pointer; color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius:5px; padding:0 5px; font-family:'Cascadia Code',monospace; font-size:.7rem; white-space:nowrap; }
+.apmsg.tool .toolnav:hover { background:color-mix(in srgb, var(--accent) 18%, transparent); color:var(--strong); }
 .apmsg.err { align-self:flex-start; color:var(--red); }
 .apmsg.note { align-self:center; background:none; color:var(--dim); font-size:.74rem; padding:2px 6px; max-width:100%; }
 .apmsg.think { align-self:flex-start; background:none; color:var(--dim); font-style:italic; font-size:.78rem; border-left:2px solid var(--bg3); border-radius:0; padding:2px 0 2px 9px; }
