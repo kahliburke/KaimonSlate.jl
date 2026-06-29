@@ -141,7 +141,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
             lock(nb.lock) do; nb.kernel = kernel; nb.version += 1; end
             try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
             lock(nb.lock) do
-                eval_stale!(nb.report, kernel)       # initial full run (streams cells)
+                _eval!(nb)                           # initial full run (streams cells via the async runner)
                 delete!(nb.report.meta, "hydrating")
                 nb.version += 1
             end
@@ -175,7 +175,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
             nb.kernel = kernel
             delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
             delete!(nb.report.meta, "hydrating")
-            eval_stale!(nb.report, kernel)           # run everything in the reconstructed env
+            _eval!(nb)                               # run everything in the reconstructed env (async runner)
             nb.version += 1
         end
         _history!(nb; source = "open")
@@ -211,7 +211,7 @@ function server_refresh(nb::LiveNotebook, vars)
             i = _index_of(nb.report.cells, id)
             i === nothing || (nb.report.cells[i].state = STALE; push!(changed, id))
         end
-        eval_stale!(nb.report, nb.kernel)
+        _eval!(nb)
         # Push ONLY the cells that recomputed (seed + dependents), inline in the event — the browser
         # patches just those (charts `setOption`, output swap) instead of pulling the whole state.
         bindref, hostednames = _bind_index(nb.report)
@@ -239,6 +239,136 @@ function _broadcast_progress(nb::LiveNotebook, cell)
     end
     return nothing
 end
+
+# ── Async eval runner ─────────────────────────────────────────────────────────────────────────
+# Cell eval used to run synchronously on the caller's thread, holding nb.lock and bounded by the
+# gate request timeout — so a long cell blocked the whole notebook (no add/edit while running) and
+# could time out mid-compute. Instead, a SINGLE per-notebook background runner drains stale cells
+# serially; it holds nb.lock only to mutate cell state / merge a result, and RELEASES it during the
+# (long) eval_capture. So structural edits proceed while a cell computes, results stream over SSE
+# (cellrun/celldone) exactly as before, and the gate request is no longer the wall (see _eval_timeout).
+# Serial = one runner per notebook (the worker is single-namespace); new stale cells are picked up by
+# the running loop. Version-guarded: a cell edited/deleted mid-run discards its in-flight result.
+const _RUNNERS = Dict{String,Bool}()          # nb.id → a runner task is active
+const _RUNNER_LOCK = ReentrantLock()
+
+# Next stale cell to run, in eval_stale!'s order: static markdown (no reads) first, then doc order.
+function _next_stale_cell(report)
+    for c in report.cells
+        c.kind == MARKDOWN && c.state == STALE && isempty(c.reads) && return c
+    end
+    for c in report.cells
+        c.state == STALE && return c
+    end
+    return nothing
+end
+
+# Evaluate ONE cell with the lock-release discipline. Markdown (fast interp) runs under the lock;
+# code marks RUNNING + announces under the lock, evals WITHOUT it, then merges under the lock iff the
+# cell still exists unchanged (src_hash match) — else the result is from a superseded run, discarded.
+function _eval_one!(nb::LiveNotebook, cell::Cell)
+    if cell.kind == MARKDOWN
+        lock(nb.lock) do; ReportEngine.eval_cell!(nb.report, cell, nb.kernel); end
+        return nothing
+    end
+    src, srchash, memo = lock(nb.lock) do
+        cell.state = RUNNING
+        _broadcast_progress(nb, cell)
+        s = (:trace in cell.flags) ? string("@trace begin ", cell.source, "\nend") : cell.source
+        m = (key = ReportEngine._memo_key(nb.report, cell),
+             names = String[string(w) for w in cell.writes],
+             threshold = ReportEngine._MEMO_THRESHOLD_MS)
+        (s, cell.src_hash, m)
+    end
+    out = try
+        ReportEngine.eval_capture(nb.kernel, nb.report, src, "cell:" * cell.id, memo)
+    catch e
+        ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
+                                "", sprint(showerror, e), nothing, 0.0)
+    end
+    lock(nb.lock) do
+        i = _index_of(nb.report.cells, cell.id)
+        i === nothing && return                          # deleted mid-run → drop
+        c = nb.report.cells[i]
+        if c.src_hash != srchash
+            # Edited mid-run: the in-flight result is for the OLD source — discard it AND mark the
+            # cell STALE so the runner re-runs it with the new source (it may have been left RUNNING).
+            c.state == RUNNING && (c.state = STALE)
+            return
+        end
+        c.output = out; c.binds = out.binds
+        c.state = out.exception === nothing ? FRESH : ERRORED
+        _broadcast_progress(nb, c)
+    end
+    return nothing
+end
+
+# Tell the UI how many cells are still pending (stale or running) — the run-batch signal. The frontend
+# adds its own completed-count, so the pill's N grows as cells are queued mid-run (not frozen).
+_emit_pending(nb::LiveNotebook, pending::Integer) = ReportEngine._emit_run_batch(nb.report.id, pending)
+
+function _run_loop!(nb::LiveNotebook)
+    try
+        while true
+            target, pending = lock(nb.lock) do
+                t = _next_stale_cell(nb.report)
+                t, count(c -> c.state in (STALE, RUNNING), nb.report.cells)
+            end
+            target === nothing && break
+            _emit_pending(nb, pending)          # k/N pill: PENDING (stale+running); frontend adds done
+            _eval_one!(nb, target)
+        end
+    catch e
+        @warn "slate async runner error" notebook = nb.id exception = (e, catch_backtrace())
+    finally
+        lock(_RUNNER_LOCK) do; delete!(_RUNNERS, nb.id); end
+        # Re-arm if work appeared between our last empty check and clearing the flag.
+        again = lock(nb.lock) do; _next_stale_cell(nb.report) !== nothing; end
+        again && _ensure_runner!(nb)
+    end
+    return nothing
+end
+
+# Start the runner if one isn't already draining (idempotent). Announces the batch size for the k/N pill.
+function _ensure_runner!(nb::LiveNotebook)
+    started = lock(_RUNNER_LOCK) do
+        get(_RUNNERS, nb.id, false) && return false
+        _RUNNERS[nb.id] = true; return true
+    end
+    started || return nothing
+    Threads.@spawn _run_loop!(nb)        # the loop emits the live run-batch size each iteration
+    return nothing
+end
+
+# Kick the runner; optionally BLOCK (no lock held) until a specific cell finishes, or until the whole
+# notebook drains (wait_for=""+wait_all). Callers that need a synchronous result (the agent tools,
+# startup/restore) wait; interactive UI paths don't (results stream over SSE).
+function _eval!(nb::LiveNotebook; wait_for::AbstractString = "", wait_all::Bool = false)
+    # Refresh the pill's pending count NOW (e.g. a cell queued while a long cell is mid-run, before
+    # the runner reaches its next iteration), so the k/N updates immediately rather than at 1/1.
+    p = lock(nb.lock) do; count(c -> c.state in (STALE, RUNNING), nb.report.cells); end
+    p > 0 && _emit_pending(nb, p)
+    _ensure_runner!(nb)
+    (isempty(wait_for) && !wait_all) && return nb
+    while true
+        done = lock(nb.lock) do
+            if !isempty(wait_for)
+                i = _index_of(nb.report.cells, wait_for)
+                return i === nothing || nb.report.cells[i].state in (FRESH, ERRORED)
+            end
+            return _next_stale_cell(nb.report) === nothing
+        end
+        if done
+            wait_all || return nb
+            # wait_all also waits for the runner task itself to clear (so callers can persist after).
+            lock(_RUNNER_LOCK) do; get(_RUNNERS, nb.id, false); end || return nb
+        end
+        sleep(0.02)
+    end
+end
+
+# Wait for the notebook to fully drain (no stale cells, runner idle).
+_drain!(nb::LiveNotebook) = _eval!(nb; wait_all = true)
 
 # Parent-project /src hot-reload (Revise). A worker `files_changed` event → apply the pending
 # revisions in the worker, learn which top-level defs changed, and mark the cells that READ them
@@ -306,7 +436,7 @@ end
 
 function _restore!(nb::LiveNotebook, src::AbstractString)
     update_source!(nb.report, src)
-    eval_stale!(nb.report, nb.kernel)
+    _eval!(nb)
     _persist!(nb; source = "restore")
 end
 

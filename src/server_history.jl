@@ -113,7 +113,7 @@ function sync_from_file!(nb::LiveNotebook)
     # cell-op sequence) — never roll the live report back to it.
     _is_server_write(nb.report.id, hash(norm)) && return false
     update_source!(nb.report, disk)
-    eval_stale!(nb.report, nb.kernel)
+    _eval!(nb)
     nb.version += 1
     # External write (agent mid-turn → "agent", else a human in another editor).
     _history!(nb; source = nb.agent_busy ? "agent" : "external")
@@ -368,7 +368,7 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
             j = findfirst(c -> c.id == did, nb.report.cells)
             j === nothing || (nb.report.cells[j].state = STALE)
         end
-        eval_stale!(nb.report, nb.kernel)
+        _eval!(nb)
     end
     return nb
 end
@@ -451,7 +451,7 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
     # announce=true → show the edited source (stale) in the browser BEFORE the eval, so an
     # agent edit of a slow cell isn't stuck showing the old code until the run finishes.
     announce && _announce_cell!(nb, something(findfirst(c -> c.id == id, nb.report.cells), 0))
-    eval_stale!(nb.report, nb.kernel)
+    _eval!(nb)
     _persist!(nb)
     _autoindex!(nb)                      # a new `using` in this cell → pick up its docs
     return nb

@@ -38,7 +38,7 @@ function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false)
         i >= idx && (c.state = STALE)
     end
     announce && _announce_cell!(nb, idx)
-    eval_stale!(nb.report, nb.kernel)
+    _eval!(nb)                           # kick the async runner (non-blocking; safe inside the lock)
     _persist!(nb)
     _autoindex!(nb)                      # added/edited cell may introduce a new `using`
     return nb
@@ -58,7 +58,7 @@ function _commit_reorder!(nb::LiveNotebook)
         for c in nb.report.cells
             c.id in restale && (c.state = STALE)
         end
-        eval_stale!(nb.report, nb.kernel)
+        _eval!(nb)                       # kick the async runner (non-blocking; safe inside the lock)
         _autoindex!(nb)
     end
     _persist!(nb)
@@ -426,6 +426,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
     end
     errmsg === nothing || return "⛔ $errmsg"
     rej === nothing || return rej
+    _eval!(nb; wait_for = cid)           # wait OUTSIDE the lock — the agent wants the cell's result
     _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "added id=$cid →\n$(_result_of(nb, cid))"
@@ -442,6 +443,7 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
         return nothing
     end
     rej === nothing || return rej
+    _eval!(nb; wait_for = id)            # wait OUTSIDE the lock — the agent wants the cell's result
     _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "edited id=$id →\n$(_result_of(nb, id))"
@@ -478,10 +480,11 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
             i = findfirst(c -> c.id == id, nb.report.cells)
             i === nothing || (nb.report.cells[i].state = STALE)
         end
-        eval_stale!(nb.report, nb.kernel)
         return nothing
     end
     rej === nothing || return rej
+    # Eval OUTSIDE the lock via the async runner, but WAIT (the agent wants the result back).
+    isempty(id) ? _drain!(nb) : _eval!(nb; wait_for = id)
     _renew_floor!(nb, caller)
     _agent_push!(nb)
     isempty(id) ? "ran stale cells; notebook is up to date" :

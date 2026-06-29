@@ -119,7 +119,7 @@ function restart_kernel!(nb::LiveNotebook)
     @async begin
         try
             lock(nb.lock) do
-                eval_stale!(nb.report, nb.kernel)         # respawns the worker, streams cellrun/celldone
+                _eval!(nb)         # respawns the worker, streams cellrun/celldone
                 delete!(nb.report.meta, "hydrating")
                 nb.version += 1
             end
@@ -364,7 +364,7 @@ function _make_router(h::Hub)
         # Toggle the flag (marks the cell STALE) then re-run stale cells, so the trace table
         # appears / disappears in one round-trip — no client-side source resend.
         set_trace!(nb, HTTP.getparam(req, "cid"), get(_body(req), "trace", true) === true)
-        eval_stale!(nb.report, nb.kernel)
+        _eval!(nb)
         _json(state_json(nb))
     end))
     # Set a cell's full tag set from the tag editor (known behaviour tags + free-form). Re-runs stale
@@ -372,7 +372,7 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/tags/{cid}", req -> _withnb(h, req, nb -> begin
         tags = get(_body(req), "tags", String[])
         set_cell_tags!(nb, HTTP.getparam(req, "cid"), tags isa AbstractVector ? tags : String[])
-        eval_stale!(nb.report, nb.kernel)
+        _eval!(nb)
         _json(state_json(nb))
     end))
     # Static export: a self-contained HTML document of the notebook (also the print →
@@ -463,7 +463,7 @@ function _make_router(h::Hub)
             r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name)
             if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
                 for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
-                eval_stale!(nb.report, nb.kernel)
+                _eval!(nb)
                 _refresh_env_meta!(nb)                   # update the .jl reproducibility footer
             end
             r
@@ -492,13 +492,13 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/redo", req -> _withnb(h, req, nb -> begin
         lbl = redo!(nb); j = state_json(nb); j["redid"] = lbl; _json(j)
     end))
-    HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (eval_stale!(nb.report, nb.kernel); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/run", req -> _withnb(h, req, nb -> (_eval!(nb); _json(state_json(nb)))))
     # Re-run the WHOLE notebook (every cell in order, keeping the namespace) — the "safe"
     # option after a /src hot-reload when our guess at affected cells may be incomplete.
     HTTP.register!(router, "POST", "/api/{id}/rerun-all", req -> _withnb(h, req, nb -> begin
         lock(nb.lock) do
             for c in nb.report.cells; c.state = STALE; end
-            eval_stale!(nb.report, nb.kernel)
+            _eval!(nb)
         end
         _json(state_json(nb))
     end))
@@ -622,7 +622,7 @@ function _make_router(h::Hub)
         _json(Dict("ok" => true, "hotreload" => nb.report.meta["hotreload"]))
     end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
-        ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); eval_stale!(nb.report, nb.kernel); _json(state_json(nb))
+        ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); _eval!(nb); _json(state_json(nb))
     end))
     # ── Time machine: durable edit history ───────────────────────────────────
     # List checkpoints (newest data is appended last); `current` marks the live state.

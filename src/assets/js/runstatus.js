@@ -140,9 +140,12 @@
   };
 
   // The server announced a run of N cells. Reset the batch counters (a fresh streak) and show the pill.
+  // The server reports PENDING cells (stale + running); N = what we've finished + what's pending, so
+  // the pill grows as cells are queued mid-run. Only a FRESH streak (none active) resets the counters.
   window.onRunBatch = function (n) {
     clearTimeout(idleTimer);
-    total = n; done = 0; errs = 0; erroredIds.length = 0; errCursor = 0;
+    if (!active()) { done = 0; errs = 0; erroredIds.length = 0; errCursor = 0; }
+    total = done + n;
     scheduleReveal();                     // show only if the run outlasts REVEAL_MS
   };
 
