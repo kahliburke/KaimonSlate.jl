@@ -263,6 +263,9 @@ function _figure_for_export(nb::LiveNotebook, c::Cell; dark::Bool = false)
     return nothing
 end
 
+# True if the cell's output includes a `text/html` chunk (a custom HTML card Typst can't render).
+_has_html_output(c::Cell) = c.output !== nothing && any(ch -> ch.mime == "text/html", c.output.display)
+
 # Emit a code cell's outputs (value / stdout / error / figure / tables) into the doc.
 function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::LiveNotebook, c::Cell;
                        theme::AbstractString = "light")
@@ -282,6 +285,14 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
         print(io, "#valblock(read(\"", base, ".val\"))\n")
     end
     fig = _figure_for_export(nb, c; dark = theme == "dark")   # vector (pdf/svg) preferred, else raster png
+    # An HTML output (a custom `text/html` card, e.g. the grading `check(...)` cells) can't be
+    # rendered by Typst and isn't an embeddable figure — so rasterize the rendered card via the open
+    # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
+    # falls back to nothing (just the code) if none is open or the capture times out.
+    if fig === nothing && _has_html_output(c)
+        png = try; cell_image_fresh(nb, c.id); catch; nothing; end
+        png === nothing || (fig = (copy(png), "png"))
+    end
     if fig !== nothing
         data, ext = fig
         write(joinpath(dir, base * "." * ext), data)
