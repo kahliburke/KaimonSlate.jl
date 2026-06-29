@@ -69,6 +69,8 @@ function controlMarkup(bindId, b) {
       `<span class="optlbl">${_esc(o.label)}</span></label>`).join('') + '</span>';
   else if (w === 'button')                           // self-labeled — no name span, no value chrome
     return `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
+  else if (w === 'playhead')                          // driven by the animation player — read-only frame readout
+    ctrl = `<span class="playhead-ro" ${a} title="driven by the animation player">▶ frame</span>`;
   const nm = p.label != null ? p.label : b.name;   // a widget's `label=` overrides the displayed var name
   return `<span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
 }

@@ -13,6 +13,11 @@
   let prog = { frac: 0, msg: '' };     // the latest update (drives the chip + badge %)
   const erroredIds = [];               // cells that errored this streak (for the pill to jump through)
   let errCursor = 0;
+  // Reveal delay: don't show ANY run-status (pill / pulsing border / chip / activity) until a run has
+  // lasted REVEAL_MS. Fast reactive evals — slider drags, a playhead bind driven at ~10 Hz — finish
+  // first and never flash; genuinely slow cells still reveal. General across every eval trigger.
+  let revealed = false, revealTimer = null;
+  const REVEAL_MS = 140;
 
   // The cell currently executing (the most recently started) — runs are sequential.
   const activeCell = () => { let last = null; for (const id of running.keys()) last = id; return last; };
@@ -36,7 +41,17 @@
     }, 150);
   }
 
+  // Schedule the first paint of run-status; if the run drains before it fires, it's cancelled (no flash).
+  function scheduleReveal() { if (revealed || revealTimer) return; revealTimer = setTimeout(reveal, REVEAL_MS); }
+  function cancelReveal() { if (revealTimer) { clearTimeout(revealTimer); revealTimer = null; } }
+  function reveal() {
+    revealTimer = null; if (revealed) return; revealed = true;
+    for (const id of running.keys()) { setLive(id, 'running'); activity('run', id, ''); }   // catch up deferred starts
+    ensureTick(); renderPill(); renderChip(); renderTimers();
+  }
+
   function renderPill() {
+    if (!revealed) return;
     const pill = document.getElementById('runpill'); if (!pill) return;
     if (active()) {
       let mx = 0; for (const t of running.values()) mx = Math.max(mx, now() - t);
@@ -55,6 +70,7 @@
   }
 
   function renderTimers() {
+    if (!revealed) return;
     for (const [id, t] of running) {
       const b = document.querySelector(`.cell[data-cid="${id}"] .badge`);
       if (b) b.textContent = 'running ' + fmt(now() - t) + (id === activeCell() && prog.frac > 0 ? ' · ' + Math.round(prog.frac * 100) + '%' : '');
@@ -64,6 +80,7 @@
   // Floating "currently running" chip: which cell, how long, and its slate_progress bar + message.
   function renderChip() {
     const chip = document.getElementById('runchip'); if (!chip) return;
+    if (!revealed) { chip.style.display = 'none'; return; }
     const id = activeCell();
     if (!id) { chip.style.display = 'none'; return; }
     const t = running.get(id), el = t ? fmt(now() - t) : '';
@@ -104,6 +121,7 @@
   // A running cell reported progress: {frac, msg, id, done}. `done` ends a scope → drop its bar;
   // otherwise upsert the bar for `id`. `prog` tracks the latest update for the chip/badge.
   window.onCellProgress = function (p) {
+    reveal();                             // a cell reporting progress is doing real work — show it now
     p = p || {};
     const id = p.id || '';
     if (p.done) bars.delete(id);
@@ -125,7 +143,7 @@
   window.onRunBatch = function (n) {
     clearTimeout(idleTimer);
     total = n; done = 0; errs = 0; erroredIds.length = 0; errCursor = 0;
-    ensureTick(); renderPill();
+    scheduleReveal();                     // show only if the run outlasts REVEAL_MS
   };
 
   // Pill click: while running, open the activity feed to watch; once a run has errored, step through
@@ -143,9 +161,10 @@
     prog = { frac: 0, msg: '' };          // fresh cell → reset any prior progress
     bars.clear();                         // a run is sequential → start each cell's bars fresh
     clearCellBar(id);                     // drop any stale per-cell bar from a previous run
-    setLive(id, 'running');               // pulsing border via the store
-    activity('run', id, '');
-    ensureTick(); renderPill(); renderChip();
+    if (revealed) {                       // already showing → mark + log immediately
+      setLive(id, 'running'); activity('run', id, '');
+      ensureTick(); renderPill(); renderChip();
+    } else scheduleReveal();              // else defer; a fast cell finishes before the reveal fires
   };
 
   // A cell FINISHED (cell is its full cell_json — patchCells has already merged it).
@@ -155,15 +174,21 @@
     done++;
     bars.clear();
     clearCellBar(id);                     // remove the per-cell progress bar(s)
-    setLive(id, cell.state);              // clear the transient running → real state
     const errored = cell.state === 'errored';
-    if (errored) { errs++; if (!erroredIds.includes(id)) erroredIds.push(id); }
-    activity(errored ? 'err' : 'done', id, errored ? 'errored' : (t ? fmt(now() - t) : 'done'));
-    prog = { frac: 0, msg: '' };
-    renderPill(); renderChip();
+    if (errored) { errs++; if (!erroredIds.includes(id)) erroredIds.push(id); if (!revealed) reveal(); }  // always surface errors
+    if (revealed) {
+      setLive(id, cell.state);            // clear the transient running → real state
+      activity(errored ? 'err' : 'done', id, errored ? 'errored' : (t ? fmt(now() - t) : 'done'));
+      prog = { frac: 0, msg: '' };
+      renderPill(); renderChip();
+    }
     // Batch drained → end the streak shortly (a small delay absorbs the gap between sequential cells
     // and back-to-back batches, so the pill doesn't flicker). `errs` persists so the error pill stays.
-    if (!active()) { clearTimeout(idleTimer); idleTimer = setTimeout(() => { total = 0; done = 0; renderPill(); }, 600); }
+    if (!active()) {
+      clearTimeout(idleTimer);
+      if (revealed) idleTimer = setTimeout(() => { total = 0; done = 0; revealed = false; renderPill(); }, 600);
+      else { cancelReveal(); total = 0; done = 0; }   // nothing was ever shown → reset silently, re-arm next streak
+    }
   };
 
   // ── Activity log: a timestamped feed, kept to a bounded ring. ──────────────────────────────────

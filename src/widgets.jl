@@ -140,9 +140,18 @@ ColorPicker(default::AbstractString = "#3aa0ff"; label = nothing) = Widget("colo
 DateField(default = ""; label = nothing) = Widget("date", _wparams(label), string(default))
 TimeField(default = ""; label = nothing) = Widget("time", _wparams(label), string(default))
 Button(label::AbstractString = "Click") = Widget("button", Dict{String,Any}("label" => String(label)), 0)
+# A DRIVEN control: an animation player pushes its current 1-based frame index here (browser→Julia,
+# throttled), so `@bind t playhead(anim)` lets other cells react to playback. It has no input of its
+# own — the player IS the control. Links to its animation by the manifest's animId.
+function playhead(anim; label = nothing)
+    p = _wparams(label)
+    p["animId"] = hasproperty(anim, :manifest) ? String(get(anim.manifest, "animId", "")) : ""
+    return Widget("playhead", p, 1)
+end
 
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
-                       :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField, :TimeField, :Button)
+                       :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
+                       :TimeField, :Button, :playhead)
 
 # ── Value reconcile (the persistence policy) ──────────────────────────────────
 # Re-running a bind cell updates the SPEC (range/params) but KEEPS the user's value
@@ -170,7 +179,7 @@ function coerce_bind(w::Widget, v)
         return (w.default isa Integer && isinteger(v)) ? Int(round(v)) : float(v)
     elseif w.kind == "checkbox" || w.kind == "toggle"
         return v === true || v == 1
-    elseif w.kind == "button"
+    elseif w.kind == "button" || w.kind == "playhead"
         return v isa Number ? Int(round(v)) : v
     elseif w.kind == "select" || w.kind == "radio"
         # The browser sends the option's stringified value attribute; map it back to the real value.

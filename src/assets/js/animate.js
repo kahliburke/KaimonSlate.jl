@@ -131,6 +131,8 @@
       this.N = (m.shape && m.shape[0]) || 0;
       this.H = (m.shape && m.shape[1]) || 0;
       this.W = (m.shape && m.shape[2]) || 0;
+      this.animId = m.animId || '';
+      this._lastFrame = -1;
       this.fps = m.fps || 30;
       this.times = (m.times && m.times.length === this.N) ? m.times : null;
       this.loop = !(m.controls && m.controls.loop === false);
@@ -291,6 +293,36 @@
       const cur = Math.round(this.layer);
       const tcur = this.times ? this.times[cur] : cur / this.fps;
       this.elTime.textContent = cur + ' / ' + (this.N - 1) + '  ·  ' + tcur.toFixed(2) + 's';
+      this._pushPlayhead();
+    }
+
+    // Drive a `@bind t playhead(anim)` in another cell: push the current 1-based frame index
+    // (browser→Julia), throttled to ~10 Hz and deduped by frame, so a second cell can react to
+    // playback without the player ever waiting on a Julia recompute.
+    _findPlayhead() {
+      try {
+        const st = (typeof nbState !== 'undefined' && nbState) ? nbState : null;
+        if (!st || !st.cells || !this.animId) return null;
+        for (const c of st.cells) for (const b of (c.binds || []))
+          if (b.widget === 'playhead' && b.params && b.params.animId === this.animId)
+            return { cellId: c.id, name: b.name };
+      } catch (_) {}
+      return null;
+    }
+    _pushPlayhead() {
+      if (!this.animId) return;
+      const now = performance.now();
+      if (now - (this._lastPush || 0) < 100) return;        // ~10 Hz, independent of render fps
+      const target = this._findPlayhead();
+      if (!target) return;
+      const frame = Math.round(this.layer) + 1;             // 1-based → frames[t] in Julia
+      if (frame === this._lastFrame) return;
+      this._lastFrame = frame; this._lastPush = now;
+      try {
+        api('POST', '/api/bind/' + target.cellId, { name: target.name, value: frame })
+          .then(s => { if (typeof updateStates === 'function') updateStates(s); })
+          .catch(() => {});
+      } catch (_) {}
     }
 
     _draw() {

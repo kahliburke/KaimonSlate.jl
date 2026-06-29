@@ -207,6 +207,8 @@ function animate(frames::AbstractVector;
 
     manifest = Dict{String,Any}(
         "kind"   => "heatmap",
+        # Stable per-content id linking this animation to a `playhead(anim)` bind in another cell.
+        "animId" => string(hash(buf); base = 16),
         "shape"  => [nf, H, W],
         "bits"   => 8,
         "fps"    => Float64(fps),
