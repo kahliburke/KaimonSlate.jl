@@ -204,16 +204,18 @@ function create_tools(GateTool::Type)
     end
 
     """
-        read(notebook::String; delta_since="") -> String
+        read(notebook::String; cells="", delta_since="") -> String
 
-    Read the notebook's cells and their current outputs/errors — your view of the live state.
-    `notebook` is its id or .jl path. Each read ends with a STATE TOKEN ("state=…"); pass it back as
-    `delta_since` on a later read to get only the cells added/edited/removed since (instead of the
-    whole notebook). An unknown/expired token falls back to a full read.
+    Your view of the live notebook. `notebook` is its id or .jl path. Three modes:
+    - default: a compact OUTLINE — one line per cell (id, kind, state, the names it defines, a
+      one-line result / md heading). Token-cheap; use it to map a large notebook, then drill in.
+    - `cells="id1,id2"`: the FULL source + output of just those cells.
+    - `delta_since="<token>"`: only the cells added/edited/removed since that token.
+    Every read ends with a STATE TOKEN ("state=…") — pass it back as `delta_since` to catch up.
     """
-    function read_cells(notebook::String; delta_since::String = "")::String
+    function read_cells(notebook::String; cells::String = "", delta_since::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return notebook_digest(nb; delta_since = delta_since)
+        return notebook_digest(nb; cells = cells, delta_since = delta_since)
     end
 
     """

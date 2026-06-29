@@ -295,10 +295,11 @@ function _agent_system_prompt(nb::LiveNotebook)
     and edit the package's `src/`, run code with `ex` / start a Julia session, and use the wider Kaimon
     tools (search_code, goto_definition, run_tests, …).
 
-    ORIENT: when you don't already know the notebook's state — your first turn, or after the user
-    edited cells — call `slate_read(notebook="$(nb.id)")`. It returns a STATE TOKEN; afterwards pass
-    `delta_since=<token>` to get only what changed instead of re-reading everything. add/edit/run also
-    return the affected cell, so you often need not re-read at all.
+    ORIENT: `slate_read(notebook="$(nb.id)")` maps the notebook — a compact OUTLINE (each cell's id,
+    kind, what it DEFINES, a one-line result) plus a STATE TOKEN. It is NOT the full notebook; read the
+    full source+output of specific cells with `slate_read(cells="id1,id2")`. After edits, catch up with
+    `slate_read(delta_since=<token>)` (only what changed). add/edit/run also return the affected cell,
+    so you often need not re-read at all. Don't dump the whole notebook — outline, then drill in.
 
     WORK INCREMENTALLY: add or edit ONE cell at a time and look at the result it returns; fix errors
     before moving on; pick the next step from what you saw. Cells are REACTIVE — a cell re-runs when an

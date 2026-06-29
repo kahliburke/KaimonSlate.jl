@@ -62,17 +62,24 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("no cell", NS.agent_rename_cell!(nb, "ghost", "x"))
         end
 
-        @testset "delta_since read reports only changes" begin
-            full = NS.notebook_digest(nb)
-            tok = match(r"state=(\w+)", full)[1]
-            # no changes since the token → "(no changes …)"
+        @testset "read modes: outline / cells / delta_since" begin
+            NS.agent_add_cell!(nb, "# " * repeat("Q", 4000) * "\n21 * 2"; id = "bigcell")  # large SOURCE, small result
+            out = NS.notebook_digest(nb)                       # default → compact OUTLINE
+            tok = match(r"state=(\w+)", out)[1]
+            @test occursin("OUTLINE", out) && occursin("defines:", out)
+            @test occursin("id=bigcell", out)
+            @test !occursin("QQQQQ", out)                      # the big SOURCE is NOT dumped in the outline
+            # cells="…" → FULL content of just those cells
+            full = NS.notebook_digest(nb; cells = "bigcell")
+            @test occursin("QQQQQ", full) && occursin("### id=bigcell", full)
+            # delta_since: no change → "(no changes)", then an add shows only it
             @test occursin("no changes", NS.notebook_digest(nb; delta_since = tok))
-            # add a cell, then a delta read shows only it
-            cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "7 + 7"; id = "delta_probe"))[1]
+            NS.agent_add_cell!(nb, "7 + 7"; id = "delta_probe")
             d = NS.notebook_digest(nb; delta_since = tok)
             @test occursin("[ADDED]", d) && occursin("id=delta_probe", d) && occursin("14", d)
-            # an unknown token falls back to a full read
-            @test occursin("full read", NS.notebook_digest(nb; delta_since = "deadbeef"))
+            @test !occursin("id=bigcell", d)                   # unchanged cell omitted from the delta
+            # an unknown token falls back to the outline
+            @test occursin("full outline", NS.notebook_digest(nb; delta_since = "deadbeef"))
         end
 
         @testset "find_live by id and path" begin

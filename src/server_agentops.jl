@@ -223,6 +223,9 @@ function _read_token!(nbid, order, hashes)
 end
 _read_token_get(nbid, tok) = lock(_READTOK_LOCK) do; get(_READTOK, string(nbid, '|', String(tok)), nothing); end
 
+_trunc(s, n::Int) = (t = String(s); length(t) <= n ? t : first(t, n) * "…")
+
+# FULL content of a cell — source + result.
 function _print_cell!(io::IO, c::Cell)
     kind = c.kind == MARKDOWN ? "md" : "code"
     print(io, "\n\n### id=", c.id, "  [", kind, ", ", lowercase(string(c.state)), "]\n")
@@ -230,29 +233,56 @@ function _print_cell!(io::IO, c::Cell)
     c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
 end
 
-# `delta_since`: a token from a prior digest → report only the cells added/edited/removed since (else
-# a full read). Every digest ends by handing back the CURRENT token for the next delta.
-function notebook_digest(nb::LiveNotebook; delta_since::AbstractString = "")
+# ONE compact line per cell — the high-signal map (id, kind, state, defined names, a 1-line result /
+# the md heading). Keeps a big notebook's read small; the agent drills into specific cells from here.
+function _outline_cell!(io::IO, c::Cell)
+    kind = c.kind == MARKDOWN ? "md" : "code"
+    print(io, "\nid=", rpad(c.id, 16), " [", kind, ",", lowercase(string(c.state)), "]")
+    if c.kind == MARKDOWN
+        first = ""
+        for ln in split(c.source, '\n'); s = strip(ln); isempty(s) || (first = s; break); end
+        isempty(first) || print(io, "  ", _trunc(first, 90))
+    else
+        defs = sort!(String[string(w) for w in c.writes])
+        isempty(defs) || print(io, "  defines: ", _trunc(join(defs, ", "), 70))
+        print(io, "  (", count(==('\n'), c.source) + 1, "L)")
+        r = strip(_cell_result_text(c))
+        isempty(r) || print(io, "  → ", _trunc(replace(r, "\n" => " "), 80))
+    end
+end
+
+# Three modes (one tool):
+#   default        → compact OUTLINE (one line per cell) — token-cheap map of a big notebook.
+#   cells="a,b"    → FULL source+output of just those cells.
+#   delta_since=t  → only the cells added/edited/removed since token `t` (else a full read).
+# Every read ends by handing back the CURRENT state token (for the next delta).
+function notebook_digest(nb::LiveNotebook; delta_since::AbstractString = "", cells::AbstractString = "")
     lock(nb.lock) do
-        cells = nb.report.cells
-        order = String[c.id for c in cells]
-        hashes = Dict{String,String}(c.id => _cell_state_hash(c) for c in cells)
+        allc = nb.report.cells
+        order = String[c.id for c in allc]
+        hashes = Dict{String,String}(c.id => _cell_state_hash(c) for c in allc)
         token = _read_token!(nb.id, order, hashes)
-        prev = isempty(delta_since) ? nothing : _read_token_get(nb.id, delta_since)
         io = IOBuffer()
-        print(io, "Notebook '", nb.id, "' — ", abspath(nb.path), " — ", length(cells),
+        print(io, "Notebook '", nb.id, "' — ", abspath(nb.path), " — ", length(allc),
               " cell(s) — v", nb.version, " — state=", token, " — build-floor: ", floor_status(nb))
-        if prev === nothing
-            isempty(delta_since) || print(io, "\n(delta token '", delta_since, "' unknown/expired — full read)")
-            for c in cells
-                _print_cell!(io, c)
+        # explicit cell list → full content of those cells
+        wanted = String[strip(x) for x in split(cells, r"[,\s]+") if !isempty(strip(x))]
+        if !isempty(wanted)
+            print(io, "\nFull content of ", length(wanted), " cell(s):")
+            for id in wanted
+                i = _index_of(allc, id)
+                i === nothing ? print(io, "\n\n### id=", id, "  (no such cell)") : _print_cell!(io, allc[i])
             end
-        else
+            return String(take!(io))
+        end
+        # delta since a prior token → only the changed cells (full)
+        prev = isempty(delta_since) ? nothing : _read_token_get(nb.id, delta_since)
+        if prev !== nothing
             porder, phash = prev
-            cset = Set(order)
+            cset = Set(order); changed = 0
             removed = String[id for id in porder if !(id in cset)]
-            changed = 0
-            for c in cells
+            print(io, "\nChanges since ", delta_since, ":")
+            for c in allc
                 old = get(phash, c.id, nothing)
                 status = old === nothing ? "ADDED" : (old != hashes[c.id] ? "CHANGED" : "")
                 isempty(status) && continue
@@ -262,6 +292,14 @@ function notebook_digest(nb::LiveNotebook; delta_since::AbstractString = "")
             end
             isempty(removed) || print(io, "\n\n[REMOVED] ", join(removed, ", "))
             (changed == 0 && isempty(removed)) && print(io, "\n\n(no changes since ", delta_since, ")")
+            return String(take!(io))
+        end
+        # default → compact outline
+        isempty(delta_since) || print(io, "\n(delta token unknown/expired — full outline)")
+        print(io, "\nOUTLINE (one line per cell). Full source+output: slate_read(cells=\"id1,id2\"). ",
+              "Catch up after edits: slate_read(delta_since=\"", token, "\").")
+        for c in allc
+            _outline_cell!(io, c)
         end
         return String(take!(io))
     end
