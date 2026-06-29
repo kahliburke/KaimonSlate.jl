@@ -197,6 +197,28 @@ end
         @test r2.cells[3].output.value_repr == "5"        # capture still works
     end
 
+    @testset "memoization key invalidates correctly" begin
+        # The durable-cache key must be a TOTAL function of what affects the result, or a stale
+        # restore serves wrong data after an edit. (src/Manifest digests are folded in worker-side.)
+        r = parse_report("#%% code id=a\nx = 2\n\n#%% code id=b\nx + 1")
+        build_dependencies!(r)
+        a, b = r.cells
+        k0 = ReportEngine._memo_key(r, b)
+        @test !isempty(k0)
+        @test ReportEngine._memo_key(r, b) == k0                 # stable across recomputation
+        b.source = "x + 2"; b.src_hash = hash(b.source)
+        @test ReportEngine._memo_key(r, b) != k0                 # own-source edit invalidates
+        b.source = "x + 1"; b.src_hash = hash(b.source)
+        @test ReportEngine._memo_key(r, b) == k0                 # reverting restores the key
+        a.source = "x = 3"; a.src_hash = hash(a.source)
+        @test ReportEngine._memo_key(r, b) != k0                 # UPSTREAM edit invalidates (transitive)
+        # a control-DECLARING cell or an import barrier is never memoized
+        op = parse_report("#%% code id=c\nusing LinearAlgebra")
+        build_dependencies!(op)
+        @test :opaque in op.cells[1].flags
+        @test ReportEngine._memo_key(op, op.cells[1]) == ""
+    end
+
     @testset "run_capture wire form" begin
         # The wire form is the contract the gate worker returns and the server
         # deserializes — primitives only, no MimeChunk/CellOutput struct identity.

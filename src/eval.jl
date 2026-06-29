@@ -171,6 +171,12 @@ reset!(::InProcessKernel, report::Report) = reset_module!(report)
 eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string") =
     _eval_capture(report_module(report), source, filename)
 
+# Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
+# evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process
+# and test kernels working unchanged.
+eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo) =
+    eval_capture(k, report, source, filename)
+
 """
     complete(kernel, report, code, pos) -> (; items, from, to)
 
@@ -263,6 +269,39 @@ Evaluate one cell through `kernel`. Markdown cells are inert (marked `FRESH`). A
 code cell becomes `FRESH` on success or `ERRORED` if it threw; the error is
 captured, never propagated, so one bad cell doesn't abort the report.
 """
+# ── Durable memoization key (server side) ─────────────────────────────────────────────────────
+const _MEMO_THRESHOLD_MS = 400.0    # only cells slower than this are worth persisting to disk
+
+# A cell is memoizable if its result is a pure function of its source + upstream sources + bind
+# inputs. Excluded: markdown, `using`/`import` barriers (:opaque — namespace effects not captured by
+# `writes`), control-DECLARING cells (their value comes from the UI), and explicit opt-outs.
+function _memoizable(cell::Cell)
+    cell.kind == CODE || return false
+    (:opaque in cell.flags || :nocache in cell.flags || :volatile in cell.flags) && return false
+    return isempty(cell.binds)
+end
+
+# A total-ish cache key: this cell's source + the sources of its transitive upstream cells + the
+# values of any @bind variables in the read-closure. The worker folds in the Revise'd `src/` digest
+# and the resolved Manifest, completing the key so a src/dep/package change invalidates the entry.
+function _memo_key(report::Report, cell::Cell)
+    _memoizable(cell) || return ""
+    byid = Dict(c.id => c for c in report.cells)
+    closure = Set{String}(); stack = collect(cell.deps)
+    while !isempty(stack)
+        id = pop!(stack); (id in closure || !haskey(byid, id)) && continue
+        push!(closure, id); union!(stack, byid[id].deps)
+    end
+    depsrc = sort!([(id, byid[id].src_hash) for id in closure])
+    readnames = copy(cell.reads); for id in closure; union!(readnames, byid[id].reads); end
+    bvals = Tuple{String,Any}[]
+    for c in report.cells, b in c.binds
+        b.name in readnames && push!(bvals, (string(b.name), b.value))
+    end
+    sort!(bvals; by = first)
+    return string(hash((cell.source, (:trace in cell.flags), depsrc, bvals)); base = 16)
+end
+
 function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel())
     if cell.kind == MARKDOWN
         exprs = _md_interp_exprs(cell.source)
@@ -285,7 +324,10 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     # filename = `cell:<id>` → backtrace frames read `cell:<id>:N`, so an error in code defined in
     # ANOTHER cell still names its source cell (cross-cell error jump). Trace wrap shifts no lines
     # (`begin ` is on the cell's line 1), so the recorded line numbers stay 1:1 with the source.
-    cell.output = eval_capture(kernel, report, src, "cell:" * cell.id)
+    memo = (key = _memo_key(report, cell),
+            names = String[string(w) for w in cell.writes],
+            threshold = _MEMO_THRESHOLD_MS)
+    cell.output = eval_capture(kernel, report, src, "cell:" * cell.id, memo)
     cell.binds = cell.output.binds
     cell.state = cell.output.exception === nothing ? FRESH : ERRORED
     _emit_progress(report.id, cell)   # announce: finished (the result/error can light up immediately)

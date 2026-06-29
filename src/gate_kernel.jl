@@ -340,6 +340,23 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
     return _wire_to_output(wire)
 end
 
+# Memo-aware: ask the worker to restore an expensive cell from disk (no recompute) or persist it
+# after a run exceeding `memo.threshold` ms. The key digests this cell + its upstream sources +
+# bind inputs; the worker folds in the Revise'd src + Manifest digests (see worker.jl `__slate_eval`).
+function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo)
+    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename)
+    wire = try
+        prepare!(k, report)
+        _tool(k, "__slate_eval", Dict{String,Any}(
+            "source" => String(source), "filename" => String(filename),
+            "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
+            "memo_threshold" => Float64(memo.threshold)))
+    catch e
+        return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
+    end
+    return _wire_to_output(wire)
+end
+
 # Forward a paged-table page request to the worker (where the provider lives).
 # Normalize/clamp the request once here, then pass flat scalars over the gate.
 function table_page(k::GateKernel, report::Report, table_id::AbstractString, request::AbstractDict)

@@ -59,10 +59,119 @@ const _NS = Ref{Module}(_new_ns())
 # Each returns a serialization-friendly value that rides back binary in the gate
 # response's `value` field.
 
+# ── Durable cell-result memoization ───────────────────────────────────────────────────────────
+# An expensive cell (measured runtime ≥ threshold) is cached to disk so a worker / extension restart
+# RESTORES its result + the globals it defined instead of recomputing. The server passes a `memo_key`
+# digesting the cell's source + its upstream cells' sources + relevant @bind values; here we fold in
+# the Revise-tracked `src/` state and the resolved Manifest — making the key TOTAL, so a src edit or a
+# package change invalidates the entry (no silent stale restore). See ANIMATION_PIPELINE_DESIGN.md.
+const _MEMO_OK = try; @eval import Serialization; true; catch; false; end
+const _MEMO_DIR = Ref{String}("")
+const _MEMO_CAP = 2 * 1024^3                       # ~2 GB on-disk ceiling (LRU-evicted)
+function _memo_dir()
+    if _MEMO_DIR[] == ""
+        d = joinpath(get(ENV, "HOME", tempdir()), ".cache", "kaimon", "slate-memo")
+        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimon-slate-memo"); mkpath(d); end
+        _MEMO_DIR[] = d
+    end
+    return _MEMO_DIR[]
+end
+
+# Digest of the Revise-tracked source (def-name → body-hash maps) — folds `src/` edits into the key.
+# Seed synchronously first so the digest reflects currently-loaded packages NOW (the async watcher
+# may not have seeded yet on a cold start) — otherwise store-time and restore-time digests diverge
+# and every restart misses the cache.
+function _src_digest()
+    h = UInt(0x53726300)
+    try; _seed_new_src_defs!(); catch; end
+    try
+        for path in sort!(collect(keys(_SRC_DEFS)))
+            h = hash(path, h); defs = _SRC_DEFS[path]
+            for k in sort!(collect(keys(defs))); h = hash((k, defs[k]), h); end
+        end
+    catch; end
+    return h
+end
+
+# Digest of the resolved Manifest (package versions); cached by mtime.
+const _MANIFEST_DIGEST = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
+function _manifest_digest()
+    try
+        proj = Base.active_project(); proj === nothing && return UInt(0)
+        man = joinpath(dirname(proj), "Manifest.toml"); isfile(man) || return UInt(0)
+        mt = Float64(mtime(man))
+        _MANIFEST_DIGEST[][1] == mt && return _MANIFEST_DIGEST[][2]
+        d = hash(read(man)); _MANIFEST_DIGEST[] = (mt, d); return d
+    catch; return UInt(0); end
+end
+
+_memo_file(cellkey::AbstractString) =
+    joinpath(_memo_dir(), string(hash((String(cellkey), _src_digest(), _manifest_digest())); base = 16))
+
+# Bounded LRU: if the store exceeds the cap, delete oldest files until under it.
+function _memo_gc()
+    try
+        files = [joinpath(_memo_dir(), f) for f in readdir(_memo_dir())]
+        files = filter(isfile, files)
+        total = sum(filesize, files; init = 0)
+        total <= _MEMO_CAP && return
+        for f in sort(files; by = mtime)
+            rm(f; force = true); total -= filesize(f)
+            total <= _MEMO_CAP && break
+        end
+    catch; end
+end
+
+# Restore {bindings, wire} for `cellkey`: assign the cell's globals into the namespace, return the wire.
+function _memo_restore(cellkey::String, names::Vector{String})
+    _MEMO_OK || return nothing
+    f = _memo_file(cellkey); isfile(f) || return nothing
+    data = try; Serialization.deserialize(f); catch; return nothing; end
+    (data isa NamedTuple && hasproperty(data, :bindings) && hasproperty(data, :wire)) || return nothing
+    m = _NS[]
+    for (nm, v) in data.bindings
+        try; Core.eval(m, :($(Symbol(nm)) = $v)); catch; return nothing; end
+    end
+    try; touch(f); catch; end                       # mark as recently used (LRU)
+    return data.wire
+end
+
+# Persist {the cell's defined globals, its wire} — guarded: a value that won't serialize → skip (warn).
+function _memo_store(cellkey::String, names::Vector{String}, wire)
+    _MEMO_OK || return nothing
+    m = _NS[]
+    binds = Dict{String,Any}()
+    for nm in names
+        s = Symbol(nm); isdefined(m, s) || continue
+        binds[nm] = getfield(m, s)
+    end
+    f = _memo_file(cellkey); tmp = f * ".tmp"
+    try
+        Serialization.serialize(tmp, (bindings = binds, wire = wire))   # throws on an unserializable value
+        mv(tmp, f; force = true)
+        _memo_gc()
+    catch e
+        @info "slate memo: not cached" cell = cellkey reason = first(split(sprint(showerror, e), '\n'))
+        try; isfile(tmp) && rm(tmp; force = true); catch; end
+    end
+    return nothing
+end
+
 "Evaluate a cell's source in the warm namespace; return the wire-form capture. `filename` (a
-kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`."
-function __slate_eval(source::String; filename::String = "string")
+kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`.
+`memo_*` (when set) enable durable caching: restore an expensive cell's result on a cold start, or
+persist it after a run that exceeds `memo_threshold` ms."
+function __slate_eval(source::String; filename::String = "string",
+                     memo_key::String = "", memo_names::Vector{String} = String[],
+                     memo_threshold::Float64 = 0.0)
     cid = replace(filename, r"^cell:" => "")
+    if !isempty(memo_key)
+        w = _memo_restore(memo_key, memo_names)
+        if w !== nothing
+            @info "slate memo: restored (no recompute)" cell = cid
+            return w
+        end
+    end
     local r
     try
         r = run_capture(_NS[], source, filename)
@@ -83,6 +192,11 @@ function __slate_eval(source::String; filename::String = "string")
     end
     isempty(r.overflow) ||
         @info "slate eval: output truncated for display — full result saved" cell = cid items = [(String(e.kind), Int(e.bytes)) for e in r.overflow]
+    # Cache only expensive, error-free runs (cheap cells never pay the serialize cost).
+    if !isempty(memo_key) && r.exception === nothing && memo_threshold > 0 && r.duration_ms >= memo_threshold
+        _memo_store(memo_key, memo_names, r)
+        @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
+    end
     return r
 end
 
