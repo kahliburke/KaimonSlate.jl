@@ -12,6 +12,13 @@ function toggleAgent() {
   document.body.classList.toggle('agent-open', open);   // slide cells left of the panel
   if (open) { document.getElementById('apin').focus(); setWorking(agentWorking); }
 }
+// Maximize / restore the agent panel — a wide near-fullscreen view for reading detailed replies.
+function toggleAgentMax() {
+  const max = document.getElementById('agentpanel').classList.toggle('maximized');
+  const b = document.getElementById('apmaxbtn');
+  if (b) { b.textContent = max ? '🗗' : '⛶'; b.title = max ? 'restore the panel' : 'maximize the panel'; }
+}
+window.toggleAgentMax = toggleAgentMax;
 // Show/hide the agent's streamed thinking (.apmsg.think) — a persisted view preference.
 // Pure CSS class toggle on the panel; the think bubbles stay in the transcript, just hidden.
 function applyThinkPref() {
@@ -121,6 +128,9 @@ let _suppressAgentRender = false;   // set during bulk replay (loadAgentLog) →
 function renderAgentMsgs() {
   if (_suppressAgentRender) return;   // skip per-event re-renders during a replay (O(n²) markdown+KaTeX)
   const el = document.getElementById('apmsgs');
+  // Stick to the bottom ONLY if you're already near it — so you can scroll up to read a streaming
+  // reply without it yanking you back down. Scroll to the bottom and it resumes auto-following.
+  const stick = (el.scrollHeight - el.scrollTop - el.clientHeight) < 80;
   let html = agentMsgs.map(m => {
     const lane = m.crew ? ` lane` : '';
     const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
@@ -139,7 +149,7 @@ function renderAgentMsgs() {
   // Render LaTeX in the assistant replies (math was stashed verbatim through mdLite). typeset is
   // idempotent over already-rendered KaTeX, so re-running each delta only touches new text nodes.
   if (window.typeset) el.querySelectorAll('.apmd').forEach(m => { try { typeset(m); } catch (_) {} });
-  el.scrollTop = el.scrollHeight;
+  if (stick) el.scrollTop = el.scrollHeight;
 }
 // Replay the buffered conversation after a page reload (in-memory agentMsgs is
 // gone, but the server kept every relayed envelope). Idempotent — clears first.
