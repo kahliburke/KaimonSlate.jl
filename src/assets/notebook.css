@@ -71,13 +71,14 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
                    background:color-mix(in srgb, var(--accent) 14%, var(--bg3)); }
 .runpill.err { color:var(--red); border-color:color-mix(in srgb, var(--red) 55%, var(--border));
                background:color-mix(in srgb, var(--red) 12%, var(--bg3)); }
-.runpill .rspin { width:11px; height:11px; border-radius:50%; flex:0 0 auto;
-                  border:2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-                  border-top-color:var(--accent); animation:rspin .7s linear infinite; }
-.runpill .runbar { width:54px; height:4px; border-radius:3px; overflow:hidden; flex:0 0 auto;
-                   background:color-mix(in srgb, var(--accent) 22%, var(--bg)); }
-.runpill .runbar > span { display:block; height:100%; background:var(--accent); transition:width .2s ease; }
-@keyframes rspin { to { transform:rotate(360deg); } }
+/* Determinate progress RING: a faint full track with an accent arc that fills clockwise toward
+   completion (done/N) — no resetting spinner. @property makes the conic angle animate smoothly. */
+@property --rp { syntax:'<number>'; inherits:false; initial-value:0; }
+.runpill .rring { width:13px; height:13px; border-radius:50%; flex:0 0 auto;
+                  background:conic-gradient(var(--accent) calc(var(--rp,0) * 1%), color-mix(in srgb, var(--accent) 22%, transparent) 0);
+                  -webkit-mask:radial-gradient(closest-side, transparent 56%, #000 58%);
+                          mask:radial-gradient(closest-side, transparent 56%, #000 58%);
+                  transition:--rp .25s ease; }
 
 .actlog { flex:1; overflow:auto; padding:6px 0; font-family:'Cascadia Code','Fira Code',monospace; font-size:.74rem; }
 .actline { display:flex; align-items:baseline; gap:8px; padding:2px 12px; border-bottom:1px solid color-mix(in srgb, var(--border) 45%, transparent); }

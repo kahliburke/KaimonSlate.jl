@@ -44,8 +44,7 @@
       const k = Math.min(done + running.size, n);
       const frac = n ? Math.round((done / n) * 100) : 0;
       pill.className = 'runpill running';
-      pill.innerHTML = `<span class="rspin"></span>Running ${k}/${n} · ${fmt(mx)}` +
-        `<span class="runbar"><span style="width:${frac}%"></span></span>`;
+      pill.innerHTML = `<span class="rring" style="--rp:${frac}"></span>Running ${k}/${n} · ${fmt(mx)}`;
       pill.style.display = '';
     } else if (errs) {
       pill.className = 'runpill err'; pill.style.display = '';
