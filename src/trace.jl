@@ -59,7 +59,7 @@ function _trace_transform(blk)
     out = Any[:($buf = Tuple{Int,String,String}[]),
               :(__slate_trace_sink[] = $buf)]            # buffer mutates in place — run_capture reads it
     n0 = length(out)
-    _trace_into!(out, stmts, buf; toplevel = true)
+    _trace_into!(out, stmts, buf; result = true)
     length(out) == n0 && push!(out, :nothing)           # empty block → return nothing, not the buffer
     return Expr(:block, out...)
 end
@@ -68,9 +68,11 @@ end
 _reccall(line::Int, name::AbstractString, valexpr, buf) =
     :($(_trace_rec!)($buf, $line, $(String(name)), $valexpr))
 
-# Walk a statement list, threading the current source line. `toplevel` marks the OUTERMOST block,
-# whose LAST meaningful bare expression is recorded as the "result" row (its value rides through).
-function _trace_into!(out, stmts, buf; toplevel::Bool = false)
+# Walk a statement list, threading the current source line. `result` marks a block whose VALUE is
+# the cell's result — its LAST meaningful bare expression is recorded as the "result" row (its value
+# rides through). It propagates into value-returning blocks (a final `let`/`begin`/`if`/`try`) so the
+# result is captured even when the cell's last statement is one of those (not just a bare top-level expr).
+function _trace_into!(out, stmts, buf; result::Bool = false)
     lastmeaningful = findlast(s -> !(s isa LineNumberNode), stmts)
     line = 0
     for (i, s) in enumerate(stmts)
@@ -78,7 +80,7 @@ function _trace_into!(out, stmts, buf; toplevel::Bool = false)
             line = s.line
             push!(out, s)
         else
-            _trace_one!(out, s, line, buf, toplevel && i === lastmeaningful)
+            _trace_one!(out, s, line, buf, result && i === lastmeaningful)
         end
     end
     return out
@@ -87,24 +89,24 @@ end
 # Rebuild `ex` with its body block (its last arg) recursively traced; the non-body args (loop
 # variable, condition, let bindings) pass through untouched. The body's last statement keeps its
 # value (inline recording), so `let`/`while`/`for` return exactly what they would untraced.
-function _trace_body(ex::Expr, buf)
+function _trace_body(ex::Expr, buf; result::Bool = false)
     body = ex.args[end]
     newbody = Expr(:block)
-    _trace_into!(newbody.args, body isa Expr && body.head === :block ? body.args : Any[body], buf)
+    _trace_into!(newbody.args, body isa Expr && body.head === :block ? body.args : Any[body], buf; result = result)
     return Expr(ex.head, ex.args[1:end-1]..., newbody)
 end
 
 # Trace each clause of an if/elseif chain: the condition passes through; the then-block (and any
 # else/elseif at the tail) is recursed into. Each branch's value is preserved → the `if` returns it.
-function _trace_if(ex::Expr, buf)
+function _trace_if(ex::Expr, buf; result::Bool = false)
     args = Any[ex.args[1]]                                  # condition
     for a in ex.args[2:end]
         if a isa Expr && (a.head === :elseif || a.head === :if)
-            push!(args, _trace_if(a, buf))
+            push!(args, _trace_if(a, buf; result = result))
         elseif a isa Expr && a.head === :block
-            nb = Expr(:block); _trace_into!(nb.args, a.args, buf); push!(args, nb)
+            nb = Expr(:block); _trace_into!(nb.args, a.args, buf; result = result); push!(args, nb)
         else
-            nb = Expr(:block); _trace_into!(nb.args, Any[a], buf); push!(args, nb)
+            nb = Expr(:block); _trace_into!(nb.args, Any[a], buf; result = result); push!(args, nb)
         end
     end
     return Expr(ex.head, args...)
@@ -137,14 +139,16 @@ function _trace_one!(out, s, line::Int, buf, isfinal::Bool)
         # `local x = …` / `global x = …` (used in loops to disambiguate soft scope): record the
         # bound name. Bare `local x` / `local a, b` declarations carry no value → emitted as-is below.
         push!(out, s); _trace_record_lhs!(out, s.args[1].args[1], line, buf)
-    elseif s isa Expr && (s.head === :for || s.head === :while || s.head === :let)
-        push!(out, _trace_body(s, buf))                     # value preserved (let returns its body value)
+    elseif s isa Expr && (s.head === :for || s.head === :while)
+        push!(out, _trace_body(s, buf))                     # a loop's value is `nothing` → no result row
+    elseif s isa Expr && s.head === :let
+        push!(out, _trace_body(s, buf; result = isfinal))   # `let` returns its body value → record it if this is the cell's result
     elseif s isa Expr && (s.head === :if || s.head === :elseif)
-        push!(out, _trace_if(s, buf))
+        push!(out, _trace_if(s, buf; result = isfinal))
     elseif s isa Expr && s.head === :block
-        _trace_into!(out, s.args, buf)
+        _trace_into!(out, s.args, buf; result = isfinal)    # a `begin … end` returns its last value
     elseif s isa Expr && s.head === :try
-        push!(out, _trace_try(s, buf))
+        push!(out, _trace_try(s, buf; result = isfinal))
     elseif s isa Expr && s.head in _TRACE_OPAQUE
         push!(out, s)                                       # defs/imports: opaque, never recorded
     elseif isfinal
@@ -157,11 +161,13 @@ end
 
 # try/catch/finally: recurse into the try body, the catch body (keeping the `catch err` var), and
 # the finally body. `try` args are `[try-block, catchvar, catch-block, (finally-block)]`.
-function _trace_try(ex::Expr, buf)
+function _trace_try(ex::Expr, buf; result::Bool = false)
     args = Vector{Any}(undef, length(ex.args))
     for (i, a) in enumerate(ex.args)
         if a isa Expr && a.head === :block
-            nb = Expr(:block); _trace_into!(nb.args, a.args, buf); args[i] = nb
+            # The try-value comes from the try-block (arg 1) or the catch-block (arg 3); the finally
+            # block (arg 4) discards its value — so only mark the result on the first two.
+            nb = Expr(:block); _trace_into!(nb.args, a.args, buf; result = result && (i == 1 || i == 3)); args[i] = nb
         else
             args[i] = a                                     # catch-var symbol / `false` slots
         end

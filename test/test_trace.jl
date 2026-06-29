@@ -189,6 +189,26 @@ nv() = [(n, v) for (_, n, v) in rows()]
         @test g(-2) == -1
     end
 
+    @testset "let/begin with only a bare expression records the result (the kinetic_1d case)" begin
+        # A cell that is just `let … <expr> end` with no assignments used to trace NOTHING; now its
+        # value is captured as the result row.
+        v = @tr begin
+            let
+                3 + 4
+            end
+        end
+        @test v == 7
+        @test nv() == [("result", "7")]
+        # a final `begin … end` likewise yields a result row
+        v2 = @tr begin
+            begin
+                2 * 5
+            end
+        end
+        @test v2 == 10
+        @test nv() == [("result", "10")]
+    end
+
     @testset "wire form" begin
         @tr begin
             n = 2
