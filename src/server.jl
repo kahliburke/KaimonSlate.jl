@@ -253,13 +253,21 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
     end
     isempty(names) && return
     syms = Set{Symbol}(Symbol(n) for n in names)
+    # A cell reads a CHANGED def if a read matches a changed name directly, OR the read is a
+    # QUALIFIED path (`SlateTest.Sub.greet`) whose leaf (`greet`) changed — reads record the
+    # whole dotted path, while the worker reports the leaf def-name.
+    _reads_changed(c) = any(c.reads) do r
+        r in syms && return true
+        s = string(r); i = findlast('.', s)
+        i !== nothing && Symbol(SubString(s, nextind(s, i))) in syms
+    end
     staled = Set{String}()
     lock(nb.lock) do
         seed = String[]
         for c in nb.report.cells
             # Both code AND markdown join the reactive graph via `reads` (md from its {{ }}
             # free vars), and eval_stale! re-renders stale md — so include both.
-            isdisjoint(c.reads, syms) && continue
+            _reads_changed(c) || continue
             c.state = STALE; push!(seed, c.id); push!(staled, c.id)
         end
         isempty(seed) && return

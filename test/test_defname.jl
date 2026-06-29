@@ -76,3 +76,38 @@ LNN = LineNumberNode(7, Symbol("SlateTest.jl"))
         @test findfirst_def(Any[]) === nothing
     end
 end
+
+# `_collect_defs!` — the file → (def-name → body-hash) walk behind change-granular hot-reload.
+# Crucially it recurses into submodules (so `Sub.greet` is captured under leaf `greet`), and the
+# body-hash is LineNumberNode-insensitive (a line shift is not a change) but body-sensitive.
+defs(src) = _collect_defs!(Dict{String,UInt64}(), Meta.parseall(src))
+
+@testset "_collect_defs!" begin
+    @testset "top-level + nested submodule defs (leaf names)" begin
+        d = defs("""
+        module M
+        using X
+        f(x) = x
+        struct Pt; a; b; end
+        module Sub
+        greet() = "hi"
+        end
+        const K = 5
+        end
+        """)
+        @test sort(collect(keys(d))) == ["K", "Pt", "f", "greet"]   # incl. submodule's `greet`
+    end
+
+    @testset "line shifts don't change the hash; body edits do" begin
+        @test defs("g(x) = x")["g"]   == defs("\n\n\ng(x) = x")["g"]      # LNN-insensitive
+        @test defs("g(x) = x")["g"]   != defs("g(x) = x + 1")["g"]        # body-sensitive
+        @test defs("greet() = \"v1\"")["greet"] != defs("greet() = \"v2\"")["greet"]
+    end
+
+    @testset "diff isolates the changed def" begin
+        a = defs("f(x)=x\ng(x)=2x\nmodule S; h()=1; end")
+        b = defs("f(x)=x\ng(x)=3x\nmodule S; h()=1; end")            # only g changed
+        changed = [k for (k, v) in b if get(a, k, nothing) != v]
+        @test changed == ["g"]
+    end
+end

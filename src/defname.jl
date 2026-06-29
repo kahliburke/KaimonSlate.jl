@@ -37,3 +37,26 @@ function _def_name(ex)
 end
 # First non-nothing def name among a list of child exprs (skips LineNumberNodes / strings / etc.).
 findfirst_def(args) = (for a in args; r = _def_name(a); r === nothing || return r; end; nothing)
+
+# LineNumberNode-free copy, so an edit that only shifts line numbers doesn't read as a change
+# (used to body-hash a def for change-granular hot-reload — see worker.jl `_file_defs`).
+_strip_lines(x) = x
+_strip_lines(ex::Expr) =
+    Expr(ex.head, Any[_strip_lines(a) for a in ex.args if !(a isa LineNumberNode)]...)
+
+# Walk a parsed file (a :toplevel Expr) into (def-name → body-hash), recursing into (sub)modules
+# so a def INSIDE a submodule (e.g. `Sub.greet`) is captured under its leaf name — matching how
+# cells read it (leaf-aware change matching, server side). `_def_name` already unwraps the
+# :block / :macrocall / docstring wrappers Julia & Revise produce.
+function _collect_defs!(d::Dict{String,UInt64}, ex)
+    ex isa Expr || return d
+    if ex.head === :toplevel || ex.head === :block
+        for a in ex.args; _collect_defs!(d, a); end
+    elseif ex.head === :module
+        _collect_defs!(d, ex.args[3])                       # module Name <block>
+    else
+        nm = _def_name(ex)
+        nm === nothing || (d[nm] = hash(_strip_lines(ex)))
+    end
+    return d
+end

@@ -338,18 +338,64 @@ end
 # in a shared, dependency-free file so it's unit-tested directly (test/test_defname.jl).
 include(joinpath(@__DIR__, "defname.jl"))
 
-# Changed top-level def-names from a snapshot of (PkgData, relpath) revision entries. Reads the
-# changed file's parsed defs (whole file → file-granular invalidation), best-effort.
+# Per-file snapshot of (def-name → body-hash), so we can report the names whose DEFINITION
+# actually changed — not every name in the touched file. Keyed by the file's absolute path.
+# Seeded lazily each watcher tick (`_seed_new_src_defs!`) so the first edit diffs against a
+# baseline. We parse the file FROM DISK (not Revise's `mod_exs_infos`) because Revise parses a
+# package's files lazily — only on the first revision — so before any edit `mod_exs_infos` is
+# empty; the same disk parse for seed AND diff also keeps body-hashes directly comparable.
+const _SRC_DEFS = Dict{String,Dict{String,UInt64}}()
+_file_path(pd, rpath) = try; joinpath(pd.info.basedir, String(rpath)); catch; String(rpath); end
+
+# (def-name → body-hash) for one source file, parsed fresh from disk.
+function _file_defs(path::AbstractString)
+    d = Dict{String,UInt64}()
+    isfile(path) || return d
+    src = try; read(path, String); catch; return d; end
+    top = try; Meta.parseall(src); catch; return d; end
+    return _collect_defs!(d, top)
+end
+
+# Baseline the defs of any tracked file we haven't seen yet, WITHOUT reporting — so the first
+# edit diffs against a real snapshot. Idempotent (only fills missing keys), so it's safe to run
+# every watcher tick: a package `using`'d after the worker booted gets seeded on the next tick,
+# before its first edit (otherwise that edit would conservatively flag every reader in the file).
+function _seed_new_src_defs!()
+    R = Main.Revise
+    (isdefined(R, :pkgdatas)) || return nothing
+    try
+        for pd in values(R.pkgdatas), rpath in pd.info.files
+            path = _file_path(pd, rpath)
+            haskey(_SRC_DEFS, path) && continue
+            _SRC_DEFS[path] = _file_defs(path)
+        end
+    catch
+    end
+    return nothing
+end
+
+# Names whose DEFINITION changed (added / body-changed / removed) across a snapshot of
+# (PkgData, relpath) revision entries — change-granular, so editing one method flags only the
+# cells that read THAT method, not every cell reading anything in the file. Updates the snapshot.
 function _changed_names(queue)
     changed = Set{String}()
     for item in queue
         try
             pd, rpath = item
-            idx = findfirst(==(rpath), pd.info.files)
-            idx === nothing && continue
-            for (_mod, exprinfos) in pd.fileinfos[idx].mod_exs_infos, (rex, _info) in exprinfos
-                nm = _def_name(convert(Expr, rex)); nm === nothing || push!(changed, nm)
+            path = _file_path(pd, rpath)
+            newdefs = _file_defs(path)
+            olddefs = get(_SRC_DEFS, path, nothing)
+            if olddefs === nothing
+                union!(changed, keys(newdefs))                 # unseeded → report all (first edit)
+            else
+                for (nm, h) in newdefs                          # new or body-changed
+                    get(olddefs, nm, nothing) == h || push!(changed, nm)
+                end
+                for nm in keys(olddefs)                         # removed
+                    haskey(newdefs, nm) || push!(changed, nm)
+                end
             end
+            _SRC_DEFS[path] = newdefs
         catch
         end
     end
@@ -395,6 +441,7 @@ function _start_src_watcher()
         try
             sleep(0.4)
             R = Main.Revise
+            _seed_new_src_defs!()             # baseline newly-loaded files so their first edit diffs cleanly
             (isdefined(R, :revision_queue) && !isempty(R.revision_queue)) || continue
             queue = collect(R.revision_queue)
             before = _qe_keys(R)

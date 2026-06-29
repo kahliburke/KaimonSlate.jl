@@ -468,6 +468,14 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
+        # A specific cell → force it STALE, exactly like the browser play button
+        # (edit_cell! force=true). Otherwise eval_stale! only re-runs cells our
+        # affected-cell detection already flagged — so a Revise'd src change that
+        # we failed to map to this cell would return its cached (stale) result.
+        if !isempty(id)
+            i = findfirst(c -> c.id == id, nb.report.cells)
+            i === nothing || (nb.report.cells[i].state = STALE)
+        end
         eval_stale!(nb.report, nb.kernel)
         return nothing
     end
