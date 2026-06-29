@@ -63,7 +63,8 @@ end
 # spawned tasks touch nothing shared except `put!`-ing their (id, result) onto a Channel. The blocker
 # graph is a DAG over the batch (blockers are strictly-earlier cells), so the loop always drains — no
 # deadlock even on a pathological dependency chain.
-function run_scheduled(cells::Vector{ParCell}, npool::Integer, evalfn, ondone = (_id, _r) -> nothing)
+function run_scheduled(cells::Vector{ParCell}, npool::Integer, evalfn, ondone = (_id, _r) -> nothing;
+                       onspawn = (_id, _t) -> nothing)
     blockers = par_blockers(cells)
     order = [c.id for c in cells]
     cap = max(1, Int(npool))
@@ -79,11 +80,12 @@ function run_scheduled(cells::Vector{ParCell}, npool::Integer, evalfn, ondone = 
             running[] >= cap && break
             all(b -> b in done, blockers[id]) || continue
             push!(launched, id); running[] += 1
-            Threads.@spawn begin
+            t = Threads.@spawn begin
                 local r
                 try; r = evalfn(id); catch e; r = e; end
                 put!(completions, (id, r))
             end
+            try; onspawn(id, t); catch; end   # hand the task to the caller (cancellation registry)
         end
     end
 

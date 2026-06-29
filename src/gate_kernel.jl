@@ -384,6 +384,21 @@ function eval_batch(k::GateKernel, report::Report, run_id::AbstractString, batch
                  timeout = _eval_timeout())
 end
 
+# Interrupt the worker's currently-running batch cells (the stop button). Deliberately does NOT
+# `prepare!` — if the worker is gone there's nothing to cancel, and we must not respawn one here. Runs
+# as its own gate request, which the worker handles on a separate task (the message loop spawns every
+# request), so it lands WHILE the blocking `eval_batch` is still in flight. Returns the count of cells
+# interrupted, or -1 if there's no live worker to talk to.
+function cancel_eval(k::GateKernel)
+    k.conn === nothing && return -1
+    return try
+        Int(_tool(k, "__slate_cancel", Dict{String,Any}(); timeout = 30.0))
+    catch e
+        @warn "slate cancel: worker did not acknowledge" exception = e
+        -1
+    end
+end
+
 # Forward a paged-table page request to the worker (where the provider lives).
 # Normalize/clamp the request once here, then pass flat scalars over the gate.
 function table_page(k::GateKernel, report::Report, table_id::AbstractString, request::AbstractDict)

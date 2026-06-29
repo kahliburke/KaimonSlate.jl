@@ -106,6 +106,16 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
         @test Set(seen) == Set([("a", "v:a"), ("b", "v:b")])
     end
 
+    @testset "run_scheduled: onspawn hands back a Task per cell (cancellation hook)" begin
+        cells = [pc("a"; writes = [:x]), pc("b"; writes = [:y])]
+        spawned = Dict{String,Task}()
+        lk = ReentrantLock()
+        run_scheduled(cells, 2, id -> id, (_id, _r) -> nothing;
+                      onspawn = (id, t) -> (lock(lk) do; spawned[id] = t; end))
+        @test Set(keys(spawned)) == Set(["a", "b"])     # every launched cell exposed its task
+        @test all(t -> t isa Task, values(spawned))
+    end
+
     @testset "mixed: independent pair after a shared dependency" begin
         # base → (left, right) independent → join
         cells = [pc("base"; writes = [:v]),

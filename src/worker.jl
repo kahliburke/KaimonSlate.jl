@@ -225,6 +225,39 @@ _as_symset(v) = Set{Symbol}(Symbol(x) for x in (v === nothing ? () : v))
 _as_strset(v) = Set{String}(String(x) for x in (v === nothing ? () : v))
 _cell_get(c, k, default) = c isa AbstractDict ? get(c, k, get(c, Symbol(k), default)) : default
 
+# Currently-running batch evaluator tasks (id → Task), so `__slate_cancel` can interrupt them. The
+# runner is serial per notebook and this worker serves one notebook, so at most one batch is live and
+# ids are unique within it. Guarded by a lock (mutated from the scheduler task + the cancel handler).
+const _CANCEL_LOCK = ReentrantLock()
+const _RUNNING_TASKS = Dict{String,Task}()
+const _BATCH_CANCEL = Ref(false)          # set by __slate_cancel; checked by the batch evalfn
+
+# The wire-form of a cancelled cell — an error result so the UI marks it interrupted (not stuck).
+_interrupted_wire() = (stdout = "", mime = Tuple{String,Vector{UInt8}}[], echarts = Any[], tables = Any[],
+                       binds = NamedTuple[], value_repr = "", exception = "InterruptException: run cancelled",
+                       backtrace = nothing, duration_ms = 0.0, trace = Any[], stderr = "",
+                       overflow = NamedTuple[], animations = Any[])
+
+# Interrupt every running batch cell (a stop button). `schedule(t, InterruptException(); error=true)`
+# delivers the throw at the task's next safepoint/yield — like every notebook's interrupt, a pure
+# tight CPU loop with no allocation/yield can't be preempted (fall back to a worker restart for that).
+# Each interrupted cell's `run_capture` catches the exception and returns an error wire, which streams
+# back via `slate_celldone` — so the cell shows "interrupted" and the WARM NAMESPACE is preserved.
+function __slate_cancel(; run_id::String = "")
+    _BATCH_CANCEL[] = true             # short-circuit any cell that hasn't started yet (evalfn checks this)
+    n = 0
+    lock(_CANCEL_LOCK) do
+        for (id, t) in collect(_RUNNING_TASKS)
+            try
+                istaskdone(t) || (schedule(t, InterruptException(); error = true); n += 1)
+            catch
+            end
+        end
+    end
+    @info "slate cancel: interrupted cells" count = n
+    return n
+end
+
 function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
     specs = ParCell[]
     meta = Dict{String,Any}()
@@ -238,9 +271,11 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
         meta[id] = c
     end
     pool = npool > 0 ? npool : max(1, Threads.nthreads())
+    _BATCH_CANCEL[] = false            # fresh batch — clear any prior cancel
     @info "slate batch: scheduling" run = run_id cells = length(specs) pool = pool
 
     evalfn = function (id)
+        _BATCH_CANCEL[] && return _interrupted_wire()   # cancelled before this cell started → don't run it
         c = meta[id]
         _eval_one(String(_cell_get(c, "source", "")),
                   String(_cell_get(c, "filename", "cell:" * id)),
@@ -248,14 +283,27 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
                   Vector{String}(String[String(x) for x in _cell_get(c, "memo_names", String[])]),
                   Float64(_cell_get(c, "memo_threshold", 0.0)))
     end
+    # Track each task so __slate_cancel can interrupt it; drop it once it finishes.
+    onspawn = (id, t) -> lock(_CANCEL_LOCK) do; _RUNNING_TASKS[id] = t; end
     # Stream each result as it lands (the scheduler calls this on its own task, one cell at a time).
     ondone = function (id, wire)
-        wire isa Exception &&
-            (@error "slate batch: evaluator task threw" cell = id exception = wire; return)
+        lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, id); end
+        if wire isa Exception
+            # The evaluator task threw OUTSIDE run_capture's own try (e.g. an interrupt during capture
+            # setup) — synthesize an error wire so the cell shows the failure instead of staying stuck.
+            @error "slate batch: evaluator task threw" cell = id exception = wire
+            ew = merge(_interrupted_wire(), (; exception = sprint(showerror, wire)))
+            try; KaimonGate._publish_stream("slate_celldone", (; run_id = run_id, id = id, wire = ew)); catch; end
+            return
+        end
         try; KaimonGate._publish_stream("slate_celldone", (; run_id = run_id, id = id, wire = wire)); catch; end
     end
 
-    run_scheduled(specs, pool, evalfn, ondone)
+    try
+        run_scheduled(specs, pool, evalfn, ondone; onspawn = onspawn)
+    finally
+        lock(_CANCEL_LOCK) do; empty!(_RUNNING_TASKS); end   # belt-and-suspenders: never leak handles
+    end
     @info "slate batch: done" run = run_id cells = length(specs)
     return (; run_id = run_id, ids = [c.id for c in specs])
 end
@@ -656,6 +704,7 @@ function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),
+        KaimonGate.GateTool("__slate_cancel", __slate_cancel),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),

@@ -139,10 +139,12 @@
   // Click the floating chip → scroll to + select the currently-running cell.
   window.onChipClick = function () { const id = activeCell(); if (id) jumpTo(id); };
 
-  // Stop the run. The only worker-level halt is a restart (kills the namespace); restartWorker()
-  // runs its own confirm + loading flow, so just delegate to it.
-  window.cancelRun = function () {
-    try { if (typeof restartWorker === 'function') restartWorker(); } catch (_) {}
+  // Stop the run. Prefer a GRACEFUL interrupt: /cancel interrupts the worker's running cells but keeps
+  // the namespace (and every finished result) — the server falls back to a full worker restart on its
+  // own when there's nothing to gracefully interrupt. No confirm: stopping a run is cheap and reversible
+  // (re-run the cells), unlike restartWorker's namespace-nuking restart.
+  window.cancelRun = async function () {
+    try { renderAll(await api('POST', '/api/cancel')); } catch (_) {}
   };
 
   // The server announced a run of N cells. Reset the batch counters (a fresh streak) and show the pill.

@@ -103,6 +103,25 @@ end
 # Restart a notebook's kernel: kill its worker (a gate worker is a real subprocess;
 # no-op in-process), then re-evaluate from a fresh namespace. The gate kernel
 # respawns a worker on the next `prepare!`.
+# Graceful stop: interrupt the worker's running cells WITHOUT killing the namespace. Only meaningful
+# for a gate worker with cells in flight; the interrupted cells stream back as errors (via celldone)
+# and the namespace + every already-finished result survives. Falls back to a full worker restart when
+# there's nothing to gracefully interrupt (in-process kernel, no live worker, or no running cells) —
+# matching the old stop-button behaviour. Returns the notebook.
+function cancel_run!(nb::LiveNotebook)
+    k = nb.kernel
+    hasrunning = lock(nb.lock) do; any(c -> c.state == RUNNING, nb.report.cells); end
+    if k isa ReportEngine.GateKernel && hasrunning
+        n = ReportEngine.cancel_eval(k)
+        if n >= 0
+            @info "slate: run cancelled (namespace preserved)" notebook = nb.id interrupted = n
+            try; _broadcast(nb, "cancelled:$n"); catch; end
+            return nb
+        end
+    end
+    return restart_kernel!(nb)
+end
+
 function restart_kernel!(nb::LiveNotebook)
     # Tear down + reset synchronously (fast), mark a background re-run underway, and RETURN — the
     # full re-eval (which respawns the worker on prepare! and streams cells back) runs async, so the
@@ -503,6 +522,7 @@ function _make_router(h::Hub)
         _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> (restart_kernel!(nb); _json(state_json(nb)))))
+    HTTP.register!(router, "POST", "/api/{id}/cancel", req -> _withnb(h, req, nb -> (cancel_run!(nb); _json(state_json(nb)))))
     # Agent chat: forward the turn to Kaimon's agent service (spawning a session
     # bound to this notebook on first use); the agent's `{kind,turn,data}` events
     # arrive async on the gate bus and are relayed to this notebook's SSE by
