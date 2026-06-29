@@ -91,11 +91,34 @@ _code_size(code) = get(_CODE_SIZES, code, _CODE_SIZES["normal"])
 const _BODY_SIZES = Dict("large" => "11.5pt", "normal" => "10.5pt", "compact" => "9.5pt", "small" => "8.5pt")
 _body_size(body) = get(_BODY_SIZES, body, _BODY_SIZES["normal"])
 
+# True if the document's section headings (the level-2+ ones Typst would auto-number) are MOSTLY
+# numbered by hand already — "3.1 · …", "1.2)", "Section 3" — so we should leave Typst's numbering off
+# and let the author's numbers stand (avoids the doubled "1 3.1 · …").
+function _manual_heading_numbers(cells)
+    head = r"^\s*#{2,6}\s+(.*\S)\s*$"
+    num  = r"^(\d+([.)]\s*\d+)*[.):·\-]|\d+\s|(section|part|chapter|appendix)\b)"i
+    total = 0; numbered = 0
+    for c in cells
+        c.kind == MARKDOWN || continue
+        infence = false
+        for ln in split(String(c.source), '\n')
+            occursin(r"^\s*(```|~~~)", ln) && (infence = !infence; continue)
+            infence && continue
+            m = match(head, ln); m === nothing && continue
+            total += 1
+            occursin(num, m.captures[1]) && (numbered += 1)
+        end
+    end
+    return total > 0 && numbered * 2 >= total      # majority manually numbered
+end
+
 function _typst_preamble(title::AbstractString; style::AbstractString = "article",
                          columns::Int = 1, theme::AbstractString = "light",
-                         code::AbstractString = "normal", body::AbstractString = "normal")
+                         code::AbstractString = "normal", body::AbstractString = "normal",
+                         number::Union{Bool,Nothing} = nothing)
     pre = _typ_str(strip(replace(_MITEX_SHIMS, r"\s+" => " ")))
     st = get(_STYLES, style, _STYLES["article"])
+    donumber = number === nothing ? st.number : number   # caller can force off (e.g. headings are manually numbered)
     p = _palette(theme)
     csize = _code_size(code)
     bsize = _body_size(body)
@@ -112,7 +135,7 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     #set par(justify: true, spacing: $(st.parspace))
     #show heading: set block(above: $(st.headabove), below: $(st.headbelow))
     #show heading: set text(fill: $(p.title))
-    $(st.number ? "#set heading(numbering: (..n) => { let m = n.pos(); if m.len() <= 1 { none } else { numbering(\"1.1\", ..m.slice(1)) } })" : "")
+    $(donumber ? "#set heading(numbering: (..n) => { let m = n.pos(); if m.len() <= 1 { none } else { numbering(\"1.1\", ..m.slice(1)) } })" : "")
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
     #let titleblock(t) = { align(center, text(size: $(st.titlesize), weight: "bold", fill: $(p.title), t)); v(2pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt) }
@@ -348,8 +371,11 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         # Dark theme highlights code via a bundled tmTheme that Typst reads from the root.
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
         io = IOBuffer()
+        # If the author manually numbers their headings ("3.1 · …", "Section 3"), suppress Typst's
+        # auto-numbering so it doesn't prepend a second number ("1 3.1 · …").
+        numoverride = _manual_heading_numbers(nb.report.cells) ? false : nothing
         print(io, _typst_preamble(nb.report.title; style = style, columns = cols,
-                                  theme = theme, code = code, body = body))
+                                  theme = theme, code = code, body = body, number = numoverride))
         # Front matter (first markdown cell) → academic title + abstract spanning full width.
         cells = nb.report.cells
         meta, firstmd_rest = Dict{String,String}(), nothing
