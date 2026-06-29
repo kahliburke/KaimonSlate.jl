@@ -49,3 +49,54 @@ function co_runnable(ids, blockers)
     end
     return true
 end
+
+# ── The dataflow execution loop (pure: no gate / no capture dependency) ──────────────────────────
+# Drive a batch of `cells` (DOCUMENT ORDER) to completion, running independent cells CONCURRENTLY on
+# spawned tasks while honouring `par_blockers` — a cell launches only once every earlier cell that
+# blocks it has FINISHED. `npool` bounds how many run at once. `evalfn(id)` does the actual work for a
+# cell (in the worker: `run_capture` with a `DemuxCapture`); `ondone(id, result)` is called on the
+# scheduler task the instant a cell finishes (in the worker: stream the result on the gate). A cell's
+# evalfn throwing is caught and the exception is delivered as that cell's `result` — one bad cell never
+# stalls the batch. Returns id → result for every cell.
+#
+# Concurrency safety: ONLY this (the scheduler) task mutates the bookkeeping sets and `results`; the
+# spawned tasks touch nothing shared except `put!`-ing their (id, result) onto a Channel. The blocker
+# graph is a DAG over the batch (blockers are strictly-earlier cells), so the loop always drains — no
+# deadlock even on a pathological dependency chain.
+function run_scheduled(cells::Vector{ParCell}, npool::Integer, evalfn, ondone = (_id, _r) -> nothing)
+    blockers = par_blockers(cells)
+    order = [c.id for c in cells]
+    cap = max(1, Int(npool))
+    done = Set{String}()
+    launched = Set{String}()
+    running = Ref(0)
+    results = Dict{String,Any}()
+    completions = Channel{Tuple{String,Any}}(length(cells))
+
+    fill_slots! = function ()
+        for id in order
+            (id in launched) && continue
+            running[] >= cap && break
+            all(b -> b in done, blockers[id]) || continue
+            push!(launched, id); running[] += 1
+            Threads.@spawn begin
+                local r
+                try; r = evalfn(id); catch e; r = e; end
+                put!(completions, (id, r))
+            end
+        end
+    end
+
+    fill_slots!()
+    remaining = length(cells)
+    while remaining > 0
+        (id, r) = take!(completions)
+        results[id] = r
+        running[] -= 1
+        push!(done, id)
+        try; ondone(id, r); catch; end
+        remaining -= 1
+        fill_slots!()
+    end
+    return results
+end

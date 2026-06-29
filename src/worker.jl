@@ -35,6 +35,7 @@ include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / 
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
 include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (parallel evaluator I/O isolation)
+include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_scheduled — parallel batch scheduler
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 
@@ -158,13 +159,15 @@ function _memo_store(cellkey::String, names::Vector{String}, wire)
     return nothing
 end
 
-"Evaluate a cell's source in the warm namespace; return the wire-form capture. `filename` (a
-kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`.
-`memo_*` (when set) enable durable caching: restore an expensive cell's result on a cold start, or
-persist it after a run that exceeds `memo_threshold` ms."
-function __slate_eval(source::String; filename::String = "string",
-                     memo_key::String = "", memo_names::Vector{String} = String[],
-                     memo_threshold::Float64 = 0.0)
+# Evaluate ONE cell's source in the warm namespace, returning its wire-form capture — the shared core
+# of both the serial `__slate_eval` and the parallel `__slate_eval_batch`. Runs under a `DemuxCapture`
+# so it's safe to call from a spawned task (each task captures its own task-local stdout/stderr/display;
+# see demux.jl). `memo_*` enable durable caching: restore an expensive cell with no recompute, or persist
+# it after a run exceeding `memo_threshold` ms. NOTE: assignment into the shared namespace `_NS[]` is the
+# unavoidable shared-state write — the scheduler (`par_blockers`) guarantees two cells that read/write the
+# same global are never in flight at once, so concurrent evals only ever touch disjoint globals.
+function _eval_one(source::String, filename::String, memo_key::String,
+                   memo_names::Vector{String}, memo_threshold::Float64)
     cid = replace(filename, r"^cell:" => "")
     if !isempty(memo_key)
         w = _memo_restore(memo_key, memo_names)
@@ -199,6 +202,62 @@ function __slate_eval(source::String; filename::String = "string",
         @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
     end
     return r
+end
+
+"Evaluate a cell's source in the warm namespace; return the wire-form capture. `filename` (a
+kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`.
+`memo_*` (when set) enable durable caching: restore an expensive cell's result on a cold start, or
+persist it after a run that exceeds `memo_threshold` ms."
+__slate_eval(source::String; filename::String = "string",
+             memo_key::String = "", memo_names::Vector{String} = String[],
+             memo_threshold::Float64 = 0.0) =
+    _eval_one(source, filename, memo_key, memo_names, memo_threshold)
+
+# ── Parallel batch evaluation (inter-cell, in-process) ───────────────────────────────────────────
+# Run a batch of stale cells CONCURRENTLY in this one worker, sharing the warm namespace. Each cell is
+# a Dict from the server carrying its source + dataflow metadata (deps/reads/writes/opaque, already
+# folding define-cells into `opaque` server-side for world-age safety). The pure scheduler
+# (`run_scheduled`, parsched.jl) launches independent cells on spawned tasks while serialising any pair
+# that conflicts, and streams each cell's wire result back the instant it finishes via the gate
+# `slate_celldone` channel `(; run_id, id, wire)` — so a fast cell renders while a slow sibling is still
+# running. Returns `(; run_id, ids)` (a small ack; the real payloads rode the stream).
+_as_symset(v) = Set{Symbol}(Symbol(x) for x in (v === nothing ? () : v))
+_as_strset(v) = Set{String}(String(x) for x in (v === nothing ? () : v))
+_cell_get(c, k, default) = c isa AbstractDict ? get(c, k, get(c, Symbol(k), default)) : default
+
+function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
+    specs = ParCell[]
+    meta = Dict{String,Any}()
+    for c in cells
+        id = String(_cell_get(c, "id", ""))
+        isempty(id) && continue
+        push!(specs, ParCell(id, _as_strset(_cell_get(c, "deps", String[])),
+                             _as_symset(_cell_get(c, "reads", Symbol[])),
+                             _as_symset(_cell_get(c, "writes", Symbol[])),
+                             _cell_get(c, "opaque", false) === true))
+        meta[id] = c
+    end
+    pool = npool > 0 ? npool : max(1, Threads.nthreads())
+    @info "slate batch: scheduling" run = run_id cells = length(specs) pool = pool
+
+    evalfn = function (id)
+        c = meta[id]
+        _eval_one(String(_cell_get(c, "source", "")),
+                  String(_cell_get(c, "filename", "cell:" * id)),
+                  String(_cell_get(c, "memo_key", "")),
+                  Vector{String}(String[String(x) for x in _cell_get(c, "memo_names", String[])]),
+                  Float64(_cell_get(c, "memo_threshold", 0.0)))
+    end
+    # Stream each result as it lands (the scheduler calls this on its own task, one cell at a time).
+    ondone = function (id, wire)
+        wire isa Exception &&
+            (@error "slate batch: evaluator task threw" cell = id exception = wire; return)
+        try; KaimonGate._publish_stream("slate_celldone", (; run_id = run_id, id = id, wire = wire)); catch; end
+    end
+
+    run_scheduled(specs, pool, evalfn, ondone)
+    @info "slate batch: done" run = run_id cells = length(specs)
+    return (; run_id = run_id, ids = [c.id for c in specs])
 end
 
 "Apply a browser `@bind` value change: coerce against the widget, update the registry,
@@ -596,6 +655,7 @@ end
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
+        KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
