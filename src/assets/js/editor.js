@@ -288,6 +288,11 @@
           { key: 'Escape', run: (v) => { v.contentDOM.blur(); return true; } },   // exit edit → command mode
           // ⌘⇧K = help (app shortcut). Bind it here so CM6's defaultKeymap `deleteLine` doesn't eat it.
           { key: 'Mod-Shift-k', run: () => { window.__docsHotkey = Date.now(); window.openDocsAtCursor && window.openDocsAtCursor(); return true; } },
+          // ⌘⇧←/→ = back/forward through selected-cell nav history, IN the editor too — so after a
+          // ⌘-click go-to-definition (which focuses the target editor) you can jump straight back.
+          // (Overrides CM's select-to-line-start; use Home / ⌘← then ⇧ for that.)
+          { key: 'Mod-Shift-ArrowLeft', run: () => { window.navBack && window.navBack(); return true; } },
+          { key: 'Mod-Shift-ArrowRight', run: () => { window.navFwd && window.navFwd(); return true; } },
           { key: 'Mod-/', run: toggleComment }, { key: 'Ctrl-/', run: toggleComment },
           // Tab: accept the open completion → else trigger one when a word/`\`/`.` precedes the
           // cursor → else fall through to indent. Restores CM5's Tab-to-complete. (macOS eats
