@@ -50,12 +50,15 @@ struct CellOutput
     trace::Vector{Any}            # `@trace` rows ({line,name,value}); empty unless cell is traced
     stderr::String                # captured stderr / `@warn` output (shown as a warnings block)
     overflow::Vector{Any}         # full results saved to disk when an output was truncated (kind,path,bytes,clipped)
+    animations::Vector{Any}       # animate(…) payloads (manifest + frame/LUT bytes); blob'd server-side
 end
-# Back-compat constructors (callers that omit trace/stderr, or trace/stderr but not overflow).
+# Back-compat constructors (callers that omit trace/stderr, or trace/stderr but not overflow/animations).
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[])
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[], Any[])
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[])
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[], Any[])
+CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow) =
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, Any[])
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);
@@ -418,6 +421,7 @@ source_text(cell::Cell) = cell.source
 
 include(joinpath(@__DIR__, "echarts.jl"))   # EChart (used by capture.jl)
 include(joinpath(@__DIR__, "echarts_dsl.jl")) # echart(:line,…)/series DSL (shared with the worker)
+include(joinpath(@__DIR__, "animation.jl")) # animate(frames;…) → Animation (used by capture.jl; shared)
 include(joinpath(@__DIR__, "reactive.jl"))  # reactive/@onclick/pause async primitives (shared)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table (used by capture.jl)
 include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value tracing (engine + worker)

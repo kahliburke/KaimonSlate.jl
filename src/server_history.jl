@@ -122,6 +122,33 @@ end
 
 _echarts_specs(c::Cell) = c.output === nothing ? Any[] : c.output.echarts
 _table_specs(c::Cell) = c.output === nothing ? Any[] : c.output.tables
+
+# Read a field from an animation payload whether it crossed as a NamedTuple (in-process) or a Dict
+# (after the gate wire). Bytes are coerced to a real `Vector{UInt8}`.
+_aget(a, k::Symbol) = a isa AbstractDict ? get(a, String(k), get(a, k, nothing)) :
+                      (hasproperty(a, k) ? getproperty(a, k) : nothing)
+_abytes(x) = x === nothing ? UInt8[] : (x isa Vector{UInt8} ? x : Vector{UInt8}(x))
+
+# Animation specs for a cell: register the (gzipped) frame stack + LUT in the durable blob store and
+# return manifests carrying `/blob/<hash>` URLs — so the heavy buffers never ride in the cell JSON.
+function _animation_specs(c::Cell, nbid::AbstractString = "")
+    (c.output === nothing || isempty(c.output.animations) || isempty(nbid)) && return Any[]
+    specs = Any[]
+    for a in c.output.animations
+        manifest = _aget(a, :manifest); manifest === nothing && continue
+        frames = _abytes(_aget(a, :frames)); lut = _abytes(_aget(a, :lut))
+        (isempty(frames) || isempty(lut)) && continue
+        fh = string(hash(frames); base = 16); lh = string(hash(lut); base = 16)
+        _blob_put_durable!(string(nbid, "/", fh), "application/octet-stream",
+                           transcode(GzipCompressor, frames); encoding = "gzip")
+        _blob_put_durable!(string(nbid, "/", lh), "application/octet-stream", lut)
+        m = Dict{String,Any}(string(k) => v for (k, v) in pairs(manifest))
+        m["framesUrl"] = string("/api/", nbid, "/blob/", fh)
+        m["lutUrl"]    = string("/api/", nbid, "/blob/", lh)
+        push!(specs, m)
+    end
+    return specs
+end
 # Specs from a markdown cell's `{{ }}` interpolations, in document order (matches
 # the `.ichart`/`.itable` placeholder indices the renderer emits).
 _md_interp_echarts(c::Cell) = (e = Any[]; for o in c.interp; append!(e, o.echarts); end; e)
@@ -184,6 +211,46 @@ function _externalize_blobs(nbid::AbstractString, html::AbstractString)
     end)
 end
 
+# ── Durable blob tier (content-addressed, on disk) ────────────────────────────────────────────
+# The in-memory `_BLOBS` above is fine for small plot rasters but loses everything on a server
+# restart and would be nuked by its crude 800-entry cap. Large, must-survive-restart artifacts —
+# animation frame stacks especially — go to a content-addressed file store instead, so a worker /
+# extension restart never has to recompute them and a browser reload serves them straight from disk.
+# Key is "nbid/hash"; a `.meta` sidecar records (mime, Content-Encoding). Content-addressed → write once.
+const _DBLOB_DIR = Ref{String}("")
+function _dblob_dir()
+    if _DBLOB_DIR[] == ""
+        d = joinpath(get(ENV, "HOME", tempdir()), ".cache", "kaimon", "slate-blobs")
+        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimon-slate-blobs"); mkpath(d); end
+        _DBLOB_DIR[] = d
+    end
+    return _DBLOB_DIR[]
+end
+_dblob_file(key::AbstractString) = joinpath(_dblob_dir(), replace(String(key), "/" => "__", r"[^A-Za-z0-9_.]" => "_"))
+
+function _blob_put_durable!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8}; encoding::AbstractString = "")
+    f = _dblob_file(key)
+    try
+        if !isfile(f)                                   # content-addressed: write once, atomically
+            tmp = f * ".tmp" * string(hash(bytes); base = 16)
+            write(tmp, bytes); mv(tmp, f; force = true)
+            write(f * ".meta", string(mime, "\n", encoding))
+        end
+    catch
+    end
+    return nothing
+end
+
+# Route lookup: memory (`_BLOBS`) first, then the durable disk tier. Returns (mime, bytes, encoding).
+function blob_lookup(key::AbstractString)
+    m = lock(_BLOB_LOCK) do; get(_BLOBS, String(key), nothing); end
+    m !== nothing && return (m[1], m[2], "")
+    f = _dblob_file(key)
+    isfile(f) || return nothing
+    meta = isfile(f * ".meta") ? split(read(f * ".meta", String), "\n") : ["application/octet-stream", ""]
+    return (String(meta[1]), read(f), length(meta) >= 2 ? String(meta[2]) : "")
+end
+
 # ── Overflow files (full results for truncated output) ───────────────────────────
 # A truncated output's FULL result is written to a temp file by the worker (capture.jl); the path
 # rides back in `CellOutput.overflow`. We register path-by-name here (confined: the serve route only
@@ -230,6 +297,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(c.source, c.interp) : output_html(c)),
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
+        "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor.

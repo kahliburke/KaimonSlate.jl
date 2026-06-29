@@ -4,6 +4,7 @@
 using SafeTestsets
 
 @safetestset "defname" begin include("test_defname.jl") end
+@safetestset "animation" begin include("test_animation.jl") end
 @safetestset "engine" begin include("test_engine.jl") end
 @safetestset "eval"   begin include("test_eval.jl") end
 @safetestset "deps"   begin include("test_deps.jl") end

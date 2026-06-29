@@ -287,9 +287,12 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     quiet = _is_quiet_cell(source)
     echarts = Any[]
     tables = Any[]
+    animations = Any[]
     if err === nothing && value !== nothing && !quiet
         if value isa EChart
             push!(echarts, value.option)
+        elseif value isa Animation
+            push!(animations, (manifest = value.manifest, frames = value.frames, lut = value.lut))
         elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
             push!(tables, _table_wire(st))
         else
@@ -303,7 +306,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # text/plain repr — skipped when richer output exists (the renderer suppresses
     # it anyway), and `invokelatest`-guarded for the world-age reason.
     value_repr = ""
-    if err === nothing && value !== nothing && !quiet && isempty(chunks) && isempty(echarts) && isempty(tables)
+    if err === nothing && value !== nothing && !quiet && isempty(chunks) && isempty(echarts) && isempty(tables) && isempty(animations)
         try
             # `:displaysize` bounds how much `show` even generates for big containers (≈40 rows),
             # then `_cap_text` is the hard ceiling for anything still huge (e.g. a giant String value).
@@ -344,5 +347,6 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
 
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
-            duration_ms = dur_ms, trace = trace, stderr = stderr_str, overflow = overflow)
+            duration_ms = dur_ms, trace = trace, stderr = stderr_str, overflow = overflow,
+            animations = animations)
 end

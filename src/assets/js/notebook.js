@@ -230,6 +230,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // (a real CPU sink during slider drags). Data changes produce a fresh cell object → fresh array.
     if (c.echarts !== last.current.echarts) { last.current.echarts = c.echarts; window.renderCharts(c); }
     if (c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
+    if (c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValues({ cells: [c] });
 
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
@@ -258,9 +259,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   } else if (isBind) {
     // A bind/MIXED cell: its own @bind rows, the surfaced-control strip (so controls surfaced
     // here — including its own @bind — actually render), then the toggle source editor + output.
-    body = html`<div class="binds"></div><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div>${srcedit}<div class="output"></div><div class="tables"></div><div class="echarts"></div>`;
+    body = html`<div class="binds"></div><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div>${srcedit}<div class="output"></div><div class="tables"></div><div class="echarts"></div><div class="anim"></div>`;
   } else {
-    body = html`<${Editor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><div class="echarts"></div>`;
+    body = html`<${Editor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><div class="echarts"></div><div class="anim"></div>`;
   }
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
