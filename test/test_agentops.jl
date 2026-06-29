@@ -62,6 +62,19 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("no cell", NS.agent_rename_cell!(nb, "ghost", "x"))
         end
 
+        @testset "delta_since read reports only changes" begin
+            full = NS.notebook_digest(nb)
+            tok = match(r"state=(\w+)", full)[1]
+            # no changes since the token → "(no changes …)"
+            @test occursin("no changes", NS.notebook_digest(nb; delta_since = tok))
+            # add a cell, then a delta read shows only it
+            cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "7 + 7"; id = "delta_probe"))[1]
+            d = NS.notebook_digest(nb; delta_since = tok)
+            @test occursin("[ADDED]", d) && occursin("id=delta_probe", d) && occursin("14", d)
+            # an unknown token falls back to a full read
+            @test occursin("full read", NS.notebook_digest(nb; delta_since = "deadbeef"))
+        end
+
         @testset "find_live by id and path" begin
             @test NS.find_live(hub, nb.id) === nb
             @test NS.find_live(hub, nbp) === nb

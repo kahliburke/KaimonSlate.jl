@@ -204,16 +204,64 @@ end
 
 # The notebook as the agent should see it: each cell's id, kind, state, source,
 # and (for code) its result.
-function notebook_digest(nb::LiveNotebook)
+# ── Read tokens for delta reads ──────────────────────────────────────────────
+# Each digest returns a short STATE TOKEN and remembers the per-cell content hashes behind it, so a
+# later read with `delta_since=<token>` reports only what changed (added / edited / removed) instead
+# of the whole notebook. In-memory + bounded; an unknown/evicted token falls back to a full read.
+const _READTOK = Dict{String,Tuple{Vector{String},Dict{String,String}}}()   # "nbid|token" → (cell order, id→hash)
+const _READTOK_LOCK = ReentrantLock()
+# A cell's content hash for delta detection — source AND result/state, so a re-run (new output) counts.
+_cell_state_hash(c::Cell) = string(hash((c.kind, c.source,
+                                         c.kind == CODE ? _cell_result_text(c) : "", c.state)); base = 16)
+function _read_token!(nbid, order, hashes)
+    tok = string(hash(join((string(id, ':', hashes[id]) for id in order), '\n')); base = 16)[1:12]
+    lock(_READTOK_LOCK) do
+        length(_READTOK) > 400 && empty!(_READTOK)
+        _READTOK[string(nbid, '|', tok)] = (copy(order), copy(hashes))
+    end
+    return tok
+end
+_read_token_get(nbid, tok) = lock(_READTOK_LOCK) do; get(_READTOK, string(nbid, '|', String(tok)), nothing); end
+
+function _print_cell!(io::IO, c::Cell)
+    kind = c.kind == MARKDOWN ? "md" : "code"
+    print(io, "\n\n### id=", c.id, "  [", kind, ", ", lowercase(string(c.state)), "]\n")
+    print(io, rstrip(c.source))
+    c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
+end
+
+# `delta_since`: a token from a prior digest → report only the cells added/edited/removed since (else
+# a full read). Every digest ends by handing back the CURRENT token for the next delta.
+function notebook_digest(nb::LiveNotebook; delta_since::AbstractString = "")
     lock(nb.lock) do
+        cells = nb.report.cells
+        order = String[c.id for c in cells]
+        hashes = Dict{String,String}(c.id => _cell_state_hash(c) for c in cells)
+        token = _read_token!(nb.id, order, hashes)
+        prev = isempty(delta_since) ? nothing : _read_token_get(nb.id, delta_since)
         io = IOBuffer()
-        print(io, "Notebook '", nb.id, "' — ", abspath(nb.path), " — ", length(nb.report.cells),
-              " cell(s) — v", nb.version, " — build-floor: ", floor_status(nb))
-        for c in nb.report.cells
-            kind = c.kind == MARKDOWN ? "md" : "code"
-            print(io, "\n\n### id=", c.id, "  [", kind, ", ", lowercase(string(c.state)), "]\n")
-            print(io, rstrip(c.source))
-            c.kind == CODE && print(io, "\n→ ", replace(_cell_result_text(c), "\n" => "\n  "))
+        print(io, "Notebook '", nb.id, "' — ", abspath(nb.path), " — ", length(cells),
+              " cell(s) — v", nb.version, " — state=", token, " — build-floor: ", floor_status(nb))
+        if prev === nothing
+            isempty(delta_since) || print(io, "\n(delta token '", delta_since, "' unknown/expired — full read)")
+            for c in cells
+                _print_cell!(io, c)
+            end
+        else
+            porder, phash = prev
+            cset = Set(order)
+            removed = String[id for id in porder if !(id in cset)]
+            changed = 0
+            for c in cells
+                old = get(phash, c.id, nothing)
+                status = old === nothing ? "ADDED" : (old != hashes[c.id] ? "CHANGED" : "")
+                isempty(status) && continue
+                changed += 1
+                print(io, "\n\n[", status, "]")
+                _print_cell!(io, c)
+            end
+            isempty(removed) || print(io, "\n\n[REMOVED] ", join(removed, ", "))
+            (changed == 0 && isempty(removed)) && print(io, "\n\n(no changes since ", delta_since, ")")
         end
         return String(take!(io))
     end

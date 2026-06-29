@@ -221,11 +221,19 @@ async function clearChat() {
   try { await api('POST', '/api/chat-clear', {}); } catch (_) {}
   agentMsgs = []; setWorking(false); agentStatus(''); renderAgentMsgs();
 }
+// Is the current UI theme a dark one? (Sent on chat so the agent's plot-theme hint matches.)
+function _uiThemeDark() {
+  try {
+    const n = (typeof curSlateTheme === 'function') ? curSlateTheme() : 'midnight';
+    const t = (typeof SLATE_UI_THEMES !== 'undefined') && SLATE_UI_THEMES.find(x => x.name === n);
+    return t ? !!t.dark : true;
+  } catch (_) { return true; }
+}
 async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
   inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
   try {
-    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: agentModel(), permission: agentPerm() });
+    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: agentModel(), permission: agentPerm(), dark: _uiThemeDark() });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
   } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); agentStatus(''); setWorking(false); }
 }
