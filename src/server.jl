@@ -116,6 +116,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
         register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
         register_runbatch!(r.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))
         register_userprog!(r.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
+        register_celldone!(r.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
         _load_chat_log!(nb)
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb
@@ -134,6 +135,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "")
     register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
     register_runbatch!(r.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
     register_userprog!(r.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
+    register_celldone!(r.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     @async begin
         try
@@ -307,9 +309,136 @@ end
 # adds its own completed-count, so the pill's N grows as cells are queued mid-run (not frozen).
 _emit_pending(nb::LiveNotebook, pending::Integer) = ReportEngine._emit_run_batch(nb.report.id, pending)
 
+# ── Parallel (inter-cell) batch execution — opt-in via meta["parallel"] ──────────────────────────
+# When enabled and a gate worker backs the notebook, the runner hands ALL stale code cells to the
+# worker AT ONCE; the worker schedules them (par_blockers) so independent cells run concurrently in
+# its one warm namespace while any conflicting pair serialises, and streams each result back as it
+# lands (slate_celldone → server_celldone). This is the genuine novelty: notebooks have never run
+# cells in parallel. Off by default — the proven serial path is untouched unless the flag is set.
+# Per-notebook `meta["parallel"]` wins; absent it, `KAIMONSLATE_PARALLEL=1` flips it on globally (the
+# test switch until there's a UI toggle). Off by default → the proven serial path.
+_parallel_enabled(nb::LiveNotebook) =
+    get(nb.report.meta, "parallel", get(ENV, "KAIMONSLATE_PARALLEL", "") == "1") == true
+
+# Per-(notebook,run) snapshot of each batched cell's src_hash at launch — the version guard for a
+# streamed result (a cell edited mid-batch has its in-flight result discarded; see server_celldone).
+const _BATCH_SNAPS = Dict{String,Dict{String,UInt64}}()
+const _BATCH_SEQ = Threads.Atomic{Int}(0)
+
+# Does a code cell DEFINE methods / types / macros? Such cells mutate the worker's method & type
+# tables, which is unsafe to do concurrently with other evals — so they run as a serial barrier
+# (sent `opaque`, which par_blockers treats two-way). def→use is ALSO already serialised by dataflow
+# (the defined name is a write the user reads downstream); this guards the independent-def case.
+function _cell_defines(cell::Cell)
+    top = try; Meta.parseall(cell.source); catch; return true; end   # unparseable → conservative barrier
+    stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+    for s in stmts
+        s isa Expr || continue
+        # `:incomplete`/`:error` nodes (parseall reports bad syntax as a node, not a throw) → barrier.
+        s.head in (:function, :struct, :macro, :abstract, :primitive, :incomplete, :error) && return true
+        # short-form `f(x) = …` / `f(x) where T = …` (a method def, not a plain binding)
+        (s.head === :(=) && s.args[1] isa Expr && s.args[1].head in (:call, :where)) && return true
+    end
+    return false
+end
+
+# Build + dispatch ONE parallel batch of every stale code cell. Returns true if a batch (≥2 cells) ran;
+# false to let the serial runner handle it (0/1 cell, or no gate worker). Blocks until the batch's
+# results have all merged (via the poller) so the runner loop doesn't re-batch still-running cells.
+function _run_code_batch!(nb::LiveNotebook)
+    nb.kernel isa ReportEngine.GateKernel || return false
+    run_id = string(Threads.atomic_add!(_BATCH_SEQ, 1) + 1)
+    skey = string(nb.report.id, "|", run_id)
+    batch, snap, npending = lock(nb.lock) do
+        code = [c for c in nb.report.cells if c.kind == CODE && c.state == STALE]
+        length(code) < 2 && return (nothing, nothing, 0)
+        specs = Vector{Dict{String,Any}}()
+        sn = Dict{String,UInt64}()
+        for c in code
+            c.state = RUNNING
+            _broadcast_progress(nb, c)
+            src = (:trace in c.flags) ? string("@trace begin ", c.source, "\nend") : c.source
+            push!(specs, Dict{String,Any}(
+                "id" => c.id, "source" => src, "filename" => "cell:" * c.id,
+                "deps" => collect(String, c.deps),
+                "reads" => String[string(r) for r in c.reads],
+                "writes" => String[string(w) for w in c.writes],
+                "opaque" => (:opaque in c.flags) || _cell_defines(c),
+                "memo_key" => ReportEngine._memo_key(nb.report, c),
+                "memo_names" => String[string(w) for w in c.writes],
+                "memo_threshold" => Float64(ReportEngine._MEMO_THRESHOLD_MS)))
+            sn[c.id] = c.src_hash
+        end
+        (specs, sn, count(c -> c.state in (STALE, RUNNING), nb.report.cells))
+    end
+    batch === nothing && return false
+    _BATCH_SNAPS[skey] = snap
+    _emit_pending(nb, npending)
+    try
+        ReportEngine.eval_batch(nb.kernel, nb.report, run_id, batch)
+    catch e
+        # The gate call itself failed (worker down / protocol error) — restale the in-flight cells and
+        # hand them to the SERIAL path (return false), which retries one-by-one and surfaces a real
+        # per-cell error. Re-batching here would hot-loop if the worker stays down.
+        @warn "slate parallel batch failed — falling back to serial" notebook = nb.id exception = (e, catch_backtrace())
+        lock(nb.lock) do
+            for (cid, h) in snap
+                i = _index_of(nb.report.cells, cid)
+                i === nothing && continue
+                c = nb.report.cells[i]
+                (c.state == RUNNING && c.src_hash == h) && (c.state = STALE)
+            end
+        end
+        delete!(_BATCH_SNAPS, skey)
+        return false
+    end
+    # Results merge asynchronously in the poller; wait until every batched cell has left RUNNING
+    # (merged, restaled-on-edit, or deleted). Bounded — the worker's ack means all were published.
+    deadline = time() + 5
+    while time() < deadline
+        still = lock(nb.lock) do
+            any(keys(snap)) do cid
+                i = _index_of(nb.report.cells, cid)
+                i !== nothing && nb.report.cells[i].state == RUNNING
+            end
+        end
+        still || break
+        sleep(0.01)
+    end
+    delete!(_BATCH_SNAPS, skey)
+    return true
+end
+
+# Merge one streamed parallel-batch result (from the worker's slate_celldone) into the notebook,
+# version-guarded against a mid-batch edit, and push the single-cell live patch — mirrors _eval_one!'s
+# merge so a parallel cell lands in the UI exactly like a serial one.
+function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::AbstractString, wire)
+    out = ReportEngine._wire_to_output(wire)
+    lock(nb.lock) do
+        i = _index_of(nb.report.cells, cid)
+        i === nothing && return                          # deleted mid-batch → drop
+        c = nb.report.cells[i]
+        snap = get(_BATCH_SNAPS, string(nb.report.id, "|", run_id), nothing)
+        expect = snap === nothing ? nothing : get(snap, String(cid), nothing)
+        if expect !== nothing && c.src_hash != expect
+            c.state == RUNNING && (c.state = STALE)       # edited mid-batch → re-run with new source
+            return
+        end
+        c.output = out; c.binds = out.binds
+        c.state = out.exception === nothing ? FRESH : ERRORED
+        _broadcast_progress(nb, c)
+    end
+    return nothing
+end
+
 function _run_loop!(nb::LiveNotebook)
     try
         while true
+            # Parallel fast-path: hand all stale code cells to the worker at once (opt-in). Falls through
+            # to the serial step for markdown, reactive restales, and the 0/1-code-cell case.
+            if _parallel_enabled(nb) && _run_code_batch!(nb)
+                continue
+            end
             target, pending = lock(nb.lock) do
                 t = _next_stale_cell(nb.report)
                 t, count(c -> c.state in (STALE, RUNNING), nb.report.cells)

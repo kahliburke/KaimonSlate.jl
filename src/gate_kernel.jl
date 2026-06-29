@@ -131,6 +131,7 @@ function _ensure_poller!()
                 pending = Dict{String,Set{String}}()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
+                celldone = Tuple{String,Any}[]          # (rid, (; run_id, id, wire)) — parallel batch results, NOT coalesced
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
@@ -152,6 +153,8 @@ function _ensure_poller!()
                         end
                     elseif m.channel == "slate_revise_err"    # a /src save didn't parse/apply
                         srcerr[rid] = String(m.data)
+                    elseif m.channel == "slate_celldone"      # a parallel-batch cell finished: (; run_id, id, wire)
+                        push!(celldone, (rid, m.data))
                     elseif m.channel == "slate_progress"      # "id|frac|done|msg" — one bar per id
                         parts = split(String(m.data), "|"; limit = 4)
                         if length(parts) == 4
@@ -162,6 +165,9 @@ function _ensure_poller!()
                 end
                 for (rid, vars) in pending
                     isempty(vars) || _do_refresh(rid, collect(vars))
+                end
+                for (rid, d) in celldone
+                    try; _do_celldone(rid, d.run_id, d.id, d.wire); catch; end
                 end
                 for (rid, names) in srcnames
                     isempty(names) || _do_src_changed(rid, collect(names))
@@ -362,6 +368,20 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end
     return _wire_to_output(wire)
+end
+
+# Run a batch of stale cells in PARALLEL in the worker (inter-cell, in-process). `batch` is a vector of
+# per-cell Dicts (id, source, filename, deps, reads, writes, opaque, memo_*) built by the server. The
+# worker schedules them (par_blockers) and STREAMS each result on the `slate_celldone` channel as it
+# finishes — the poller routes those to `server_celldone` for a version-guarded live merge. This call
+# blocks on the ACK (the worker returns once the whole batch has drained), so by the time it returns,
+# every result has been published; the merge itself happens asynchronously in the poller. Returns the
+# worker's ack `(; run_id, ids)` (or rethrows — the caller restales any cell left RUNNING).
+function eval_batch(k::GateKernel, report::Report, run_id::AbstractString, batch::Vector)
+    prepare!(k, report)
+    return _tool(k, "__slate_eval_batch",
+                 Dict{String,Any}("cells" => batch, "run_id" => String(run_id), "npool" => 0);
+                 timeout = _eval_timeout())
 end
 
 # Forward a paged-table page request to the worker (where the provider lives).

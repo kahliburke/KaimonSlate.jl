@@ -11,6 +11,7 @@ export Kernel, InProcessKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
 export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
 export register_userprog!, unregister_userprog!
+export register_celldone!, unregister_celldone!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
 #
@@ -66,6 +67,21 @@ function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = fals
     cb === nothing && return nothing
     f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
     try; cb(f, String(msg), String(id), done === true); catch; end
+    return nothing
+end
+
+# Parallel batch results: the gate worker evaluates a batch of stale cells CONCURRENTLY and PUBs each
+# cell's wire-form result on the `slate_celldone` channel the instant it finishes (see worker.jl
+# `__slate_eval_batch`). The poller routes each here; the server merges it version-guarded and pushes a
+# single-cell patch — so a fast cell renders while a slow sibling is still running. Same out-of-band
+# registry. The callback takes (run_id, cell_id, wire).
+const _CELLDONE_REGISTRY = Dict{String,Any}()
+register_celldone!(report_id::AbstractString, cb) = (_CELLDONE_REGISTRY[String(report_id)] = cb; nothing)
+unregister_celldone!(report_id::AbstractString) = (delete!(_CELLDONE_REGISTRY, String(report_id)); nothing)
+function _do_celldone(report_id::AbstractString, run_id, cell_id, wire)
+    cb = get(_CELLDONE_REGISTRY, String(report_id), nothing)
+    cb === nothing && return nothing
+    try; cb(String(run_id), String(cell_id), wire); catch e; @warn "slate: celldone merge failed" cell = cell_id exception = e; end
     return nothing
 end
 
