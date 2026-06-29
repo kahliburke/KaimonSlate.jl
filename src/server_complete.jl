@@ -104,13 +104,35 @@ end
 # no-op in-process), then re-evaluate from a fresh namespace. The gate kernel
 # respawns a worker on the next `prepare!`.
 function restart_kernel!(nb::LiveNotebook)
+    # Tear down + reset synchronously (fast), mark a background re-run underway, and RETURN — the
+    # full re-eval (which respawns the worker on prepare! and streams cells back) runs async, so the
+    # user gets control back immediately instead of blocking until everything re-renders. Same
+    # "open instantly" pattern as load_notebook.
     lock(nb.lock) do
         try; ReportEngine.shutdown!(nb.kernel); catch; end
         ReportEngine.reset!(nb.kernel, nb.report)
         build_dependencies!(nb.report)
-        eval_stale!(nb.report, nb.kernel)
+        nb.report.meta["hydrating"] = true
+        nb.version += 1
     end
     _broadcast(nb, "restart")
+    @async begin
+        try
+            lock(nb.lock) do
+                eval_stale!(nb.report, nb.kernel)         # respawns the worker, streams cellrun/celldone
+                delete!(nb.report.meta, "hydrating")
+                nb.version += 1
+            end
+        catch e
+            lock(nb.lock) do
+                nb.report.meta["hydrate_error"] = sprint(showerror, e)
+                delete!(nb.report.meta, "hydrating")
+                nb.version += 1
+            end
+            @warn "KaimonSlate: worker-restart re-run failed" exception = (e, catch_backtrace())
+        end
+        try; _broadcast(nb, string(nb.version)); catch; end   # nudge the browser to pull the now-live cells
+    end
     return nb
 end
 
