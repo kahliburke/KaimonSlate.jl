@@ -300,6 +300,13 @@ function prepare!(k::GateKernel, report::Report)
     return nothing
 end
 
+# How long a CELL eval may run before the gate request gives up. Heavy scientific cells (a long
+# propagation, a parameter sweep) legitimately exceed the old 120 s request cap, which surfaced as a
+# spurious timeout even though the worker kept computing. Generous + finite (so a true runaway still
+# frees eventually; the worker-restart escape hatch remains), overridable via env. Interactive tool
+# calls (complete / table-page / docs) keep the short default.
+_eval_timeout() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_EVAL_TIMEOUT", "")), 3600.0)
+
 # Synchronous gate tool call → the tool's raw return value (binary wire-form).
 function _tool(k::GateKernel, name::String, args::Dict; timeout::Float64 = 120.0)
     K = _kaimon()
@@ -333,7 +340,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         prepare!(k, report)
         # `filename` is a kwarg on the worker tool — GateTool strips optional POSITIONAL args, so it
         # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
-        _tool(k, "__slate_eval", Dict("source" => String(source), "filename" => String(filename)))
+        _tool(k, "__slate_eval", Dict("source" => String(source), "filename" => String(filename)); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end
@@ -350,7 +357,7 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
             "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
-            "memo_threshold" => Float64(memo.threshold)))
+            "memo_threshold" => Float64(memo.threshold)); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end
