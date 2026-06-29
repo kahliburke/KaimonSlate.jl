@@ -238,6 +238,8 @@ end
 function _outline_cell!(io::IO, c::Cell)
     kind = c.kind == MARKDOWN ? "md" : "code"
     print(io, "\nid=", rpad(c.id, 16), " [", kind, ",", lowercase(string(c.state)), "]")
+    tags = sort!(String[string(f) for f in c.flags if f !== :opaque])   # user tags (not the inferred :opaque)
+    isempty(tags) || print(io, " {", join(tags, " "), "}")
     if c.kind == MARKDOWN
         # The heading (first non-blank line) plus, when that's a heading, the first body sentence —
         # a touch more context than a bare title.

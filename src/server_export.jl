@@ -225,58 +225,10 @@ function _cell_context(nb::LiveNotebook, id::AbstractString)
 end
 
 # ── Canonical Slate notebook-API reference (SINGLE SOURCE OF TRUTH) ───────────
-# The one place documenting the helpers injected into every cell (echart, @bind, reactive,
-# slate_table) — fed to BOTH the agent system prompt below AND the `slate.api` tool, so the two
-# can never drift (that drift is exactly what left an agent using the old echart API). Update the
-# notebook API? Update HERE. Reached from the parent module as `NotebookServer.slate_api_reference()`.
-const _SLATE_API = """
-# Kaimon Slate notebook API
-
-Cells run in a REACTIVE notebook: a cell that READS a variable re-runs automatically when that
-variable changes. The LAST expression of a cell is DISPLAYED. Beyond standard Julia and your
-`using`'d packages, these helpers are injected into every cell — they are Slate-specific, so look
-HERE (not `slate.search_docs`, which only indexes packages and will mislead you toward Makie).
-
-## Display
-Return the value to show — a number / String / DataFrame, a CairoMakie figure, an `echart(…)`, or
-`slate_table(df)`. Use `println` for stdout.
-
-## Charts — `echart` (Slate's ECharts DSL; NOT Makie's `series`)
-    echart(:line, x, y; title="…", smooth=true)          # Express: ONE series. kinds: line bar
-                                                          #   scatter area pie heatmap candlestick
-                                                          #   radar boxplot gauge funnel … (+ any raw type)
-    echart(series(:line, x, a; name="a"),                 # Composable: MANY series
-           series(:bar,  x, b; name="b"); legend=true, title="Mix")
-    echart(; xAxis=(type=:category, data=x),              # Raw: the full ECharts option surface
-            series=[(type=:bar, data=b)], dataZoom=[(type=:slider,)])
-Renders live, animating in place on updates. Ergonomic kinds infer data shape + components
-(`:heatmap` matrix→axes+visualMap, `:radar` indicators, `:boxplot` raw samples). `?echart` `?series`.
-
-## Widgets — `@bind name Widget(…)`  (declare in a cell; `name` holds the live value)
-    @bind n     Slider(1:100; label="n")
-    @bind on    Toggle(true; on="A", off="B")
-    @bind which Radio(["sin"=>"sine", "cos"=>"cosine"])     # value => label pairs (which == "sin")
-    @bind sel   Select(opts) / MultiSelect(opts) / MultiCheckBox(opts) / Checkbox(true)
-    @bind s     NumberField(0) / TextField("hi") / TextArea("…") / ColorPicker("#56d364")
-    @bind dt    DateField(…) / TimeField(…)
-    @bind go    Button("Run")                               # value = click count (Int, 0,1,2,…)
-Any cell that READS a bound var recomputes when its control changes. `which.label` = the label.
-
-## Live / async — stream updates into a value over time
-    level = reactive(:level, 0)        # live value: `level[]` reads, `level[] = v` pushes to readers
-    @onclick go begin                  # runs on click; a NEW click cancels the still-running prior run
-        for v in 0:2:100; level[] = v; pause(0.1) end       # pause = CANCELLABLE sleep
-    end
-    @onchange n  (level[] = n)         # runs on each change; `n` is the new value; cell does NOT recompute
-    cancel(:level)                     # cooperatively stop a running @onclick handler (at its next pause)
-A chart/cell that reads `level[]` re-renders live as values are pushed — no manual refresh.
-
-## Tables — `slate_table(df; …)`  → an interactive sortable / filterable / paged table
-
-Worked examples: `examples/echarts_dsl.jl` (all chart forms + a live gauge) and
-`examples/binds_demo.jl` (every widget).
-"""
-slate_api_reference() = _SLATE_API
+# The Slate notebook-API docs (echart, @bind, animate, reactive, slate_table, cell tags, …) are the
+# SINGLE SOURCE OF TRUTH in `slate_api.jl`: `slate_api_reference()` (the `slate.api` tool + full
+# reference), `slate_api_records()` (fed to semantic search), and `_SLATE_CHEATSHEET` (inlined in the
+# agent prompt below) all come from the one registry there, so they can never drift.
 
 function _agent_system_prompt(nb::LiveNotebook)
     # Match the user's UI theme for plots (sent from the browser on chat → nb.report.meta["ui_dark"]).
@@ -312,11 +264,13 @@ function _agent_system_prompt(nb::LiveNotebook)
     upstream value it reads changes, so define once and read elsewhere. Give cells meaningful ids (the
     `id` arg on add, or slate_rename_cell) so the notebook reads well.
 
-    The SLATE HELPERS below (echart, @bind, reactive/@onclick, slate_table) are NOT in package docs —
-    use them for charts / widgets / tables / live updates. `slate_api()` re-fetches this cheatsheet if
-    you need it again; `slate_search_docs` / `slate_index_docs` search the notebook's PACKAGE docs.
+    The SLATE HELPERS below (echart, @bind, animate, playhead, reactive/@onclick, slate_table, cell
+    tags) are Slate-specific — use them for charts / widgets / animation / tables / live updates. The
+    cheatsheet below is the quick reference; `slate_api()` returns the FULL per-helper reference, and
+    `slate_search_docs("…")` now finds these helpers too (they're indexed under module "Slate")
+    alongside the notebook's PACKAGE docs (`slate_index_docs` adds more packages).
 
-    $(_SLATE_API)
+    $(_SLATE_CHEATSHEET)
 
     For STATIC/scientific figures use **CairoMakie**. $(themehint) NEVER GLMakie/WGLMakie (no GPU
     window), and don't use Makie `SliderGrid`/`@lift`/`Observable` — use the @bind reactivity above

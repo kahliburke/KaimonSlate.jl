@@ -87,6 +87,26 @@ const NS = KaimonSlate.NotebookServer
             @test NS.find_live(hub, nbp) === nb
             @test NS.find_live(hub, "nope") === nothing
         end
+
+        @testset "slate API reference + search records (SSOT)" begin
+            full = NS.slate_api_reference()
+            @test occursin("echart", full) && occursin("@bind", full) && occursin("animate", full)
+            @test occursin("playhead", full) && occursin("nocache", full)   # newest helpers present
+            one = NS.slate_api_reference("animate")
+            @test occursin("animate", one) && !occursin("## Charts", one)     # filtered detail, not full ref
+            @test occursin("No Slate API entry", NS.slate_api_reference("zzzznope"))
+            recs = NS.slate_api_records()
+            @test !isempty(recs) && all(r -> r["module"] == "Slate", recs)
+            @test any(r -> r["name"] == "@bind", recs) && any(r -> r["name"] == "animate", recs)
+            @test !isempty(NS.slate_api_version())
+        end
+
+        @testset "outline shows a cell's tags" begin
+            cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "1 + 1"))[1]
+            NS.set_cell_tags!(nb, cid, ["nocache", "wip"])
+            out = NS.notebook_digest(nb)
+            @test occursin("{nocache wip}", out) || occursin("{wip nocache}", out)
+        end
     finally
         NS.stop_hub(hub)
     end

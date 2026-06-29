@@ -171,7 +171,7 @@ end
 
 # Base/Core docs (if ever indexed) are relevant to every notebook — always in scope so a hard
 # module filter can never hide them. Stdlibs a notebook actually uses arrive via project_deps.
-const _UNIVERSAL_MODULES = String["Base", "Core"]
+const _UNIVERSAL_MODULES = String["Base", "Core", "Slate"]   # "Slate" = the injected notebook helpers
 
 "The package/module names in scope for `nb`: its project deps ∪ the packages its cells `using`,
 plus the universal Base/Core. Drives module-scoped doc search so the SHARED index only surfaces
@@ -190,6 +190,12 @@ function _autoindex!(nb::LiveNotebook)
     _agent_available() || return nothing
     Threads.@spawn try
         _doc_cache_load()
+        # Slate's own injected helpers (echart / @bind / animate / …) — indexed under module "Slate"
+        # so `search_docs` finds them too. Version-cached on the API docs' content hash.
+        if get(_DOC_CACHE, "Slate", nothing) != slate_api_version()
+            ns = index_docs!(slate_api_records())
+            ns == 0 || (ensure_docs_fts!(); _doc_cache_put!("Slate", slate_api_version()))
+        end
         want = Dict{String,String}()
         for d in (try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end)
             n = string(get(d, "name", "")); isempty(n) || (want[n] = string(get(d, "version", "")))
