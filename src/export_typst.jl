@@ -138,6 +138,7 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     $(donumber ? "#set heading(numbering: (..n) => { let m = n.pos(); if m.len() <= 1 { none } else { numbering(\"1.1\", ..m.slice(1)) } })" : "")
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
+    $(_CITE_SHOW)
     #let titleblock(t) = { align(center, text(size: $(st.titlesize), weight: "bold", fill: $(p.title), t)); v(2pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt) }
     #let metablock(title, subtitle, byline, abstract) = {
       align(center)[
@@ -193,6 +194,7 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     #set heading(numbering: none)
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
+    $(_CITE_SHOW)
     #let metablock(title, subtitle, byline, abstract) = align(center + horizon)[
       #text(size: 2.4em, weight: "bold", fill: $(p.title))[#title]
       #if subtitle != none { v(8pt); text(size: 1.4em, fill: $(p.title))[#subtitle] }
@@ -221,9 +223,58 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     """
 end
 
-# Markdown source with `{{ expr }}` interpolations resolved to their scalar values (the
-# only interp kind embeddable as text in v1; charts/tables-in-markdown are dropped).
-function _md_for_typst(c::Cell, src::AbstractString = c.source)
+# Citation rewriting. `cmarker` only honors a bare `[@key]` (it makes the whole bracket the
+# citation label), so Pandoc locators/forms break it. We rewrite citation syntax into a plain-text
+# sentinel `§c§<form>§<key>§<supplement>§` (survives cmarker verbatim) and a preamble `#show regex`
+# turns each sentinel into a real Typst `cite(label(key), supplement: …, form: …)`. Supported:
+#   [@key]              normal           [@key, p. 7] / [@key, pp. 3–9]   page locator (supplement)
+#   [-@key]             suppress author  [@a; @b]                          multiple (adjacent cites)
+#   @key (bare)         prose form — only when `key` is a defined bibliography key (avoids emails)
+const _CITE_OPEN = "§c§"
+# Preamble rule that turns each citation sentinel back into a real Typst cite (resolved against
+# whatever `#bibliography(...)` the document emits). Harmless when there are no citations.
+const _CITE_SHOW = raw"""#show regex("§c§[^§]*§[^§]+§[^§]*§"): it => {
+  let p = it.text.split("§")
+  let f = if p.at(2) == "y" { "year" } else if p.at(2) == "p" { "prose" } else { "normal" }
+  if p.at(4) == "" { cite(label(p.at(3)), form: f) } else { cite(label(p.at(3)), supplement: [#p.at(4)], form: f) }
+}"""
+function _cite_token(key, sup, form)
+    return string(_CITE_OPEN, form, "§", key, "§", replace(strip(sup), "§" => ""), "§")
+end
+# Rewrite one `[...]` citation group (its inner text, which contains an `@`) into sentinels.
+function _rewrite_bracket_cite(inner)
+    io = IOBuffer()
+    for spec in split(inner, ';')
+        m = match(r"^\s*(-?)@([\w:.\-]+)\s*(?:,\s*(.*\S))?\s*$", spec)
+        m === nothing && return nothing            # not a clean citation group → leave the bracket as-is
+        form = isempty(m.captures[1]) ? "n" : "y"  # `-@key` → year-only (suppress author)
+        sup = m.captures[3] === nothing ? "" : m.captures[3]
+        print(io, _cite_token(m.captures[2], sup, form))
+    end
+    return String(take!(io))
+end
+function _rewrite_citations(md::AbstractString, citekeys = Set{String}())
+    out = IOBuffer(); infence = false
+    for (li, ln) in enumerate(split(md, '\n'))
+        li == 1 || print(out, '\n')
+        if occursin(r"^\s*(```|~~~)", ln); infence = !infence; print(out, ln); continue; end
+        if infence; print(out, ln); continue; end
+        # Bracketed citation groups: `[ … @key … ]`.
+        ln2 = replace(ln, r"\[([^\]\n]*@[^\]\n]*)\]" => m -> begin
+            r = _rewrite_bracket_cite(m[2:end-1]); r === nothing ? m : r
+        end)
+        # Bare `@key` → prose form, but ONLY for keys that exist (so `user@host` etc. are untouched).
+        isempty(citekeys) || (ln2 = replace(ln2, r"(?<![\w@/])@([\w:.\-]+)" => m -> begin
+            key = m[2:end]; key in citekeys ? _cite_token(key, "", "p") : m
+        end))
+        print(out, ln2)
+    end
+    return String(take!(out))
+end
+
+# Markdown source with `{{ expr }}` interpolations resolved to their scalar values (the only interp
+# kind embeddable as text in v1) and citations rewritten to sentinels for the preamble's cite rule.
+function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}())
     tmpl, exprs = ReportEngine._md_template(src)
     s = tmpl
     for i in 1:length(exprs)
@@ -231,7 +282,7 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source)
         val = (o === nothing || o.exception !== nothing || isempty(o.value_repr)) ? "" : o.value_repr
         s = replace(s, ReportEngine._interp_token(i) => val)
     end
-    return s
+    return _rewrite_citations(s, citekeys)
 end
 
 # Parse an optional YAML-ish front-matter block fenced by `---` lines at the very top of
@@ -695,13 +746,14 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         # the hoisted cells are then dropped from the body. Legacy YAML front-matter still works.
         cells = nb.report.cells
         fm = report_frontmatter(nb.report)
+        citekeys = Set(e.key for e in bibliography_index(nb.report, dirname(abspath(nb.path))))
         arg(s) = isempty(strip(s)) ? "none" : "\"" * _typ_str(s) * "\""
         if !fm.has
             print(io, "#titleblock(\"", _typ_str(fm.title), "\")\n\n")
         else
             absarg = "none"
             if !isempty(strip(fm.abstract))
-                write(joinpath(dir, "abstract.md"), fm.abstract)
+                write(joinpath(dir, "abstract.md"), _rewrite_citations(fm.abstract, citekeys))
                 absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn)"
             end
             print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")
@@ -713,7 +765,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             c.id in fm.skip && continue               # hoisted into the title block above
             (:bibliography in c.flags) && continue    # rendered as #bibliography at the end, not raw
             if c.kind == MARKDOWN
-                md = (k == fm.firstmd && fm.yrest !== nothing) ? _md_for_typst(c, fm.yrest) : _md_for_typst(c)
+                md = (k == fm.firstmd && fm.yrest !== nothing) ? _md_for_typst(c, fm.yrest; citekeys = citekeys) : _md_for_typst(c; citekeys = citekeys)
                 isempty(strip(md)) && continue       # front-matter-only cell leaves nothing to render
                 write(joinpath(dir, base * ".md"), md)
                 print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
@@ -739,10 +791,10 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
 end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
-function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_source, include_params)
+function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_source, include_params, citekeys = Set{String}())
     c, override = frag
     if c.kind == MARKDOWN
-        md = _md_for_typst(c, override === nothing ? c.source : override)
+        md = _md_for_typst(c, override === nothing ? c.source : override; citekeys = citekeys)
         isempty(strip(md)) && return
         write(joinpath(dir, base * ".md"), md)
         print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
@@ -775,6 +827,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         # Role-tagged metadata → a dedicated title slide (metablock); hoisted title/abstract cells
         # are dropped from the body slides. Legacy YAML front-matter renders its body remainder.
         fm = report_frontmatter(nb.report)
+        citekeys = Set(e.key for e in bibliography_index(nb.report, dirname(abspath(nb.path))))
         arg(s) = isempty(strip(s)) ? "none" : "\"" * _typ_str(s) * "\""
         if fm.has
             print(io, "#slide(metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ",
@@ -791,7 +844,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                 f = (fm.yrest !== nothing && fm.firstmd !== nothing && frag[1] === cells[fm.firstmd] &&
                      frag[2] === nothing) ? (frag[1], fm.yrest) : frag
                 _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
-                                  show_source = show_source, include_params = include_params)
+                                  show_source = show_source, include_params = include_params, citekeys = citekeys)
             end
             print(io, "]\n\n")
         end
@@ -802,7 +855,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         if notes
             for (si, seg) in enumerate(segs)
                 isempty(seg.notes) && continue
-                ntext = join((_md_for_typst(n) for n in seg.notes), "\n\n")
+                ntext = join((_md_for_typst(n; citekeys = citekeys) for n in seg.notes), "\n\n")
                 isempty(strip(ntext)) && continue
                 write(joinpath(dir, "notes$(si).md"), ntext)
                 print(io, "#slide[\n#text(fill: luma(130))[Notes · slide $(si)]\n#v(6pt)\n",

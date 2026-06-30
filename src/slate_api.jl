@@ -126,11 +126,34 @@ const SLATE_API = SlateApiEntry[
     # ── Cell tags (header) ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("cell tags", "Cell tags", "#%% code id=… <tag> …    (or the 🏷 tag editor)",
         """Per-cell tags travel in the `#%%` header (set them with the 🏷 button in the cell header, or
-        an explicit header token). Built-in: `collapsed` (fold the cell), `hidecode` (hide the editor,
-        show output), `trace` (wrap in @trace — inspect every value), `nocache` (opt OUT of durable
-        memoization — for impure / side-effecting cells). Any other token is a free-form tag that
+        an explicit header token). Behaviour tags: `collapsed` (fold the cell), `hidecode` (hide the
+        editor, show output), `trace` (wrap in @trace — inspect every value), `nocache` (opt OUT of
+        durable memoization — for impure / side-effecting cells). Presentation tags: `slide` (force a
+        new slide), `notes` (speaker notes, presenter-only). Document-metadata ROLE tags: `title`,
+        `abstract`, `bibliography` (see "front matter"). Any other token is a free-form tag that
         round-trips. Expensive cells (≥400 ms) are otherwise auto-cached to disk and RESTORED after a
         restart instead of recomputing."""),
+
+    # ── Document metadata (front matter) ─────────────────────────────────────────────────────────────
+    SlateApiEntry("front matter", "Document", "#%% md id=… title | abstract | bibliography",
+        """A notebook is also a PUBLISHABLE document. Author metadata as ordinary cells carrying a ROLE
+        tag, in natural reading order; every export target (article PDF, slide deck, HTML) interprets the
+        role for placement.
+          • `title` — its markdown is the title block: `# Title`, then `## `/`### ` subtitle, then the
+            first plain line as the byline. Hoisted to the top on export.
+          • `abstract` — hoisted into the title block (academic abstract).
+          • `bibliography` — its body is either embedded BibTeX (`@book{key, …}`) OR one-or-more `.bib`
+            file paths (one per line), resolved relative to the notebook and copied into the export.
+            Inline + external can be mixed; in the live UI it renders an adaptive references card.
+        A legacy `---` YAML front-matter block on the first markdown cell still works. Per-notebook
+        citation style is `bibstyle` (Settings → Citation style): ieee/apa/chicago-author-date/mla/
+        nature/vancouver/harvard."""),
+    SlateApiEntry("citation", "Document", "[@key] · [@key, p. 7] · [-@key] · [@a; @b] · @key (prose)",
+        """Cite a bibliography key in MARKDOWN prose. Forms: `[@key]` (normal) · `[@key, pp. 33-35]`
+        (page/locator) · `[-@key]` (suppress author → year only) · `[@a; @b]` (multiple) · bare `@key`
+        (prose form: "Knuth (1984)" — only for keys actually defined, so emails stay literal). Typing
+        `[@` in a markdown cell autocompletes keys. Export renders linked citations + a References list
+        in the chosen `bibstyle`; the live notebook shows a references card with cited keys highlighted."""),
     SlateApiEntry("@trace", "Cell tags", "@trace begin … end   (or the `trace` cell tag)",
         """Inspect every intermediate value in a cell — each line's value is collected into a trace
         table. Usually toggled via the cell's 🔍 button / `trace` tag rather than written by hand."""),
@@ -210,9 +233,23 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
 
 ## Tables — `slate_table(df)`   ·   Progress — `slate_progress(frac; msg)`
 
-## Cell tags (🏷 in the cell header, or `#%%` header tokens)
+## Cell tags (🏷 in the cell header, or `#%%` header tokens, e.g. `#%% md id=abs abstract`)
     collapsed · hidecode · trace · nocache (skip durable caching) · plus free-form tags.
-    Expensive cells (≥400ms) auto-cache to disk and RESTORE after a restart (tag `nocache` to opt out).
+    Presentation: slide (force a new slide) · notes (speaker notes — presenter view only).
+    Document metadata (ROLES): title · abstract · bibliography. Expensive cells (≥400ms) auto-cache.
 
-Worked examples: `examples/echarts_dsl.jl`, `examples/binds_demo.jl`.
+## Document metadata = role-tagged cells (publishable PDF / slides / HTML)
+A notebook is also a publishable document. Tag ordinary cells with a ROLE; exports interpret it:
+    #%% md id=ttl title         # H1=title, ## / ### = subtitle, first plain line = byline
+    #%% md id=abs abstract      # hoisted into the title block on export
+    #%% md id=refs bibliography # BibTeX entries, OR a line that is a `.bib` path (embedded or external)
+Cite in markdown prose: `[@key]` · `[@key, p. 7]` (locator) · `[-@key]` (suppress author) ·
+`[@a; @b]` (multiple) · bare `@key` (prose: "Knuth (1984)"). Export PDF/slides/HTML renders linked
+citations + a References list (style via Settings → Citation style / `bibstyle`).
+
+## Slides (presentation mode)
+A `##` heading starts a slide (level configurable); `slide`/`notes` tags give explicit control.
+Present in the browser (▶ Present) or Export PDF (slides) — a 16:9 deck.
+
+Worked examples: `examples/echarts_dsl.jl`, `examples/binds_demo.jl`, `examples/frontmatter_demo.jl`.
 """

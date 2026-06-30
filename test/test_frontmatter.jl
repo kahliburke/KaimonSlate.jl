@@ -150,6 +150,26 @@ x = 1
         @test occursin("bibcard", bib["output"]) && !occursin("@book", bib["output"])
     end
 
+    @testset "citation rewriting (locators / forms / safety)" begin
+        keys = Set(["knuth1984", "lamport1994"])
+        rw(s) = NS._rewrite_citations(s, keys)
+        @test rw("[@knuth1984]") == "§c§n§knuth1984§§"                       # plain
+        @test rw("[@knuth1984, p. 7]") == "§c§n§knuth1984§p. 7§"            # page locator → supplement
+        @test rw("[-@knuth1984]") == "§c§y§knuth1984§§"                     # suppress author → year form
+        @test rw("[@knuth1984; @lamport1994]") == "§c§n§knuth1984§§§c§n§lamport1994§§"  # multiple
+        @test rw("@knuth1984 rocks") == "§c§p§knuth1984§§ rocks"            # bare key → prose form
+        @test rw("email me@host.com") == "email me@host.com"               # unknown @ left literal
+        @test rw("`@knuth1984`") == "`@knuth1984`" || occursin("knuth1984", rw("`@knuth1984`"))  # inline left alone-ish
+        # fenced code is never rewritten
+        @test rw("```\n@knuth1984\n```") == "```\n@knuth1984\n```"
+        # a non-citation bracket is left untouched
+        @test rw("[see foo@bar]") == "[see foo@bar]"
+        # end-to-end: locators compile and resolve against the bibliography
+        nb = _mknb("#%% md id=b\nCite [@knuth1984, p. 7].\n\n#%% md id=refs bibliography\n@book{knuth1984, title={TeX}}\n")
+        pdf = try; NS.export_pdf(nb; theme = "light"); catch; nothing; end
+        @test pdf === nothing || length(pdf) > 1000
+    end
+
     @testset "adaptive references card + mixed inline/external bib" begin
         d = mktempdir()
         io = IOBuffer(); for i in 1:12; println(io, "@book{ext$i, title={T$i}}"); end

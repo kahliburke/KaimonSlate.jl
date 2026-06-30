@@ -38,6 +38,10 @@ slate_table((x = 1:5, x2 = (1:5).^2, sqrt_x = round.(sqrt.(1:5); digits=3)))
 The numeric citation style links each reference to its entry and renders a numbered
 list at the end [@turing1936computable]. Author–year styles are a one-word switch.
 
+Citations support more than a bare key: a page locator [@knuth1984literate, p. 97], a
+suppressed author [-@turing1936computable], multiple keys [@knuth1984literate; @turing1936computable],
+and a prose mention — @knuth1984literate coined the term *literate programming*.
+
 #%% md id=styles
 ## Citation styles
 
