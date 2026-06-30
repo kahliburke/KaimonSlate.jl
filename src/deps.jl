@@ -102,6 +102,11 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # → recompute).
 const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
+# No per-cell eviction (a deleted cell / closed notebook never removes its entry), so on a
+# long-lived server this would otherwise grow forever. Entries are small, but cap it — once full,
+# clear and start over rather than track real LRU bookkeeping for a cache this cheap to repopulate
+# (a cleared entry just costs one more `_infer_bindings_uncached!` pass, same as a normal miss).
+const _BIND_CACHE_MAX = 5000
 function infer_bindings!(cell::Cell)
     h = hash(cell.source) ⊻ hash(cell.kind)
     hit = lock(_BIND_CACHE_LOCK) do; get(_BIND_CACHE, cell.id, nothing); end
@@ -113,6 +118,7 @@ function infer_bindings!(cell::Cell)
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
+        length(_BIND_CACHE) >= _BIND_CACHE_MAX && empty!(_BIND_CACHE)
         _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags)
     end
     return cell

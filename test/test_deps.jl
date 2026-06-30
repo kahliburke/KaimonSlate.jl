@@ -22,6 +22,19 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :K in c.writes
     end
 
+    @testset "_BIND_CACHE is bounded (no unbounded growth on a long-lived server)" begin
+        empty!(ReportEngine._BIND_CACHE)
+        # Fill past the cap with distinct cell ids; correctness survives the eviction sweep —
+        # inference is recomputed (cheap), not skipped or corrupted.
+        n = ReportEngine._BIND_CACHE_MAX + 5
+        for i in 1:n
+            c = Cell("c$i", CODE, "v$i = $i"); infer_bindings!(c)
+            @test Symbol("v$i") in c.writes
+        end
+        @test length(ReportEngine._BIND_CACHE) <= ReportEngine._BIND_CACHE_MAX
+        empty!(ReportEngine._BIND_CACHE)   # don't leak into other testsets' cache-hit assumptions
+    end
+
     @testset "mutation heuristics add a write (and read)" begin
         for (src, sym) in (("push!(data, 4)", :data),
                            ("data[i] = 5", :data),
