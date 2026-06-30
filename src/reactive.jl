@@ -23,7 +23,12 @@ mutable struct Reactive
     refresh::Any              # this notebook's slate_refresh
 end
 Base.getindex(r::Reactive) = getfield(r, :value)
+# A write is ALSO a cancellation checkpoint (same check `pause` does) — so a superseded @onclick
+# handler that streams values (`level[] = v` in a loop) stops at its next write even with no
+# explicit `pause()` call, instead of running to completion and racing the new handler's writes.
 function Base.setindex!(r::Reactive, v)
+    tok = get(task_local_storage(), :slate_cancel, nothing)
+    (tok !== nothing && tok[]) && throw(_Cancelled())
     setfield!(r, :value, v)
     getfield(r, :refresh)(getfield(r, :name))     # restale + recompute the cells that read this value
     return v
@@ -62,7 +67,9 @@ function __on_fire!(tokens, name::Symbol, f, value)
     return nothing
 end
 
-# Cooperatively cancel the running handler for `name` — it stops at its next `pause`. Used from a
-# Stop button (`@onclick stop cancel(:fill)`). Cancelling an idle/finished handler is a no-op.
-# (Julia can't force-kill a task, so a handler with no `pause` can't be interrupted.)
+# Cooperatively cancel the running handler for `name` — it stops at its next `pause` OR its next
+# `Reactive` write. Used from a Stop button (`@onclick stop cancel(:fill)`). Cancelling an
+# idle/finished handler is a no-op. (Julia can't force-kill a task — a handler with NEITHER a
+# `pause` NOR a reactive write in its body still can't be interrupted, but such a handler has no
+# visible side effect to race against anyway.)
 __on_cancel!(tokens, name::Symbol) = (t = get(tokens, name, nothing); t === nothing || (t[] = true); nothing)
