@@ -128,7 +128,8 @@ function _infer_bindings_uncached!(cell::Cell)
             ast === nothing && continue
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, ast)).references)
-            catch
+            catch e
+                @debug "deps: markdown {{ }} reactive-node analysis failed" cell = cell.id exception = e
             end
         end
         return cell
@@ -166,7 +167,8 @@ function _infer_bindings_uncached!(cell::Cell)
             push!(cell.writes, bm[1])
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, bm[2])).references)
-            catch
+            catch e
+                @debug "deps: @bind widget-expr reactive-node analysis failed" cell = cell.id exception = e
             end
         elseif om !== nothing || cm !== nothing
             # `@onclick btn body` / `@onchange ctrl body` REGISTER a handler — they deliberately do
@@ -180,7 +182,8 @@ function _infer_bindings_uncached!(cell::Cell)
                 node = EE.compute_reactive_node(lam)
                 union!(cell.reads, node.references)
                 union!(cell.writes, node.definitions)
-            catch
+            catch e
+                @debug "deps: @onclick/@onchange handler reactive-node analysis failed" cell = cell.id exception = e
             end
             _collect_mutations!(cell.writes, cell.reads, body)
         else
@@ -194,7 +197,8 @@ function _infer_bindings_uncached!(cell::Cell)
             union!(cell.reads, node.references)
             union!(cell.writes, node.definitions)
             union!(cell.writes, node.funcdefs_without_signatures)
-        catch
+        catch e
+            @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell = cell.id exception = e
             push!(cell.flags, :opaque)
         end
         _collect_mutations!(cell.writes, cell.reads, blk)
