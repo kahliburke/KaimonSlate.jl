@@ -413,13 +413,16 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         pdf = try
-            export_pdf(nb; include_source = get(qp, "source", "1") != "0",
+            _lay = get(qp, "layout", "article")
+            export_pdf(nb; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
                        style = get(qp, "style", "article"),
                        columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
                        theme = get(qp, "theme", "light"),
                        code = get(qp, "code", "normal"),
                        body = get(qp, "body", ""),
-                       include_params = get(qp, "params", "0") == "1")
+                       include_params = get(qp, "params", "0") == "1",
+                       layout = _lay, notes = get(qp, "notes", "0") == "1",
+                       level = get(nb.report.meta, "slidelevel", 2))
         catch e
             return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))
         end
@@ -432,13 +435,16 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.typ", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         data = try
-            export_typst_bundle(nb; include_source = get(qp, "source", "1") != "0",
+            _lay = get(qp, "layout", "article")
+            export_typst_bundle(nb; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
                        style = get(qp, "style", "article"),
                        columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
                        theme = get(qp, "theme", "light"),
                        code = get(qp, "code", "normal"),
                        body = get(qp, "body", ""),
-                       include_params = get(qp, "params", "0") == "1")
+                       include_params = get(qp, "params", "0") == "1",
+                       layout = _lay, notes = get(qp, "notes", "0") == "1",
+                       level = get(nb.report.meta, "slidelevel", 2))
         catch e
             return HTTP.Response(500, "Typst export failed: " * sprint(showerror, e))
         end
@@ -649,6 +655,18 @@ function _make_router(h::Hub)
         nb.report.meta["parallel"] = get(_body(req), "enabled", false) === true
         _persist!(nb)                                    # write the Slate.config footer so it sticks
         _json(Dict("ok" => true, "parallel" => nb.report.meta["parallel"]))
+    end))
+    # Per-notebook slide-deck presentation prefs (heading level / transition / theme / PDF ratio).
+    # Stored in report meta; persisted to the Slate.config footer. No worker restart — purely
+    # presentation. Body keys: level (int), transition, theme, ratio (any subset).
+    HTTP.register!(router, "POST", "/api/{id}/slideconfig", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        haskey(b, "level") && (nb.report.meta["slidelevel"] = something(tryparse(Int, string(b["level"])), 2))
+        haskey(b, "transition") && (nb.report.meta["slidetransition"] = String(b["transition"]))
+        haskey(b, "theme") && (nb.report.meta["slidetheme"] = String(b["theme"]))
+        haskey(b, "ratio") && (nb.report.meta["slideratio"] = String(b["ratio"]))
+        _persist!(nb)
+        _json(state_json(nb))
     end))
     # Per-notebook worker-thread override. "" clears it (back to the global). Applies by respawning this
     # notebook's worker — so changing it kills + restarts the process (lose the warm namespace), unlike

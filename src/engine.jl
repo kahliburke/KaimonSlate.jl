@@ -215,7 +215,7 @@ end
 const _INTERNAL_FLAGS = Set{Symbol}([:opaque])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
-const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache)
+const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :slide, :notes)
 
 "Parse a header line's trailing tokens into (kind, id, controls, tags::Vector{Symbol}). Every token
 that isn't `id=`/`controls=`/`code`/`md` becomes a tag flag (known ones drive behaviour; the rest are
@@ -388,7 +388,14 @@ end
 # human-readable footer — so they survive reopen/restart and move with the file, instead of living only
 # in-memory. Round-trips through `report.meta`; `_select_kernel`/`_parallel_enabled` already read meta.
 const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
-const _CONFIG_KEYS = ("parallel", "threads", "hotreload")   # whitelist; bools vs string handled on parse
+# Whitelist of durable per-notebook settings, each with a value type so parsing coerces
+# correctly (`:bool` | `:string` | `:int`). Slide-deck prefs live here too so a notebook
+# carries its presentation style with it.
+const _CONFIG_KEYS = ("parallel", "threads", "hotreload",
+                      "slidelevel", "slidetransition", "slidetheme", "slideratio")
+const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
+                           "slidelevel" => :int, "slidetransition" => :string,
+                           "slidetheme" => :string, "slideratio" => :string)
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]
@@ -418,7 +425,11 @@ function _parse_config_footer(lines)::Dict{String,Any}
         m === nothing && continue
         k = m.captures[1]; (k in _CONFIG_KEYS) || continue
         v = strip(String(m.captures[2]))
-        out[k] = (k == "threads") ? v : (v == "true")   # threads is a string; the rest are bools
+        ty = get(_CONFIG_TYPES, k, :string)
+        out[k] = ty === :bool ? (v == "true") :
+                 ty === :int  ? something(tryparse(Int, v), nothing) :
+                 String(v)
+        out[k] === nothing && delete!(out, k)   # drop malformed ints rather than store junk
     end
     return out
 end

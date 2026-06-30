@@ -44,6 +44,7 @@
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
+  <button onclick="enterPresent()" title="present this notebook as a slide deck (⌘⇧P)">▶ Present</button>
   <button onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
   <button onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
   <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
@@ -61,6 +62,7 @@
       <hr>
       <button onclick="exportHtml();closeTopMenu()">⬇ Export HTML</button>
       <button onclick="exportPdf();closeTopMenu()">📄 Export PDF (publication)</button>
+      <button onclick="exportSlidesPdf();closeTopMenu()">🎞 Export PDF (slides)</button>
       <button onclick="printNotebook();closeTopMenu()">🖨 Print HTML</button>
       <button onclick="exportStandalone();closeTopMenu()">📦 Export self-contained .jl</button>
       <hr>
@@ -170,6 +172,12 @@
     <span class="rt"><input type="checkbox" id="setparallel"/></span></div>
   <div class="setrow"><label title="Worker Julia threads for THIS notebook (e.g. 4,1 or auto,1). Blank = global default. Applying restarts the worker (clears the namespace).">Worker threads (this notebook)</label>
     <span class="rt"><input type="text" id="setthreads" placeholder="global" size="7" style="width:64px"/><button id="setthreadsapply" title="apply + restart worker">Apply</button> <span id="setthreadseff" class="dim"></span></span></div>
+  <div class="setrow"><label title="Markdown heading level that starts a new slide in presentation mode">Slides — heading level</label>
+    <select id="setslidelevel"><option value="1">H1 (#)</option><option value="2">H2 (##)</option><option value="3">H3 (###)</option></select></div>
+  <div class="setrow"><label title="Animation between slides in presentation mode">Slides — transition</label>
+    <select id="setslidetransition"><option value="fade">Fade</option><option value="slide">Slide</option><option value="none">None</option></select></div>
+  <div class="setrow"><label title="Aspect ratio for the slide-deck PDF export">Slides — PDF aspect</label>
+    <select id="setslideratio"><option value="16:9">16:9 (widescreen)</option><option value="4:3">4:3</option></select></div>
   <div class="setrow"><label title="Overall colour theme for the Slate notebook UI">Theme</label>
     <select id="settheme"><!-- options populated from SLATE_UI_THEMES (settings.js) --></select></div>
   <div class="setrow"><label title="Theme for code syntax highlighting in the editor — token colours and editor chrome">Editor syntax</label>
@@ -200,7 +208,11 @@
       <option value="article|2">Article — two column</option>
       <option value="report|1">Report — single column</option>
       <option value="report|2">Report — two column</option>
+      <option value="slides|1">🎞 Slides — presentation deck (16:9)</option>
     </select></div>
+  <div class="setrow" id="pdfnotesrow" style="display:none"><label title="Append a speaker-notes section (one page per slide that has `notes` cells)">Speaker notes</label>
+    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="pdfnotes"> Append speaker-notes pages to the deck</label></div>
   <div class="setrow"><label>Body text</label>
     <select id="pdfbody">
       <option value="">Auto (compact for two-column)</option>
@@ -259,6 +271,7 @@
 <script src="/assets/js/trace.js"></script>
 <script src="/assets/js/errors.js"></script>
 <script src="/assets/js/toc.js"></script>
+<script src="/assets/js/slides.js"></script>
 <script src="/assets/js/animate.js"></script>
 <!-- Preact app (ESM module). Strangler-fig: coexists with the classic scripts above
      and takes over the UI island by island until the vanilla code is retired. -->

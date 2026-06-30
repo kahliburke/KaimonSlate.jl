@@ -60,6 +60,19 @@ function openSettings() {
     thrApply && (thrApply.onclick = applyThreads);
     thr.onkeydown = e => { if (e.key === 'Enter') applyThreads(); };
   }
+  // Per-notebook slide-deck prefs (heading level / transition / PDF aspect). Persisted to the
+  // Slate.config footer via /slideconfig; the live deck (slides.js) reads them from nbState.
+  const slvl = document.getElementById('setslidelevel'), strn = document.getElementById('setslidetransition'),
+        srat = document.getElementById('setslideratio');
+  if (slvl) {
+    slvl.value = String((nbState && nbState.slideLevel) || 2);
+    strn.value = (nbState && nbState.slideTransition) || 'fade';
+    srat.value = (nbState && nbState.slideRatio) || '16:9';
+    const pushSlide = () => api('POST', '/api/slideconfig',
+      { level: parseInt(slvl.value, 10), transition: strn.value, ratio: srat.value })
+      .then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
+    slvl.onchange = pushSlide; strn.onchange = pushSlide; srat.onchange = pushSlide;
+  }
   // Overall Slate UI theme — applied by toggling html[data-slate-theme] (palette in notebook.css),
   // persisted as `slateTheme`, and re-applied at load by the inline head script (no flash).
   const th = document.getElementById('settheme');

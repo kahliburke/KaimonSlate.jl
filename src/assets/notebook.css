@@ -946,3 +946,74 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   .mentionbox li { padding: 5px 10px; border-radius: 5px; cursor: pointer;
     font-family: 'Cascadia Code', monospace; font-size: .82rem; color: var(--text); }
   .mentionbox li.on, .mentionbox li:hover { background: var(--accent); color: var(--bg); }
+
+/* ── Presentation / slideshow mode ─────────────────────────────────────────────
+   The deck is a fullscreen overlay; `body.presenting` hides the editing chrome so the
+   moved-in live cells own the screen. Slides auto-fit via a JS scale() transform. */
+body.presenting > .topbar, body.presenting > .page, body.presenting > .hydbanner,
+body.presenting > .srcbanner, body.presenting > #selcount, body.presenting > #doclauncher { display: none !important; }
+body.presenting { overflow: hidden; }
+
+.deck { position: fixed; inset: 0; z-index: 80; background: var(--bg); display: flex;
+  align-items: center; justify-content: center; }
+.deck-stage { position: relative; width: 100%; height: 100%; display: flex;
+  align-items: center; justify-content: center; overflow: hidden; }
+.deck-slide { width: min(1080px, 92vw); transform-origin: center center;
+  max-height: 100vh; }
+.deck-slide.overflow { align-self: flex-start; max-height: none; overflow: auto; }
+/* The moved-in cells lose their notebook chrome — present clean output, no editor/handles. */
+.deck-slide .cell { border: none !important; background: none !important; margin: 0 0 18px 0 !important; padding: 0 !important; }
+.deck-slide .cellhead { display: none !important; }
+.deck-slide .srcedit, .deck-slide .cm-editor { display: none; }
+.deck-slide.show-code .srcedit, .deck-slide.show-code .cm-editor { display: block; }
+.deck-slide .output { max-height: none !important; }
+.deck-slide .md { font-size: 1.15rem; }
+.deck-slide .md h1 { font-size: 2.6rem; } .deck-slide .md h2 { font-size: 2rem; }
+
+/* Slide transitions (honor prefers-reduced-motion via JS, which omits the class). */
+.deck-slide.enter-fade { opacity: 0; }
+.deck-slide.enter-next { opacity: 0; transform: translateX(40px); }
+.deck-slide.enter-prev { opacity: 0; transform: translateX(-40px); }
+.deck-slide { transition: opacity .28s ease, transform .28s ease; }
+
+.deck-edge { position: fixed; top: 0; height: 100vh; width: 9vw; border: none; cursor: pointer;
+  background: transparent; color: var(--dim); font-size: 2.4rem; opacity: 0; transition: opacity .15s; z-index: 82; }
+.deck-edge:hover { opacity: .8; color: var(--text); background: linear-gradient(90deg, transparent, var(--ovl)); }
+.deck-prev { left: 0; } .deck-next { right: 0; background: linear-gradient(270deg, transparent, var(--ovl)); }
+
+.deck-hud { position: fixed; bottom: 14px; right: 16px; z-index: 83; display: flex; align-items: center;
+  gap: 6px; padding: 5px 8px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  opacity: .25; transition: opacity .15s; }
+.deck-hud:hover { opacity: 1; }
+.deck-hud button { background: none; border: none; color: var(--text); cursor: pointer; font-size: .95rem;
+  padding: 3px 6px; border-radius: 6px; }
+.deck-hud button:hover { background: var(--bg3); color: var(--accent); }
+.deck-progress { color: var(--dim); font-size: .82rem; padding: 0 6px; font-variant-numeric: tabular-nums; }
+
+/* ── Presenter window (?present=1) ──────────────────────────────────────────── */
+body.is-presenter { overflow: hidden; }
+body.is-presenter > .topbar, body.is-presenter > .page, body.is-presenter > #doclauncher,
+body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !important; }
+#presenter { position: fixed; inset: 0; z-index: 90; background: var(--bg); color: var(--text); padding: 16px; }
+.pp-main { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; height: 100%; }
+.pp-stage { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: auto; padding: 18px; }
+.pp-cur { font-size: 1.05rem; }
+.pp-side { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.pp-clock { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+.pp-elapsed { font-size: 1.8rem; font-weight: 700; color: var(--strong); }
+.pp-wall { font-size: 1.1rem; color: var(--dim); align-self: center; }
+.pp-nexthd { display: flex; justify-content: space-between; align-items: baseline; color: var(--dim); font-size: .85rem; }
+.pp-nexttitle { color: var(--accent); }
+.pp-next { flex: 0 0 30%; opacity: .85; font-size: .8rem; }
+.pp-noteshd { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); }
+.pp-notes { flex: 1 1 auto; overflow: auto; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 14px; font-size: 1.15rem; line-height: 1.5; }
+.pp-note + .pp-note { margin-top: 10px; }
+.pv-empty { color: var(--dim); font-style: italic; }
+.pp-nav { display: flex; gap: 8px; }
+.pp-nav button { flex: 1; padding: 9px; background: var(--bg2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 9px; cursor: pointer; font-size: 1rem; }
+.pp-nav button:hover { background: var(--bg3); color: var(--accent); }
+.pp-cur .cell, .pp-next .cell { border: none !important; background: none !important; margin: 0 0 10px 0 !important; padding: 0 !important; }
+.pp-cur .cellhead, .pp-next .cellhead, .pp-cur .srcedit, .pp-next .srcedit,
+.pp-cur .cm-editor, .pp-next .cm-editor { display: none !important; }

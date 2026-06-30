@@ -315,6 +315,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:collapsed in c.flags) && (d["collapsed"] = true)   # folded in the UI (persisted in the .jl)
     (:hidecode in c.flags) && (d["codeHidden"] = true)   # code editor hidden, output shown
     (:trace in c.flags) && (d["trace"] = true)           # @trace-wrapped on eval (collects trace rows)
+    (:slide in c.flags) && (d["slide"] = true)           # explicit slide-start (presentation mode)
+    (:notes in c.flags) && (d["notes"] = true)           # speaker notes — presenter view only
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
     # `:opaque` is inferred each eval, not a user tag, so it's excluded.
     d["tags"] = sort!(String[string(f) for f in c.flags if f !== :opaque])
@@ -405,6 +407,11 @@ function state_json(nb::LiveNotebook)
     meta["threads"] = get(nb.report.meta, "threads", "")                     # per-notebook worker thread override ("" = global)
     meta["threadsEffective"] = nb.kernel isa ReportEngine.GateKernel ?       # what the live worker spawns with
         ReportEngine.effective_worker_threads(nb.kernel.threads) : ""
+    # Slide-deck presentation prefs (per-notebook, persisted in the Slate.config footer).
+    meta["slideLevel"] = get(nb.report.meta, "slidelevel", 2)               # heading depth that starts a slide
+    meta["slideTransition"] = get(nb.report.meta, "slidetransition", "fade") # none | fade | slide
+    meta["slideTheme"] = get(nb.report.meta, "slidetheme", "")               # "" = follow the editor theme
+    meta["slideRatio"] = get(nb.report.meta, "slideratio", "16:9")           # PDF deck aspect ratio
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true

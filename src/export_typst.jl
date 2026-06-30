@@ -166,6 +166,61 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     """
 end
 
+# ── Slide-deck preamble (16:9 / 4:3 landscape, one slide per page) ────────────────────────────────
+# Slide page geometry (width, height) for a 254mm-wide canvas. 16:9 is the default deck size.
+_slide_geom(ratio) = ratio == "4:3" ? ("254mm", "190.5mm") : ("254mm", "142.875mm")
+
+# Preamble for the slides layout. Reuses the same block helpers as the article preamble but on a
+# landscape slide page with bigger type, and adds `#let slide(body)` — one page per slide that
+# vertically centers its content and auto-shrinks (down to a 0.5× floor) so a tall slide still fits.
+function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "dark",
+                                ratio::AbstractString = "16:9", code::AbstractString = "small")
+    pre = _typ_str(strip(replace(_MITEX_SHIMS, r"\s+" => " ")))
+    p = _palette(theme)
+    csize = _code_size(code == "normal" ? "small" : code)   # listings are tighter on slides
+    w, h = _slide_geom(ratio)
+    rawtheme = isempty(p.codetheme) ? "" : "\n    #set raw(theme: \"$(p.codetheme)\")"
+    return """
+    #import "@preview/cmarker:$(_CMARKER_VER)"
+    #import "@preview/mitex:$(_MITEX_VER)": mitex, mi
+    #set document(title: "$(_typ_str(title))")
+    #set page(width: $w, height: $h, margin: (x: 16mm, y: 12mm), fill: $(p.page))
+    #set text(font: "New Computer Modern", size: 19pt, fill: $(p.text))$(rawtheme)
+    #set par(justify: false, leading: 0.7em, spacing: 1.1em)
+    #show heading: set text(fill: $(p.title))
+    #show heading.where(level: 1): set text(size: 1.7em)
+    #show heading.where(level: 2): set text(size: 1.35em)
+    #set heading(numbering: none)
+    #let PRE = "$pre "
+    #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
+    #let metablock(title, subtitle, byline, abstract) = align(center + horizon)[
+      #text(size: 2.4em, weight: "bold", fill: $(p.title))[#title]
+      #if subtitle != none { v(8pt); text(size: 1.4em, fill: $(p.title))[#subtitle] }
+      #if byline != none { v(14pt); text(size: 0.9em, fill: $(p.parlabel))[#byline] }
+      #if abstract != none { v(16pt); block(width: 80%, text(size: 0.8em, style: "italic")[#abstract]) }
+    ]
+    #let codeblock(s) = block(width: 100%, fill: $(p.codebg), inset: 8pt, radius: 4pt, text(size: $(csize), raw(block: true, lang: "julia", s)))
+    #let outblock(s) = block(width: 100%, inset: 7pt, fill: $(p.outbg), radius: 3pt, text(size: 0.7em, fill: $(p.outfg), raw(s)))
+    #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 0.7em, fill: $(p.valfg), raw(s)))
+    #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 0.7em, fill: $(p.errfg), raw(s)))
+    #let figureimg(p) = align(center, image(p, height: 62%))
+    #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
+      text(size: 0.7em)[#text(fill: $(p.parlabel), weight: "bold")[parameters] #h(6pt) #items.map(it => [#raw(it.at(0)) = #text(weight: "bold", it.at(1))]).join([#h(10pt)])])
+    // One slide = one page. Measure the body at full content width; if it's taller than the page,
+    // scale it down (floor 0.5×) so it still fits, then vertically center.
+    #let slide(body) = page[
+      #align(horizon)[
+        #layout(sz => {
+          let m = measure(box(width: sz.width, body))
+          let s = if m.height > sz.height and m.height > 0pt { calc.max(0.5, sz.height / m.height) } else { 1.0 }
+          scale(origin: top + center, x: s * 100%, y: s * 100%, box(width: sz.width, body))
+        })
+      ]
+    ]
+
+    """
+end
+
 # Markdown source with `{{ expr }}` interpolations resolved to their scalar values (the
 # only interp kind embeddable as text in v1; charts/tables-in-markdown are dropped).
 function _md_for_typst(c::Cell, src::AbstractString = c.source)
@@ -366,6 +421,89 @@ function export_pdf(nb::LiveNotebook; kwargs...)
     end
 end
 
+# ── Slide segmentation (shared boundary rules; mirrored in assets/js/slides.js) ───────────────────
+# A notebook becomes a deck by grouping its cells into slides. Boundaries:
+#   1. a markdown cell whose first heading is at depth ≤ `level` (default H2),
+#   2. any cell flagged `:slide` (explicit start),
+#   3. a thematic-break line (`---`) inside a markdown cell (splits it mid-cell),
+#   4. a cell flagged `:notes` attaches to the current slide's speaker notes (not its body),
+#   5. cells before the first boundary form the leading (title) slide.
+# `:collapsed` cells are omitted, matching the article/report export.
+
+# Depth of a markdown source's first ATX heading (skipping fenced code), or `nothing`.
+function _first_heading_depth(src::AbstractString)
+    infence = false
+    for ln in split(src, '\n')
+        if occursin(r"^\s*(```|~~~)", ln); infence = !infence; continue; end
+        infence && continue
+        m = match(r"^(#{1,6})\s+\S", ln)
+        m === nothing || return length(m.captures[1])
+    end
+    return nothing
+end
+
+# Split a markdown source on thematic-break lines (`---`/`***`/`___`, 3+), skipping fenced code
+# and a leading YAML front-matter block (its `---` fences are NOT slide breaks). Returns the
+# inter-break chunks (≥1); a source with no rule returns `[src]`.
+function _split_md_rules(src::AbstractString)
+    parts = String[]
+    buf = IOBuffer(); infence = false
+    lines = split(src, '\n')
+    i = 1
+    # Skip a `---`-fenced front-matter block at the very top (first non-blank line is `---`).
+    let j = findfirst(l -> !isempty(strip(l)), lines)
+        if j !== nothing && strip(lines[j]) == "---"
+            k = findnext(l -> strip(l) == "---", lines, j + 1)
+            if k !== nothing
+                for l in lines[1:k]; print(buf, l, '\n'); end
+                i = k + 1
+            end
+        end
+    end
+    for ln in lines[i:end]
+        if occursin(r"^\s*(```|~~~)", ln); infence = !infence; print(buf, ln, '\n'); continue; end
+        if !infence && occursin(r"^\s*([-*_])(\s*\1){2,}\s*$", ln)
+            push!(parts, String(take!(buf))); continue
+        end
+        print(buf, ln, '\n')
+    end
+    push!(parts, String(take!(buf)))
+    return parts
+end
+
+# A slide: ordered body fragments `(cell, src_override)` (override is a `---`-split markdown
+# chunk, else `nothing` = use the whole cell) plus the `:notes` cells attached to it.
+const SlideFrag = Tuple{Cell,Union{String,Nothing}}
+
+function _slide_segments(cells; level::Integer = 2)
+    slides = NamedTuple{(:frags, :notes),Tuple{Vector{SlideFrag},Vector{Cell}}}[]
+    frags = SlideFrag[]; notes = Cell[]
+    function flush!()
+        (isempty(frags) && isempty(notes)) && return
+        push!(slides, (frags = frags, notes = notes))
+        frags = SlideFrag[]; notes = Cell[]
+    end
+    for c in cells
+        (:collapsed in c.flags) && continue
+        if :notes in c.flags
+            push!(notes, c); continue
+        end
+        d = c.kind == MARKDOWN ? _first_heading_depth(c.source) : nothing
+        starts = (:slide in c.flags) || (d !== nothing && d <= level)
+        if c.kind == MARKDOWN && length(_split_md_rules(c.source)) > 1
+            for (j, part) in enumerate(_split_md_rules(c.source))
+                ((j == 1 && starts) || j > 1) && flush!()
+                isempty(strip(part)) || push!(frags, (c, String(part)))
+            end
+        else
+            starts && flush!()
+            push!(frags, (c, nothing))
+        end
+    end
+    flush!()
+    return slides
+end
+
 # Assemble the Typst PROJECT — `doc.typ` plus every per-cell aux file it reads (.md / .jl /
 # figures / output blocks) — into a fresh temp dir and return its path. Shared by `export_pdf`
 # (compile it) and `export_typst_bundle` (archive it). Holds `nb.lock` while reading the report;
@@ -373,7 +511,13 @@ end
 function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                               style::AbstractString = "article", columns::Integer = 1,
                               theme::AbstractString = "light", code::AbstractString = "normal",
-                              body::AbstractString = "", include_params::Bool = false)
+                              body::AbstractString = "", include_params::Bool = false,
+                              layout::AbstractString = "article", notes::Bool = false,
+                              level::Integer = 2)
+    # Slide-deck layout takes a wholly different page geometry/flow — dispatch early.
+    layout == "slides" && return _build_slides_project(nb; theme = theme, code = code,
+        include_source = include_source, include_params = include_params, notes = notes,
+        level = level, ratio = get(nb.report.meta, "slideratio", "16:9"))
     show_source = include_source && code != "hidden"
     cols = clamp(Int(columns), 1, 2)
     body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
@@ -432,6 +576,87 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             end
         end
         cols == 2 && print(io, "]\n")
+        write(joinpath(dir, "doc.typ"), String(take!(io)))
+        return dir
+    end
+end
+
+# Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
+function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_source, include_params)
+    c, override = frag
+    if c.kind == MARKDOWN
+        md = _md_for_typst(c, override === nothing ? c.source : override)
+        isempty(strip(md)) && return
+        write(joinpath(dir, base * ".md"), md)
+        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
+    else
+        if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))
+            write(joinpath(dir, base * ".jl"), c.source)
+            print(io, "#codeblock(read(\"", base, ".jl\"))\n")
+        end
+        include_params && print(io, _emit_controls(c))
+        _emit_output!(io, dir, base, nb, c; theme = theme)
+        print(io, "\n")
+    end
+    return
+end
+
+# Assemble a slide-DECK Typst project: one page per slide (segmented by `_slide_segments`),
+# 16:9/4:3 landscape, auto-fit. Code listings are hidden by default on slides (set `code`/
+# `include_source`). With `notes=true`, a speaker-notes appendix follows the deck.
+function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
+                               ratio::AbstractString = "16:9", code::AbstractString = "hidden",
+                               include_source::Bool = false, include_params::Bool = false,
+                               notes::Bool = false, level::Integer = 2)
+    show_source = include_source && code != "hidden"
+    lock(nb.lock) do
+        dir = mktempdir()
+        theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
+        io = IOBuffer()
+        print(io, _typst_preamble_slides(nb.report.title; theme = theme, ratio = ratio, code = code))
+        cells = nb.report.cells
+        # Front matter on the first markdown cell → a dedicated title slide (metablock).
+        firsti = findfirst(c -> c.kind == MARKDOWN, cells)
+        fmeta, frest = Dict{String,String}(), nothing
+        if firsti !== nothing
+            fmeta, rest = _parse_frontmatter(cells[firsti].source)
+            isempty(fmeta) || (frest = rest)
+        end
+        if !isempty(fmeta)
+            ttl = get(fmeta, "title", nb.report.title)
+            sub = get(fmeta, "subtitle", "")
+            byline = strip(join(filter(!isempty, [get(fmeta, "author", ""), get(fmeta, "date", "")]), " · "))
+            abss = get(fmeta, "abstract", "")
+            arg(s) = isempty(s) ? "none" : "\"" * _typ_str(s) * "\""
+            print(io, "#slide(metablock(", arg(ttl), ", ", arg(sub), ", ", arg(byline), ", ", arg(abss), "))\n\n")
+        end
+        segs = _slide_segments(cells; level = level)
+        for (si, seg) in enumerate(segs)
+            # Skip a leading title slide whose only fragment IS the consumed front-matter cell.
+            if !isempty(fmeta) && length(seg.frags) == 1 && seg.frags[1][1] === cells[firsti] &&
+               seg.frags[1][2] === nothing && (frest === nothing || isempty(strip(_md_for_typst(cells[firsti], frest))))
+                continue
+            end
+            print(io, "#slide[\n")
+            for (fi, frag) in enumerate(seg.frags)
+                # Render the front-matter cell's BODY (sans the YAML block) when it appears in a slide.
+                f = (!isempty(fmeta) && frag[1] === cells[firsti] && frag[2] === nothing) ?
+                    (frag[1], frest) : frag
+                _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
+                                  show_source = show_source, include_params = include_params)
+            end
+            print(io, "]\n\n")
+        end
+        if notes
+            for (si, seg) in enumerate(segs)
+                isempty(seg.notes) && continue
+                ntext = join((_md_for_typst(n) for n in seg.notes), "\n\n")
+                isempty(strip(ntext)) && continue
+                write(joinpath(dir, "notes$(si).md"), ntext)
+                print(io, "#slide[\n#text(fill: luma(130))[Notes · slide $(si)]\n#v(6pt)\n",
+                      "#cmarker.render(read(\"notes$(si).md\"), math: mathfn)\n]\n\n")
+            end
+        end
         write(joinpath(dir, "doc.typ"), String(take!(io)))
         return dir
     end

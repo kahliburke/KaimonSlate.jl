@@ -21,9 +21,10 @@ module Complete;  include("test_complete.jl");  end
 module History;   include("test_history.jl");   end
 module Agentops;  include("test_agentops.jl");  end
 module Repro;     include("test_repro.jl");     end
+module Slides;    include("test_slides.jl");    end
 
 const _TESTMODS = (Defname, Demux, Parsched, Parallel, Animation, Engine, Eval, Deps,
-                   Bind, Render, Tables, Trace, Complete, History, Agentops, Repro)
+                   Bind, Render, Tables, Trace, Complete, History, Agentops, Repro, Slides)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 retest(_TESTMODS..., ARGS...)

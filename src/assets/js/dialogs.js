@@ -79,7 +79,12 @@ function closePdfDialog(go) {
   document.getElementById('pdfbg').classList.remove('show');
   if (_pdfResolve) { const r = _pdfResolve; _pdfResolve = null; r(go); }
 }
-function _pdfPick() {
+// Show the speaker-notes row only for the slides layout (it's meaningless for article/report).
+function _pdfSyncSlides() {
+  const slides = (document.getElementById('pdflayout').value || '').startsWith('slides');
+  const row = document.getElementById('pdfnotesrow'); if (row) row.style.display = slides ? '' : 'none';
+}
+function _pdfPick(preset) {
   return new Promise(resolve => {
     _pdfResolve = resolve;
     ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
@@ -87,21 +92,30 @@ function _pdfPick() {
     });
     document.getElementById('pdfparams').checked = localStorage.getItem('slate_pdfparams') === '1';  // default off
     document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';    // default off
+    document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';    // default off
+    if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';                // deck shortcut
+    document.getElementById('pdflayout').onchange = _pdfSyncSlides;
+    _pdfSyncSlides();
     document.getElementById('pdfbg').classList.add('show');
   });
 }
-async function exportPdf() {
-  const go = await _pdfPick();
+// Menu shortcut: open the export dialog with the slide-deck layout preselected.
+function exportSlidesPdf() { return exportPdf('slides'); }
+async function exportPdf(preset) {
+  const go = await _pdfPick(preset);
   if (!go) return;
   const theme = document.getElementById('pdftheme').value;
   const [style, columns] = document.getElementById('pdflayout').value.split('|');
+  const slides = style === 'slides';
   const body = document.getElementById('pdfbody').value;
   const code = document.getElementById('pdfcode').value;
   const params = document.getElementById('pdfparams').checked;
+  const notes = slides && document.getElementById('pdfnotes').checked;
   const typst = document.getElementById('pdftypst').checked;
   ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => localStorage.setItem('slate_' + id, document.getElementById(id).value));
   localStorage.setItem('slate_pdfparams', params ? '1' : '0');
   localStorage.setItem('slate_pdftypst', typst ? '1' : '0');
+  localStorage.setItem('slate_pdfnotes', notes ? '1' : '0');
   const _save = (blob, ext) => {                       // trigger a browser download of `blob` as <title>.<ext>
     const url = URL.createObjectURL(blob), a = document.createElement('a');
     a.href = url; a.download = (nbState && nbState.title || 'notebook') + ext;
@@ -109,7 +123,8 @@ async function exportPdf() {
   };
   showLoading('Rendering PDF with Typst…');
   try {
-    const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code + (params ? '&params=1' : '');
+    const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code + (params ? '&params=1' : '')
+      + (slides ? '&layout=slides' : '') + (notes ? '&notes=1' : '');
     const r = await fetch(_apipath('/api/export.pdf') + qs);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
     _save(await r.blob(), '.pdf');
