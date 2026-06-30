@@ -38,5 +38,27 @@ slate_table((x = 1:5, x2 = (1:5).^2, sqrt_x = round.(sqrt.(1:5); digits=3)))
 The numeric citation style links each reference to its entry and renders a numbered
 list at the end [@turing1936computable]. Author–year styles are a one-word switch.
 
+#%% md id=styles
+## Citation styles
+
+The reference style is a per-notebook setting (**Settings → Citation style**, persisted in
+the `Slate.config` footer as `bibstyle`). Slate uses Typst's CSL engine, so the same
+notebook can render in any of these — switch and re-export to compare:
+
+| `bibstyle` | citation | reference list |
+| --- | --- | --- |
+| `ieee` *(default)* | `[1]` | numbered |
+| `apa` | (Knuth, 1984) | author–date |
+| `chicago-author-date` | (Knuth 1984) | author–date |
+| `chicago-notes` | footnote¹ | notes + bibliography |
+| `mla` | (Knuth) | works cited |
+| `nature` | superscript¹ | numbered |
+| `vancouver` | (1) | numbered |
+| `harvard-cite-them-right` | (Knuth, 1984) | author–date |
+
 #%% md id=refs bibliography
 references.bib
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   bibstyle = ieee
+# ╚═╡

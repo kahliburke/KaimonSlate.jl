@@ -73,6 +73,13 @@ function openSettings() {
       .then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
     slvl.onchange = pushSlide; strn.onchange = pushSlide; srat.onchange = pushSlide;
   }
+  // Citation/reference style (Typst CSL) for bibliography export — persisted to the config footer.
+  const bst = document.getElementById('setbibstyle');
+  if (bst) {
+    bst.value = (nbState && nbState.bibStyle) || 'ieee';
+    bst.onchange = () => api('POST', '/api/slideconfig', { bibstyle: bst.value })
+      .then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
+  }
   // Overall Slate UI theme — applied by toggling html[data-slate-theme] (palette in notebook.css),
   // persisted as `slateTheme`, and re-applied at load by the inline head script (no flash).
   const th = document.getElementById('settheme');
