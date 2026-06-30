@@ -63,41 +63,47 @@ end
 
 # Self-contained `.jl`s are intercepted earlier in `load_notebook` (background hydrate against
 # the depot cache), so this only handles ordinary notebooks: base / forked / detached.
-function _select_kernel(path::AbstractString, report)
+function _select_kernel(path::AbstractString, report; threads::AbstractString = "")
     if ReportEngine.gate_available()
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
         envdir = ReportEngine.notebook_env_dir(path)
         env_exists = isfile(joinpath(envdir, "Project.toml"))   # the fork is materialised on first add
         delta = get(report.meta, "env", Dict{String,Any}[])     # footer-recorded notebook packages
+        # Per-notebook worker-thread override: explicit `threads` arg wins, else a persisted
+        # meta["threads"] (set at a prior open / footer), else "" → the kernel falls back to the global.
+        th = isempty(threads) ? String(get(report.meta, "threads", "")) : String(threads)
         if !env_exists && !isempty(delta)
             # The `.jl` records package adds but the env dir is gone (e.g. a fresh git clone):
             # reconstruct it from the footer on first use (pending). Only `mkdir` here — the
             # Project.toml is written by the reconstruction itself, so a worker that never ran
             # leaves the env "absent" and reconstruction retries on the next open.
             mkpath(envdir)
-            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta)
+            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta, threads = th)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
             ReportEngine.ensure_notebook_env!(envdir)
-            return GateKernel(envdir; parent = "", envdir = envdir)
+            return GateKernel(envdir; parent = "", envdir = envdir, threads = th)
         elseif env_exists
             # Already has its own packages → run in the forked env (extends the parent).
-            return GateKernel(envdir; parent = parent, envdir = envdir)
+            return GateKernel(envdir; parent = parent, envdir = envdir, threads = th)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.
-            return GateKernel(parent; parent = parent, envdir = envdir)
+            return GateKernel(parent; parent = parent, envdir = envdir, threads = th)
         end
     end
     return InProcessKernel()
 end
 
-function load_notebook(path::AbstractString; id::AbstractString = "")
+function load_notebook(path::AbstractString; id::AbstractString = "", threads::AbstractString = "")
     src = read(path, String)
     base = splitext(basename(path))[1]
     rid = replace(base, r"[^A-Za-z0-9]" => "_")
     nbid = isempty(id) ? rid : String(id)
     r = parse_report(src; id = rid, title = base)
+    # Per-notebook worker-thread override (from slate.open) → meta, where _select_kernel reads it (and
+    # state_json round-trips it). The `.jl` footer carries it across restarts when present.
+    isempty(threads) || (r.meta["threads"] = String(threads))
     build_dependencies!(r)
     _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it

@@ -47,6 +47,19 @@ function openSettings() {
     par.checked = !!(nbState && nbState.parallel === true);
     par.onchange = () => api('POST', '/api/parallel', { enabled: par.checked }).catch(() => {});
   }
+  // Per-notebook worker thread override. Blank = global. Apply POSTs /threads, which restarts the
+  // worker (warm namespace is lost), so it's a button, not live-on-change.
+  const thr = document.getElementById('setthreads'), thrApply = document.getElementById('setthreadsapply'),
+        thrEff = document.getElementById('setthreadseff');
+  if (thr) {
+    thr.value = (nbState && nbState.threads) || '';
+    if (thrEff) thrEff.textContent = nbState && nbState.threadsEffective ? `now: ${nbState.threadsEffective}` : '';
+    const applyThreads = async () => {
+      try { renderAll(await api('POST', '/api/threads', { threads: thr.value.trim() })); } catch (_) {}
+    };
+    thrApply && (thrApply.onclick = applyThreads);
+    thr.onkeydown = e => { if (e.key === 'Enter') applyThreads(); };
+  }
   // Overall Slate UI theme — applied by toggling html[data-slate-theme] (palette in notebook.css),
   // persisted as `slateTheme`, and re-applied at load by the inline head script (no flash).
   const th = document.getElementById('settheme');

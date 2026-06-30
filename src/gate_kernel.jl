@@ -71,9 +71,10 @@ mutable struct GateKernel <: Kernel
     conn::Any        # Main.Kaimon REPLConnection
     logpath::String  # worker stdout/stderr log
     lock::ReentrantLock   # serializes prepare!/respawn so concurrent callers can't double-spawn
+    threads::String  # per-notebook worker thread override ("<compute>,<interactive>"); "" = use the global
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
-               pending::Vector = Any[]) =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock())
+               pending::Vector = Any[], threads::AbstractString = "") =
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads))
 end
 
 # True when the notebook is running directly in its parent (no own packages yet).
@@ -232,8 +233,11 @@ function _spawn_worker!(k::GateKernel)
     # (`auto` would grab ALL cores per worker → oversubscription with several open notebooks; idle Julia
     # threads park, so the cost is memory not spin, but a cap is tidier. Over-estimating cores is safe —
     # Julia just timeslices.) Order: explicit config (panel) wins, then env, then this adaptive default.
+    # Precedence: this notebook's own override (k.threads, set at open) → global panel/config setting
+    # (WORKER_THREADS[]) → env → the adaptive default.
     _default_jthreads = string(min(Sys.CPU_THREADS, 8), ",1")
-    jthreads = !isempty(WORKER_THREADS[]) ? WORKER_THREADS[] :
+    jthreads = !isempty(k.threads)         ? k.threads :
+               !isempty(WORKER_THREADS[])  ? WORKER_THREADS[] :
                get(ENV, "KAIMONSLATE_JULIA_THREADS", _default_jthreads)
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas)

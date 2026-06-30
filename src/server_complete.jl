@@ -648,6 +648,20 @@ function _make_router(h::Hub)
         nb.report.meta["parallel"] = get(_body(req), "enabled", false) === true
         _json(Dict("ok" => true, "parallel" => nb.report.meta["parallel"]))
     end))
+    # Per-notebook worker-thread override. "" clears it (back to the global). Applies by respawning this
+    # notebook's worker — so changing it kills + restarts the process (lose the warm namespace), unlike
+    # the parallel toggle. Stored in meta so it survives reloads; the .jl footer carries it across restarts.
+    HTTP.register!(router, "POST", "/api/{id}/threads", req -> _withnb(h, req, nb -> begin
+        spec = strip(String(get(_body(req), "threads", "")))
+        if isempty(spec)
+            delete!(nb.report.meta, "threads")
+        else
+            nb.report.meta["threads"] = spec
+        end
+        nb.kernel isa ReportEngine.GateKernel && (nb.kernel.threads = spec)   # update the live kernel's override
+        restart_kernel!(nb)                                                    # respawn the worker with it
+        _json(state_json(nb))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); _eval!(nb); _json(state_json(nb))
     end))
@@ -709,14 +723,14 @@ end
 Load the notebook at `path` into the hub (reusing the existing entry if already
 open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
 """
-function open_notebook!(h::Hub, path::AbstractString)
+function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "")
     file = abspath(path)
     id = lock(h.lock) do
         for nb in values(h.notebooks)
             abspath(nb.path) == file && return nb.id
         end
         id = _unique_id(h, file)
-        nb = load_notebook(file; id = id)
+        nb = load_notebook(file; id = id, threads = threads)
         h.notebooks[id] = nb
         _start_watcher!(nb)
         return id

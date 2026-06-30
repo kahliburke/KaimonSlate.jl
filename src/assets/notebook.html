@@ -168,6 +168,8 @@
     <span class="rt"><input type="checkbox" id="sethotreload"/></span></div>
   <div class="setrow"><label title="Run independent cells concurrently in one worker (dependent cells stay ordered). Experimental.">Parallel cell execution</label>
     <span class="rt"><input type="checkbox" id="setparallel"/></span></div>
+  <div class="setrow"><label title="Worker Julia threads for THIS notebook (e.g. 4,1 or auto,1). Blank = global default. Applying restarts the worker (clears the namespace).">Worker threads (this notebook)</label>
+    <span class="rt"><input type="text" id="setthreads" placeholder="global" size="7" style="width:64px"/><button id="setthreadsapply" title="apply + restart worker">Apply</button> <span id="setthreadseff" class="dim"></span></span></div>
   <div class="setrow"><label title="Overall colour theme for the Slate notebook UI">Theme</label>
     <select id="settheme"><!-- options populated from SLATE_UI_THEMES (settings.js) --></select></div>
   <div class="setrow"><label title="Theme for code syntax highlighting in the editor — token colours and editor chrome">Editor syntax</label>

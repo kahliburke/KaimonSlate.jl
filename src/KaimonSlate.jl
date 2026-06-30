@@ -204,17 +204,21 @@ function create_tools(GateTool::Type)
     _caller() = (c = parentmodule(GateTool).current_caller(); c === nothing ? "" : String(c))
 
     """
-        open(path::String) -> String
+        open(path::String; threads::String="") -> String
 
     Open a reactive notebook for the `.jl` file at `path` and start its live
     browser server (creating the file if it does not exist). Returns the URL.
     Opening the same file again returns the existing server.
+
+    `threads` ("<compute>,<interactive>", e.g. "8,1") overrides the worker Julia
+    thread count for THIS notebook only — useful for a CPU-heavy notebook. Empty →
+    the global setting (Extensions panel / slate.json) / adaptive default.
     """
-    function nb_open(path::String)::String
+    function nb_open(path::String; threads::String = "")::String
         path = expanduser(path)
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
         h = _hub()
-        id = open_notebook!(h, path)
+        id = open_notebook!(h, path; threads = threads)
         return "Serving $(abspath(path)) at $(_base())/n/$id"
     end
 
