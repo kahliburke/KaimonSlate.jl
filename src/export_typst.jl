@@ -504,6 +504,96 @@ function _slide_segments(cells; level::Integer = 2)
     return slides
 end
 
+# ── Document metadata from role-tagged cells (title / abstract / bibliography) ────────────────────
+# Metadata is authored as ordinary cells carrying a role tag, in natural document order, and each
+# export target interprets the role for placement. `title`/`subtitle`/`byline` come from a `:title`
+# cell's markdown (H1 / H2-H3 / first plain line); `:abstract` cell(s) supply the abstract; both are
+# hoisted into the title block and dropped from the body (their ids land in `skip`). For backward
+# compatibility, a legacy `---` YAML block on the first markdown cell is used when no `:title` cell
+# exists (its body remainder is returned as `yrest`). One resolver for PDF, slides, and HTML.
+function _parse_title_cell(src)
+    title = ""; subtitle = ""; byline = ""
+    for ln in split(String(src), '\n')
+        s = strip(ln); isempty(s) && continue
+        if isempty(title) && (m = match(r"^#\s+(.+?)\s*#*$", ln)) !== nothing
+            title = strip(m.captures[1])
+        elseif isempty(subtitle) && (m = match(r"^#{2,3}\s+(.+?)\s*#*$", ln)) !== nothing
+            subtitle = strip(m.captures[1])
+        elseif isempty(byline) && !startswith(s, "#")
+            byline = String(s)
+        end
+    end
+    return (title, subtitle, byline)
+end
+
+function report_frontmatter(report)
+    cells = report.cells
+    title = report.title; subtitle = ""; byline = ""; abstract = ""
+    skip = Set{String}(); yrest = nothing
+    firstmd = findfirst(c -> c.kind == MARKDOWN, cells)
+    titlei = findfirst(c -> :title in c.flags, cells)
+    if titlei !== nothing
+        t, s, b = _parse_title_cell(cells[titlei].source)
+        isempty(t) || (title = t); subtitle = s; byline = b
+        push!(skip, cells[titlei].id)
+    elseif firstmd !== nothing
+        ym, rest = _parse_frontmatter(cells[firstmd].source)
+        if !isempty(ym)
+            title = get(ym, "title", title)
+            subtitle = get(ym, "subtitle", "")
+            byline = strip(join(filter(!isempty, [get(ym, "author", ""), get(ym, "date", "")]), " · "))
+            abstract = get(ym, "abstract", "")
+            yrest = rest
+        end
+    end
+    abscells = Cell[c for c in cells if :abstract in c.flags]
+    if !isempty(abscells)
+        abstract = join((strip(c.source) for c in abscells), "\n\n")   # a role abstract wins over YAML
+        for c in abscells; push!(skip, c.id); end
+    end
+    bibcells = Cell[c for c in cells if :bibliography in c.flags]
+    has = titlei !== nothing || !isempty(strip(abstract)) || yrest !== nothing
+    return (; title, subtitle, byline, abstract, skip, bibcells, yrest, firstmd, has)
+end
+
+# Resolve `:bibliography` cells into Typst bib files written into the project dir, returning the
+# project-relative filenames for `#bibliography(...)`. A cell body of BibTeX entries (`@type{…}`)
+# is embedded (written to refs.bib); a body of `.bib` path(s) — one per line — references external
+# files copied in (resolved relative to the notebook's directory). `cmarker` already emits a
+# markdown `@key` as a native Typst reference, so citations resolve against these with no bridge.
+function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractString)
+    files = String[]
+    embedded = IOBuffer()
+    for c in bibcells
+        body = c.source
+        if occursin(r"@\w+\s*\{", body)                 # embedded BibTeX entries
+            println(embedded, strip(body))
+        else
+            for ln in split(body, '\n')                 # external `.bib` path(s)
+                p = strip(ln); isempty(p) && continue
+                src = isabspath(p) ? String(p) : joinpath(nbdir, p)
+                isfile(src) || error("bibliography file not found: $p")
+                fn = "ext_" * basename(src)
+                cp(src, joinpath(dir, fn); force = true)
+                fn in files || push!(files, fn)
+            end
+        end
+    end
+    emb = String(take!(embedded))
+    if !isempty(strip(emb))
+        write(joinpath(dir, "refs.bib"), emb)
+        pushfirst!(files, "refs.bib")
+    end
+    return files
+end
+
+# Typst `#bibliography(...)` call for the resolved files, or "" when there are none.
+function _bibliography_typst(files, style::AbstractString)::String
+    isempty(files) && return ""
+    farg = length(files) == 1 ? "\"$(files[1])\"" : "(" * join(("\"$f\"" for f in files), ", ") * ")"
+    return "#bibliography($farg, style: \"$(style)\", title: [References])\n"
+end
+
 # Assemble the Typst PROJECT — `doc.typ` plus every per-cell aux file it reads (.md / .jl /
 # figures / output blocks) — into a fresh temp dir and return its path. Shared by `export_pdf`
 # (compile it) and `export_typst_bundle` (archive it). Holds `nb.lock` while reading the report;
@@ -531,35 +621,29 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         numoverride = _manual_heading_numbers(nb.report.cells) ? false : nothing
         print(io, _typst_preamble(nb.report.title; style = style, columns = cols,
                                   theme = theme, code = code, body = body, number = numoverride))
-        # Front matter (first markdown cell) → academic title + abstract spanning full width.
+        # Role-tagged metadata (title / abstract) → academic title block spanning full width;
+        # the hoisted cells are then dropped from the body. Legacy YAML front-matter still works.
         cells = nb.report.cells
-        meta, firstmd_rest = Dict{String,String}(), nothing
-        firsti = findfirst(c -> c.kind == MARKDOWN, cells)
-        if firsti !== nothing
-            meta, rest = _parse_frontmatter(cells[firsti].source)
-            isempty(meta) || (firstmd_rest = rest)
-        end
-        if isempty(meta)
-            print(io, "#titleblock(\"", _typ_str(nb.report.title), "\")\n\n")
+        fm = report_frontmatter(nb.report)
+        arg(s) = isempty(strip(s)) ? "none" : "\"" * _typ_str(s) * "\""
+        if !fm.has
+            print(io, "#titleblock(\"", _typ_str(fm.title), "\")\n\n")
         else
-            ttl = get(meta, "title", nb.report.title)
-            sub = get(meta, "subtitle", "")
-            byline = strip(join(filter(!isempty, [get(meta, "author", ""), get(meta, "date", "")]), " · "))
-            abs = get(meta, "abstract", "")
-            arg(s) = isempty(s) ? "none" : "\"" * _typ_str(s) * "\""
             absarg = "none"
-            if !isempty(abs)
-                write(joinpath(dir, "abstract.md"), abs)
+            if !isempty(strip(fm.abstract))
+                write(joinpath(dir, "abstract.md"), fm.abstract)
                 absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn)"
             end
-            print(io, "#metablock(", arg(ttl), ", ", arg(sub), ", ", arg(byline), ", ", absarg, ")\n\n")
+            print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")
         end
         cols == 2 && print(io, "#columns(2)[\n")
         for (k, c) in enumerate(cells)
             base = "c$(k)"
             (:collapsed in c.flags) && continue       # folded cell → omit from the export entirely
+            c.id in fm.skip && continue               # hoisted into the title block above
+            (:bibliography in c.flags) && continue    # rendered as #bibliography at the end, not raw
             if c.kind == MARKDOWN
-                md = (k == firsti && firstmd_rest !== nothing) ? _md_for_typst(c, firstmd_rest) : _md_for_typst(c)
+                md = (k == fm.firstmd && fm.yrest !== nothing) ? _md_for_typst(c, fm.yrest) : _md_for_typst(c)
                 isempty(strip(md)) && continue       # front-matter-only cell leaves nothing to render
                 write(joinpath(dir, base * ".md"), md)
                 print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
@@ -575,6 +659,9 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                 print(io, "\n")
             end
         end
+        # References — `:bibliography` cells (embedded + external .bib), rendered via Typst's CSL.
+        biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
+        print(io, _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee")))
         cols == 2 && print(io, "]\n")
         write(joinpath(dir, "doc.typ"), String(take!(io)))
         return dir
@@ -615,38 +702,33 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         io = IOBuffer()
         print(io, _typst_preamble_slides(nb.report.title; theme = theme, ratio = ratio, code = code))
         cells = nb.report.cells
-        # Front matter on the first markdown cell → a dedicated title slide (metablock).
-        firsti = findfirst(c -> c.kind == MARKDOWN, cells)
-        fmeta, frest = Dict{String,String}(), nothing
-        if firsti !== nothing
-            fmeta, rest = _parse_frontmatter(cells[firsti].source)
-            isempty(fmeta) || (frest = rest)
-        end
-        if !isempty(fmeta)
-            ttl = get(fmeta, "title", nb.report.title)
-            sub = get(fmeta, "subtitle", "")
-            byline = strip(join(filter(!isempty, [get(fmeta, "author", ""), get(fmeta, "date", "")]), " · "))
-            abss = get(fmeta, "abstract", "")
-            arg(s) = isempty(s) ? "none" : "\"" * _typ_str(s) * "\""
-            print(io, "#slide(metablock(", arg(ttl), ", ", arg(sub), ", ", arg(byline), ", ", arg(abss), "))\n\n")
+        # Role-tagged metadata → a dedicated title slide (metablock); hoisted title/abstract cells
+        # are dropped from the body slides. Legacy YAML front-matter renders its body remainder.
+        fm = report_frontmatter(nb.report)
+        arg(s) = isempty(strip(s)) ? "none" : "\"" * _typ_str(s) * "\""
+        if fm.has
+            print(io, "#slide(metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ",
+                  arg(fm.byline), ", ", arg(fm.abstract), "))\n\n")
         end
         segs = _slide_segments(cells; level = level)
         for (si, seg) in enumerate(segs)
-            # Skip a leading title slide whose only fragment IS the consumed front-matter cell.
-            if !isempty(fmeta) && length(seg.frags) == 1 && seg.frags[1][1] === cells[firsti] &&
-               seg.frags[1][2] === nothing && (frest === nothing || isempty(strip(_md_for_typst(cells[firsti], frest))))
-                continue
-            end
+            # drop hoisted title/abstract cells and the bibliography (rendered as a closing slide)
+            frags = [f for f in seg.frags if !(f[1].id in fm.skip) && !(:bibliography in f[1].flags)]
+            isempty(frags) && continue
             print(io, "#slide[\n")
-            for (fi, frag) in enumerate(seg.frags)
-                # Render the front-matter cell's BODY (sans the YAML block) when it appears in a slide.
-                f = (!isempty(fmeta) && frag[1] === cells[firsti] && frag[2] === nothing) ?
-                    (frag[1], frest) : frag
+            for (fi, frag) in enumerate(frags)
+                # Render the legacy YAML cell's BODY (sans the YAML block) when it appears in a slide.
+                f = (fm.yrest !== nothing && fm.firstmd !== nothing && frag[1] === cells[fm.firstmd] &&
+                     frag[2] === nothing) ? (frag[1], fm.yrest) : frag
                 _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
                                   show_source = show_source, include_params = include_params)
             end
             print(io, "]\n\n")
         end
+        # References slide — `:bibliography` cells rendered via Typst's CSL engine.
+        biblio = _bibliography_files!(dir, fm.bibcells, dirname(abspath(nb.path)))
+        isempty(biblio) || print(io, "#slide[\n",
+            _bibliography_typst(biblio, get(nb.report.meta, "bibstyle", "ieee")), "]\n\n")
         if notes
             for (si, seg) in enumerate(segs)
                 isempty(seg.notes) && continue

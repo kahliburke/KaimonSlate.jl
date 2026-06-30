@@ -1,10 +1,11 @@
-#%% md id=cover
+#%% md id=cover title
 # Slate Slideshow Mode
 ### Reactive notebooks, presented
-
 Kahli Burke · 2026-06-30
 
-A quick tour of presentation mode — press **▶ Present** (or ⌘⇧P).
+#%% md id=summary abstract
+A quick tour of presentation mode — heading-detected slides, live interactive
+content, a synced presenter view, and 16:9 PDF export. Press **▶ Present** (⌘⇧P).
 
 #%% md id=why
 ## Why a slideshow mode?

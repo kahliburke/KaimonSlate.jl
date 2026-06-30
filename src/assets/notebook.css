@@ -1017,3 +1017,20 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .pp-cur .cell, .pp-next .cell { border: none !important; background: none !important; margin: 0 0 10px 0 !important; padding: 0 !important; }
 .pp-cur .cellhead, .pp-next .cellhead, .pp-cur .srcedit, .pp-next .srcedit,
 .pp-cur .cm-editor, .pp-next .cm-editor { display: none !important; }
+
+/* ── Document-metadata role cells (title / abstract / bibliography) ─────────────
+   Authored as ordinary cells in natural flow; styled in place so what you see is what
+   exports produce. The `.md` body holds rendered markdown. Reuses theme vars. */
+.cell.role-title .md { text-align: center; padding: 6px 0 2px; }
+.cell.role-title .md h1 { font-size: 2rem; margin: 0; color: var(--strong); }
+.cell.role-title .md h2, .cell.role-title .md h3 { font-weight: 400; color: var(--dim); margin: 4px 0 0; }
+.cell.role-abstract .md { position: relative; margin: 2px 0 2px 14px; padding: 8px 14px;
+  border-left: 3px solid var(--accent); background: var(--ovl); border-radius: 0 8px 8px 0;
+  font-size: .94em; font-style: italic; color: var(--text); }
+.cell.role-abstract .md::before { content: 'Abstract'; display: block; font-style: normal;
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .09em; font-weight: 700;
+  color: var(--accent); margin-bottom: 4px; }
+.cell.role-bib .md { font-size: .88em; }
+.cell.role-bib .md::before { content: 'References'; display: block; font-size: .72rem;
+  text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: var(--dim);
+  margin-bottom: 6px; border-bottom: 1px solid var(--border); padding-bottom: 3px; }

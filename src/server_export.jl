@@ -13,6 +13,13 @@ const _EXPORT_CSS = """
   font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
 .export{max-width:900px;margin:0 auto;padding:36px 24px 80px;}
 .exp-title{color:#fff;font-size:1.9rem;margin:0 0 2px;}
+.exp-titleblock{text-align:center;padding:8px 0 4px;}
+.exp-subtitle{color:var(--text);font-size:1.2rem;margin-top:4px;}
+.exp-byline{color:var(--dim);font-size:.86rem;margin-top:8px;}
+.exp-abstract{max-width:680px;margin:16px auto 0;text-align:left;font-size:.92rem;font-style:italic;
+  color:var(--text);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:12px 0;}
+.exp-abslabel{display:block;font-style:normal;font-size:.7rem;text-transform:uppercase;letter-spacing:.09em;
+  font-weight:700;color:var(--accent);margin-bottom:5px;text-align:center;}
 .exp-meta{color:var(--dim);font-size:.78rem;font-family:monospace;margin-bottom:24px;
   border-bottom:1px solid var(--border);padding-bottom:14px;}
 .exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
@@ -108,12 +115,25 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
               "<style>", _EXPORT_CSS, "</style></head><body><article class=\"export\">")
-        print(io, "<h1 class=\"exp-title\">", title, "</h1>")
+        # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
+        # body (mirrors the PDF/Typst export). Legacy YAML front-matter still works via the resolver.
+        fm = report_frontmatter(nb.report)
+        print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
+              _esc(fm.title), "</h1>")
+        isempty(strip(fm.subtitle)) || print(io, "<div class=\"exp-subtitle\">", _esc(fm.subtitle), "</div>")
+        isempty(strip(fm.byline)) || print(io, "<div class=\"exp-byline\">", _esc(fm.byline), "</div>")
+        if !isempty(strip(fm.abstract))
+            print(io, "<div class=\"exp-abstract\"><span class=\"exp-abslabel\">Abstract</span>",
+                  markdown_html(fm.abstract, CellOutput[]), "</div>")
+        end
+        print(io, "</header>")
         print(io, "<div class=\"exp-meta\">Exported from Kaimon Slate · ", _esc(abspath(nb.path)), "</div>")
         for c in nb.report.cells
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
             # the export too (both code and output), for markdown and code alike.
             (:collapsed in c.flags) && continue
+            c.id in fm.skip && continue              # hoisted into the title block above
+            (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
             if c.kind == MARKDOWN
                 print(io, "<section class=\"exp-md\">", markdown_html(c.source, c.interp), "</section>")
             else

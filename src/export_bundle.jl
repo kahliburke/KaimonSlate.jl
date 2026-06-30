@@ -238,12 +238,36 @@ source, and (if the project is a git repo) a shallow git bundle — and, when `i
 a `Slate.preview` footer holding the cells' rendered outputs so the notebook displays instantly
 while its env reconstructs. Reinflate / run with [`expand`](@ref) or the open box.
 """
+# For a self-contained `.jl`, inline any EXTERNAL bibliography file into its `:bibliography` cell
+# (replace the `.bib` path lines with the file's contents) so the reproducible notebook keeps its
+# citations working without depending on a file outside the bundle. Embedded-BibTeX cells and
+# notebooks without an external bib are returned unchanged.
+function _serialize_cells_inlining_bibs(report, nbdir::AbstractString)
+    isext(c) = :bibliography in c.flags && !occursin(r"@\w+\s*\{", c.source)
+    any(isext, report.cells) || return ReportEngine.serialize_cells(report)
+    cells2 = map(report.cells) do c
+        isext(c) || return c
+        io = IOBuffer()
+        for ln in split(c.source, '\n')
+            p = strip(ln); isempty(p) && continue
+            src = isabspath(p) ? String(p) : joinpath(nbdir, p)
+            isfile(src) ? println(io, rstrip(read(src, String))) : println(io, p)   # keep path if missing
+        end
+        nc = ReportEngine.Cell(c.id, c.kind, rstrip(String(take!(io))))
+        union!(nc.flags, c.flags)
+        nc
+    end
+    tmp = ReportEngine.Report(report.id, report.title)
+    append!(tmp.cells, cells2)
+    return ReportEngine.serialize_cells(tmp)
+end
+
 function export_standalone(nb::LiveNotebook; include_preview::Bool = true)
     lock(nb.lock) do
         info = ReportEngine.bundle_info(nb.kernel, nb.report)
         isempty(info.projectdir) &&
             error("this notebook has no project environment to bundle (in-process kernel)")
-        cells = ReportEngine.serialize_cells(nb.report)
+        cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
         b64 = _make_bundle_b64(info.projectdir, info.pathdeps, basename(nb.path), cells)
         out = cells * "\n" * _bundle_footer(b64)
         include_preview && try

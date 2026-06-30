@@ -247,9 +247,13 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   const inSet = selSet ? selSet.has(c.id) : false;
   const selCls = selectedId === c.id ? ' selected' : (inSet ? ' multisel' : '');
   const isBind = window.hasBinds(c);
+  // Document-metadata roles (title / abstract / bibliography) style the cell in place, so what
+  // you author flows naturally in the notebook and exports interpret the role for placement.
+  const roleCls = (c.roleTitle ? ' role-title' : '') + (c.roleAbstract ? ' role-abstract' : '')
+    + (c.roleBib ? ' role-bib' : '');
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
-    + selCls + (focusId === c.id ? ' dep-focus' : '');
+    + roleCls + selCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
   const srcedit = html`<div class="srcedit" style="display:none" dangerouslySetInnerHTML=${raw(window.srcEditInner())}></div>`;
   // Content hosts are empty/stable — Preact preserves them; the effect above fills them.

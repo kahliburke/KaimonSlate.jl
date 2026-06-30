@@ -317,6 +317,9 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:trace in c.flags) && (d["trace"] = true)           # @trace-wrapped on eval (collects trace rows)
     (:slide in c.flags) && (d["slide"] = true)           # explicit slide-start (presentation mode)
     (:notes in c.flags) && (d["notes"] = true)           # speaker notes — presenter view only
+    (:title in c.flags) && (d["roleTitle"] = true)       # document title block (export metadata)
+    (:abstract in c.flags) && (d["roleAbstract"] = true) # abstract — hoisted into the title block on export
+    (:bibliography in c.flags) && (d["roleBib"] = true)  # bibliography / references
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
     # `:opaque` is inferred each eval, not a user tag, so it's excluded.
     d["tags"] = sort!(String[string(f) for f in c.flags if f !== :opaque])

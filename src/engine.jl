@@ -215,7 +215,8 @@ end
 const _INTERNAL_FLAGS = Set{Symbol}([:opaque])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
-const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :slide, :notes)
+const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :slide, :notes,
+                     :title, :abstract, :bibliography)
 
 "Parse a header line's trailing tokens into (kind, id, controls, tags::Vector{Symbol}). Every token
 that isn't `id=`/`controls=`/`code`/`md` becomes a tag flag (known ones drive behaviour; the rest are
@@ -392,10 +393,10 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # correctly (`:bool` | `:string` | `:int`). Slide-deck prefs live here too so a notebook
 # carries its presentation style with it.
 const _CONFIG_KEYS = ("parallel", "threads", "hotreload",
-                      "slidelevel", "slidetransition", "slidetheme", "slideratio")
+                      "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            "slidelevel" => :int, "slidetransition" => :string,
-                           "slidetheme" => :string, "slideratio" => :string)
+                           "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string)
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]
