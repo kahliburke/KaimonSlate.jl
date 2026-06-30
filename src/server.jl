@@ -46,6 +46,26 @@ mutable struct LiveNotebook
     agents::Dict{String,String}          # crew label → Kaimon agent id (multi-agent crew; "" = default)
 end
 
+# Wire/unwire the engine's out-of-band callback registry (eval.jl) for one notebook — the seam
+# between the dependency-light engine and the HTTP/SSE layer. Both `load_notebook` paths (fresh
+# `.jl` bundle vs. ordinary notebook) wire the identical set; close/restart paths unwire it. Kept
+# as ONE place so the two never drift out of sync with each other.
+function _wire_callbacks!(nb::LiveNotebook)
+    register_refresh!(nb.report.id, vars -> server_refresh(nb, vars))                      # async slate_refresh → recompute readers
+    register_srcchange!(nb.report.id, (names, err) -> server_src_changed(nb, names, err))  # parent /src reloaded (Revise)
+    register_progress!(nb.report.id, c -> _broadcast_progress(nb, c))                      # stream per-cell run status to the UI
+    register_runbatch!(nb.report.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
+    register_userprog!(nb.report.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
+    register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
+    return nb
+end
+function _unwire_callbacks!(nb::LiveNotebook)
+    unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
+    unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
+    unregister_userprog!(nb.report.id); unregister_celldone!(nb.report.id)
+    return nb
+end
+
 # GateKernel when running as the Kaimon extension AND the notebook is inside a
 # Julia project (cells eval in a per-notebook worker); else in-process.
 # Instantiate an env in a subprocess (isolated; best-effort). Blocking — used by the background
@@ -118,12 +138,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
         nb = LiveNotebook(nbid, String(path), r, InProcessKernel(), 0, String[], String[],
                           ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                           Dict{String,String}())
-        register_refresh!(r.id, vars -> server_refresh(nb, vars))
-        register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))
-        register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
-        register_runbatch!(r.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))
-        register_userprog!(r.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
-        register_celldone!(r.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
+        _wire_callbacks!(nb)
         _load_chat_log!(nb)
         @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
         return nb
@@ -136,12 +151,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     nb = LiveNotebook(nbid, String(path), r, InProcessKernel(), 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                       Dict{String,String}())
-    # Async cells call `slate_refresh(:x)` → recompute readers of x + push live.
-    register_refresh!(r.id, vars -> server_refresh(nb, vars))
-    register_srcchange!(r.id, (names, err) -> server_src_changed(nb, names, err))   # parent /src reloaded (Revise)
-    register_progress!(r.id, c -> _broadcast_progress(nb, c))   # stream per-cell run status to the UI
-    register_runbatch!(r.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
-    register_userprog!(r.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
+    _wire_callbacks!(nb)
     register_celldone!(r.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     @async begin

@@ -17,14 +17,34 @@ _bundle_sha(s) = bytes2hex(SHA.sha2_256(codeunits(String(s))))
 const _BUNDLE_OPEN = "# ╔═╡ Slate.bundle"
 const _BUNDLE_CLOSE = "# ╚═╡ Slate.bundle"
 
-_bundle_footer(b64::AbstractString) = let io = IOBuffer()
-    println(io, _BUNDLE_OPEN, " v1 · self-contained env (Project + Manifest + local source). Expand: julia> using KaimonSlate; KaimonSlate.expand(\"this.jl\")")
+# Wrap a base64 payload into a `Slate.*` terminal footer block: an open marker (with a one-line
+# description), the payload split into 100-char commented lines, then a close marker. Shared by
+# `_bundle_footer` and `_preview_footer` (encode side) so the two layouts can't drift apart.
+function _footer_block(open_marker::AbstractString, close_marker::AbstractString, header::AbstractString, b64::AbstractString)
+    io = IOBuffer()
+    println(io, open_marker, " ", header)
     for i in 1:100:lastindex(b64)
         println(io, "# ", SubString(b64, i, min(i + 99, lastindex(b64))))
     end
-    print(io, _BUNDLE_CLOSE)
-    String(take!(io))
+    print(io, close_marker)
+    return String(take!(io))
 end
+
+# Pull a footer's base64 payload out of `text` (between `open_marker`/`close_marker`), or
+# `nothing` if the marker isn't present. Shared by `_read_preview` and `_read_bundle_b64`
+# (decode side) so the two extraction passes can't drift apart.
+function _read_footer_b64(text::AbstractString, open_marker::AbstractString, close_marker::AbstractString)
+    lines = split(text, '\n')
+    oi = findfirst(l -> startswith(l, open_marker), lines)
+    oi === nothing && return nothing
+    rest = @view lines[(oi + 1):end]
+    ci = findfirst(l -> startswith(l, close_marker), rest)
+    body = ci === nothing ? rest : @view rest[1:(ci - 1)]
+    return join((startswith(l, "# ") ? SubString(l, 3) : l for l in body))
+end
+
+_bundle_footer(b64::AbstractString) = _footer_block(_BUNDLE_OPEN, _BUNDLE_CLOSE,
+    "v1 · self-contained env (Project + Manifest + local source). Expand: julia> using KaimonSlate; KaimonSlate.expand(\"this.jl\")", b64)
 
 # ── Frozen render (preview) ───────────────────────────────────────────────────
 # A standalone `.jl` optionally embeds the cells' rendered outputs as of export time, so the
@@ -39,24 +59,13 @@ _gzip_b64(data::AbstractString) = Base64.base64encode(transcode(GzipCompressor, 
 _gunzip_b64(b64::AbstractString) = String(transcode(GzipDecompressor, Base64.base64decode(b64)))
 
 # `cells` is the JSON-able rendered-cells array (`state_json(nb)["cells"]`).
-_preview_footer(cells) = let b64 = _gzip_b64(JSON.json(cells)), io = IOBuffer()
-    println(io, _PREVIEW_OPEN, " v1 · frozen render shown while the live env reconstructs")
-    for i in 1:100:lastindex(b64)
-        println(io, "# ", SubString(b64, i, min(i + 99, lastindex(b64))))
-    end
-    print(io, _PREVIEW_CLOSE)
-    String(take!(io))
-end
+_preview_footer(cells) = _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE,
+    "v1 · frozen render shown while the live env reconstructs", _gzip_b64(JSON.json(cells)))
 
 # Pull the embedded frozen-render cells out of a standalone `.jl` (or `nothing` if absent).
 function _read_preview(text::AbstractString)
-    lines = split(text, '\n')
-    oi = findfirst(l -> startswith(l, _PREVIEW_OPEN), lines)
-    oi === nothing && return nothing
-    rest = @view lines[(oi + 1):end]
-    ci = findfirst(l -> startswith(l, _PREVIEW_CLOSE), rest)
-    body = ci === nothing ? rest : @view rest[1:(ci - 1)]
-    b64 = join((startswith(l, "# ") ? SubString(l, 3) : l for l in body))
+    b64 = _read_footer_b64(text, _PREVIEW_OPEN, _PREVIEW_CLOSE)
+    b64 === nothing && return nothing
     return try; JSON.parse(_gunzip_b64(b64)); catch; nothing; end
 end
 
@@ -256,13 +265,9 @@ end
 
 # Pull the base64 payload out of a standalone `.jl`'s `Slate.bundle` footer.
 function _read_bundle_b64(text::AbstractString)
-    lines = split(text, '\n')
-    oi = findfirst(l -> startswith(l, _BUNDLE_OPEN), lines)
-    oi === nothing && error("no Slate.bundle footer found")
-    rest = @view lines[(oi + 1):end]
-    ci = findfirst(l -> startswith(l, _BUNDLE_CLOSE), rest)
-    body = ci === nothing ? rest : @view rest[1:(ci - 1)]
-    return join((startswith(l, "# ") ? SubString(l, 3) : l for l in body))
+    b64 = _read_footer_b64(text, _BUNDLE_OPEN, _BUNDLE_CLOSE)
+    b64 === nothing && error("no Slate.bundle footer found")
+    return b64
 end
 
 # True if `text` carries a `Slate.bundle` footer (cheap marker scan, no base64 decode).
