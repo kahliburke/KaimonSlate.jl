@@ -374,7 +374,10 @@ function _run_code_batch!(nb::LiveNotebook)
     batch === nothing && return false
     _BATCH_SNAPS[skey] = snap
     _emit_pending(nb, npending)
-    try
+    ack = try
+        # Blocks until the whole batch drains in the worker; returns (; run_id, results::Dict{id=>wire}).
+        # The rich results ride back binary in the REQ/REP value (the gate STREAM channel is string-only,
+        # so they can't be streamed as objects — see gate_client_debug.jl `drain_stream_messages!`).
         ReportEngine.eval_batch(nb.kernel, nb.report, run_id, batch)
     catch e
         # The gate call itself failed (worker down / protocol error) — restale the in-flight cells and
@@ -392,20 +395,34 @@ function _run_code_batch!(nb::LiveNotebook)
         delete!(_BATCH_SNAPS, skey)
         return false
     end
-    # Results merge asynchronously in the poller; wait until every batched cell has left RUNNING
-    # (merged, restaled-on-edit, or deleted). Bounded — the worker's ack means all were published.
-    deadline = time() + 5
-    while time() < deadline
-        still = lock(nb.lock) do
-            any(keys(snap)) do cid
+    # Merge each cell's result (version-guarded against a mid-batch edit) and push its live patch.
+    results = (ack !== nothing && hasproperty(ack, :results)) ? ack.results : Dict{String,Any}()
+    if isempty(results)
+        # The batch came back with NOTHING (e.g. an arg/transport problem) — do NOT re-batch, or the
+        # runner hot-loops (cells flicker RUNNING forever). Restale and hand them to the serial path.
+        @warn "slate parallel batch returned no results — falling back to serial" notebook = nb.id cells = length(snap)
+        lock(nb.lock) do
+            for cid in keys(snap)
                 i = _index_of(nb.report.cells, cid)
-                i !== nothing && nb.report.cells[i].state == RUNNING
+                i === nothing && continue
+                nb.report.cells[i].state == RUNNING && (nb.report.cells[i].state = STALE)
             end
         end
-        still || break
-        sleep(0.01)
+        delete!(_BATCH_SNAPS, skey)
+        return false
+    end
+    for (cid, wire) in results
+        server_celldone(nb, run_id, cid, wire)
     end
     delete!(_BATCH_SNAPS, skey)
+    # Safety net: a cell with no result (shouldn't happen) must not stay stuck RUNNING — restale it.
+    lock(nb.lock) do
+        for cid in keys(snap)
+            i = _index_of(nb.report.cells, cid)
+            i === nothing && continue
+            nb.report.cells[i].state == RUNNING && (nb.report.cells[i].state = STALE)
+        end
+    end
     return true
 end
 

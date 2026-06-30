@@ -131,7 +131,6 @@ function _ensure_poller!()
                 pending = Dict{String,Set{String}}()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
-                celldone = Tuple{String,Any}[]          # (rid, (; run_id, id, wire)) — parallel batch results, NOT coalesced
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
@@ -153,8 +152,6 @@ function _ensure_poller!()
                         end
                     elseif m.channel == "slate_revise_err"    # a /src save didn't parse/apply
                         srcerr[rid] = String(m.data)
-                    elseif m.channel == "slate_celldone"      # a parallel-batch cell finished: (; run_id, id, wire)
-                        push!(celldone, (rid, m.data))
                     elseif m.channel == "slate_progress"      # "id|frac|done|msg" — one bar per id
                         parts = split(String(m.data), "|"; limit = 4)
                         if length(parts) == 4
@@ -165,9 +162,6 @@ function _ensure_poller!()
                 end
                 for (rid, vars) in pending
                     isempty(vars) || _do_refresh(rid, collect(vars))
-                end
-                for (rid, d) in celldone
-                    try; _do_celldone(rid, d.run_id, d.id, d.wire); catch; end
                 end
                 for (rid, names) in srcnames
                     isempty(names) || _do_src_changed(rid, collect(names))
@@ -226,10 +220,14 @@ function _spawn_worker!(k::GateKernel)
     # linear algebra). Julia's own task threads (default "1,1" = 1 compute + 1 interactive) PARK
     # when idle — no spin; the interactive thread is reserved for keeping reactive handling snappy.
     blas = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
-    # Default to several compute threads (+1 interactive) so inter-cell parallel execution actually
-    # overlaps on the CPU; idle Julia task threads PARK (no spin), so this is cheap for serial
-    # notebooks too. Capped so a many-core box doesn't spawn a huge pool per worker. Override via env.
-    jthreads = get(ENV, "KAIMONSLATE_JULIA_THREADS", string(min(Sys.CPU_THREADS, 8), ",1"))
+    # ONE compute thread by default. Julia 1.12's strict world-age for global bindings means a global
+    # created by Core.eval on one thread isn't reliably visible to an eval on ANOTHER thread without a
+    # safepoint delay — so running cell evals across multiple OS threads breaks cross-cell variable
+    # visibility (a downstream cell sees `UndefVarError` for a global an upstream cell just defined).
+    # The parallel runner still overlaps I/O-bound / yielding cells correctly on one thread; true
+    # multi-core CPU parallelism needs the binding-visibility issue solved first (see notes). Override
+    # via env only if you understand that risk.
+    jthreads = get(ENV, "KAIMONSLATE_JULIA_THREADS", "1,1")
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
@@ -382,6 +380,10 @@ end
 # worker's ack `(; run_id, ids)` (or rethrows — the caller restales any cell left RUNNING).
 function eval_batch(k::GateKernel, report::Report, run_id::AbstractString, batch::Vector)
     prepare!(k, report)
+    # NOTE: `cells` is a nested Vector{Dict}. This depends on the gate delivering structured tool-call
+    # arguments intact — currently it does NOT (they arrive empty; see GATE_STRUCTURED_ARGS_ISSUE.md).
+    # Until the fabric fix lands the worker gets an empty batch and the caller falls back to serial.
+    # The RESULT rides back binary in the REQ/REP value field (return values aren't schema-filtered).
     return _tool(k, "__slate_eval_batch",
                  Dict{String,Any}("cells" => batch, "run_id" => String(run_id), "npool" => 0);
                  timeout = _eval_timeout())

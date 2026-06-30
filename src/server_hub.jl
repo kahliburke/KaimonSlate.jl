@@ -163,7 +163,15 @@ function _withnb(h::Hub, req, f)
     nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
     nb === nothing && (nb = _reopen_persisted!(h, id))
     nb === nothing && return HTTP.Response(404, "no such notebook: $id")
-    return f(nb)
+    try
+        return f(nb)
+    catch e
+        # A handler that throws used to surface as a BARE 500 with nothing logged — impossible to
+        # diagnose. Log the full backtrace to the extension log (stderr, server-side only); return a
+        # GENERIC 500 to the browser — never leak internals (paths, backtraces) to the client.
+        @error "Kaimon Slate: request handler error" notebook = id method = String(req.method) path = String(req.target) exception = (e, catch_backtrace())
+        return HTTP.Response(500, "internal error")
+    end
 end
 
 # Filesystem path completions for the open box. Expands a leading `~`, lists the

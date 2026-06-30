@@ -125,11 +125,18 @@ function _memo_gc()
 end
 
 # Restore {bindings, wire} for `cellkey`: assign the cell's globals into the namespace, return the wire.
+# COMPLETENESS GUARD: only restore if EVERY global the cell is expected to define (`names`) is present
+# in the stored entry. A partial/empty entry — e.g. one written before its globals were visible — would
+# restore the cached OUTPUT but leave downstream cells with `UndefVarError`; treat that as a cache miss
+# so the cell genuinely re-runs (and re-stores a complete entry). Returns nothing (miss) or the wire.
 function _memo_restore(cellkey::String, names::Vector{String})
     _MEMO_OK || return nothing
     f = _memo_file(cellkey); isfile(f) || return nothing
     data = try; Serialization.deserialize(f); catch; return nothing; end
     (data isa NamedTuple && hasproperty(data, :bindings) && hasproperty(data, :wire)) || return nothing
+    for nm in names
+        haskey(data.bindings, nm) || return nothing      # missing a declared global → don't restore a partial state
+    end
     m = _NS[]
     for (nm, v) in data.bindings
         try; Core.eval(m, :($(Symbol(nm)) = $v)); catch; return nothing; end
@@ -139,12 +146,18 @@ function _memo_restore(cellkey::String, names::Vector{String})
 end
 
 # Persist {the cell's defined globals, its wire} — guarded: a value that won't serialize → skip (warn).
+# If a DECLARED write isn't actually defined in the namespace (e.g. the value never became visible),
+# skip caching entirely rather than writing a partial entry that would restore output without state.
 function _memo_store(cellkey::String, names::Vector{String}, wire)
     _MEMO_OK || return nothing
     m = _NS[]
     binds = Dict{String,Any}()
     for nm in names
-        s = Symbol(nm); isdefined(m, s) || continue
+        s = Symbol(nm)
+        if !isdefined(m, s)
+            @info "slate memo: not cached (a declared global is undefined post-run)" cell = cellkey name = nm
+            return nothing
+        end
         binds[nm] = getfield(m, s)
     end
     f = _memo_file(cellkey); tmp = f * ".tmp"
@@ -258,6 +271,10 @@ function __slate_cancel(; run_id::String = "")
     return n
 end
 
+# `cells` is a Vector{Dict} (id/source/deps/reads/writes/opaque/memo fields per cell). NOTE: this
+# currently depends on the gate delivering structured (non-scalar) tool-call arguments intact — see
+# GATE_STRUCTURED_ARGS_ISSUE.md. Until that fabric fix lands, the batch arrives empty and the server
+# falls back to the serial path (it guards on empty results).
 function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
     specs = ParCell[]
     meta = Dict{String,Any}()
@@ -285,27 +302,24 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
     end
     # Track each task so __slate_cancel can interrupt it; drop it once it finishes.
     onspawn = (id, t) -> lock(_CANCEL_LOCK) do; _RUNNING_TASKS[id] = t; end
-    # Stream each result as it lands (the scheduler calls this on its own task, one cell at a time).
-    ondone = function (id, wire)
-        lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, id); end
-        if wire isa Exception
-            # The evaluator task threw OUTSIDE run_capture's own try (e.g. an interrupt during capture
-            # setup) — synthesize an error wire so the cell shows the failure instead of staying stuck.
-            @error "slate batch: evaluator task threw" cell = id exception = wire
-            ew = merge(_interrupted_wire(), (; exception = sprint(showerror, wire)))
-            try; KaimonGate._publish_stream("slate_celldone", (; run_id = run_id, id = id, wire = ew)); catch; end
-            return
-        end
-        try; KaimonGate._publish_stream("slate_celldone", (; run_id = run_id, id = id, wire = wire)); catch; end
-    end
+    ondone = (id, _wire) -> lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, id); end
 
+    local res
     try
-        run_scheduled(specs, pool, evalfn, ondone; onspawn = onspawn)
+        res = run_scheduled(specs, pool, evalfn, ondone; onspawn = onspawn)
     finally
         lock(_CANCEL_LOCK) do; empty!(_RUNNING_TASKS); end   # belt-and-suspenders: never leak handles
     end
+    # Normalise each cell's result to a wire: an evaluator that threw OUTSIDE run_capture's own try
+    # (e.g. an interrupt during capture setup) shows up here as an Exception — turn it into an error
+    # wire so the cell renders the failure instead of vanishing. The whole map rides back binary in the
+    # gate REQ/REP `value` field (the stream channel is string-only, so rich results can't ride it).
+    results = Dict{String,Any}()
+    for (id, r) in res
+        results[id] = r isa Exception ? merge(_interrupted_wire(), (; exception = sprint(showerror, r))) : r
+    end
     @info "slate batch: done" run = run_id cells = length(specs)
-    return (; run_id = run_id, ids = [c.id for c in specs])
+    return (; run_id = run_id, results = results)
 end
 
 "Apply a browser `@bind` value change: coerce against the widget, update the registry,
