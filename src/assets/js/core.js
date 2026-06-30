@@ -47,9 +47,11 @@ function _pubSpec(spec) {
 // charts, the same way CairoMakie figures come through. Debounced so animation settles
 // and reactive ticks don't spam; raw fetch so it doesn't pulse the busy indicator.
 const _snapPending = {};
+window._cancelSnap = cellId => { clearTimeout(_snapPending[cellId]); delete _snapPending[cellId]; };
 function _snapCell(cellId, insts, spec) {
   clearTimeout(_snapPending[cellId]);
   _snapPending[cellId] = setTimeout(() => {
+    delete _snapPending[cellId];
     const inst = insts[0]; if (!inst) return;
     let png = '', svg = '', svgDark = '';
     // PNG (dark theme) → matches the live UI for the agent's slate_view.

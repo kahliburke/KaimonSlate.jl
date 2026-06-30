@@ -85,7 +85,7 @@ async function delCell(id) {
   const after = cellIds();
   // Select the PREVIOUS cell (idx-1), not the one that shifted up into the gap; clamp so
   // deleting the first cell falls back to the new first. selectCell scrolls it into view.
-  after.length ? selectCell(after[Math.min(Math.max(0, idx - 1), after.length - 1)], true) : (selectedId = null);
+  after.length ? selectCell(after[Math.min(Math.max(0, idx - 1), after.length - 1)], true) : selectCell(null);
   toast('Deleted ' + id, 2000);
 }
 // Delete several cells atomically (multi-select dd / cut). Selects the cell before the first
@@ -96,7 +96,7 @@ async function delCells(ids, verb) {
   const firstIdx = Math.min(...ids.map(i => all.indexOf(i)).filter(i => i >= 0));
   renderAll(await api('POST', '/api/cells-delete', { ids, verb: verb || 'delete' }));
   const after = cellIds();
-  after.length ? selectCell(after[Math.min(Math.max(0, firstIdx - 1), after.length - 1)], true) : (selectedId = null);
+  after.length ? selectCell(after[Math.min(Math.max(0, firstIdx - 1), after.length - 1)], true) : selectCell(null);
   if (verb !== 'cut') toast('Deleted ' + _idsLabel(ids), 2000);
 }
 async function moveCell(id, dir)     { renderAll(await api('POST', '/api/cell-move/' + id, { dir })); }

@@ -172,6 +172,13 @@ mean(data)
         @test_throws ArgumentError S(:heatmap, [1, 2, 3])            # not a matrix
         @test_throws ArgumentError S(:heatmap, zeros(0, 0))          # empty matrix
         @test S(:line, [1, 2, 3], [4, 5, 6]) !== nothing             # valid still builds
+        # Wrong arity for a known ergonomic kind must raise too, not silently fall through to the
+        # generic 1-arg/2-vector branches (which would misinterpret the args as raw `data`).
+        @test_throws ArgumentError S(:line, [1, 2, 3])                # missing y
+        @test_throws ArgumentError S(:pie, ["a", "b", "c"])           # missing values
+        @test_throws ArgumentError S(:candlestick, ["10/1"])          # missing ohlc
+        @test_throws ArgumentError S(:radar, ["Sales" => 1])          # missing values
+        @test_throws ArgumentError S(:boxplot, ["a", "b"])            # missing data
     end
 
     @testset "progress-logging bridge → cell meter" begin
