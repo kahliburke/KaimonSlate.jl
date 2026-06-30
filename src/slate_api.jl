@@ -148,12 +148,12 @@ const SLATE_API = SlateApiEntry[
         A legacy `---` YAML front-matter block on the first markdown cell still works. Per-notebook
         citation style is `bibstyle` (Settings → Citation style): ieee/apa/chicago-author-date/mla/
         nature/vancouver/harvard."""),
-    SlateApiEntry("citation", "Document", "[@key] · [@key, p. 7] · [-@key] · [@a; @b] · @key (prose)",
+    SlateApiEntry("citation", "Document", "[@key] · [@key, p. 7] · [@a; @b] · @key (prose)",
         """Cite a bibliography key in MARKDOWN prose. Forms: `[@key]` (normal) · `[@key, pp. 33-35]`
-        (page/locator) · `[-@key]` (suppress author → year only) · `[@a; @b]` (multiple) · bare `@key`
-        (prose form: "Knuth (1984)" — only for keys actually defined, so emails stay literal). Typing
-        `[@` in a markdown cell autocompletes keys. Export renders linked citations + a References list
-        in the chosen `bibstyle`; the live notebook shows a references card with cited keys highlighted."""),
+        (page/locator) · `[@a; @b]` (multiple) · bare `@key` (prose form: "Knuth (1984)" — for an
+        author-year mention; only converts keys actually defined, so emails stay literal). Typing `[@`
+        in a markdown cell autocompletes keys. Export renders linked citations + a References list in
+        the chosen `bibstyle`; the live notebook shows a references card with cited keys highlighted."""),
     SlateApiEntry("@trace", "Cell tags", "@trace begin … end   (or the `trace` cell tag)",
         """Inspect every intermediate value in a cell — each line's value is collected into a trace
         table. Usually toggled via the cell's 🔍 button / `trace` tag rather than written by hand."""),
@@ -243,9 +243,9 @@ A notebook is also a publishable document. Tag ordinary cells with a ROLE; expor
     #%% md id=ttl title         # H1=title, ## / ### = subtitle, first plain line = byline
     #%% md id=abs abstract      # hoisted into the title block on export
     #%% md id=refs bibliography # BibTeX entries, OR a line that is a `.bib` path (embedded or external)
-Cite in markdown prose: `[@key]` · `[@key, p. 7]` (locator) · `[-@key]` (suppress author) ·
-`[@a; @b]` (multiple) · bare `@key` (prose: "Knuth (1984)"). Export PDF/slides/HTML renders linked
-citations + a References list (style via Settings → Citation style / `bibstyle`).
+Cite in markdown prose: `[@key]` · `[@key, p. 7]` (locator) · `[@a; @b]` (multiple) · bare `@key`
+(prose: "Knuth (1984)"). Export PDF/slides/HTML renders linked citations + a References list
+(style via Settings → Citation style / `bibstyle`).
 
 ## Slides (presentation mode)
 A `##` heading starts a slide (level configurable); `slide`/`notes` tags give explicit control.

@@ -155,13 +155,19 @@ x = 1
         rw(s) = NS._rewrite_citations(s, keys)
         @test rw("[@knuth1984]") == "§c§n§knuth1984§§"                       # plain
         @test rw("[@knuth1984, p. 7]") == "§c§n§knuth1984§p. 7§"            # page locator → supplement
-        @test rw("[-@knuth1984]") == "§c§y§knuth1984§§"                     # suppress author → year form
         @test rw("[@knuth1984; @lamport1994]") == "§c§n§knuth1984§§§c§n§lamport1994§§"  # multiple
         @test rw("@knuth1984 rocks") == "§c§p§knuth1984§§ rocks"            # bare key → prose form
+        @test rw("see @knuth1984.") == "see §c§p§knuth1984§§."              # trailing punctuation kept literal
         @test rw("email me@host.com") == "email me@host.com"               # unknown @ left literal
         @test rw("`@knuth1984`") == "`@knuth1984`" || occursin("knuth1984", rw("`@knuth1984`"))  # inline left alone-ish
         # fenced code is never rewritten
         @test rw("```\n@knuth1984\n```") == "```\n@knuth1984\n```"
+        # inline code spans are protected (a literal citation in backticks stays literal)
+        @test rw("show `[@knuth1984]` then [@knuth1984]") == "show `[@knuth1984]` then §c§n§knuth1984§§"
+        # live HTML-link emit (cell_json renders citations as links to the bibliography cell)
+        emit = NS._cite_link_emit("refs", Dict("knuth1984" => "Knuth · TeX"))
+        live = NS._rewrite_citations("[@knuth1984, p. 7]", Set(["knuth1984"]); emit = emit)
+        @test occursin("<a class=\"cite\" href=\"#cell-refs\"", live) && occursin("knuth1984, p. 7</a>", live)
         # a non-citation bracket is left untouched
         @test rw("[see foo@bar]") == "[see foo@bar]"
         # end-to-end: locators compile and resolve against the bibliography

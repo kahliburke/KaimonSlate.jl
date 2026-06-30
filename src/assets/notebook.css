@@ -1056,3 +1056,10 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .bibcard-empty { color: var(--red); font-size: .85rem; margin-top: 6px; }
 .bibcard-hint { margin-top: 8px; color: var(--dim); font-size: .76rem; border-top: 1px solid var(--border); padding-top: 6px; }
 .bibcard-hint code { background: var(--bg3); padding: 0 4px; border-radius: 3px; }
+
+/* Inline citation links in rendered markdown — jump to the bibliography cell. */
+.md a.cite { color: var(--accent); text-decoration: none; cursor: pointer;
+  border-bottom: 1px dotted var(--accent); white-space: nowrap; }
+.md a.cite::before { content: "["; color: var(--dim); }
+.md a.cite::after { content: "]"; color: var(--dim); }
+.md a.cite:hover { background: var(--ovl); border-radius: 3px; }

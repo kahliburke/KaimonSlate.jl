@@ -328,16 +328,40 @@ function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::Abs
     return String(take!(io))
 end
 
+# HTML link for a live citation: jumps to the bibliography cell, with the entry as a tooltip.
+function _cite_link_emit(anchor::AbstractString, entries::Dict{String,String})
+    esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+    return (key, sup, _form) -> begin
+        lbl = isempty(strip(sup)) ? String(key) : string(key, ", ", strip(sup))
+        href = isempty(anchor) ? "" : " href=\"#cell-$(esc(anchor))\""
+        string("<a class=\"cite\"", href, " title=\"", esc(get(entries, String(key), String(key))),
+               "\">", esc(lbl), "</a>")
+    end
+end
+# (anchor cell id, key→"author · title") for live citation links — read from the notebook's
+# :bibliography cells. "" anchor when the notebook has no bibliography.
+function _bib_link_ctx(nb)
+    bi = bibliography_index(nb.report, dirname(abspath(nb.path)))
+    isempty(bi) && return ("", Dict{String,String}())
+    idx = findfirst(c -> :bibliography in c.flags, nb.report.cells)
+    anchor = idx === nothing ? "" : nb.report.cells[idx].id
+    return (anchor, Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi))
+end
+
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
-                   nbdir::AbstractString = "", cited::Set{String} = Set{String}())
+                   nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
+                   bibanchor::AbstractString = "", bibentries::Dict{String,String} = Dict{String,String}())
+    # Markdown citations → links to the bibliography cell (skips the bibliography cells themselves).
+    _mdsrc = (c.kind == MARKDOWN && !isempty(bibanchor) && !(:bibliography in c.flags)) ?
+        _rewrite_citations(c.source, Set(keys(bibentries)); emit = _cite_link_emit(bibanchor, bibentries)) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
         "source"  => c.source,
         "state"   => lowercase(string(c.state)),
-        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(c.source, c.interp) : output_html(c)),
+        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) : output_html(c)),
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
@@ -488,12 +512,11 @@ function state_json(nb::LiveNotebook)
     meta["multidefCells"] = get(nb.report.meta, "multidef_cells", Dict{String,Vector{String}}())   # name → defining cells (popup)
     nbdir = dirname(abspath(nb.path))
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
-    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir, cited = cited) for c in nb.report.cells]
+    bibanchor, bibentries = _bib_link_ctx(nb)   # live citation links → the bibliography cell
+    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
+        cited = cited, bibanchor = bibanchor, bibentries = bibentries) for c in nb.report.cells]
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
-    let idx = bibliography_index(nb.report, nbdir)
-        isempty(idx) || (meta["bibKeys"] = [Dict("key" => e.key,
-            "label" => strip(join(filter(!isempty, [e.author, e.title]), " · "))) for e in idx])
-    end
+    isempty(bibentries) || (meta["bibKeys"] = [Dict("key" => k, "label" => v) for (k, v) in bibentries])
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     return meta
 end

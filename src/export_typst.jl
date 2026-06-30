@@ -228,8 +228,10 @@ end
 # sentinel `§c§<form>§<key>§<supplement>§` (survives cmarker verbatim) and a preamble `#show regex`
 # turns each sentinel into a real Typst `cite(label(key), supplement: …, form: …)`. Supported:
 #   [@key]              normal           [@key, p. 7] / [@key, pp. 3–9]   page locator (supplement)
-#   [-@key]             suppress author  [@a; @b]                          multiple (adjacent cites)
-#   @key (bare)         prose form — only when `key` is a defined bibliography key (avoids emails)
+#   [@a; @b]            multiple (adjacent cites — the CSL style groups them)
+#   @key (bare)         prose form ("Knuth (1984)") — only when `key` is a defined bibliography key
+# (Suppress-author isn't offered: Typst's year form drops the parentheses, which reads wrong; use the
+#  prose form `@key` for an author-year mention.)
 const _CITE_OPEN = "§c§"
 # Preamble rule that turns each citation sentinel back into a real Typst cite (resolved against
 # whatever `#bibliography(...)` the document emits). Harmless when there are no citations.
@@ -241,33 +243,51 @@ const _CITE_SHOW = raw"""#show regex("§c§[^§]*§[^§]+§[^§]*§"): it => {
 function _cite_token(key, sup, form)
     return string(_CITE_OPEN, form, "§", key, "§", replace(strip(sup), "§" => ""), "§")
 end
-# Rewrite one `[...]` citation group (its inner text, which contains an `@`) into sentinels.
-function _rewrite_bracket_cite(inner)
+# Default `emit` for the export path: a sentinel the preamble's `#show` rule turns into a Typst cite.
+_cite_sentinel(key, sup, form) = _cite_token(key, sup, form)
+
+# Rewrite one `[...]` citation group (its inner text, which contains an `@`); `emit(key,sup,form)`
+# builds each replacement (a Typst sentinel for export, an HTML link for the live view).
+function _rewrite_bracket_cite(inner, emit)
     io = IOBuffer()
     for spec in split(inner, ';')
-        m = match(r"^\s*(-?)@([\w:.\-]+)\s*(?:,\s*(.*\S))?\s*$", spec)
+        # Accept an optional leading `-` (Pandoc suppress-author) but render normally — Typst's year
+        # form drops the parentheses, which reads wrong, so we don't honor suppression.
+        m = match(r"^\s*-?@([\w:.\-]+)\s*(?:,\s*(.*\S))?\s*$", spec)
         m === nothing && return nothing            # not a clean citation group → leave the bracket as-is
-        form = isempty(m.captures[1]) ? "n" : "y"  # `-@key` → year-only (suppress author)
-        sup = m.captures[3] === nothing ? "" : m.captures[3]
-        print(io, _cite_token(m.captures[2], sup, form))
+        sup = m.captures[2] === nothing ? "" : m.captures[2]
+        print(io, emit(m.captures[1], sup, "n"))
     end
     return String(take!(io))
 end
-function _rewrite_citations(md::AbstractString, citekeys = Set{String}())
+# Rewrite the citation syntax in one stretch of TEXT (no code spans). Bracketed groups first, then
+# bare `@key` (prose) — the latter only for defined keys, so emails/handles are left literal.
+function _rewrite_text_citations(text, citekeys, emit)
+    t = replace(text, r"\[([^\]\n]*@[^\]\n]*)\]" => m -> begin
+        r = _rewrite_bracket_cite(m[2:end-1], emit); r === nothing ? m : r
+    end)
+    isempty(citekeys) && return t
+    return replace(t, r"(?<![\w@/])@([\w:.\-]+)" => m -> begin
+        raw = m[2:end]
+        key = rstrip(raw, ['.', ',', ';', ':', ')', ']', '!', '?'])
+        suffix = raw[(ncodeunits(key) + 1):end]
+        key in citekeys ? emit(key, "", "p") * suffix : m
+    end)
+end
+# Rewrite citations across a markdown source, skipping fenced code blocks AND inline `code` spans
+# (so a literal `[@key]` shown in backticks is left untouched). `emit` selects sentinel vs HTML link.
+function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit = _cite_sentinel)
     out = IOBuffer(); infence = false
     for (li, ln) in enumerate(split(md, '\n'))
         li == 1 || print(out, '\n')
         if occursin(r"^\s*(```|~~~)", ln); infence = !infence; print(out, ln); continue; end
         if infence; print(out, ln); continue; end
-        # Bracketed citation groups: `[ … @key … ]`.
-        ln2 = replace(ln, r"\[([^\]\n]*@[^\]\n]*)\]" => m -> begin
-            r = _rewrite_bracket_cite(m[2:end-1]); r === nothing ? m : r
-        end)
-        # Bare `@key` → prose form, but ONLY for keys that exist (so `user@host` etc. are untouched).
-        isempty(citekeys) || (ln2 = replace(ln2, r"(?<![\w@/])@([\w:.\-]+)" => m -> begin
-            key = m[2:end]; key in citekeys ? _cite_token(key, "", "p") : m
-        end))
-        print(out, ln2)
+        # Protect inline `code` spans, rewrite the text between them, then restore the spans.
+        spans = SubString{String}[]
+        masked = replace(ln, r"`[^`]*`" => s -> (push!(spans, s); "\x00$(length(spans))\x00"))
+        done = _rewrite_text_citations(masked, citekeys, emit)
+        for (i, s) in enumerate(spans); done = replace(done, "\x00$(i)\x00" => s); end
+        print(out, done)
     end
     return String(take!(out))
 end

@@ -1,7 +1,7 @@
 #%% md id=title title
 # Reactive Notebooks as Publishable Documents
 ### Front-matter roles in Slate
-Kahli Burke · Seaworthy Machine Learning · 2026-06-30
+Kahli Burke · Seaworthy AI · 2026-06-30
 
 #%% md id=abstract abstract
 This notebook demonstrates Slate's document-metadata **roles** — `title`, `abstract`,
@@ -35,12 +35,17 @@ slate_table((x = 1:5, x2 = (1:5).^2, sqrt_x = round.(sqrt.(1:5); digits=3)))
 #%% md id=discussion
 ## Discussion
 
-The numeric citation style links each reference to its entry and renders a numbered
-list at the end [@turing1936computable]. Author–year styles are a one-word switch.
+Citations link to the bibliography in the live notebook and render in the chosen `bibstyle`
+on export. Each row shows what you **type** (left) and how it **renders** (right):
 
-Citations support more than a bare key: a page locator [@knuth1984literate, p. 97], a
-suppressed author [-@turing1936computable], multiple keys [@knuth1984literate; @turing1936computable],
-and a prose mention — @knuth1984literate coined the term *literate programming*.
+| You write | Renders |
+| --- | --- |
+| `[@turing1936computable]` | [@turing1936computable] |
+| `[@knuth1984literate, p. 97]` | [@knuth1984literate, p. 97] |
+| `[@knuth1984literate; @turing1936computable]` | [@knuth1984literate; @turing1936computable] |
+| `@knuth1984literate` (prose) | @knuth1984literate |
+
+(The left column is in `backticks`, so it stays literal; the right column is a real citation.)
 
 #%% md id=styles
 ## Citation styles
