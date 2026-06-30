@@ -245,6 +245,21 @@ end
 _auto_id(kind::CellKind, source::AbstractString, idx::Integer) =
     string(hash((kind, source, idx)) % 0xffffff; base = 16, pad = 6)
 
+# `_auto_id` truncates to 24 bits — a birthday-bound collision becomes plausible around ~5000
+# unnamed cells in one notebook. A silent duplicate id would corrupt every id-keyed lookup
+# (dependency graph, history matching, the browser's cell map), so re-salt against `used` (every
+# id already assigned in THIS parse, explicit or auto) until unique. The common case (no
+# collision) costs one extra Set lookup; only an actual collision pays for a re-hash.
+function _unique_auto_id(kind::CellKind, source::AbstractString, idx::Integer, used::AbstractSet{String})
+    id = _auto_id(kind, source, idx)
+    salt = idx
+    while id in used
+        salt += 1
+        id = string(hash((kind, source, idx, salt)) % 0xffffff; base = 16, pad = 6)
+    end
+    return id
+end
+
 "Trim a leading and trailing run of blank lines, preserving interior blanks."
 function _strip_blank_edges(lines::Vector{<:AbstractString})
     lo = firstindex(lines)
@@ -300,12 +315,14 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     body = String[]
 
     tags = Symbol[]                       # header tag flags of the current explicit cell
+    used_ids = Set{String}()              # every id assigned so far this parse (explicit or auto)
     function flush!()
         trimmed = _strip_blank_edges(body)
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
             idx = length(report.cells) + 1
             src = join(trimmed, "\n")
-            id_ = cid === nothing ? _auto_id(kind, src, idx) : cid
+            id_ = cid === nothing ? _unique_auto_id(kind, src, idx, used_ids) : cid
+            push!(used_ids, id_)
             cell = Cell(id_, kind, src)
             cell.controls = ctrls
             for t in tags; push!(cell.flags, t); end
