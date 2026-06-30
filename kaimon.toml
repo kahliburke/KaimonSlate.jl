@@ -10,3 +10,6 @@ shutdown_function = "on_shutdown"
 # `KaimonSlate.on_event` relays them to the bound notebook's SSE (chat pane).
 event_topics = ["agent:"]
 description = "KaimonSlate — a warm-session reactive notebook with a live browser UI."
+# TUI config panel (Extensions tab → press `u`): set the worker Julia-thread count for parallel
+# cell execution. Built with Tachikoma widgets; see src/slate_panel.jl.
+tui_file = "src/slate_panel.jl"

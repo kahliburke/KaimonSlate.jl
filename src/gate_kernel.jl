@@ -8,6 +8,10 @@
 
 export GateKernel
 
+# Worker Julia-thread spec ("<compute>,<interactive>"), set by the server from persisted config /
+# the Kaimon TUI panel. Empty → fall back to env / the "1,1" default. Read at each worker spawn.
+const WORKER_THREADS = Ref{String}("")
+
 const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
 # Slate-owned env carrying ONLY Revise (+ its deps), so the worker can hot-reload the
 # notebook's parent-project /src without adding Revise to the user's project. Stacked AFTER
@@ -220,14 +224,17 @@ function _spawn_worker!(k::GateKernel)
     # linear algebra). Julia's own task threads (default "1,1" = 1 compute + 1 interactive) PARK
     # when idle — no spin; the interactive thread is reserved for keeping reactive handling snappy.
     blas = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
-    # ONE compute thread by default. Julia 1.12's strict world-age for global bindings means a global
-    # created by Core.eval on one thread isn't reliably visible to an eval on ANOTHER thread without a
-    # safepoint delay — so running cell evals across multiple OS threads breaks cross-cell variable
-    # visibility (a downstream cell sees `UndefVarError` for a global an upstream cell just defined).
-    # The parallel runner still overlaps I/O-bound / yielding cells correctly on one thread; true
-    # multi-core CPU parallelism needs the binding-visibility issue solved first (see notes). Override
-    # via env only if you understand that risk.
-    jthreads = get(ENV, "KAIMONSLATE_JULIA_THREADS", "1,1")
+    # Worker Julia threads ("<compute>,<interactive>"). Configurable via the Kaimon extension TUI panel
+    # (NotebookServer sets WORKER_THREADS[]); env overrides; default "1,1". More compute threads enable
+    # true multi-core CPU parallelism for independent cells — note Julia 1.12's strict world-age for
+    # global bindings is the correctness frontier to validate when raising this above 1.
+    # Default compute-thread count adapts to the machine but stays bounded: min(cores, 8) + 1 interactive.
+    # (`auto` would grab ALL cores per worker → oversubscription with several open notebooks; idle Julia
+    # threads park, so the cost is memory not spin, but a cap is tidier. Over-estimating cores is safe —
+    # Julia just timeslices.) Order: explicit config (panel) wins, then env, then this adaptive default.
+    _default_jthreads = string(min(Sys.CPU_THREADS, 8), ",1")
+    jthreads = !isempty(WORKER_THREADS[]) ? WORKER_THREADS[] :
+               get(ENV, "KAIMONSLATE_JULIA_THREADS", _default_jthreads)
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing

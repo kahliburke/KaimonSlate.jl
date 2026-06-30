@@ -221,10 +221,19 @@ end
 kwarg — GateTool drops optional positionals) becomes the parse/backtrace location, `cell:<id>`.
 `memo_*` (when set) enable durable caching: restore an expensive cell's result on a cold start, or
 persist it after a run that exceeds `memo_threshold` ms."
-__slate_eval(source::String; filename::String = "string",
-             memo_key::String = "", memo_names::Vector{String} = String[],
-             memo_threshold::Float64 = 0.0) =
-    _eval_one(source, filename, memo_key, memo_names, memo_threshold)
+function __slate_eval(source::String; filename::String = "string",
+                     memo_key::String = "", memo_names::Vector{String} = String[],
+                     memo_threshold::Float64 = 0.0)
+    # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
+    # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
+    cid = replace(filename, r"^cell:" => "")
+    lock(_CANCEL_LOCK) do; _RUNNING_TASKS[cid] = current_task(); end
+    try
+        return _eval_one(source, filename, memo_key, memo_names, memo_threshold)
+    finally
+        lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
+    end
+end
 
 # ── Parallel batch evaluation (inter-cell, in-process) ───────────────────────────────────────────
 # Run a batch of stale cells CONCURRENTLY in this one worker, sharing the warm namespace. Each cell is

@@ -110,6 +110,7 @@ end
 # matching the old stop-button behaviour. Returns the notebook.
 function cancel_run!(nb::LiveNotebook)
     k = nb.kernel
+    _PARALLEL_CANCEL[nb.id] = true            # stop the parallel scheduler from starting not-yet-run cells
     hasrunning = lock(nb.lock) do; any(c -> c.state == RUNNING, nb.report.cells); end
     if k isa ReportEngine.GateKernel && hasrunning
         n = ReportEngine.cancel_eval(k)

@@ -18,6 +18,7 @@ using ..ReportEngine
 using ..ReportRender
 
 include("history.jl")   # module SlateHistory — durable content-addressed time machine
+include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the parallel dataflow scheduler
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
@@ -315,10 +316,12 @@ _emit_pending(nb::LiveNotebook, pending::Integer) = ReportEngine._emit_run_batch
 # its one warm namespace while any conflicting pair serialises, and streams each result back as it
 # lands (slate_celldone → server_celldone). This is the genuine novelty: notebooks have never run
 # cells in parallel. Off by default — the proven serial path is untouched unless the flag is set.
-# Per-notebook toggle (Settings → "Parallel cell execution"), stored in report meta and flipped live
-# via POST /api/{id}/parallel. Off by default → the proven serial path; no restart needed to switch
-# (the runner reads this each loop iteration).
-_parallel_enabled(nb::LiveNotebook) = get(nb.report.meta, "parallel", false) == true
+# Default for notebooks that haven't explicitly set meta["parallel"]. That per-notebook flag is
+# IN-MEMORY and resets whenever the notebook is re-opened/rebuilt from its .jl (every extension restart
+# / kernel respawn) — which is why a Settings toggle kept getting wiped. KaimonSlate loads this default
+# from slate.json at init so the choice persists; the per-notebook Settings toggle still overrides.
+const PARALLEL_DEFAULT = Ref(true)
+_parallel_enabled(nb::LiveNotebook) = get(nb.report.meta, "parallel", PARALLEL_DEFAULT[]) === true
 
 # Per-(notebook,run) snapshot of each batched cell's src_hash at launch — the version guard for a
 # streamed result (a cell edited mid-batch has its in-flight result discarded; see server_celldone).
@@ -342,87 +345,57 @@ function _cell_defines(cell::Cell)
     return false
 end
 
-# Build + dispatch ONE parallel batch of every stale code cell. Returns true if a batch (≥2 cells) ran;
-# false to let the serial runner handle it (0/1 cell, or no gate worker). Blocks until the batch's
-# results have all merged (via the poller) so the runner loop doesn't re-batch still-running cells.
+# Per-notebook flag: a stop request sets it so the scheduler short-circuits cells that haven't started
+# yet (in-flight cells are interrupted via the worker's __slate_cancel). Keyed by nb.id.
+const _PARALLEL_CANCEL = Dict{String,Bool}()
+
+# Run every stale CODE cell as a PARALLEL dataflow batch. Independent cells evaluate CONCURRENTLY —
+# each on its own task making its own gate `__slate_eval` call (the request channel muxes them by
+# correlation id; each runs on its own worker task with task-local DemuxCapture) — while par_blockers
+# serialises any dependent/conflicting pair. Each cell goes through the SAME `_eval_one!` as the serial
+# path, so it renders running→done and merges version-guarded the INSTANT it finishes (true per-cell
+# streaming). Returns true if a batch (≥2 cells) ran; false for the 0/1-cell case or a non-gate kernel.
 function _run_code_batch!(nb::LiveNotebook)
     nb.kernel isa ReportEngine.GateKernel || return false
-    run_id = string(Threads.atomic_add!(_BATCH_SEQ, 1) + 1)
-    skey = string(nb.report.id, "|", run_id)
-    batch, snap, npending = lock(nb.lock) do
+    specs, npending = lock(nb.lock) do
         code = [c for c in nb.report.cells if c.kind == CODE && c.state == STALE]
-        length(code) < 2 && return (nothing, nothing, 0)
-        specs = Vector{Dict{String,Any}}()
-        sn = Dict{String,UInt64}()
-        for c in code
-            c.state = RUNNING
-            _broadcast_progress(nb, c)
-            src = (:trace in c.flags) ? string("@trace begin ", c.source, "\nend") : c.source
-            push!(specs, Dict{String,Any}(
-                "id" => c.id, "source" => src, "filename" => "cell:" * c.id,
-                "deps" => collect(String, c.deps),
-                "reads" => String[string(r) for r in c.reads],
-                "writes" => String[string(w) for w in c.writes],
-                "opaque" => (:opaque in c.flags) || _cell_defines(c),
-                "memo_key" => ReportEngine._memo_key(nb.report, c),
-                "memo_names" => String[string(w) for w in c.writes],
-                "memo_threshold" => Float64(ReportEngine._MEMO_THRESHOLD_MS)))
-            sn[c.id] = c.src_hash
-        end
-        (specs, sn, count(c -> c.state in (STALE, RUNNING), nb.report.cells))
+        length(code) < 2 && return (nothing, 0)
+        ss = [ParCell(c.id, copy(c.deps), copy(c.reads), copy(c.writes),
+                      (:opaque in c.flags) || _cell_defines(c)) for c in code]
+        (ss, count(c -> c.state in (STALE, RUNNING), nb.report.cells))
     end
-    batch === nothing && return false
-    _BATCH_SNAPS[skey] = snap
-    _emit_pending(nb, npending)
-    ack = try
-        # Blocks until the whole batch drains in the worker; returns (; run_id, results::Dict{id=>wire}).
-        # The rich results ride back binary in the REQ/REP value (the gate STREAM channel is string-only,
-        # so they can't be streamed as objects — see gate_client_debug.jl `drain_stream_messages!`).
-        ReportEngine.eval_batch(nb.kernel, nb.report, run_id, batch)
+    specs === nothing && return false
+    # Bring the worker up ONCE (prepare! is locked + idempotent, so the concurrent per-cell evals just
+    # no-op it). If it can't start, fall back to the serial path rather than spinning.
+    try
+        ReportEngine.prepare!(nb.kernel, nb.report)
     catch e
-        # The gate call itself failed (worker down / protocol error) — restale the in-flight cells and
-        # hand them to the SERIAL path (return false), which retries one-by-one and surfaces a real
-        # per-cell error. Re-batching here would hot-loop if the worker stays down.
-        @warn "slate parallel batch failed — falling back to serial" notebook = nb.id exception = (e, catch_backtrace())
-        lock(nb.lock) do
-            for (cid, h) in snap
-                i = _index_of(nb.report.cells, cid)
-                i === nothing && continue
-                c = nb.report.cells[i]
-                (c.state == RUNNING && c.src_hash == h) && (c.state = STALE)
-            end
-        end
-        delete!(_BATCH_SNAPS, skey)
+        @warn "slate parallel: worker not ready — falling back to serial" notebook = nb.id exception = e
         return false
     end
-    # Merge each cell's result (version-guarded against a mid-batch edit) and push its live patch.
-    results = (ack !== nothing && hasproperty(ack, :results)) ? ack.results : Dict{String,Any}()
-    if isempty(results)
-        # The batch came back with NOTHING (e.g. an arg/transport problem) — do NOT re-batch, or the
-        # runner hot-loops (cells flicker RUNNING forever). Restale and hand them to the serial path.
-        @warn "slate parallel batch returned no results — falling back to serial" notebook = nb.id cells = length(snap)
-        lock(nb.lock) do
-            for cid in keys(snap)
-                i = _index_of(nb.report.cells, cid)
-                i === nothing && continue
-                nb.report.cells[i].state == RUNNING && (nb.report.cells[i].state = STALE)
+    _PARALLEL_CANCEL[nb.id] = false
+    _emit_pending(nb, npending)
+    pool = something(tryparse(Int, get(ENV, "KAIMONSLATE_PARALLEL_POOL", "")), 8)
+    run_scheduled(specs, pool, function (id)
+        cell = lock(nb.lock) do
+            i = _index_of(nb.report.cells, id)
+            i === nothing ? nothing : nb.report.cells[i]
+        end
+        cell === nothing && return nothing
+        if get(_PARALLEL_CANCEL, nb.id, false)
+            # Cancelled before this cell started → mark it interrupted, don't run.
+            lock(nb.lock) do
+                (cell.state in (STALE, RUNNING)) || return
+                cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
+                    ReportEngine.BindSpec[], "", "InterruptException: run cancelled", nothing, 0.0)
+                cell.state = ERRORED
+                _broadcast_progress(nb, cell)
             end
+            return nothing
         end
-        delete!(_BATCH_SNAPS, skey)
-        return false
-    end
-    for (cid, wire) in results
-        server_celldone(nb, run_id, cid, wire)
-    end
-    delete!(_BATCH_SNAPS, skey)
-    # Safety net: a cell with no result (shouldn't happen) must not stay stuck RUNNING — restale it.
-    lock(nb.lock) do
-        for cid in keys(snap)
-            i = _index_of(nb.report.cells, cid)
-            i === nothing && continue
-            nb.report.cells[i].state == RUNNING && (nb.report.cells[i].state = STALE)
-        end
-    end
+        _eval_one!(nb, cell)   # marks RUNNING + broadcasts, evals OFF-lock, merges version-guarded + broadcasts
+    end)
+    delete!(_PARALLEL_CANCEL, nb.id)
     return true
 end
 

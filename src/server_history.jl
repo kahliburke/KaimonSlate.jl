@@ -401,7 +401,7 @@ function state_json(nb::LiveNotebook)
         proj === nothing || (meta["project"] = dirname(proj))
     end
     meta["hotreload"] = get(nb.report.meta, "hotreload", true)   # /src auto-reload toggle (default on)
-    meta["parallel"] = get(nb.report.meta, "parallel", false)    # inter-cell parallel execution (default off)
+    meta["parallel"] = get(nb.report.meta, "parallel", PARALLEL_DEFAULT[])   # effective state (default + per-nb override)
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true

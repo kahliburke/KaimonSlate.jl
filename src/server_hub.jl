@@ -166,10 +166,11 @@ function _withnb(h::Hub, req, f)
     try
         return f(nb)
     catch e
-        # A handler that throws used to surface as a BARE 500 with nothing logged — impossible to
-        # diagnose. Log the full backtrace to the extension log (stderr, server-side only); return a
-        # GENERIC 500 to the browser — never leak internals (paths, backtraces) to the client.
-        @error "Kaimon Slate: request handler error" notebook = id method = String(req.method) path = String(req.target) exception = (e, catch_backtrace())
+        # A handler that throws used to surface as a BARE 500 with nothing logged. The extension log
+        # keeps only the FIRST LINE of an @error message (and not its `exception=` kwarg), so flatten
+        # the error + backtrace to ONE line. Server-side only — the browser gets a GENERIC 500 (no leak).
+        detail = replace(sprint(showerror, e, catch_backtrace()), r"\s*\n\s*" => " ⏎ ")
+        @error "Kaimon Slate: request handler error [$(String(req.method)) $(String(req.target))] nb=$id :: $detail"
         return HTTP.Response(500, "internal error")
     end
 end

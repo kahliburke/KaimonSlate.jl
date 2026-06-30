@@ -30,13 +30,24 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         @test !NS._cell_defines(cell("a = 1\nb = a + 2\nc = b * 3"))  # several bindings, no defs
     end
 
-    @testset "parallel is opt-in (off by default)" begin
+    @testset "parallel default + per-notebook override" begin
         r = RE.Report("nb", "nb")
         nb = NS.LiveNotebook("nb", "", r, RE.InProcessKernel(), 0, String[], String[],
                              ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                              Dict{String,String}())
-        @test NS._parallel_enabled(nb) == false                        # default: proven serial path
-        nb.report.meta["parallel"] = true
-        @test NS._parallel_enabled(nb) == true                         # flag flips it on
+        old = NS.PARALLEL_DEFAULT[]
+        try
+            NS.PARALLEL_DEFAULT[] = true
+            @test NS._parallel_enabled(nb) == true                     # no meta → follows the default
+            nb.report.meta["parallel"] = false
+            @test NS._parallel_enabled(nb) == false                    # per-notebook override wins
+            NS.PARALLEL_DEFAULT[] = false
+            delete!(nb.report.meta, "parallel")
+            @test NS._parallel_enabled(nb) == false                    # follows default-off
+            nb.report.meta["parallel"] = true
+            @test NS._parallel_enabled(nb) == true                     # override on
+        finally
+            NS.PARALLEL_DEFAULT[] = old
+        end
     end
 end

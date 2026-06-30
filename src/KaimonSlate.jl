@@ -127,6 +127,68 @@ function _reap_orphan_workers!()
     return nothing
 end
 
+# ── Persistent extension settings (edited via the Kaimon TUI panel) ───────────
+# A small JSON file alongside the extension registry. Currently holds the worker Julia-thread spec —
+# more compute threads enable true multi-core CPU parallelism for independent cells. Read at init into
+# ReportEngine.WORKER_THREADS[] (which `_spawn_worker!` consumes), and editable live from the panel.
+const _SLATE_CONFIG = joinpath(_KAIMON_DIR, "slate.json")
+
+_slate_config() = isfile(_SLATE_CONFIG) ?
+    (try; JSON.parsefile(_SLATE_CONFIG); catch; Dict{String,Any}(); end) : Dict{String,Any}()
+
+"Current worker Julia-thread spec (\"<compute>,<interactive>\"); \"\" means the default (1,1)."
+worker_threads()::String = String(get(_slate_config(), "worker_threads", ""))
+
+"""
+    set_worker_threads!(spec; respawn=true) -> String
+
+Persist the worker Julia-thread spec (e.g. `"4,1"` or `"auto"`), apply it to future worker spawns,
+and — by default — respawn every running notebook's worker so it takes effect immediately. Returns
+the stored spec. Called by the Kaimon TUI panel via `ctx.eval`.
+"""
+function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
+    s = strip(String(spec))
+    ReportEngine.WORKER_THREADS[] = s
+    cfg = _slate_config(); cfg["worker_threads"] = s
+    try
+        isdir(_KAIMON_DIR) && write(_SLATE_CONFIG, JSON.json(cfg, 2))
+    catch e
+        @warn "slate: could not persist worker-threads setting" exception = e
+    end
+    if respawn && _HUB[] !== nothing
+        nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
+        for nb in nbs
+            try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
+        end
+    end
+    @info "slate: worker threads set" spec = s respawned = respawn
+    return s
+end
+
+"Whether inter-cell parallel execution is on by default for notebooks (persisted; default true)."
+parallel_default()::Bool = get(_slate_config(), "parallel", true) === true
+
+"""
+    set_parallel_default!(on::Bool) -> Bool
+
+Persist whether new/re-opened notebooks run cells in parallel by default, and apply it live. The
+per-notebook Settings toggle still overrides for a specific notebook.
+"""
+function set_parallel_default!(on::Bool)
+    NotebookServer.PARALLEL_DEFAULT[] = on
+    cfg = _slate_config(); cfg["parallel"] = on
+    try; isdir(_KAIMON_DIR) && write(_SLATE_CONFIG, JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
+    return on
+end
+
+# Load persisted settings into the engine BEFORE any worker spawns (called at init).
+function _load_slate_config!()
+    s = worker_threads()
+    isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
+    NotebookServer.PARALLEL_DEFAULT[] = parallel_default()
+    return nothing
+end
+
 # ── Extension entrypoints ─────────────────────────────────────────────────────
 
 """
@@ -472,6 +534,7 @@ function create_tools(GateTool::Type)
     # first, and register an atexit backstop so a normal process exit also reaps.
     # Guarded: a failure here must not break tool registration.
     try
+        _load_slate_config!()            # apply the persisted worker-thread spec before any worker spawns
         _reap_orphan_workers!()
         atexit(on_shutdown)
         _hub()
