@@ -135,6 +135,42 @@ x = 1
         @test_throws Exception NS._build_typst_project(nb)
     end
 
+    @testset "bibliography index + per-cell card info" begin
+        r = RE.parse_report("#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}}\n@article{turing1936, author={Turing}, title={Computable}}\n")
+        idx = NS.bibliography_index(r, "/tmp")
+        @test [e.key for e in idx] == ["knuth1984", "turing1936"]
+        @test idx[1].author == "Knuth" && idx[1].title == "TeX"
+        file, n, es = NS.bib_cell_info(r.cells[1], "/tmp")
+        @test file == "" && n == 2                      # embedded → no external file
+        # state_json ships the key list for [@-autocomplete; the cell renders a card, not raw BibTeX
+        nb = _mknb("#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}}\n")
+        sj = NS.state_json(nb)
+        @test haskey(sj, "bibKeys") && sj["bibKeys"][1]["key"] == "knuth1984"
+        bib = first(c for c in sj["cells"] if get(c, "roleBib", false))
+        @test occursin("bibcard", bib["output"]) && !occursin("@book", bib["output"])
+    end
+
+    @testset "adaptive references card + mixed inline/external bib" begin
+        d = mktempdir()
+        io = IOBuffer(); for i in 1:12; println(io, "@book{ext$i, title={T$i}}"); end
+        write(joinpath(d, "big.bib"), String(take!(io)))
+        src = "#%% md id=body\nCite [@ext3], [@ext7], [@inlineA].\n\n" *
+              "#%% md id=ext bibliography\nbig.bib\n\n" *
+              "#%% md id=inl bibliography\n@article{inlineA, title={A}}\n@article{inlineB, title={B}}\n"
+        nb = NS.LiveNotebook("mix", joinpath(d, "n.jl"), RE.parse_report(src),
+            RE.InProcessKernel(), 1, String[], String[], ReentrantLock(), Channel{String}[],
+            ReentrantLock(), "", false, Dict{String,String}())
+        @test NS.cited_citation_keys(nb.report) == Set(["ext3", "ext7", "inlineA"])
+        @test [e.key for e in NS.bibliography_index(nb.report, d)][1:12] == ["ext$i" for i in 1:12]  # both sources aggregate
+        sj = NS.state_json(nb)
+        ext = first(c for c in sj["cells"] if c["id"] == "ext")
+        inl = first(c for c in sj["cells"] if c["id"] == "inl")
+        @test ext["bibCount"] == 12 && occursin("Showing the 2 cited of 12", ext["output"])   # large → only cited
+        @test occursin("ext3", ext["output"]) && !occursin("ext5", ext["output"])
+        @test occursin("li class=\"cited\"", inl["output"]) && occursin("li class=\"uncited\"", inl["output"])  # small → all, highlighted
+        rm(d; recursive = true, force = true)
+    end
+
     @testset "standalone export inlines an external bib" begin
         d = mktempdir()
         write(joinpath(d, "lib.bib"), "@book{lamport1994, title={LaTeX}}\n")

@@ -160,6 +160,33 @@
     return { from, to, options, validFor: /^[\w!]*$/ };
   }
 
+  // Is the cursor inside a fenced code block? Markdown editors have no language tree, so count
+  // ``` / ~~~ fence lines before the cursor — an odd count means we're inside code.
+  function _inFencedCode(ctx) {
+    const before = ctx.state.doc.sliceString(0, ctx.pos);
+    return ((before.match(/^[ \t]*(```|~~~)/gm) || []).length % 2) === 1;
+  }
+  // `[@key]`-citation completion in markdown — keys come from the notebook's :bibliography cells
+  // (state_json `bibKeys`). Triggers right after `[@`; inserts the chosen key before the `]`.
+  function citeComplete(ctx, match) {
+    const keys = (typeof nbState !== 'undefined' && nbState && nbState.bibKeys) || [];
+    if (!keys.length) return null;
+    return {
+      from: match.from + 2,                              // after the `[@`
+      options: keys.map(k => ({ label: k.key, detail: k.label || 'citation', type: 'constant', apply: k.key })),
+      validFor: /^[\w:.\-]*$/,
+    };
+  }
+  // Markdown editor completion: offer citations on `[@`, delegate to Julia ONLY inside a fenced
+  // code block, and otherwise stay quiet — prose must not trigger code completion (the bug a tester
+  // hit). Manual (Ctrl/Alt-Space) still completes citations / fenced code, never prose.
+  async function markdownComplete(ctx) {
+    const cite = ctx.matchBefore(/\[@[\w:.\-]*$/);
+    if (cite) return citeComplete(ctx, cite);
+    if (_inFencedCode(ctx)) return juliaComplete(ctx);
+    return null;
+  }
+
   // Tab: accept an open completion → else indent when the cursor is in leading whitespace or a
   // selection is active (block indent) → else trigger completion. This way `diag(`+Tab completes
   // the call (after `(` isn't whitespace) while Tab at line start still indents. Returns false to
@@ -281,7 +308,8 @@
         history(), drawSelection(), bracketMatching(), closeBrackets(), indentOnInput(),
         indentUnit.of('    '), EditorState.tabSize.of(4), errField, originField, flashField,
         ...lang,
-        autocompletion({ override: [juliaComplete], icons: true }),
+        // Markdown editors complete citations + fenced code only (never prose); code cells get Julia.
+        autocompletion({ override: [opts.markdown ? markdownComplete : juliaComplete], icons: true }),
         keymap.of([
           ...completionKeymap,                  // popup nav/close (Escape) takes precedence over cell keys
           ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below

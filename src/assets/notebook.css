@@ -1034,3 +1034,25 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .cell.role-bib .md::before { content: 'References'; display: block; font-size: .72rem;
   text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: var(--dim);
   margin-bottom: 6px; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
+
+/* Bibliography cell card (role-bib) — rendered instead of raw BibTeX. */
+.cell.role-bib .md::before { content: none; }   /* the card carries its own header */
+.bibcard { border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); padding: 10px 14px; font-size: .9em; }
+.bibcard-hd { display: flex; align-items: baseline; gap: 8px; font-size: 1rem; }
+.bibcard-n { color: var(--dim); font-size: .8rem; }
+.bibcard-file { margin-top: 4px; color: var(--dim); font-size: .82rem; }
+.bibcard-file a { color: var(--accent); text-decoration: none; }
+.bibcard-file a:hover { text-decoration: underline; }
+.bibcard-note { color: var(--dim); font-size: .8rem; margin-top: 6px; }
+.bibcard-keys { list-style: none; margin: 8px 0 4px; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.bibcard-keys li { display: flex; gap: 7px; align-items: baseline; }
+.bibcard-keys code { background: var(--bg3); padding: 1px 6px; border-radius: 4px; color: var(--accent); font-size: .82rem; flex: none; }
+.bibcard-tick { flex: none; font-size: .6rem; line-height: 1.7; }
+.bibcard-keys li.cited .bibcard-tick { color: var(--green); }
+.bibcard-keys li.uncited .bibcard-tick { color: var(--dim); }
+.bibcard-keys li.uncited code { color: var(--dim); }
+.bibcard-keys li.uncited .bibcard-meta { opacity: .65; }
+.bibcard-meta { color: var(--dim); font-size: .82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bibcard-empty { color: var(--red); font-size: .85rem; margin-top: 6px; }
+.bibcard-hint { margin-top: 8px; color: var(--dim); font-size: .76rem; border-top: 1px solid var(--border); padding-top: 6px; }
+.bibcard-hint code { background: var(--bg3); padding: 0 4px; border-radius: 3px; }

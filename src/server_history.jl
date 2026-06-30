@@ -286,9 +286,52 @@ end
 # `bindref`: var-name → (defining cell, its BindSpec). `hostednames`: variable name →
 # the cell ids that surface it via `controls=` (so each can collapse to a chip / jump link).
 # `nbid` (when non-empty) externalizes inlined output images to cached blob URLs (see above).
+# A friendly card for a `:bibliography` cell instead of dumping raw BibTeX. Adaptive: a small
+# library (< _BIB_CARD_LIMIT) lists every entry, marking which are cited in the notebook vs not;
+# a large library shows the count and lists ONLY the cited entries (so a 2000-entry Zotero file
+# doesn't flood the cell). External files get a "view" link (the /bibfile route).
+const _BIB_CARD_LIMIT = 10
+function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited)
+    esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+    ncited = Base.count(e -> e.key in cited, entries)
+    meta(e) = strip(join(filter(!isempty, [String(e.author), String(e.title)]), " · "))
+    item(e) = (isin = e.key in cited; string("<li class=\"", isin ? "cited" : "uncited", "\">",
+        isin ? "<span class=\"bibcard-tick\">●</span>" : "<span class=\"bibcard-tick\">○</span>",
+        "<code>", esc(e.key), "</code>",
+        isempty(meta(e)) ? "" : "<span class=\"bibcard-meta\">" * esc(meta(e)) * "</span></li>"))
+    io = IOBuffer()
+    print(io, "<div class=\"bibcard\"><div class=\"bibcard-hd\">📚 <strong>References</strong>",
+          "<span class=\"bibcard-n\">", count, count == 1 ? " entry" : " entries",
+          ncited > 0 ? " · $(ncited) cited" : "", "</span></div>")
+    if !isempty(file)
+        link = "/api/" * esc(nbid) * "/bibfile?name=" * esc(file)
+        print(io, "<div class=\"bibcard-file\">External file: <a href=\"", link,
+              "\" target=\"_blank\" rel=\"noopener\"><code>", esc(file), "</code></a></div>")
+    end
+    if count == 0
+        print(io, "<div class=\"bibcard-empty\">No entries found", isempty(file) ? "." : " in this file.", "</div>")
+    elseif count < _BIB_CARD_LIMIT
+        # Small library: list all, highlighting cited vs uncited.
+        print(io, "<ul class=\"bibcard-keys\">")
+        for e in entries; print(io, item(e)); end
+        print(io, "</ul>")
+    elseif ncited == 0
+        print(io, "<div class=\"bibcard-empty\">No entries cited yet — cite with <code>[@key]</code>.</div>")
+    else
+        # Large library: show only the cited entries.
+        print(io, "<div class=\"bibcard-note\">Showing the $(ncited) cited of $(count) entries.</div>",
+              "<ul class=\"bibcard-keys\">")
+        for e in entries; e.key in cited && print(io, item(e)); end
+        print(io, "</ul>")
+    end
+    print(io, "<div class=\"bibcard-hint\">Cite with <code>[@key]</code> in markdown.</div></div>")
+    return String(take!(io))
+end
+
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
-                   multidef::Set{String} = Set{String}(), nbid::AbstractString = "")
+                   multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
+                   nbdir::AbstractString = "", cited::Set{String} = Set{String}())
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
@@ -319,7 +362,14 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:notes in c.flags) && (d["notes"] = true)           # speaker notes — presenter view only
     (:title in c.flags) && (d["roleTitle"] = true)       # document title block (export metadata)
     (:abstract in c.flags) && (d["roleAbstract"] = true) # abstract — hoisted into the title block on export
-    (:bibliography in c.flags) && (d["roleBib"] = true)  # bibliography / references
+    if :bibliography in c.flags                          # bibliography / references
+        d["roleBib"] = true
+        file, n, es = bib_cell_info(c, nbdir)            # external file (or "") + entry count + keys
+        d["bibFile"] = file
+        d["bibCount"] = n
+        d["bibKeys"] = [Dict("key" => e.key, "title" => e.title, "author" => e.author) for e in es]
+        d["output"] = _bib_card_html(file, n, es, nbid, cited)  # render a card instead of raw BibTeX
+    end
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
     # `:opaque` is inferred each eval, not a user tag, so it's excluded.
     d["tags"] = sort!(String[string(f) for f in c.flags if f !== :opaque])
@@ -435,7 +485,14 @@ function state_json(nb::LiveNotebook)
     bindref, hostednames = _bind_index(nb.report)
     md = Set{String}(get(nb.report.meta, "multidef", String[]))   # names defined in 2+ cells → per-cell flag
     meta["multidefCells"] = get(nb.report.meta, "multidef_cells", Dict{String,Vector{String}}())   # name → defining cells (popup)
-    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id) for c in nb.report.cells]
+    nbdir = dirname(abspath(nb.path))
+    cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
+    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir, cited = cited) for c in nb.report.cells]
+    # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
+    let idx = bibliography_index(nb.report, nbdir)
+        isempty(idx) || (meta["bibKeys"] = [Dict("key" => e.key,
+            "label" => strip(join(filter(!isempty, [e.author, e.title]), " · "))) for e in idx])
+    end
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     return meta
 end

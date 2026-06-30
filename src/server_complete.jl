@@ -410,6 +410,16 @@ function _make_router(h::Hub)
     end))
     # Publication-quality PDF via Typst (server-side). `?source=0` hides code listings;
     # `?params=1` shows the @bind parameter strip (hidden by default — a PDF is a snapshot).
+    # Serve a notebook's external bibliography file (the "view" link on the references card). Scoped
+    # to .bib files resolved against the notebook's directory; no path traversal outside it.
+    HTTP.register!(router, "GET", "/api/{id}/bibfile", req -> _withnb(h, req, nb -> begin
+        name = get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")
+        (isempty(name) || !endswith(lowercase(name), ".bib")) && return HTTP.Response(400, "expected a .bib name")
+        nbdir = dirname(abspath(nb.path))
+        path = isabspath(name) ? String(name) : normpath(joinpath(nbdir, name))
+        (isfile(path) && (isabspath(name) || startswith(path, nbdir))) || return HTTP.Response(404, "not found")
+        HTTP.Response(200, ["Content-Type" => "text/plain; charset=utf-8"], read(path))
+    end))
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         pdf = try

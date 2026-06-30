@@ -587,6 +587,76 @@ function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractStri
     return files
 end
 
+# Parse BibTeX entries from a string into (key, title, author) tuples — best-effort, for citation
+# autocomplete and the bibliography card (not a full BibTeX parser; keys are exact, fields snipped).
+function _parse_bibtex_entries(text::AbstractString)
+    out = NamedTuple{(:key, :title, :author),Tuple{String,String,String}}[]
+    for part in split(String(text), r"(?=@\w+\s*\{)")
+        m = match(r"^@\w+\s*\{\s*([^,\s]+)", part)
+        m === nothing && continue
+        fld(n) = (mm = match(Regex(n * raw"\s*=\s*[{\"]([^}\"\n]*)", "i"), part);
+                  mm === nothing ? "" : String(strip(mm.captures[1])))
+        push!(out, (key = String(m.captures[1]), title = fld("title"), author = fld("author")))
+    end
+    return out
+end
+
+# All citation entries defined by a report's `:bibliography` cells (embedded + external .bib),
+# resolved relative to `nbdir`. Powers `[@`-autocomplete and the per-cell card.
+function bibliography_index(report, nbdir::AbstractString)
+    entries = NamedTuple{(:key, :title, :author),Tuple{String,String,String}}[]
+    for c in report.cells
+        :bibliography in c.flags || continue
+        if occursin(r"@\w+\s*\{", c.source)
+            append!(entries, _parse_bibtex_entries(c.source))
+        else
+            for ln in split(c.source, '\n')
+                p = strip(ln); isempty(p) && continue
+                src = isabspath(p) ? String(p) : joinpath(nbdir, p)
+                isfile(src) && append!(entries, _parse_bibtex_entries(read(src, String)))
+            end
+        end
+    end
+    return entries
+end
+
+# Citation keys actually referenced in the notebook's prose — every `@key` in a markdown cell
+# (skipping fenced code and the bibliography cells themselves, whose `@book{…}` aren't citations).
+# Mirrors what cmarker turns into Typst references; drives the adaptive references card.
+function cited_citation_keys(report)
+    keys = Set{String}()
+    for c in report.cells
+        c.kind == MARKDOWN || continue
+        :bibliography in c.flags && continue
+        infence = false
+        for ln in split(c.source, '\n')
+            if occursin(r"^\s*(```|~~~)", ln); infence = !infence; continue; end
+            infence && continue
+            for m in eachmatch(r"(?<![\w@])@([A-Za-z][\w:.\-]*)", ln)
+                push!(keys, String(m.captures[1]))
+            end
+        end
+    end
+    return keys
+end
+
+# Per-cell bibliography summary for the live card: (external-file-or-"", entry count, entries).
+function bib_cell_info(cell, nbdir::AbstractString)
+    body = cell.source
+    if occursin(r"@\w+\s*\{", body)
+        es = _parse_bibtex_entries(body)
+        return ("", length(es), es)
+    end
+    file = ""; es = NamedTuple{(:key, :title, :author),Tuple{String,String,String}}[]
+    for ln in split(body, '\n')
+        p = strip(ln); isempty(p) && continue
+        file = String(p)
+        src = isabspath(p) ? String(p) : joinpath(nbdir, p)
+        isfile(src) && append!(es, _parse_bibtex_entries(read(src, String)))
+    end
+    return (file, length(es), es)
+end
+
 # Typst `#bibliography(...)` call for the resolved files, or "" when there are none.
 function _bibliography_typst(files, style::AbstractString)::String
     isempty(files) && return ""
