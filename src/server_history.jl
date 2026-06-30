@@ -447,10 +447,19 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         new_full = serialize_report(nb.report)
         cells[idx].source = saved
         update_source!(nb.report, new_full)
-        # force=true → re-run even when the source is unchanged (the explicit play/run button).
+        # force=true → re-run even when the source is unchanged (the explicit play/run button). A forced
+        # re-run may change this cell's outputs (or clear an error), so its DEPENDENTS must re-run too —
+        # otherwise downstream cells keep stale/errored results from the previous run (e.g. re-running a
+        # producer that previously errored leaves its consumers stuck ERRORED). update_source! only
+        # restales dependents when the SOURCE changed, so on an unchanged force-run we do it explicitly.
         if force
             i = findfirst(c -> c.id == id, nb.report.cells)
-            i === nothing || (nb.report.cells[i].state = STALE)
+            if i !== nothing
+                for did in dependents_of(nb.report, Set([id]))   # closure includes `id` itself
+                    j = findfirst(c -> c.id == did, nb.report.cells)
+                    j === nothing || (nb.report.cells[j].state = STALE)
+                end
+            end
         end
         # announce=true → show the edited source (stale) before its eval finishes.
         announce && _announce_cell!(nb, something(findfirst(c -> c.id == id, nb.report.cells), 0))
