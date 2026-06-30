@@ -403,8 +403,8 @@ function state_json(nb::LiveNotebook)
     meta["hotreload"] = get(nb.report.meta, "hotreload", true)   # /src auto-reload toggle (default on)
     meta["parallel"] = get(nb.report.meta, "parallel", PARALLEL_DEFAULT[])   # effective state (default + per-nb override)
     meta["threads"] = get(nb.report.meta, "threads", "")                     # per-notebook worker thread override ("" = global)
-    meta["threadsEffective"] = nb.kernel isa ReportEngine.GateKernel ?       # what the live worker is actually using
-        (isempty(nb.kernel.threads) ? string(ReportEngine.WORKER_THREADS[]) : nb.kernel.threads) : ""
+    meta["threadsEffective"] = nb.kernel isa ReportEngine.GateKernel ?       # what the live worker spawns with
+        ReportEngine.effective_worker_threads(nb.kernel.threads) : ""
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true

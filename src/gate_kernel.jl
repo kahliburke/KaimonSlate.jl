@@ -9,8 +9,21 @@
 export GateKernel
 
 # Worker Julia-thread spec ("<compute>,<interactive>"), set by the server from persisted config /
-# the Kaimon TUI panel. Empty → fall back to env / the "1,1" default. Read at each worker spawn.
+# the Kaimon TUI panel. Empty → fall back to env / the adaptive default. Read at each worker spawn.
 const WORKER_THREADS = Ref{String}("")
+
+# The machine-adaptive default thread spec: min(cores, 8) compute + 1 interactive (idle threads park;
+# the cap avoids oversubscription across several open notebooks). Used both at spawn and to report the
+# effective count in state_json.
+default_worker_threads() = string(min(Sys.CPU_THREADS, 8), ",1")
+
+# The thread spec a worker would actually spawn with, given a per-kernel override `kthreads`:
+# per-kernel override → global setting → adaptive default.
+function effective_worker_threads(kthreads::AbstractString)
+    !isempty(kthreads)        && return String(kthreads)
+    !isempty(WORKER_THREADS[]) && return WORKER_THREADS[]
+    return get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
+end
 
 const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
 # Slate-owned env carrying ONLY Revise (+ its deps), so the worker can hot-reload the
@@ -235,10 +248,9 @@ function _spawn_worker!(k::GateKernel)
     # Julia just timeslices.) Order: explicit config (panel) wins, then env, then this adaptive default.
     # Precedence: this notebook's own override (k.threads, set at open) → global panel/config setting
     # (WORKER_THREADS[]) → env → the adaptive default.
-    _default_jthreads = string(min(Sys.CPU_THREADS, 8), ",1")
     jthreads = !isempty(k.threads)         ? k.threads :
                !isempty(WORKER_THREADS[])  ? WORKER_THREADS[] :
-               get(ENV, "KAIMONSLATE_JULIA_THREADS", _default_jthreads)
+               get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
