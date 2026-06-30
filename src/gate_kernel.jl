@@ -226,7 +226,10 @@ function _spawn_worker!(k::GateKernel)
     # linear algebra). Julia's own task threads (default "1,1" = 1 compute + 1 interactive) PARK
     # when idle — no spin; the interactive thread is reserved for keeping reactive handling snappy.
     blas = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
-    jthreads = get(ENV, "KAIMONSLATE_JULIA_THREADS", "1,1")
+    # Default to several compute threads (+1 interactive) so inter-cell parallel execution actually
+    # overlaps on the CPU; idle Julia task threads PARK (no spin), so this is cheap for serial
+    # notebooks too. Capped so a many-core box doesn't spawn a huge pool per worker. Override via env.
+    jthreads = get(ENV, "KAIMONSLATE_JULIA_THREADS", string(min(Sys.CPU_THREADS, 8), ",1"))
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing

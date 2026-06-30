@@ -641,6 +641,12 @@ function _make_router(h::Hub)
         nb.report.meta["hotreload"] = get(_body(req), "enabled", true) === true
         _json(Dict("ok" => true, "hotreload" => nb.report.meta["hotreload"]))
     end))
+    # Per-notebook toggle for parallel (inter-cell) execution. Stored in report meta; the runner reads
+    # it each iteration, so it takes effect on the next run with no worker restart.
+    HTTP.register!(router, "POST", "/api/{id}/parallel", req -> _withnb(h, req, nb -> begin
+        nb.report.meta["parallel"] = get(_body(req), "enabled", false) === true
+        _json(Dict("ok" => true, "parallel" => nb.report.meta["parallel"]))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/reset", req -> _withnb(h, req, nb -> begin
         ReportEngine.reset!(nb.kernel, nb.report); build_dependencies!(nb.report); _eval!(nb); _json(state_json(nb))
     end))

@@ -315,10 +315,10 @@ _emit_pending(nb::LiveNotebook, pending::Integer) = ReportEngine._emit_run_batch
 # its one warm namespace while any conflicting pair serialises, and streams each result back as it
 # lands (slate_celldone → server_celldone). This is the genuine novelty: notebooks have never run
 # cells in parallel. Off by default — the proven serial path is untouched unless the flag is set.
-# Per-notebook `meta["parallel"]` wins; absent it, `KAIMONSLATE_PARALLEL=1` flips it on globally (the
-# test switch until there's a UI toggle). Off by default → the proven serial path.
-_parallel_enabled(nb::LiveNotebook) =
-    get(nb.report.meta, "parallel", get(ENV, "KAIMONSLATE_PARALLEL", "") == "1") == true
+# Per-notebook toggle (Settings → "Parallel cell execution"), stored in report meta and flipped live
+# via POST /api/{id}/parallel. Off by default → the proven serial path; no restart needed to switch
+# (the runner reads this each loop iteration).
+_parallel_enabled(nb::LiveNotebook) = get(nb.report.meta, "parallel", false) == true
 
 # Per-(notebook,run) snapshot of each batched cell's src_hash at launch — the version guard for a
 # streamed result (a cell edited mid-batch has its in-flight result discarded; see server_celldone).

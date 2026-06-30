@@ -41,6 +41,12 @@ function openSettings() {
   const hr = document.getElementById('sethotreload');
   hr.checked = !(nbState && nbState.hotreload === false);
   hr.onchange = () => api('POST', '/api/hotreload', { enabled: hr.checked }).catch(() => {});
+  // Per-notebook: run independent cells concurrently in the worker (default off — the serial path).
+  const par = document.getElementById('setparallel');
+  if (par) {
+    par.checked = !!(nbState && nbState.parallel === true);
+    par.onchange = () => api('POST', '/api/parallel', { enabled: par.checked }).catch(() => {});
+  }
   // Overall Slate UI theme — applied by toggling html[data-slate-theme] (palette in notebook.css),
   // persisted as `slateTheme`, and re-applied at load by the inline head script (no flash).
   const th = document.getElementById('settheme');
