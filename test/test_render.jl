@@ -1,6 +1,6 @@
 # Renderer tests. Needs OteraEngine + CommonMark, so run against the dev env:
 #   julia --startup-file=no --project=/tmp/report-devenv test/report/test_render.jl
-using Test
+using ReTest
 
 const HERE = @__DIR__
 include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine

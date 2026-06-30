@@ -2,7 +2,7 @@
 # detection (src/defname.jl). Covers the Expr shapes Julia parsing AND Revise produce. The
 # regression that motivated this: Revise stores bare one-liner defs as `begin <LNN> def end`
 # (a :block), which used to be dropped, so cells using those functions never went stale.
-using Test
+using ReTest
 
 const HERE = @__DIR__
 include(joinpath(HERE, "..", "src", "defname.jl"))

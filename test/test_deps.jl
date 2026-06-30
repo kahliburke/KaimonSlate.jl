@@ -1,7 +1,7 @@
 # Reactivity tests: binding inference, dependency graph, staleness, pruned eval.
 # Needs ExpressionExplorer:
 #   julia --startup-file=no --project=/tmp/report-devenv test/report/test_deps.jl
-using Test
+using ReTest
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
 
@@ -76,7 +76,9 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test findcell(r, "b").output !== outB       # re-ran (dependent)
         @test findcell(r, "c").output === outC       # NOT re-run
         @test findcell(r, "b").output.value_repr == "22"   # recomputed value
-        @test getproperty(r.mod, :independent) == 99
+        # `independent` is created by eval_stale! (Core.eval) inside this testset; ReTest runs the body
+        # in a fixed world, so read it via invokelatest to see the just-defined binding (1.12 world-age).
+        @test Base.invokelatest(getproperty, r.mod, :independent) == 99
     end
 
     @testset "wildcard using / include are barriers" begin

@@ -3,7 +3,7 @@
 #
 # `@bind` is real Julia: widgets are constructors, `@bind name W(…)` runs as code
 # (so dynamic args work), and the control is reported back through eval — not parsed.
-using Test
+using ReTest
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
 const RE = ReportEngine
@@ -64,12 +64,12 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         eval_stale!(r)
         @test !isempty(findcell(r, "ctl").binds)           # control reported by eval
         @test findcell(r, "ctl").binds[1].widget == "slider"
-        @test getproperty(r.mod, :n) == 1 && getproperty(r.mod, :m) == 2
+        @test Base.invokelatest(getproperty, r.mod, :n) == 1 && Base.invokelatest(getproperty, r.mod, :m) == 2
 
         set_bind_value!(r, findcell(r, "ctl"), 5)          # "move the slider"
         findcell(r, "use").state = STALE                   # (server marks dependents)
         eval_stale!(r)
-        @test getproperty(r.mod, :n) == 5 && getproperty(r.mod, :m) == 10
+        @test Base.invokelatest(getproperty, r.mod, :n) == 5 && Base.invokelatest(getproperty, r.mod, :m) == 10
         @test findcell(r, "ctl").binds[1].value == 5       # host-side spec mirrors it
     end
 
@@ -79,7 +79,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :w in findcell(r, "mix").writes && :q in findcell(r, "mix").writes
         eval_stale!(r)
         @test findcell(r, "mix").state == FRESH
-        @test getproperty(r.mod, :w) == 2 && getproperty(r.mod, :q) == 3
+        @test Base.invokelatest(getproperty, r.mod, :w) == 2 && Base.invokelatest(getproperty, r.mod, :q) == 3
         @test !isempty(findcell(r, "mix").binds)           # control reported even though mixed
     end
 
@@ -91,23 +91,23 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         eval_stale!(r)
         @test findcell(r, "ctl").binds[1].params["max"] == 5
         set_bind_value!(r, findcell(r, "ctl"), 4)
-        @test getproperty(r.mod, :k) == 4
+        @test Base.invokelatest(getproperty, r.mod, :k) == 4
         # hi grows → bind cell re-runs, range expands; in-range value is preserved
         Core.eval(r.mod, :(hi = 8))
         findcell(r, "ctl").state = STALE
         eval_stale!(r)
         @test findcell(r, "ctl").binds[1].params["max"] == 8   # range updated live
-        @test getproperty(r.mod, :k) == 4                       # value preserved (still in range)
+        @test Base.invokelatest(getproperty, r.mod, :k) == 4                       # value preserved (still in range)
     end
 
     @testset "value persists across a bind-cell re-run (registry reconcile)" begin
         r = parse_report("#%% code id=ctl\n@bind n Slider(1:10)")
         build_dependencies!(r); eval_stale!(r)
         set_bind_value!(r, findcell(r, "ctl"), 7)
-        @test getproperty(r.mod, :n) == 7
+        @test Base.invokelatest(getproperty, r.mod, :n) == 7
         findcell(r, "ctl").state = STALE                   # re-run the bind cell
         eval_stale!(r)
-        @test getproperty(r.mod, :n) == 7                  # not reset to default
+        @test Base.invokelatest(getproperty, r.mod, :n) == 7                  # not reset to default
         @test findcell(r, "ctl").binds[1].value == 7
     end
 
@@ -120,12 +120,12 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test "ctl" in findcell(r, "use").deps
         eval_stale!(r)
         @test length(ctl.binds) == 2
-        @test getproperty(r.mod, :a) == 1 && getproperty(r.mod, :b) == 0 && getproperty(r.mod, :m) == 1
+        @test Base.invokelatest(getproperty, r.mod, :a) == 1 && Base.invokelatest(getproperty, r.mod, :b) == 0 && Base.invokelatest(getproperty, r.mod, :m) == 1
 
         set_bind_value!(r, ctl, :b, 2.5)                   # set one of the two
         findcell(r, "use").state = STALE
         eval_stale!(r)
-        @test getproperty(r.mod, :b) == 2.5 && getproperty(r.mod, :m) == 3.5
+        @test Base.invokelatest(getproperty, r.mod, :b) == 2.5 && Base.invokelatest(getproperty, r.mod, :m) == 3.5
         @test ctl.binds[findfirst(s -> s.name == :a, ctl.binds)].value == 1   # other unchanged
     end
 

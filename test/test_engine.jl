@@ -1,6 +1,6 @@
 # Standalone tests for the report engine model + parser (no project deps).
 # Run:  julia --startup-file=no test/report/test_engine.jl
-using Test
+using ReTest
 import Logging
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))

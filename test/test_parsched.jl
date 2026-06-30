@@ -1,5 +1,5 @@
 # Unit tests for the pure parallel-readiness core (src/parsched.jl).
-using Test
+using ReTest
 include(joinpath(@__DIR__, "..", "src", "parsched.jl"))
 
 pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =

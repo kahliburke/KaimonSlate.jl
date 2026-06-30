@@ -2,7 +2,7 @@
 # Tables.jl is NOT a test dependency, so the soft-detection path is exercised only
 # by its absence here (a bare NamedTuple-vector must NOT auto-render); the
 # no-dependency shapes carry the rest.
-using Test
+using ReTest
 
 const HERE = @__DIR__
 include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine

@@ -1,21 +1,29 @@
-# Package test entry point. Each file is run in its own module (SafeTestsets) so
-# the per-file `include("../src/engine.jl")` namespaces stay isolated. Each file
-# is also runnable standalone: `julia --project test/test_<name>.jl`.
-using SafeTestsets
+# Package test entry point. Each file is included into its OWN module so the per-file
+# `include("../src/…")` namespaces stay isolated (what `@safetestset` gave us before), and every file
+# uses ReTest's LAZY `@testset` — so a subset can be run by pattern:
+#   run_tests(pattern="parsched")                       # via Kaimon
+#   julia --project -e 'using Pkg; Pkg.test(test_args=["parsched"])'
+using ReTest
 
-@safetestset "defname" begin include("test_defname.jl") end
-@safetestset "demux" begin include("test_demux.jl") end
-@safetestset "parsched" begin include("test_parsched.jl") end
-@safetestset "parallel" begin include("test_parallel.jl") end
-@safetestset "animation" begin include("test_animation.jl") end
-@safetestset "engine" begin include("test_engine.jl") end
-@safetestset "eval"   begin include("test_eval.jl") end
-@safetestset "deps"   begin include("test_deps.jl") end
-@safetestset "bind"   begin include("test_bind.jl") end
-@safetestset "render" begin include("test_render.jl") end
-@safetestset "tables" begin include("test_tables.jl") end
-@safetestset "trace"  begin include("test_trace.jl") end
-@safetestset "complete" begin include("test_complete.jl") end
-@safetestset "history" begin include("test_history.jl") end
-@safetestset "agentops" begin include("test_agentops.jl") end
-@safetestset "repro" begin include("test_repro.jl") end
+module Defname;   include("test_defname.jl");   end
+module Demux;     include("test_demux.jl");     end
+module Parsched;  include("test_parsched.jl");  end
+module Parallel;  include("test_parallel.jl");  end
+module Animation; include("test_animation.jl"); end
+module Engine;    include("test_engine.jl");    end
+module Eval;      include("test_eval.jl");      end
+module Deps;      include("test_deps.jl");      end
+module Bind;      include("test_bind.jl");      end
+module Render;    include("test_render.jl");    end
+module Tables;    include("test_tables.jl");    end
+module Trace;     include("test_trace.jl");     end
+module Complete;  include("test_complete.jl");  end
+module History;   include("test_history.jl");   end
+module Agentops;  include("test_agentops.jl");  end
+module Repro;     include("test_repro.jl");     end
+
+const _TESTMODS = (Defname, Demux, Parsched, Parallel, Animation, Engine, Eval, Deps,
+                   Bind, Render, Tables, Trace, Complete, History, Agentops, Repro)
+
+# ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
+retest(_TESTMODS..., ARGS...)

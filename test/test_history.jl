@@ -1,6 +1,6 @@
 # Durable history store: dedup, diff-derived labels, content round-trip, restore.
 # history.jl is self-contained (SHA + JSON), so include it directly.
-using Test
+using ReTest
 
 include(joinpath(@__DIR__, "..", "src", "history.jl"))
 using .SlateHistory

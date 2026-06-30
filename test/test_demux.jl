@@ -1,6 +1,6 @@
 # Unit tests for the task-demultiplexing capture primitive (src/demux.jl) — the foundation for the
 # in-process parallel evaluator pool. Verifies that concurrent tasks each capture their OWN output.
-using Test
+using ReTest
 
 include(joinpath(@__DIR__, "..", "src", "demux.jl"))
 

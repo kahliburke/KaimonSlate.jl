@@ -1,7 +1,7 @@
 # Agent cell operations — the incremental-build tool surface. Runs against a live
 # hub (so the file-watcher is active) to guard the watcher-vs-rapid-write race that
 # was deleting just-added cells.
-using Test
+using ReTest
 using KaimonSlate
 const NS = KaimonSlate.NotebookServer
 

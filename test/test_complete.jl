@@ -1,7 +1,7 @@
 # Cell-local completion: the binding extractor that augments REPLCompletions with
 # identifiers a cell binds before it has run. Loads the package (NotebookServer
 # needs HTTP/JSON), so it runs under `Pkg.test`.
-using Test
+using ReTest
 using KaimonSlate
 import REPL
 const NS = KaimonSlate.NotebookServer

@@ -1,6 +1,6 @@
 # Unit tests for the animation core (src/animation.jl) — quantization, clim resolution, LUT, and
 # manifest. Pure/Base-only, so we include the file directly (no engine/worker needed).
-using Test
+using ReTest
 
 const HERE_ANIM = @__DIR__
 include(joinpath(HERE_ANIM, "..", "src", "animation.jl"))

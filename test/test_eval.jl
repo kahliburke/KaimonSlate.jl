@@ -1,6 +1,6 @@
 # Standalone tests for isolated-module evaluation (Base only, no session).
 # Run:  julia --startup-file=no test/report/test_eval.jl
-using Test
+using ReTest
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine

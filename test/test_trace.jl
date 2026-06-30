@@ -4,7 +4,7 @@
 # plus the `@tr` macro. We assert on the returned value AND the recorded rows. Covers plain/typed/
 # augmented/destructuring/local/global assignment, loop & branch recursion (per-iteration capture),
 # opaque defs, value snapshotting (a later mutation must NOT rewrite an earlier row), and the wire.
-using Test
+using ReTest
 
 const HERE = @__DIR__
 include(joinpath(HERE, "..", "src", "trace.jl"))

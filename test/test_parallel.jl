@@ -3,7 +3,7 @@
 # a cell mutates the worker's method & type tables and so runs as a serial barrier. A false NEGATIVE
 # (a def cell mistaken for pure compute) would let it run concurrently — unsafe — so this is the
 # safety-critical predicate and is tested directly.
-using Test
+using ReTest
 using KaimonSlate
 const NS = KaimonSlate.NotebookServer
 const RE = KaimonSlate.ReportEngine
