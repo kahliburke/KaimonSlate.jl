@@ -157,6 +157,11 @@ const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :T
 # Re-running a bind cell updates the SPEC (range/params) but KEEPS the user's value
 # unless it no longer fits: widget type changed, or value out of the new domain.
 function _reconcile_bind(oldw::Widget, oldv, neww::Widget)
+    # `oldw.kind == "?"` is the placeholder `_do_set_bind` fabricates when the browser sets a
+    # value for a name the registry doesn't know yet (e.g. a control-change race before this
+    # cell's first run this session). It's not a real "type changed" — coerce the pending value
+    # against the REAL widget instead of discarding it to the default.
+    oldw.kind == "?" && return coerce_bind(neww, oldv)
     oldw.kind == neww.kind || return neww.default          # type changed → reset
     if neww.kind == "slider" || neww.kind == "number"
         lo = get(neww.params, "min", -Inf); hi = get(neww.params, "max", Inf)

@@ -53,6 +53,12 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         # multiselect drops now-invalid options
         @test RE._reconcile_bind(RE.MultiSelect(["x", "y", "z"]), ["x", "z"],
                                  RE.MultiSelect(["x", "y"])) == ["x"]
+        # `_do_set_bind`'s "?" placeholder (browser set a value before this bind cell's first run
+        # this session) isn't a real type change — the pending value survives, coerced against the
+        # real widget, instead of being discarded to the default.
+        placeholder = RE.Widget("?", Dict{String,Any}(), 7)
+        @test RE._reconcile_bind(placeholder, 7, RE.Slider(0:10)) == 7
+        @test RE._reconcile_bind(placeholder, 7.0, RE.Slider(0:10)) == 7   # coerced like a normal Int slider set
     end
 
     @testset "bind cell: control reported by eval; dependents react" begin
