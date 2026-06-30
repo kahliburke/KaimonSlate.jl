@@ -640,12 +640,14 @@ function _make_router(h::Hub)
     # Per-notebook toggle for parent /src hot-reload (Revise). Stored in report meta.
     HTTP.register!(router, "POST", "/api/{id}/hotreload", req -> _withnb(h, req, nb -> begin
         nb.report.meta["hotreload"] = get(_body(req), "enabled", true) === true
+        _persist!(nb)                                    # write the Slate.config footer so it sticks
         _json(Dict("ok" => true, "hotreload" => nb.report.meta["hotreload"]))
     end))
     # Per-notebook toggle for parallel (inter-cell) execution. Stored in report meta; the runner reads
     # it each iteration, so it takes effect on the next run with no worker restart.
     HTTP.register!(router, "POST", "/api/{id}/parallel", req -> _withnb(h, req, nb -> begin
         nb.report.meta["parallel"] = get(_body(req), "enabled", false) === true
+        _persist!(nb)                                    # write the Slate.config footer so it sticks
         _json(Dict("ok" => true, "parallel" => nb.report.meta["parallel"]))
     end))
     # Per-notebook worker-thread override. "" clears it (back to the global). Applies by respawning this
@@ -659,6 +661,7 @@ function _make_router(h::Hub)
             nb.report.meta["threads"] = spec
         end
         nb.kernel isa ReportEngine.GateKernel && (nb.kernel.threads = spec)   # update the live kernel's override
+        _persist!(nb)                                                          # write the Slate.config footer
         restart_kernel!(nb)                                                    # respawn the worker with it
         _json(state_json(nb))
     end))

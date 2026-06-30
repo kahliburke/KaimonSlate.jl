@@ -286,6 +286,9 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
     if fi !== nothing
         env = _parse_env_footer(@view lines[fi:end])   # picks up the Slate.env block if present
         isempty(env) || (report.meta["env"] = env)
+        for (k, v) in _parse_config_footer(@view lines[fi:end])   # Slate.config: per-notebook settings
+            report.meta[k] = v
+        end
         lines = lines[1:(fi - 1)]
     end
 
@@ -366,8 +369,10 @@ end
 # Vector of dicts. Tolerant of missing version/uuid (older/edited footers).
 function _parse_env_footer(lines)::Vector{Dict{String,Any}}
     out = Dict{String,Any}[]
+    inenv = false                                       # only read entries inside the Slate.env block
     for l in lines
-        startswith(l, _ENV_MARK_OPEN) && continue
+        startswith(l, _ENV_MARK_OPEN) && (inenv = true; continue)
+        inenv || continue                               # a different Slate.* block (e.g. config) → skip
         startswith(l, _ENV_MARK_CLOSE) && break
         m = match(r"^#\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?\s*$", l)
         m === nothing && continue
@@ -376,6 +381,46 @@ function _parse_env_footer(lines)::Vector{Dict{String,Any}}
                                     "uuid" => something(m.captures[3], "")))
     end
     return sort(out; by = p -> p["name"])
+end
+
+# ── Per-notebook config footer (Slate.config) ────────────────────────────────────────────────────
+# Durable per-notebook settings (worker threads, parallel execution) travel with the `.jl` in a small
+# human-readable footer — so they survive reopen/restart and move with the file, instead of living only
+# in-memory. Round-trips through `report.meta`; `_select_kernel`/`_parallel_enabled` already read meta.
+const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
+const _CONFIG_KEYS = ("parallel", "threads", "hotreload")   # whitelist; bools vs string handled on parse
+
+function _render_config_footer(meta)::String
+    items = Tuple{String,String}[]
+    for k in _CONFIG_KEYS
+        haskey(meta, k) || continue
+        v = meta[k]
+        sv = v isa Bool ? string(v) : String(string(v))
+        isempty(sv) && continue
+        push!(items, (k, sv))
+    end
+    isempty(items) && return ""
+    io = IOBuffer()
+    println(io, _CFG_MARK_OPEN, " · per-notebook settings (Settings panel)")
+    for (k, v) in items; println(io, "#   ", k, " = ", v); end
+    print(io, _ENV_MARK_CLOSE)
+    return String(take!(io))
+end
+
+function _parse_config_footer(lines)::Dict{String,Any}
+    out = Dict{String,Any}()
+    incfg = false
+    for l in lines
+        startswith(l, _CFG_MARK_OPEN) && (incfg = true; continue)
+        incfg || continue
+        startswith(l, _ENV_MARK_CLOSE) && break
+        m = match(r"^#\s+(\w+)\s*=\s*(.+?)\s*$", l)
+        m === nothing && continue
+        k = m.captures[1]; (k in _CONFIG_KEYS) || continue
+        v = strip(String(m.captures[2]))
+        out[k] = (k == "threads") ? v : (v == "true")   # threads is a string; the rest are bools
+    end
+    return out
 end
 
 # ── Serialization ────────────────────────────────────────────────────────────
@@ -410,8 +455,11 @@ serialize_cells(report::Report) = join((_cell_source(c) for c in report.cells), 
 
 function serialize_report(report::Report)
     body = serialize_cells(report)
-    footer = _render_env_footer(get(report.meta, "env", Dict{String,Any}[]))
-    return isempty(footer) ? body : body * "\n" * footer * "\n"
+    # env footer FIRST (parse_env_footer breaks at the first close), then the config footer.
+    parts = filter(!isempty, [_render_env_footer(get(report.meta, "env", Dict{String,Any}[])),
+                              _render_config_footer(report.meta)])
+    isempty(parts) && return body
+    return body * "\n" * join(parts, "\n") * "\n"
 end
 
 "Alias kept for callers that think in terms of a cell's raw text."

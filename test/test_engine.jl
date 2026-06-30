@@ -196,3 +196,31 @@ mean(data)
     end
 
 end
+
+@testset "Slate.config footer — per-notebook settings round-trip" begin
+    r = parse_report("#%% code id=a\nx = 1")
+    r.meta["parallel"] = true
+    r.meta["threads"] = "8,1"
+    s = serialize_report(r)
+    @test occursin("Slate.config", s)
+    r2 = parse_report(s)
+    @test r2.meta["parallel"] === true          # bool round-trips
+    @test r2.meta["threads"] == "8,1"           # string round-trips
+    @test length(r2.cells) == 1                 # cells parse fine (footer stripped, not a cell)
+    @test findfirst(c -> c.id == "a", r2.cells) !== nothing
+
+    # parallel=false also round-trips (not dropped)
+    rf = parse_report("#%% code id=a\nx = 1"); rf.meta["parallel"] = false
+    @test parse_report(serialize_report(rf)).meta["parallel"] === false
+
+    # no settings → no config footer
+    @test !occursin("Slate.config", serialize_report(parse_report("#%% code id=a\nx = 1")))
+
+    # config + env footers coexist (env still parses, not polluted by config)
+    re = parse_report("#%% code id=a\nx = 1")
+    re.meta["env"] = [Dict{String,Any}("name" => "Foo", "version" => "1.2.3", "uuid" => "abc")]
+    re.meta["threads"] = "4,1"
+    rr = parse_report(serialize_report(re))
+    @test rr.meta["threads"] == "4,1"
+    @test rr.meta["env"][1]["name"] == "Foo"
+end
