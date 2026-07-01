@@ -282,6 +282,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
           '<span class="meta">'+nbBadges(n)+'</span>'+nbFoot(n)+'</a>'+
           '<button class="kill" data-id="'+esc(n.id)+'" title="shut down this session">⨯ shutdown</button></div>';
       }).join('') : '<p class="empty">No notebooks open — open one above.</p>';
+      // Remember ANY notebook the server has open — not just ones opened from this page — so a
+      // notebook opened via a link, an agent, or an MCP tool still shows up in Recent.
+      var rec=getRecents();
+      nbs.forEach(function(n){ if(n.path && rec.indexOf(n.path)<0) pushRecent(n.path); });
       renderRecents();   // recents marks (not hides) notebooks already open (reads .nb .p)
     }).catch(function(){});
   }
