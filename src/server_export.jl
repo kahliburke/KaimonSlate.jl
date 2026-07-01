@@ -120,21 +120,25 @@ end
 
 function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", code::AbstractString = "normal",
-                     outputs::AbstractString = "all")
+                     outputs::AbstractString = "all", og_image::AbstractString = "")
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
         title = _esc(fm0.title)
         # Open Graph / Twitter card metadata: once this page is HOSTED at a URL, a link pasted into
-        # Slack / Discourse / iMessage / etc. unfurls into a rich card (title + description). Inert on a
-        # downloaded file (no URL to fetch), harmless — lights up when published.
+        # Slack / Discourse / iMessage / etc. unfurls into a rich card (title + description + image). Inert
+        # on a downloaded file (no URL to fetch), harmless — lights up when published. `og_image` is a URL
+        # or a path relative to the page (the site builder writes an `og-image.png` next to index.html).
         desc = _esc(_first_words(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract, 40))
+        img = isempty(strip(og_image)) ? "" :
+            "<meta property=\"og:image\" content=\"$(_esc(og_image))\"/><meta name=\"twitter:image\" content=\"$(_esc(og_image))\"/>"
         io = IOBuffer()
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
               "<meta property=\"og:type\" content=\"article\"/><meta property=\"og:title\" content=\"", title, "\"/>",
               (isempty(desc) ? "" : "<meta property=\"og:description\" content=\"$desc\"/><meta name=\"description\" content=\"$desc\"/>"),
-              "<meta name=\"twitter:card\" content=\"summary\"/><meta name=\"generator\" content=\"Kaimon Slate\"/>",
+              img,
+              "<meta name=\"twitter:card\" content=\"", isempty(img) ? "summary" : "summary_large_image", "\"/><meta name=\"generator\" content=\"Kaimon Slate\"/>",
               "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
