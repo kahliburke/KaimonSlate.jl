@@ -202,6 +202,12 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
     for (k, v) in kwargs
         opt[String(k)] = _ec(v)
     end
+    # Consistent typography: default ALL chart text to inherit the surrounding document font (the
+    # notebook's sans in the browser; the serif body in a PDF/Typst export). Without an explicit
+    # family ECharts uses its own default, and a glyph that font lacks — e.g. a Unicode superscript
+    # `10¹⁹` in a title — silently falls back to a DIFFERENT font, so the title diverges from the
+    # rest of the chart. A caller `textStyle` kwarg overrides this.
+    haskey(opt, "textStyle") || (opt["textStyle"] = Dict{String,Any}("fontFamily" => "inherit"))
     return opt
 end
 
@@ -272,7 +278,7 @@ into a live value) — see the `slate.api` reference.
 # "just works" on a one-series chart (e.g. a log axis, a category x-axis, a slider zoom).
 const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualMap", "polar",
     "angleAxis", "radiusAxis", "radar", "geo", "toolbox", "dataset", "brush", "calendar", "timeline",
-    "singleAxis", "parallel", "parallelAxis", "graphic", "axisPointer"])
+    "singleAxis", "parallel", "parallelAxis", "graphic", "axisPointer", "textStyle", "color"])
 
 # Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
 # go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.

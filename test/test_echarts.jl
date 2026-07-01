@@ -38,6 +38,17 @@ const RE = ReportEngine
         @test !haskey(o2["series"][1], "grid")
     end
 
+    @testset "consistent typography: text inherits the document font unless overridden" begin
+        # Default: all chart text uses one family (inherit), so a superscript in a title can't fall
+        # back to a different font than the rest of the chart.
+        o = RE.echart(:line, [1, 2], [3, 4]).option
+        @test o["textStyle"]["fontFamily"] == "inherit"
+        # A caller textStyle wins (and rides the OPTION in Express mode, not the series).
+        o2 = RE.echart(:line, [1, 2], [3, 4]; textStyle = (fontFamily = "serif",)).option
+        @test o2["textStyle"]["fontFamily"] == "serif"
+        @test !haskey(o2["series"][1], "textStyle")
+    end
+
     @testset "Composable: many series + option-level axes (dual Y)" begin
         o = RE.echart(RE.series(:line, [1, 2], [1, 2]; name = "L"),
                       RE.series(:bar, [1, 2], [3, 4]; name = "R", yAxisIndex = 1);
