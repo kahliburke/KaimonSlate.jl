@@ -282,10 +282,10 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # captures the SAME `chunks` (display) + provides the stderr the logger writes to.
     _begin_capture!(capture, chunks)
 
-    # Collect `@bind` controls declared during this eval — the namespace's injected
-    # `__slate_bind` pushes to this sink. Absent on bare modules (e.g. tests) → no-op.
-    sinkref = isdefined(mod, :__slate_bind_sink) ? getfield(mod, :__slate_bind_sink) : nothing
-    sinkref === nothing || (sinkref[] = NamedTuple[])
+    # Collect `@bind` controls declared during this eval into a TASK-LOCAL sink, so concurrently
+    # evaluated cells (the parallel batch) never race on one shared vector. `__slate_bind` (widgets.jl)
+    # pushes to `task_local_storage(:__slate_binds)`; bare modules that never bind just leave it empty.
+    task_local_storage(:__slate_binds, NamedTuple[])
 
     # `@trace` publishes its row buffer here (one per traced cell). Reset before eval; read after.
     tracesink = isdefined(mod, :__slate_trace_sink) ? getfield(mod, :__slate_trace_sink) : nothing
@@ -310,10 +310,8 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     finally
         raw_out, raw_err = _finish_capture!(capture)
     end
-    # Guard `sinkref[] === nothing` too (a cold-worker race can leave the bind sink uninitialised),
-    # else `copy(nothing)` throws and the whole eval errors. Mirrors the trace-sink guard below.
-    binds = (sinkref === nothing || sinkref[] === nothing) ? NamedTuple[] : copy(sinkref[])
-    sinkref === nothing || (sinkref[] = nothing)
+    binds = copy(get(task_local_storage(), :__slate_binds, NamedTuple[]))
+    delete!(task_local_storage(), :__slate_binds)
     # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)

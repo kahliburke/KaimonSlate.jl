@@ -228,33 +228,45 @@ function _wrap_choice(w::Widget, val)
     return val
 end
 
-function _do_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, sink::Ref{Any}, name::Symbol, w::Widget)
-    prev = get(reg, name, nothing)
-    val = prev === nothing ? w.default : _reconcile_bind(prev[1], prev[2], w)
-    reg[name] = (w, val)
-    s = sink[]
+# The per-eval `@bind` sink is TASK-LOCAL, so cells evaluated CONCURRENTLY (the parallel batch) each
+# collect their own controls instead of racing on one shared vector. `run_capture` seeds/reads it.
+const _BIND_SINK_KEY = :__slate_binds
+
+function _do_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name::Symbol, w::Widget)
+    # The registry PERSISTS across evals and is shared, so a concurrent bind batch would resize the
+    # Dict from two tasks at once — guard it. (The sink below is task-local, so it needs no lock.)
+    val = lock(reglock) do
+        prev = get(reg, name, nothing)
+        v = prev === nothing ? w.default : _reconcile_bind(prev[1], prev[2], w)
+        reg[name] = (w, v)
+        v
+    end
+    s = get(task_local_storage(), _BIND_SINK_KEY, nothing)
     s === nothing || push!(s, (name = name, kind = w.kind, params = w.params, value = val))
     return _wrap_choice(w, val)        # user gets a Choice for labeled option widgets; bare value otherwise
 end
 
 # Host sets a control's value (browser change). Updates the registry so a later
-# re-run of the bind cell preserves it; coerces against the known widget.
-function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, name::Symbol, value)
-    prev = get(reg, name, nothing)
-    if prev === nothing
-        reg[name] = (Widget("?", Dict{String,Any}(), value), value)
-        return value
+# re-run of the bind cell preserves it; coerces against the known widget. Locked — a browser change
+# can land while a parallel eval batch is mutating the same registry.
+function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name::Symbol, value)
+    lock(reglock) do
+        prev = get(reg, name, nothing)
+        if prev === nothing
+            reg[name] = (Widget("?", Dict{String,Any}(), value), value)
+            return value
+        end
+        w = prev[1]; cv = coerce_bind(w, value)
+        reg[name] = (w, cv)
+        return cv
     end
-    w = prev[1]; cv = coerce_bind(w, value)
-    reg[name] = (w, cv)
-    return cv
 end
 
 # ── The namespace contract ────────────────────────────────────────────────────
 # Inject the COMPLETE, identical set of notebook-namespace names into module `m`.
 # Context-specific helper *implementations* (echart/tables/refresh) are passed in;
 # the SET of names, the widget constructors, and the `@bind` macro are defined here
-# once. Returns the per-notebook bind sink Ref (run_capture toggles it per eval).
+# once. The per-eval `@bind` sink is task-local (run_capture seeds it); returns the populated module.
 function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
                                 slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing)
     Core.eval(m, :(const echart = $echart))
@@ -273,20 +285,21 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     for nm in _WIDGET_CTORS
         Core.eval(m, :(const $nm = $(getfield(@__MODULE__, nm))))
     end
-    # Per-notebook bind state, closed over by the injected helpers.
+    # Per-notebook bind state, closed over by the injected helpers. `reglock` serializes registry
+    # mutation across concurrently-evaluated cells (the parallel batch); the per-eval sink is
+    # task-local (seeded by run_capture), so it needs no lock.
     reg = Dict{Symbol,Tuple{Widget,Any}}()
-    sink = Ref{Any}(nothing)
+    reglock = ReentrantLock()
     handlers = Dict{Symbol,Any}()                 # @onclick: button name → handler closure (event model)
     tokens = Dict{Symbol,Base.RefValue{Bool}}()   # button name → running handler's cancel token
     Core.eval(m, :(const __slate_bind_registry = $reg))
-    Core.eval(m, :(const __slate_bind_sink = $sink))
-    Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, sink, name, w))))
+    Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, reglock, name, w))))
     # Browser value change: coerce + update registry, set the global so readers see it, then
     # DISPATCH to any registered @onclick handler (so a button is an event — the handler fires
     # here, NOT by recomputing a cell that reads the button). Returns the coerced value for the host.
     Core.eval(m, :(const __slate_set_bind = $((name, value) -> begin
-        cv = _do_set_bind(reg, name, value)
-        w = reg[name][1]
+        cv = _do_set_bind(reg, reglock, name, value)
+        w = lock(reglock) do; reg[name][1]; end
         wv = _wrap_choice(w, cv)
         Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
         h = get(handlers, name, nothing)
@@ -327,7 +340,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(macro onchange(ctrl, body)
         esc(Expr(:call, :__on_register, QuoteNode(ctrl), Expr(:(->), Expr(:tuple, ctrl), body)))
     end))
-    return sink
+    return m
 end
 
 # (name::Symbol, widget_expr) if `ex` is `@bind name W(…)`, else nothing. Pure AST,

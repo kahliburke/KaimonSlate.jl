@@ -105,6 +105,23 @@ x = 1
         @test occursin("A reactive study", h)
     end
 
+    @testset "HTML export: citations rendered + References + echarts embedded client-side" begin
+        cnb = _mknb("#%% md id=body\nSee [@knuth1984, p. 7].\n\n" *
+                    "#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}, year={1984}}\n")
+        h = NS.export_html(cnb)
+        @test occursin("[1, p. 7]", h)                       # citation rendered (ieee default), not raw
+        @test !occursin("[@knuth1984", h)                    # no raw citation marker
+        @test occursin("exp-refs", h) && occursin("References", h) && occursin("TeX", h)
+        # ECharts embed as a client-rendered spec, not a frozen snapshot
+        enb = _mknb("#%% code id=ch\n1\n")
+        ec = enb.report.cells[findfirst(x -> x.id == "ch", enb.report.cells)]
+        ec.output = RE.CellOutput("", RE.MimeChunk[], Any[Dict("series" => [Dict("type" => "bar", "data" => [1, 2, 3])])],
+                                  Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        eh = NS.export_html(enb)
+        @test occursin("echarts@5", eh)                      # CDN loaded
+        @test occursin("_slateCharts", eh) && occursin("\"type\":\"bar\"", eh)   # spec embedded for client render
+    end
+
     @testset "Markdown export (copy-to-clipboard)" begin
         md = NS.export_markdown(_mknb(ROLES_SRC))
         @test occursin("# Predicting Foo from Bar", md)      # title as an H1

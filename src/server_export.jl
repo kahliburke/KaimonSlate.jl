@@ -38,6 +38,9 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
 .exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
 .exp-figcap{margin:2px 24px 16px;font-size:.85rem;color:var(--dim);line-height:1.5;}
 .exp-figcap b{color:var(--text);}.exp-figcap p{display:inline;margin:0;}
+.exp-chart{margin:14px 0;}
+.exp-refs{margin-top:28px;border-top:1px solid var(--border);padding-top:8px;font-size:.9rem;}
+.exp-refs h2{font-size:1.1rem;}
 .exp-md table,.exp-table{border-collapse:collapse;margin:8px 0;font-size:.84rem;}
 .exp-md td,.exp-md th,.exp-table td,.exp-table th{border:1px solid var(--border);padding:4px 10px;text-align:left;}
 .exp-table th{background:var(--bg3);color:var(--dim);} .exp-table td{font-variant-numeric:tabular-nums;}
@@ -142,18 +145,28 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
+              # ECharts renders CLIENT-SIDE from the embedded specs below (real charts with data), instead
+              # of freezing to a server snapshot that headless exports can't capture.
+              "<script src=\"https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js\"></script>",
               "<style>", _export_css(theme, code), "</style></head><body><article class=\"export\">")
+        charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
         fm = fm0
         figidx = figure_index(nb.report)
+        # Rewrite `[@cite]` → its in-text form (per bibstyle) and `[@fig:label]` → "Figure N" so the
+        # static page reads like the live view / PDF instead of showing raw markers.
+        citectx = _md_cite_ctx(nb)
+        citekeys = citectx === nothing ? Set{String}() : citectx.citekeys
+        citemit = citectx === nothing ? _cite_literal : citectx.emit
+        rw(s) = _rewrite_citations(s, citekeys; emit = citemit, figrefs = figidx.labels, figemit = _fig_text)
         print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
               _esc(fm.title), "</h1>")
         isempty(strip(fm.subtitle)) || print(io, "<div class=\"exp-subtitle\">", _esc(fm.subtitle), "</div>")
         isempty(strip(fm.byline)) || print(io, "<div class=\"exp-byline\">", _esc(fm.byline), "</div>")
         if !isempty(strip(fm.abstract))
             print(io, "<div class=\"exp-abstract\"><span class=\"exp-abslabel\">Abstract</span>",
-                  markdown_html(fm.abstract, CellOutput[]), "</div>")
+                  markdown_html(rw(fm.abstract), CellOutput[]), "</div>")
         end
         print(io, "</header>")
         print(io, "<div class=\"exp-meta\">Exported from Kaimon Slate · ", _esc(abspath(nb.path)), "</div>")
@@ -164,7 +177,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             c.id in fm.skip && continue              # hoisted into the title block above
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
             if c.kind == MARKDOWN
-                mdsrc = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
+                mdsrc = rw(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source)   # citations/refs + hoisted H1
                 if haskey(figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
                     print(io, "<figcaption class=\"exp-figcap\" id=\"fig-", _esc(c.id), "\"><b>Figure ",
                           figidx.numbers[c.id], ".</b> ", markdown_html(mdsrc, c.interp), "</figcaption>")
@@ -186,15 +199,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                     elseif o !== nothing && !isempty(o.display)
                         print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">", _render_chunks(o.display), "</div></div>")
                     end
-                    if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot
-                        png = _snapshot(nb.id, c.id)
-                        if png === nothing                    # headless export (no tab rendered it) → don't silently drop
-                            print(io, "<div class=\"disp\" style=\"padding:10px 14px;color:var(--dim);font-style:italic\">",
-                                  "[chart not captured — open this notebook in a browser, then re-export]</div>")
-                        else
-                            print(io, "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,",
-                                  Base64.base64encode(png), "\"/></div>")
-                        end
+                    for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
+                        did = string("chart-", c.id, "-", si)
+                        print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:340px\"></div>")
+                        push!(charts, (did, JSON.json(spec)))
                     end
                     for spec in _table_specs(c)
                         print(io, _export_table_html(spec))
@@ -203,8 +211,21 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 print(io, "</section>")
             end
         end
-        # (og:image sidecar + site builder live in export_site, below.)
-        print(io, "</article><script>window.addEventListener('load',function(){",
+        # References — rendered from the bibliography cells (the raw BibTeX cell itself is skipped above).
+        refs = _md_references(citectx)
+        isempty(strip(refs)) || print(io, "<section class=\"exp-md exp-refs\">", markdown_html(refs, CellOutput[]), "</section>")
+        # ECharts: render each embedded spec client-side (real, interactive charts with data). The specs
+        # are emitted as a JS array; a resize handler keeps them responsive.
+        print(io, "</article><script>")
+        if !isempty(charts)
+            echtheme = theme == "dark" ? "'dark'" : "null"   # echarts.init(el, theme) — dark palette or default
+            print(io, "var _slateCharts=[", join(("['" * id * "'," * opt * "]" for (id, opt) in charts), ","), "];",
+                  "function _slateRenderCharts(){if(!window.echarts)return;_slateCharts.forEach(function(c){",
+                  "var el=document.getElementById(c[0]);if(!el)return;var ch=echarts.init(el,", echtheme, ");",
+                  "ch.setOption(c[1]);window.addEventListener('resize',function(){ch.resize();});});}",
+                  "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
+        end
+        print(io, "window.addEventListener('load',function(){",
               "if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[",
               "{left:'\$\$',right:'\$\$',display:true},{left:'\\\\[',right:'\\\\]',display:true},",
               "{left:'\$',right:'\$',display:false},{left:'\\\\(',right:'\\\\)',display:false}],",
@@ -379,6 +400,8 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = fa
         srcbranch = "source[branch]=gh-pages"; srcpath = "source[path]=/"; pagesep = "repos/$repo/pages"
         already = _gh_ok(`$gh api $pagesep`)
         pok, plog = already ? (true, "") : _git_run(dir, `$gh api -X POST $pagesep -f $srcbranch -f $srcpath`)
+        already_enabled = occursin("already enabled", plog)      # 409 — Pages was set up already; that's success
+        pok = pok || already_enabled
         pagesError = pok ? "" : (occursin("does not support GitHub Pages", plog) ?
             "GitHub Pages isn't available for this repo — private Pages needs GitHub Pro/Team; on a free plan the repo must be PUBLIC." :
             strip(replace(plog, r"\s+" => " ")))

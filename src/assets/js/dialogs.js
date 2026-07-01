@@ -137,6 +137,7 @@ async function exportSite() {
   const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
   const parts = ['theme=' + theme]; if (outv !== 'all') parts.push('outputs=' + outv);
+  if (!(document.getElementById('sitesource') || { checked: true }).checked) parts.push('source=0');
   showLoading('Building site + preview image…');
   try {
     const r = await fetch(_apipath('/api/export.site?' + parts.join('&')));
@@ -153,6 +154,7 @@ async function publishSite() {
   const isPrivate = ((document.getElementById('sitevis') || {}).value || 'public') === 'private';
   const create = !!(document.getElementById('sitecreate') || { checked: true }).checked;
   const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
+  const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
   // Preflight: tell the user exactly what will happen (create new vs overwrite an existing site).
   let pf;
@@ -179,7 +181,7 @@ async function publishSite() {
   let result = null, err = null;
   try {
     const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repo, private: isPrivate, create: create, theme: theme, outputs: outv }) });
+      body: JSON.stringify({ repo: repo, private: isPrivate, create: create, theme: theme, outputs: outv, source: source }) });
     result = r.ok ? await r.json() : { error: await r.text() };
   } catch (e) { err = e; }
   hideLoading();                                          // drop the spinner BEFORE the result dialog
