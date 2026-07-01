@@ -158,7 +158,6 @@ function paletteCommands() {
     { label: 'Open presenter window', tag: 'present', run: () => openPresenter() },
     { label: 'Export… (HTML · PDF · standalone)', tag: 'export', run: () => openExport() },
     { label: 'Export PDF (slides)', tag: 'export', run: () => exportSlidesPdf() },
-    { label: 'Print notebook (HTML)', tag: 'export', run: printNotebook },
     ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
     ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
     { label: 'Open notebook in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p; } },

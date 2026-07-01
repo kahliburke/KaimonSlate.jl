@@ -63,10 +63,6 @@ function exportHtml(dl) {
   a.href = _apipath('/api/export.html' + (q ? q + '&dl=1' : '?dl=1')); a.download = _dlName('.html');
   document.body.appendChild(a); a.click(); a.remove();
 }
-function printNotebook() {
-  const w = window.open(_apipath('/api/export.html'), '_blank');
-  if (w) w.addEventListener('load', () => setTimeout(() => w.print(), 300));
-}
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
