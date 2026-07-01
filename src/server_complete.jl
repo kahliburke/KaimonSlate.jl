@@ -409,6 +409,13 @@ function _make_router(h::Hub)
         end
         HTTP.Response(200, headers, html)
     end))
+    # GitHub-flavored Markdown for copy-paste (Discourse / Slack / GitHub / Obsidian). `?source=0`
+    # omits code cells. Figures/charts embed as data-URI images; tables as GFM tables.
+    HTTP.register!(router, "GET", "/api/{id}/export.md", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        md = export_markdown(nb; include_source = get(qp, "source", "1") != "0")
+        HTTP.Response(200, ["Content-Type" => "text/markdown; charset=utf-8"], md)
+    end))
     # Publication-quality PDF via Typst (server-side). `?source=0` hides code listings;
     # `?params=1` shows the @bind parameter strip (hidden by default — a PDF is a snapshot).
     # Serve a notebook's external bibliography file (the "view" link on the references card). Scoped

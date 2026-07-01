@@ -157,6 +157,7 @@ function paletteCommands() {
     { label: 'Present (slideshow)', tag: 'present', run: () => enterPresent() },
     { label: 'Open presenter window', tag: 'present', run: () => openPresenter() },
     { label: 'Export… (HTML · PDF · standalone)', tag: 'export', run: () => openExport() },
+    { label: 'Copy as Markdown', tag: 'export', run: () => copyMarkdown() },
     { label: 'Export PDF (slides)', tag: 'export', run: () => exportSlidesPdf() },
     ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
     ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),

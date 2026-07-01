@@ -55,11 +55,19 @@ x = 1
     end
 
     @testset "no :title cell → title falls back to the first markdown H1 (not the filename)" begin
-        fm = NS.report_frontmatter(
-            RE.parse_report("#%% md id=intro\n# Real Title\nsome intro\n\n#%% code id=c\n1+1\n"; title = "notebook-file"))
+        r = RE.parse_report("#%% md id=intro\n# Real Title\nsome intro\n\n#%% code id=c\n1+1\n"; title = "notebook-file")
+        fm = NS.report_frontmatter(r)
         @test fm.title == "Real Title"        # derived from the H1, not the filename
+        @test fm.titlecell == "intro"         # records the cell whose H1 was hoisted
         @test isempty(fm.skip)                # non-destructive: the cell still renders in the body
         @test !fm.has                         # no title/abstract role, so no dedicated title block
+        # the hoisted H1 is stripped from the body so the title doesn't render twice, but the intro stays
+        @test NS._strip_leading_h1("# Real Title\nsome intro") == "some intro"
+        h = NS.export_html(_mknb("#%% md id=intro\n# Real Title\nsome intro\n"))
+        @test occursin("exp-title\">Real Title</h1>", h)   # in the hoisted title block
+        @test !occursin("<h1>Real Title</h1>", h)          # NOT repeated as a body heading
+        @test occursin("some intro", h)                    # the rest of the cell survives
+        @test occursin("og:title", h) && occursin("twitter:card", h)   # OG unfurl metadata present
     end
 
     @testset "no heading at all → last-resort filename" begin
@@ -95,6 +103,18 @@ x = 1
         @test occursin("Predicting Foo from Bar", h)
         @test occursin("exp-abstract", h)
         @test occursin("A reactive study", h)
+    end
+
+    @testset "Markdown export (copy-to-clipboard)" begin
+        md = NS.export_markdown(_mknb(ROLES_SRC))
+        @test occursin("# Predicting Foo from Bar", md)      # title as an H1
+        @test occursin("> **Abstract.**", md)                # abstract as a blockquote
+        m2 = NS.export_markdown(_mknb("#%% code id=c\nx = 40 + 2\n"))
+        @test occursin("```julia\nx = 40 + 2\n```", m2)      # code fenced
+        @test !occursin("```julia", NS.export_markdown(_mknb("#%% code id=c\nx = 1\n"); include_source = false))
+        # GFM table helper
+        @test occursin("| a | b |", NS._md_table(Dict("columns" => ["a", "b"], "rows" => [[1, 2]])))
+        @test NS._first_words("# A **bold** title here now", 3) == "A bold title…"
     end
 
     @testset "HTML export options: theme + code size + hide source" begin

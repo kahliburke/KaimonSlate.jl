@@ -68,6 +68,21 @@ function exportHtml(dl) {
   a.href = _apipath('/api/export.html' + (q ? q + '&dl=1' : '?dl=1')); a.download = _dlName('.html');
   document.body.appendChild(a); a.click(); a.remove();
 }
+// Copy the notebook as GitHub-flavored Markdown to the clipboard (paste into Discourse / Slack /
+// GitHub / Obsidian). Falls back to a download if the clipboard API is unavailable (non-HTTPS, etc.).
+async function copyMarkdown() {
+  try {
+    const r = await fetch(_apipath('/api/export.md'));
+    if (!r.ok) { await alertDark('Markdown export failed:\n' + (await r.text())); return; }
+    const md = await r.text();
+    try {
+      await navigator.clipboard.writeText(md);
+      showLoading('Copied Markdown to clipboard ✓'); setTimeout(hideLoading, 850);
+    } catch (_) {
+      _saveBlob(new Blob([md], { type: 'text/markdown' }), '.md');   // clipboard blocked → download instead
+    }
+  } catch (e) { await alertDark('Markdown export failed: ' + e); }
+}
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
