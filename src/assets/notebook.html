@@ -61,7 +61,6 @@
       <button onclick="openPalette();closeTopMenu()">⌘K Command palette</button>
       <hr>
       <button onclick="openExport();closeTopMenu()">⬆ Export…</button>
-      <button onclick="copyMarkdown();closeTopMenu()">⧉ Copy as Markdown</button>
       <hr>
       <button onclick="resetAll();closeTopMenu()">↻ Rebuild (fresh namespace)</button>
       <button onclick="restartWorker();closeTopMenu()">⟲ Restart worker</button>
@@ -212,7 +211,14 @@
     <select id="exfmt">
       <option value="html">HTML — self-contained page</option>
       <option value="pdf">PDF — publication (Typst)</option>
+      <option value="markdown">Markdown — file or clipboard</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
+    </select></div>
+  <div class="setrow exrow fmt-pdf fmt-html fmt-markdown"><label title="Filter which cell outputs appear">Outputs</label>
+    <select id="exoutputs">
+      <option value="all">All (text, values, figures)</option>
+      <option value="figures">Figures only (images / charts / tables)</option>
+      <option value="none">None (prose &amp; code only)</option>
     </select></div>
   <div class="setrow exrow fmt-pdf"><label>Theme</label>
     <select id="pdftheme"><option value="light">Light (publication)</option><option value="dark">Dark (matches UI)</option></select></div>
@@ -262,8 +268,14 @@
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmlsource" checked> Include cell source (uncheck for outputs only)</label></div>
   <div class="setrow exrow fmt-html sethint"><span></span>A self-contained page — figures embedded, math via KaTeX. No server needed.</div>
+  <div class="setrow exrow fmt-markdown"><label>Source</label>
+    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="mdsource" checked> Include cell source as <code>```julia</code> blocks</label></div>
+  <div class="setrow exrow fmt-markdown sethint"><span></span>GitHub-flavored Markdown — paste into Discourse / Slack / GitHub, or save a <code>.md</code>. Figures embed as data-URI images.</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
-  <div class="row"><button onclick="closeExport(false)">Cancel</button><button class="primary" onclick="closeExport(true)">Export</button></div>
+  <div class="row"><button onclick="closeExport(false)">Cancel</button>
+    <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
+    <button class="primary" onclick="closeExport(true)">Export</button></div>
 </div></div>
 <div class="palette-bg" id="cmdbg"><div class="cmdpal">
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>

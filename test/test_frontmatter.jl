@@ -117,6 +117,21 @@ x = 1
         @test NS._first_words("# A **bold** title here now", 3) == "A bold title…"
     end
 
+    @testset "outputs filter (all / figures / none)" begin
+        @test NS._outputs_text_ok("all") && !NS._outputs_text_ok("figures") && !NS._outputs_text_ok("none")
+        @test NS._outputs_any("all") && NS._outputs_any("figures") && !NS._outputs_any("none")
+        # A code cell with a scalar text value: `figures`/`none` drop it from HTML + Markdown; `all` keeps it.
+        nb = _mknb("#%% code id=c\nx = 1\n")
+        c = nb.report.cells[findfirst(x -> x.id == "c", nb.report.cells)]
+        c.output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "(cloned = true)", nothing, nothing, 0.0)
+        @test occursin("cloned = true", NS.export_html(nb; outputs = "all"))
+        @test !occursin("cloned = true", NS.export_html(nb; outputs = "figures"))
+        @test occursin("cloned = true", NS.export_markdown(nb; outputs = "all"))
+        @test !occursin("cloned = true", NS.export_markdown(nb; outputs = "figures"))
+        @test !occursin("cloned = true", NS.export_markdown(nb; outputs = "none"))
+        @test occursin("exp-out", NS.export_html(nb; outputs = "all"))          # 'all' keeps the output block
+    end
+
     @testset "HTML export options: theme + code size + hide source" begin
         nb = _mknb("#%% code id=c\nx = 1\n")
         dark = NS.export_html(nb; theme = "dark")

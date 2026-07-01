@@ -53,6 +53,8 @@ function _saveBlob(blob, ext) {
   const url = URL.createObjectURL(blob), a = document.createElement('a');
   a.href = url; a.download = _dlName(ext); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
+// The shared Outputs filter (all | figures | none) — appends `&outputs=` when not the default.
+function _outputsQS() { const v = (document.getElementById('exoutputs') || {}).value || 'all'; return v === 'all' ? '' : '&outputs=' + v; }
 // Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
 function exportHtml(dl) {
   const src = document.getElementById('htmlsource');
@@ -62,24 +64,31 @@ function exportHtml(dl) {
   if (src && !src.checked) parts.push('source=0');
   if (theme !== 'dark') parts.push('theme=' + theme);
   if (code !== 'normal') parts.push('code=' + code);
+  const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
   const q = parts.length ? '?' + parts.join('&') : '';
   if (dl === false) { window.open(_apipath('/api/export.html' + q), '_blank'); return; }
   const a = document.createElement('a');
   a.href = _apipath('/api/export.html' + (q ? q + '&dl=1' : '?dl=1')); a.download = _dlName('.html');
   document.body.appendChild(a); a.click(); a.remove();
 }
-// Copy the notebook as GitHub-flavored Markdown to the clipboard (paste into Discourse / Slack /
-// GitHub / Obsidian). Falls back to a download if the clipboard API is unavailable (non-HTTPS, etc.).
-async function copyMarkdown() {
+// GitHub-flavored Markdown. `mode='copy'` → clipboard (download fallback), else save a `.md` file.
+async function exportMarkdown(mode) {
+  const src = document.getElementById('mdsource');
+  const parts = [];
+  if (src && !src.checked) parts.push('source=0');
+  const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
+  const q = parts.length ? '?' + parts.join('&') : '';
   try {
-    const r = await fetch(_apipath('/api/export.md'));
+    const r = await fetch(_apipath('/api/export.md' + q));
     if (!r.ok) { await alertDark('Markdown export failed:\n' + (await r.text())); return; }
     const md = await r.text();
-    try {
-      await navigator.clipboard.writeText(md);
-      showLoading('Copied Markdown to clipboard ✓'); setTimeout(hideLoading, 850);
-    } catch (_) {
-      _saveBlob(new Blob([md], { type: 'text/markdown' }), '.md');   // clipboard blocked → download instead
+    if (mode === 'copy') {
+      try {
+        await navigator.clipboard.writeText(md);
+        showLoading('Copied Markdown to clipboard ✓'); setTimeout(hideLoading, 850);
+      } catch (_) { _saveBlob(new Blob([md], { type: 'text/markdown' }), '.md'); }   // clipboard blocked → download
+    } else {
+      _saveBlob(new Blob([md], { type: 'text/markdown' }), '.md');
     }
   } catch (e) { await alertDark('Markdown export failed: ' + e); }
 }
@@ -112,7 +121,7 @@ async function _runPdfExport() {
   showLoading('Rendering PDF with Typst…');
   try {
     const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code + (params ? '&params=1' : '')
-      + (slides ? '&layout=slides' : '') + (notes ? '&notes=1' : '');
+      + (slides ? '&layout=slides' : '') + (notes ? '&notes=1' : '') + _outputsQS();
     const r = await fetch(_apipath('/api/export.pdf') + qs);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
     _saveBlob(await r.blob(), '.pdf');
@@ -148,21 +157,28 @@ function openExport(preset) {
   document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';
   document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
-  ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
+  const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
+  ['htmltheme', 'htmlcode', 'exoutputs'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
   _exSyncRows();
   document.getElementById('exportbg').classList.add('show');
 }
+// `go`: false = cancel, true = primary export, 'copy' = Markdown-to-clipboard.
 function closeExport(go) {
   if (!go) { closeExportModal(); return; }
   const fmt = _exFormat(); localStorage.setItem('slate_exfmt', fmt);
+  const ex = document.getElementById('exoutputs'); if (ex) localStorage.setItem('slate_exoutputs', ex.value);
   closeExportModal();
   if (fmt === 'html') {
     const hs = document.getElementById('htmlsource'); localStorage.setItem('slate_htmlsource', hs && hs.checked ? '1' : '0');
     ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     return exportHtml(true);
+  }
+  if (fmt === 'markdown') {
+    const ms = document.getElementById('mdsource'); localStorage.setItem('slate_mdsource', ms && ms.checked ? '1' : '0');
+    return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
   if (fmt === 'standalone') return exportStandalone();
   return _runPdfExport();

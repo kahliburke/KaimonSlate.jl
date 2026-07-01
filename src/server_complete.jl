@@ -401,7 +401,8 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.html", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
-                           theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"))
+                           theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
+                           outputs = get(qp, "outputs", "all"))
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
             fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
@@ -413,8 +414,14 @@ function _make_router(h::Hub)
     # omits code cells. Figures/charts embed as data-URI images; tables as GFM tables.
     HTTP.register!(router, "GET", "/api/{id}/export.md", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
-        md = export_markdown(nb; include_source = get(qp, "source", "1") != "0")
-        HTTP.Response(200, ["Content-Type" => "text/markdown; charset=utf-8"], md)
+        md = export_markdown(nb; include_source = get(qp, "source", "1") != "0",
+                             outputs = get(qp, "outputs", "all"))
+        headers = Pair{String,String}["Content-Type" => "text/markdown; charset=utf-8"]
+        if get(qp, "dl", "0") == "1"
+            fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".md"
+            push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
+        end
+        HTTP.Response(200, headers, md)
     end))
     # Publication-quality PDF via Typst (server-side). `?source=0` hides code listings;
     # `?params=1` shows the @bind parameter strip (hidden by default — a PDF is a snapshot).
@@ -440,7 +447,8 @@ function _make_router(h::Hub)
                        body = get(qp, "body", ""),
                        include_params = get(qp, "params", "0") == "1",
                        layout = _lay, notes = get(qp, "notes", "0") == "1",
-                       level = get(nb.report.meta, "slidelevel", 2))
+                       level = get(nb.report.meta, "slidelevel", 2),
+                       outputs = get(qp, "outputs", "all"))
         catch e
             return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))
         end
@@ -462,7 +470,8 @@ function _make_router(h::Hub)
                        body = get(qp, "body", ""),
                        include_params = get(qp, "params", "0") == "1",
                        layout = _lay, notes = get(qp, "notes", "0") == "1",
-                       level = get(nb.report.meta, "slidelevel", 2))
+                       level = get(nb.report.meta, "slidelevel", 2),
+                       outputs = get(qp, "outputs", "all"))
         catch e
             return HTTP.Response(500, "Typst export failed: " * sprint(showerror, e))
         end

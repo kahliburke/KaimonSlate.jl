@@ -357,20 +357,27 @@ end
 _has_html_output(c::Cell) = c.output !== nothing && any(ch -> ch.mime == "text/html", c.output.display)
 
 # Emit a code cell's outputs (value / stdout / error / figure / tables) into the doc.
+# Export output-verbosity: `"all"` (everything), `"figures"` (only figures / charts / tables / rendered
+# math — drop scalar text reprs, stdout, and errors, the "working output" noise), `"none"` (nothing).
+_outputs_text_ok(outputs) = String(outputs) == "all"
+_outputs_any(outputs) = String(outputs) != "none"
+
 function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::LiveNotebook, c::Cell;
-                       theme::AbstractString = "light")
+                       theme::AbstractString = "light", outputs::AbstractString = "all")
     o = c.output
-    o === nothing && return
+    (o === nothing || !_outputs_any(outputs)) && return
+    texts = _outputs_text_ok(outputs)
     if o.exception !== nothing
+        texts || return                                # figures-only: skip error text
         write(joinpath(dir, base * ".err"), rstrip(o.exception))
         print(io, "#errblock(read(\"", base, ".err\"))\n")
         return
     end
-    if !isempty(strip(o.stdout))
+    if texts && !isempty(strip(o.stdout))
         write(joinpath(dir, base * ".out"), rstrip(o.stdout))
         print(io, "#outblock(read(\"", base, ".out\"))\n")
     end
-    if isempty(o.display) && !isempty(o.value_repr)
+    if texts && isempty(o.display) && !isempty(o.value_repr)
         write(joinpath(dir, base * ".val"), o.value_repr)
         print(io, "#valblock(read(\"", base, ".val\"))\n")
     end
@@ -830,11 +837,11 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                               theme::AbstractString = "light", code::AbstractString = "normal",
                               body::AbstractString = "", include_params::Bool = false,
                               layout::AbstractString = "article", notes::Bool = false,
-                              level::Integer = 2)
+                              level::Integer = 2, outputs::AbstractString = "all")
     # Slide-deck layout takes a wholly different page geometry/flow — dispatch early.
     layout == "slides" && return _build_slides_project(nb; theme = theme, code = code,
         include_source = include_source, include_params = include_params, notes = notes,
-        level = level, ratio = get(nb.report.meta, "slideratio", "16:9"))
+        level = level, ratio = get(nb.report.meta, "slideratio", "16:9"), outputs = outputs)
     show_source = include_source && code != "hidden"
     cols = clamp(Int(columns), 1, 2)
     body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
@@ -884,7 +891,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
                 include_params && print(io, _emit_controls(c))   # frozen @bind controls — off by default
-                _emit_output!(io, dir, base, nb, c; theme = theme)
+                _emit_output!(io, dir, base, nb, c; theme = theme, outputs = outputs)
                 print(io, "\n")
             end
         end
@@ -898,7 +905,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
 end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
-function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_source, include_params, citekeys = Set{String}())
+function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all")
     c, override = frag
     if c.kind == MARKDOWN
         md = _md_for_typst(c, override === nothing ? c.source : override; citekeys = citekeys)
@@ -911,7 +918,7 @@ function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_s
             print(io, "#codeblock(read(\"", base, ".jl\"))\n")
         end
         include_params && print(io, _emit_controls(c))
-        _emit_output!(io, dir, base, nb, c; theme = theme)
+        _emit_output!(io, dir, base, nb, c; theme = theme, outputs = outputs)
         print(io, "\n")
     end
     return
@@ -923,7 +930,7 @@ end
 function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                                ratio::AbstractString = "16:9", code::AbstractString = "hidden",
                                include_source::Bool = false, include_params::Bool = false,
-                               notes::Bool = false, level::Integer = 2)
+                               notes::Bool = false, level::Integer = 2, outputs::AbstractString = "all")
     show_source = include_source && code != "hidden"
     lock(nb.lock) do
         dir = mktempdir()
@@ -950,7 +957,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                 # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body slide.
                 f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
                 _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
-                                  show_source = show_source, include_params = include_params, citekeys = citekeys)
+                                  show_source = show_source, include_params = include_params, citekeys = citekeys, outputs = outputs)
             end
             print(io, "]\n\n")
         end

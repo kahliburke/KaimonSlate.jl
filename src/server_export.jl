@@ -117,7 +117,8 @@ function _highlight_julia(code::AbstractString)
 end
 
 function export_html(nb::LiveNotebook; include_source::Bool = true,
-                     theme::AbstractString = "dark", code::AbstractString = "normal")
+                     theme::AbstractString = "dark", code::AbstractString = "normal",
+                     outputs::AbstractString = "all")
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
@@ -165,19 +166,27 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 # not the code editor, in the browser) — so the export matches what's on screen.
                 (show_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))) &&
                     print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
-                print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
-                if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot
-                    png = _snapshot(nb.id, c.id)
-                    if png === nothing                    # headless export (no tab rendered it) → don't silently drop
-                        print(io, "<div class=\"disp\" style=\"padding:10px 14px;color:var(--dim);font-style:italic\">",
-                              "[chart not captured — open this notebook in a browser, then re-export]</div>")
-                    else
-                        print(io, "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,",
-                              Base64.base64encode(png), "\"/></div>")
+                if _outputs_any(outputs)
+                    # `figures`: only rich display (images/html/latex) — drop scalar text / stdout / errors.
+                    o = c.output
+                    if _outputs_text_ok(outputs)
+                        print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
+                    elseif o !== nothing && !isempty(o.display)
+                        print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">", _render_chunks(o.display), "</div></div>")
                     end
-                end
-                for spec in _table_specs(c)
-                    print(io, _export_table_html(spec))
+                    if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot
+                        png = _snapshot(nb.id, c.id)
+                        if png === nothing                    # headless export (no tab rendered it) → don't silently drop
+                            print(io, "<div class=\"disp\" style=\"padding:10px 14px;color:var(--dim);font-style:italic\">",
+                                  "[chart not captured — open this notebook in a browser, then re-export]</div>")
+                        else
+                            print(io, "<div class=\"disp img\"><img alt=\"chart\" src=\"data:image/png;base64,",
+                                  Base64.base64encode(png), "\"/></div>")
+                        end
+                    end
+                    for spec in _table_specs(c)
+                        print(io, _export_table_html(spec))
+                    end
                 end
                 print(io, "</section>")
             end
@@ -226,7 +235,8 @@ fenced; figures / frozen charts embed as `![](data:image/…;base64,…)`; table
 title/abstract lead. Data-URI images are self-contained but not every host renders them — for
 Discourse, upload the standalone `.jl` (+ a PNG/SVG) alongside.
 """
-function export_markdown(nb::LiveNotebook; include_source::Bool = true)
+function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs::AbstractString = "all")
+    texts = _outputs_text_ok(outputs); anyout = _outputs_any(outputs)
     lock(nb.lock) do
         fm = report_frontmatter(nb.report)
         io = IOBuffer()
@@ -248,9 +258,9 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true)
                 println(io, "```julia\n", rstrip(c.source), "\n```\n")
             end
             o = c.output
-            o === nothing && continue
-            o.exception === nothing || println(io, "```\n", rstrip(o.exception), "\n```\n")
-            isempty(strip(o.stdout)) || println(io, "```\n", rstrip(o.stdout), "\n```\n")
+            (o === nothing || !anyout) && continue
+            texts && o.exception !== nothing && println(io, "```\n", rstrip(o.exception), "\n```\n")
+            texts && !isempty(strip(o.stdout)) && println(io, "```\n", rstrip(o.stdout), "\n```\n")
             imgs = 0
             for ch in o.display
                 if startswith(ch.mime, "image/")
@@ -259,7 +269,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true)
                     println(io, "\$\$", strip(String(copy(ch.data))), "\$\$\n")
                 end
             end
-            (imgs == 0 && isempty(o.display) && !isempty(strip(o.value_repr))) &&
+            (texts && imgs == 0 && isempty(o.display) && !isempty(strip(o.value_repr))) &&
                 println(io, "```\n", rstrip(o.value_repr), "\n```\n")
             if !isempty(_echarts_specs(c))
                 png = _snapshot(nb.id, c.id)
