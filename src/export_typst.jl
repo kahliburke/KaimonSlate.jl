@@ -557,7 +557,7 @@ end
 function report_frontmatter(report)
     cells = report.cells
     title = report.title; subtitle = ""; byline = ""; abstract = ""
-    skip = Set{String}()
+    skip = Set{String}(); titlecell = ""
     titlei = findfirst(c -> :title in c.flags, cells)
     if titlei !== nothing
         t, s, b = _parse_title_cell(cells[titlei].source)
@@ -565,13 +565,14 @@ function report_frontmatter(report)
         push!(skip, cells[titlei].id)
     else
         # No explicit `title` role tag → derive the document title from the FIRST markdown H1, so
-        # exports read the real title instead of the notebook filename. Non-destructive: the cell
-        # still renders in the body; tag a dedicated cell `title` to hoist a full title block.
+        # exports read the real title instead of the notebook filename. The cell KEEPS its other
+        # content in the body, but its leading H1 is stripped (via `titlecell`) so the title doesn't
+        # render twice — once hoisted, once as a body heading.
         for c in cells
             c.kind == MARKDOWN || continue
             m = match(r"(?m)^#[ \t]+(.+?)[ \t]*#*$", c.source)
             m === nothing && continue
-            title = strip(m.captures[1]); break
+            title = strip(m.captures[1]); titlecell = c.id; break
         end
     end
     abscells = Cell[c for c in cells if :abstract in c.flags]
@@ -581,7 +582,18 @@ function report_frontmatter(report)
     end
     bibcells = Cell[c for c in cells if :bibliography in c.flags]
     has = titlei !== nothing || !isempty(strip(abstract))
-    return (; title, subtitle, byline, abstract, skip, bibcells, has)
+    return (; title, subtitle, byline, abstract, skip, bibcells, titlecell, has)
+end
+
+# Drop the FIRST H1 line (and any blank lines it leaves at the top) from a markdown source — used to
+# suppress the body copy of a heading that `report_frontmatter` hoisted into the title block.
+function _strip_leading_h1(src::AbstractString)
+    lines = collect(split(String(src), '\n'))
+    i = findfirst(l -> occursin(r"^#[ \t]+\S", l), lines)
+    i === nothing && return String(src)
+    deleteat!(lines, i)
+    while i <= length(lines) && isempty(strip(lines[i])); deleteat!(lines, i); end
+    return join(lines, '\n')
 end
 
 # Resolve `:bibliography` cells into Typst bib files written into the project dir, returning the
@@ -859,7 +871,8 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             c.id in fm.skip && continue               # hoisted into the title block above
             (:bibliography in c.flags) && continue    # rendered as #bibliography at the end, not raw
             if c.kind == MARKDOWN
-                md = _md_for_typst(c; citekeys = citekeys)
+                src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
+                md = _md_for_typst(c, src; citekeys = citekeys)
                 isempty(strip(md)) && continue       # empty markdown cell leaves nothing to render
                 write(joinpath(dir, base * ".md"), md)
                 print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
@@ -934,7 +947,9 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
             isempty(frags) && continue
             print(io, "#slide[\n")
             for (fi, frag) in enumerate(frags)
-                _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, frag; theme = theme,
+                # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body slide.
+                f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
+                _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
                                   show_source = show_source, include_params = include_params, citekeys = citekeys)
             end
             print(io, "]\n\n")

@@ -120,17 +120,25 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", code::AbstractString = "normal")
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
-        title = _esc(nb.report.title)
+        fm0 = report_frontmatter(nb.report)
+        title = _esc(fm0.title)
+        # Open Graph / Twitter card metadata: once this page is HOSTED at a URL, a link pasted into
+        # Slack / Discourse / iMessage / etc. unfurls into a rich card (title + description). Inert on a
+        # downloaded file (no URL to fetch), harmless — lights up when published.
+        desc = _esc(_first_words(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract, 40))
         io = IOBuffer()
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
+              "<meta property=\"og:type\" content=\"article\"/><meta property=\"og:title\" content=\"", title, "\"/>",
+              (isempty(desc) ? "" : "<meta property=\"og:description\" content=\"$desc\"/><meta name=\"description\" content=\"$desc\"/>"),
+              "<meta name=\"twitter:card\" content=\"summary\"/><meta name=\"generator\" content=\"Kaimon Slate\"/>",
               "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
               "<style>", _export_css(theme, code), "</style></head><body><article class=\"export\">")
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
-        fm = report_frontmatter(nb.report)
+        fm = fm0
         print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
               _esc(fm.title), "</h1>")
         isempty(strip(fm.subtitle)) || print(io, "<div class=\"exp-subtitle\">", _esc(fm.subtitle), "</div>")
@@ -148,7 +156,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             c.id in fm.skip && continue              # hoisted into the title block above
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
             if c.kind == MARKDOWN
-                print(io, "<section class=\"exp-md\">", markdown_html(c.source, c.interp), "</section>")
+                mdsrc = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
+                print(io, "<section class=\"exp-md\">", markdown_html(mdsrc, c.interp), "</section>")
             else
                 print(io, "<section class=\"exp-code\">")
                 # Show source only when the NOTEBOOK shows it: respect the global `?source=0` toggle,
@@ -180,6 +189,87 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # don't math-render code listings / table cells (a literal $x$ in code)
               "ignoredClasses:['exp-src','exp-table'],throwOnError:false});});",
               "</script></body></html>")
+        return String(take!(io))
+    end
+end
+
+# First ~`n` words of `text` as a plain one-liner (markdown punctuation stripped) — for the OG/meta
+# description. Adds an ellipsis when truncated.
+function _first_words(text, n::Int)
+    s = replace(strip(String(text)), r"[#*_`>\[\]]" => "", r"\s+" => " ")
+    w = split(s)
+    isempty(w) && return ""
+    return join(w[1:min(n, length(w))], " ") * (length(w) > n ? "…" : "")
+end
+
+# A GitHub-flavored markdown table from a `slate_table`/`slate_query` spec (server-paged tables carry
+# only the loaded rows). `|` in a cell is escaped so it doesn't break the column layout.
+function _md_table(spec)
+    cols = get(spec, "columns", Any[]); rows = get(spec, "rows", Any[])
+    names = String[c isa AbstractDict ? string(get(c, "name", "")) : string(c) for c in cols]
+    isempty(names) && return ""
+    io = IOBuffer()
+    println(io, "| ", join(names, " | "), " |")
+    println(io, "| ", join(fill("---", length(names)), " | "), " |")
+    for r in rows
+        println(io, "| ", join((v === nothing ? "" : replace(string(v), "|" => "\\|") for v in r), " | "), " |")
+    end
+    return String(take!(io))
+end
+
+"""
+    export_markdown(nb; include_source=true) -> String
+
+Serialize the notebook to GitHub-flavored Markdown for copy-paste (Discourse / Slack / GitHub /
+Obsidian / docs). Prose rides verbatim; code cells become fenced ```julia blocks; text outputs are
+fenced; figures / frozen charts embed as `![](data:image/…;base64,…)`; tables become GFM tables. The
+title/abstract lead. Data-URI images are self-contained but not every host renders them — for
+Discourse, upload the standalone `.jl` (+ a PNG/SVG) alongside.
+"""
+function export_markdown(nb::LiveNotebook; include_source::Bool = true)
+    lock(nb.lock) do
+        fm = report_frontmatter(nb.report)
+        io = IOBuffer()
+        isempty(strip(fm.title)) || println(io, "# ", fm.title, "\n")
+        isempty(strip(fm.subtitle)) || println(io, "### ", fm.subtitle, "\n")
+        isempty(strip(fm.byline)) || println(io, "*", fm.byline, "*\n")
+        isempty(strip(fm.abstract)) ||
+            println(io, "> **Abstract.** ", replace(strip(fm.abstract), "\n" => "\n> "), "\n")
+        for c in nb.report.cells
+            (:collapsed in c.flags) && continue
+            c.id in fm.skip && continue
+            (:bibliography in c.flags) && continue
+            if c.kind == MARKDOWN
+                s = strip(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source)
+                isempty(s) || println(io, s, "\n")
+                continue
+            end
+            if include_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))
+                println(io, "```julia\n", rstrip(c.source), "\n```\n")
+            end
+            o = c.output
+            o === nothing && continue
+            o.exception === nothing || println(io, "```\n", rstrip(o.exception), "\n```\n")
+            isempty(strip(o.stdout)) || println(io, "```\n", rstrip(o.stdout), "\n```\n")
+            imgs = 0
+            for ch in o.display
+                if startswith(ch.mime, "image/")
+                    println(io, "![](data:", ch.mime, ";base64,", Base64.base64encode(ch.data), ")\n"); imgs += 1
+                elseif ch.mime == "text/latex"
+                    println(io, "\$\$", strip(String(copy(ch.data))), "\$\$\n")
+                end
+            end
+            (imgs == 0 && isempty(o.display) && !isempty(strip(o.value_repr))) &&
+                println(io, "```\n", rstrip(o.value_repr), "\n```\n")
+            if !isempty(_echarts_specs(c))
+                png = _snapshot(nb.id, c.id)
+                png === nothing ? println(io, "*[chart — open in a browser and re-export to capture]*\n") :
+                    println(io, "![chart](data:image/png;base64,", Base64.base64encode(png), ")\n")
+            end
+            for spec in _table_specs(c)
+                t = _md_table(spec); isempty(t) || println(io, t)
+            end
+        end
         return String(take!(io))
     end
 end
