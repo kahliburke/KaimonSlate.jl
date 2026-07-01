@@ -333,6 +333,13 @@ end
 
 # HTML link for a live citation, formatted to TRACK the notebook's bibstyle: `[1]` for numeric
 # styles, `(Knuth, 1984)` for author-date. Jumps to the bibliography cell; the tooltip is the entry.
+# A live `[@fig:label]` cross-reference → an HTML link that scrolls to the figure and shows "Figure N".
+_fig_link_emit(num, anchor) =
+    string("<a class=\"figref\" href=\"#cell-", replace(String(anchor), "\"" => ""), "\">Figure ", num, "</a>")
+# Fallback bracket-cite emit for the live view when the notebook has NO bibliography: reconstruct the
+# original `[@key]` literally so a stray citation isn't turned into a Typst sentinel (§c§…) on screen.
+_cite_literal(key, sup, _form) = isempty(strip(sup)) ? string("[@", key, "]") : string("[@", key, ", ", strip(sup), "]")
+
 function _cite_link_emit(ctx)
     esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
     return (key, sup, _form) -> begin
@@ -365,10 +372,15 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
                    nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
-                   bibctx = nothing, fignums::Dict{String,Int} = Dict{String,Int}())
-    # Markdown citations → links to the bibliography cell, formatted per bibstyle (skips bib cells).
-    _mdsrc = (c.kind == MARKDOWN && bibctx !== nothing && !(:bibliography in c.flags)) ?
-        _rewrite_citations(c.source, Set(keys(bibctx.tips)); emit = _cite_link_emit(bibctx)) : c.source
+                   bibctx = nothing, figidx = nothing)
+    fignums = figidx === nothing ? Dict{String,Int}() : figidx.numbers
+    figrefs = figidx === nothing ? Dict{String,Tuple{Int,String}}() : figidx.labels
+    # Markdown citations → links to the bibliography cell (per bibstyle), and `[@fig:label]` → a live
+    # "Figure N" link that jumps to the figure. Skips bibliography/caption cells' own bodies.
+    _mdsrc = (c.kind == MARKDOWN && !(:bibliography in c.flags) && (bibctx !== nothing || !isempty(figrefs))) ?
+        _rewrite_citations(c.source, bibctx === nothing ? Set{String}() : Set(keys(bibctx.tips));
+                           emit = bibctx === nothing ? _cite_literal : _cite_link_emit(bibctx),
+                           figrefs = figrefs, figemit = _fig_link_emit) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
@@ -534,9 +546,9 @@ function state_json(nb::LiveNotebook)
     nbdir = dirname(abspath(nb.path))
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
     bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
-    fignums = figure_index(nb.report).numbers   # caption-cell id → Figure number
+    figidx = figure_index(nb.report)            # caption numbering + [@fig:] cross-ref labels
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibctx = bibctx, fignums = fignums) for c in nb.report.cells]
+        cited = cited, bibctx = bibctx, figidx = figidx) for c in nb.report.cells]
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
     let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])

@@ -248,37 +248,57 @@ end
 # Default `emit` for the export path: a sentinel the preamble's `#show` rule turns into a Typst cite.
 _cite_sentinel(key, sup, form) = _cite_token(key, sup, form)
 
+# A `[@fig:label]` cross-reference → its rendered text. `figrefs` maps label → (num, anchor); the
+# export default emits plain "Figure N" (the number is authoritative even without a hyperlink), the
+# live view overrides `figemit` with an HTML link that jumps to the figure.
+_fig_text(num, anchor) = string("Figure ", num)
+
 # Rewrite one `[...]` citation group (its inner text, which contains an `@`); `emit(key,sup,form)`
-# builds each replacement (a Typst sentinel for export, an HTML link for the live view).
-function _rewrite_bracket_cite(inner, emit)
+# builds each replacement (a Typst sentinel for export, an HTML link for the live view). A `fig:`
+# label resolved in `figrefs` becomes a figure cross-reference via `figemit` instead of a bib cite.
+function _rewrite_bracket_cite(inner, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
     io = IOBuffer()
     for spec in split(inner, ';')
         # Accept an optional leading `-` (Pandoc suppress-author) but render normally — Typst's year
         # form drops the parentheses, which reads wrong, so we don't honor suppression.
         m = match(r"^\s*-?@([\w:.\-]+)\s*(?:,\s*(.*\S))?\s*$", spec)
         m === nothing && return nothing            # not a clean citation group → leave the bracket as-is
-        sup = m.captures[2] === nothing ? "" : m.captures[2]
-        print(io, emit(m.captures[1], sup, "n"))
+        key = m.captures[1]
+        if haskey(figrefs, key)                    # figure cross-reference
+            num, anchor = figrefs[key]
+            print(io, figemit(num, anchor))
+        else
+            sup = m.captures[2] === nothing ? "" : m.captures[2]
+            print(io, emit(key, sup, "n"))
+        end
     end
     return String(take!(io))
 end
 # Rewrite the citation syntax in one stretch of TEXT (no code spans). Bracketed groups first, then
 # bare `@key` (prose) — the latter only for defined keys, so emails/handles are left literal.
-function _rewrite_text_citations(text, citekeys, emit)
+function _rewrite_text_citations(text, citekeys, emit; figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
     t = replace(text, r"\[([^\]\n]*@[^\]\n]*)\]" => m -> begin
-        r = _rewrite_bracket_cite(m[2:end-1], emit); r === nothing ? m : r
+        r = _rewrite_bracket_cite(m[2:end-1], emit; figrefs = figrefs, figemit = figemit); r === nothing ? m : r
     end)
-    isempty(citekeys) && return t
+    (isempty(citekeys) && isempty(figrefs)) && return t
     return replace(t, r"(?<![\w@/])@([\w:.\-]+)" => m -> begin
         raw = m[2:end]
         key = rstrip(raw, ['.', ',', ';', ':', ')', ']', '!', '?'])
         suffix = raw[(ncodeunits(key) + 1):end]
-        key in citekeys ? emit(key, "", "p") * suffix : m
+        if haskey(figrefs, key)
+            num, anchor = figrefs[key]; figemit(num, anchor) * suffix
+        elseif key in citekeys
+            emit(key, "", "p") * suffix
+        else
+            m
+        end
     end)
 end
 # Rewrite citations across a markdown source, skipping fenced code blocks AND inline `code` spans
-# (so a literal `[@key]` shown in backticks is left untouched). `emit` selects sentinel vs HTML link.
-function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit = _cite_sentinel)
+# (so a literal `[@key]` shown in backticks is left untouched). `emit` selects sentinel vs HTML link;
+# `figrefs`/`figemit` handle `[@fig:label]` figure cross-references.
+function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit = _cite_sentinel,
+                            figrefs = Dict{String,Tuple{Int,String}}(), figemit = _fig_text)
     out = IOBuffer(); infence = false
     for (li, ln) in enumerate(split(md, '\n'))
         li == 1 || print(out, '\n')
@@ -287,7 +307,7 @@ function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit =
         # Protect inline `code` spans, rewrite the text between them, then restore the spans.
         spans = SubString{String}[]
         masked = replace(ln, r"`[^`]*`" => s -> (push!(spans, s); "\x00$(length(spans))\x00"))
-        done = _rewrite_text_citations(masked, citekeys, emit)
+        done = _rewrite_text_citations(masked, citekeys, emit; figrefs = figrefs, figemit = figemit)
         for (i, s) in enumerate(spans); done = replace(done, "\x00$(i)\x00" => s); end
         print(out, done)
     end
@@ -296,7 +316,8 @@ end
 
 # Markdown source with `{{ expr }}` interpolations resolved to their scalar values (the only interp
 # kind embeddable as text in v1) and citations rewritten to sentinels for the preamble's cite rule.
-function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}())
+function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}(),
+                       figrefs = Dict{String,Tuple{Int,String}}())
     tmpl, exprs = ReportEngine._md_template(src)
     s = tmpl
     for i in 1:length(exprs)
@@ -304,7 +325,7 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
         val = (o === nothing || o.exception !== nothing || isempty(o.value_repr)) ? "" : o.value_repr
         s = replace(s, ReportEngine._interp_token(i) => val)
     end
-    return _rewrite_citations(s, citekeys)
+    return _rewrite_citations(s, citekeys; figrefs = figrefs)
 end
 
 
@@ -931,7 +952,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             (:bibliography in c.flags) && continue    # rendered as #bibliography at the end, not raw
             if c.kind == MARKDOWN
                 src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
-                md = _md_for_typst(c, src; citekeys = citekeys)
+                md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels)
                 isempty(strip(md)) && continue       # empty markdown cell leaves nothing to render
                 write(joinpath(dir, base * ".md"), md)
                 if haskey(figidx.numbers, c.id)      # a caption cell → numbered "Figure N." block

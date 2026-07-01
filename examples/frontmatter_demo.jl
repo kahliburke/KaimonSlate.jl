@@ -36,8 +36,8 @@ markdown, so **bold**, `code`, and math like $\mu \approx 0$ all render.
 #%% md id=method
 ## Method
 
-We draw $n = 1000$ samples from a standard normal and summarize them. The interactive
-table below is computed live; in the exported PDF it is frozen to a static table.
+We draw $n = 1000$ samples from a standard normal and summarize them (see [@fig:hist]). The
+interactive table below is computed live; in the exported PDF it is frozen to a static table.
 
 #%% code id=tbl
 slate_table((x = 1:5, x2 = (1:5).^2, sqrt_x = round.(sqrt.(1:5); digits=3)))

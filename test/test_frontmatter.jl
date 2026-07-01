@@ -144,6 +144,21 @@ x = 1
         @test idx.labels["fig:a"] == (2, "f1")         # explicit label
     end
 
+    @testset "figure cross-references [@fig:label]" begin
+        figrefs = Dict("fig:hist" => (2, "hist"))
+        # live: an HTML link that jumps to the figure cell and reads "Figure N"
+        live = NS._rewrite_citations("See [@fig:hist] above."; figrefs = figrefs, figemit = NS._fig_link_emit)
+        @test occursin("<a class=\"figref\" href=\"#cell-hist\">Figure 2</a>", live)
+        # bare form works too
+        @test occursin("Figure 2", NS._rewrite_citations("as in @fig:hist"; figrefs = figrefs, figemit = NS._fig_link_emit))
+        # export default: plain "Figure N" text (number authoritative even without a hyperlink)
+        @test NS._rewrite_citations("[@fig:hist]"; figrefs = figrefs) == "Figure 2"
+        # a real bibliography key is NOT a figure ref → untouched by the fig path
+        @test occursin("[@knuth]", NS._rewrite_citations("[@knuth]"; figrefs = figrefs, emit = NS._cite_literal))
+        # a literal in backticks is left alone
+        @test occursin("`[@fig:hist]`", NS._rewrite_citations("`[@fig:hist]`"; figrefs = figrefs, figemit = NS._fig_link_emit))
+    end
+
     @testset "outputs filter (all / figures / none)" begin
         @test NS._outputs_text_ok("all") && !NS._outputs_text_ok("figures") && !NS._outputs_text_ok("none")
         @test NS._outputs_any("all") && NS._outputs_any("figures") && !NS._outputs_any("none")
