@@ -148,8 +148,8 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
       ]
       v(6pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt)
       if abstract != none {
-        block(width: 86%, inset: 0pt)[
-          #align(center, text(size: 0.82em, weight: "bold", tracking: 0.08em, fill: $(p.parlabel))[ABSTRACT])
+        block(width: 100%, inset: 0pt)[
+          #text(size: 0.82em, weight: "bold", tracking: 0.08em, fill: $(p.parlabel))[ABSTRACT]
           #v(3pt)
           #text(size: 0.94em, style: "italic")[#abstract]
         ]
@@ -306,43 +306,6 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
     return _rewrite_citations(s, citekeys)
 end
 
-# Parse an optional YAML-ish front-matter block fenced by `---` lines at the very top of
-# the notebook's first markdown cell:
-#
-#     ---
-#     title: The Two-State Paramagnet
-#     subtitle: A Complete Statistical-Mechanics Tutorial
-#     author: Kahli Burke
-#     date: 2026-06-07
-#     abstract: The two-state paramagnet is the simplest exactly-solvable model …
-#     ---
-#
-# Returns `(meta::Dict{String,String}, rest::String)` where `rest` is the cell body after
-# the closing fence (rendered as normal markdown). A line that doesn't start a new `key:`
-# continues the previous value, so long abstracts may wrap across lines. When there is no
-# front matter, returns `(empty, original)`. Recognised keys: title/subtitle/author/date/
-# abstract (others are ignored).
-function _parse_frontmatter(src::AbstractString)
-    lines = split(String(src), '\n')
-    i = 1
-    while i <= length(lines) && isempty(strip(lines[i])); i += 1; end          # skip leading blanks
-    (i > length(lines) || strip(lines[i]) != "---") && return (Dict{String,String}(), String(src))
-    meta = Dict{String,String}(); lastkey = ""; close = 0
-    j = i + 1
-    while j <= length(lines)
-        if strip(lines[j]) == "---"; close = j; break; end
-        m = match(r"^\s*([A-Za-z][\w-]*)\s*:\s?(.*)$", lines[j])
-        if m !== nothing
-            lastkey = lowercase(m.captures[1]); meta[lastkey] = String(m.captures[2])
-        elseif !isempty(lastkey)
-            meta[lastkey] = rstrip(meta[lastkey]) * " " * strip(lines[j])      # continuation
-        end
-        j += 1
-    end
-    close == 0 && return (Dict{String,String}(), String(src))                  # unterminated → not front matter
-    rest = join(lines[(close + 1):end], '\n')
-    return (meta, String(rest))
-end
 
 # A static Typst table from a wire table spec (Dict with "columns"/"rows"). Capped.
 # Cell/header text inherits the document text colour, so it follows the theme; only the
@@ -482,9 +445,9 @@ sets the code-listing font size, or `"hidden"` to omit source entirely (also hon
 PDF, ECharts SVG). `@bind` controls are omitted by default (a PDF is a static snapshot);
 set `include_params=true` to show them frozen to their current values as a parameter strip.
 
-If the first markdown cell opens with a `---`-fenced front-matter block, its
-title/subtitle/author/date/abstract render as an academic title block (the title overrides
-the filename) and the remainder of that cell becomes normal body text.
+Document metadata is authored as role-tagged cells (`#%% md id=… title` / `abstract` /
+`bibliography`): the title/abstract are hoisted into an academic title block. With no `title`
+cell the document title falls back to the first markdown H1 (then the notebook filename).
 """
 function export_pdf(nb::LiveNotebook; kwargs...)
     dir = _build_typst_project(nb; kwargs...)
@@ -525,18 +488,7 @@ function _split_md_rules(src::AbstractString)
     parts = String[]
     buf = IOBuffer(); infence = false
     lines = split(src, '\n')
-    i = 1
-    # Skip a `---`-fenced front-matter block at the very top (first non-blank line is `---`).
-    let j = findfirst(l -> !isempty(strip(l)), lines)
-        if j !== nothing && strip(lines[j]) == "---"
-            k = findnext(l -> strip(l) == "---", lines, j + 1)
-            if k !== nothing
-                for l in lines[1:k]; print(buf, l, '\n'); end
-                i = k + 1
-            end
-        end
-    end
-    for ln in lines[i:end]
+    for ln in lines
         if occursin(r"^\s*(```|~~~)", ln); infence = !infence; print(buf, ln, '\n'); continue; end
         if !infence && occursin(r"^\s*([-*_])(\s*\1){2,}\s*$", ln)
             push!(parts, String(take!(buf))); continue
@@ -584,9 +536,9 @@ end
 # Metadata is authored as ordinary cells carrying a role tag, in natural document order, and each
 # export target interprets the role for placement. `title`/`subtitle`/`byline` come from a `:title`
 # cell's markdown (H1 / H2-H3 / first plain line); `:abstract` cell(s) supply the abstract; both are
-# hoisted into the title block and dropped from the body (their ids land in `skip`). For backward
-# compatibility, a legacy `---` YAML block on the first markdown cell is used when no `:title` cell
-# exists (its body remainder is returned as `yrest`). One resolver for PDF, slides, and HTML.
+# hoisted into the title block and dropped from the body (their ids land in `skip`). With no `:title`
+# cell, the document title falls back to the first markdown H1 (then the notebook filename). One
+# resolver for PDF, slides, and HTML.
 function _parse_title_cell(src)
     title = ""; subtitle = ""; byline = ""
     for ln in split(String(src), '\n')
@@ -605,31 +557,31 @@ end
 function report_frontmatter(report)
     cells = report.cells
     title = report.title; subtitle = ""; byline = ""; abstract = ""
-    skip = Set{String}(); yrest = nothing
-    firstmd = findfirst(c -> c.kind == MARKDOWN, cells)
+    skip = Set{String}()
     titlei = findfirst(c -> :title in c.flags, cells)
     if titlei !== nothing
         t, s, b = _parse_title_cell(cells[titlei].source)
         isempty(t) || (title = t); subtitle = s; byline = b
         push!(skip, cells[titlei].id)
-    elseif firstmd !== nothing
-        ym, rest = _parse_frontmatter(cells[firstmd].source)
-        if !isempty(ym)
-            title = get(ym, "title", title)
-            subtitle = get(ym, "subtitle", "")
-            byline = strip(join(filter(!isempty, [get(ym, "author", ""), get(ym, "date", "")]), " · "))
-            abstract = get(ym, "abstract", "")
-            yrest = rest
+    else
+        # No explicit `title` role tag → derive the document title from the FIRST markdown H1, so
+        # exports read the real title instead of the notebook filename. Non-destructive: the cell
+        # still renders in the body; tag a dedicated cell `title` to hoist a full title block.
+        for c in cells
+            c.kind == MARKDOWN || continue
+            m = match(r"(?m)^#[ \t]+(.+?)[ \t]*#*$", c.source)
+            m === nothing && continue
+            title = strip(m.captures[1]); break
         end
     end
     abscells = Cell[c for c in cells if :abstract in c.flags]
     if !isempty(abscells)
-        abstract = join((strip(c.source) for c in abscells), "\n\n")   # a role abstract wins over YAML
+        abstract = join((strip(c.source) for c in abscells), "\n\n")
         for c in abscells; push!(skip, c.id); end
     end
     bibcells = Cell[c for c in cells if :bibliography in c.flags]
-    has = titlei !== nothing || !isempty(strip(abstract)) || yrest !== nothing
-    return (; title, subtitle, byline, abstract, skip, bibcells, yrest, firstmd, has)
+    has = titlei !== nothing || !isempty(strip(abstract))
+    return (; title, subtitle, byline, abstract, skip, bibcells, has)
 end
 
 # Resolve `:bibliography` cells into Typst bib files written into the project dir, returning the
@@ -843,7 +795,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         print(io, _typst_preamble(nb.report.title; style = style, columns = cols,
                                   theme = theme, code = code, body = body, number = numoverride))
         # Role-tagged metadata (title / abstract) → academic title block spanning full width;
-        # the hoisted cells are then dropped from the body. Legacy YAML front-matter still works.
+        # the hoisted cells are then dropped from the body.
         cells = nb.report.cells
         fm = report_frontmatter(nb.report)
         citekeys = Set(e.key for e in bibliography_index(nb.report, dirname(abspath(nb.path))))
@@ -865,8 +817,8 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             c.id in fm.skip && continue               # hoisted into the title block above
             (:bibliography in c.flags) && continue    # rendered as #bibliography at the end, not raw
             if c.kind == MARKDOWN
-                md = (k == fm.firstmd && fm.yrest !== nothing) ? _md_for_typst(c, fm.yrest; citekeys = citekeys) : _md_for_typst(c; citekeys = citekeys)
-                isempty(strip(md)) && continue       # front-matter-only cell leaves nothing to render
+                md = _md_for_typst(c; citekeys = citekeys)
+                isempty(strip(md)) && continue       # empty markdown cell leaves nothing to render
                 write(joinpath(dir, base * ".md"), md)
                 print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
             else
@@ -925,7 +877,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
         print(io, _typst_preamble_slides(nb.report.title; theme = theme, ratio = ratio, code = code))
         cells = nb.report.cells
         # Role-tagged metadata → a dedicated title slide (metablock); hoisted title/abstract cells
-        # are dropped from the body slides. Legacy YAML front-matter renders its body remainder.
+        # are dropped from the body slides.
         fm = report_frontmatter(nb.report)
         citekeys = Set(e.key for e in bibliography_index(nb.report, dirname(abspath(nb.path))))
         arg(s) = isempty(strip(s)) ? "none" : "\"" * _typ_str(s) * "\""
@@ -940,10 +892,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
             isempty(frags) && continue
             print(io, "#slide[\n")
             for (fi, frag) in enumerate(frags)
-                # Render the legacy YAML cell's BODY (sans the YAML block) when it appears in a slide.
-                f = (fm.yrest !== nothing && fm.firstmd !== nothing && frag[1] === cells[fm.firstmd] &&
-                     frag[2] === nothing) ? (frag[1], fm.yrest) : frag
-                _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
+                _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, frag; theme = theme,
                                   show_source = show_source, include_params = include_params, citekeys = citekeys)
             end
             print(io, "]\n\n")

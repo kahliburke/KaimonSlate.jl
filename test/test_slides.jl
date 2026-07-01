@@ -19,8 +19,8 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         @test NS._first_heading_depth("```\n## fenced\n```\n### real") == 3   # fenced code skipped
         @test length(NS._split_md_rules("a\n---\nb\n---\nc")) == 3
         @test length(NS._split_md_rules("plain text, no rule")) == 1
-        # A leading YAML front-matter block's `---` fences are NOT slide breaks.
-        @test length(NS._split_md_rules("---\ntitle: x\n---\nbody")) == 1
+        # A leading `---` is an ordinary thematic break now (no YAML front matter): break, then body.
+        @test length(NS._split_md_rules("---\nbody")) == 2
     end
 
     @testset "segmentation: headings / slide tag / notes / collapsed" begin
@@ -100,7 +100,7 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
     end
 
     @testset "slide-deck PDF compiles" begin
-        nb = _mknb("#%% md id=t\n---\ntitle: Deck\n---\nhi\n\n#%% md id=s\n## One\n\n- a\n- b\n")
+        nb = _mknb("#%% md id=t\n# Deck\nhi\n\n#%% md id=s\n## One\n\n- a\n- b\n")
         # Typst fetches registry packages on first compile; guard on network/availability so the
         # suite stays green offline — but assert real bytes whenever it does run.
         pdf = try

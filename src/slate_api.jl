@@ -192,9 +192,9 @@ const SLATE_API = SlateApiEntry[
           • `bibliography` — its body is either embedded BibTeX (`@book{key, …}`) OR one-or-more `.bib`
             file paths (one per line), resolved relative to the notebook and copied into the export.
             Inline + external can be mixed; in the live UI it renders an adaptive references card.
-        A legacy `---` YAML front-matter block on the first markdown cell still works. Per-notebook
-        citation style is `bibstyle` (Settings → Citation style): ieee/apa/chicago-author-date/mla/
-        nature/vancouver/harvard."""),
+        With no `title` cell, the document title falls back to the first markdown H1 (then the
+        filename). Per-notebook citation style is `bibstyle` (Settings → Citation style):
+        ieee/apa/chicago-author-date/mla/nature/vancouver/harvard."""),
     SlateApiEntry("citation", "Document", "[@key] · [@key, p. 7] · [@a; @b] · @key (prose)",
         """Cite a bibliography key in MARKDOWN prose. Forms: `[@key]` (normal) · `[@key, pp. 33-35]`
         (page/locator) · `[@a; @b]` (multiple) · bare `@key` (prose form: "Knuth (1984)" — for an

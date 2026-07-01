@@ -19,7 +19,7 @@ const _EXPORT_CSS = """
 .exp-abstract{max-width:680px;margin:16px auto 0;text-align:left;font-size:.92rem;font-style:italic;
   color:var(--text);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:12px 0;}
 .exp-abslabel{display:block;font-style:normal;font-size:.7rem;text-transform:uppercase;letter-spacing:.09em;
-  font-weight:700;color:var(--accent);margin-bottom:5px;text-align:center;}
+  font-weight:700;color:var(--accent);margin-bottom:5px;text-align:left;}
 .exp-meta{color:var(--dim);font-size:.78rem;font-family:monospace;margin-bottom:24px;
   border-bottom:1px solid var(--border);padding-bottom:14px;}
 .exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
@@ -116,7 +116,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
               "<style>", _EXPORT_CSS, "</style></head><body><article class=\"export\">")
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
-        # body (mirrors the PDF/Typst export). Legacy YAML front-matter still works via the resolver.
+        # body (mirrors the PDF/Typst export).
         fm = report_frontmatter(nb.report)
         print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
               _esc(fm.title), "</h1>")

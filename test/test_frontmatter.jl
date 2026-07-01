@@ -1,5 +1,5 @@
 # Document metadata as role-tagged cells: the `title`/`abstract`/`bibliography` roles, the
-# `report_frontmatter` resolver (role cells + legacy YAML fallback), cell_json role booleans, and
+# `report_frontmatter` resolver (role cells + first-H1 title fallback), cell_json role booleans, and
 # export hoisting (title/abstract lifted into the title block and dropped from the body).
 using ReTest
 using KaimonSlate
@@ -54,19 +54,17 @@ x = 1
         @test fm.has
     end
 
-    @testset "legacy YAML front-matter still resolves" begin
-        yaml = "#%% md id=a\n---\ntitle: Legacy\nauthor: Me\nabstract: Older notebooks keep working.\n---\nIntro body.\n"
-        fm = NS.report_frontmatter(RE.parse_report(yaml))
-        @test fm.title == "Legacy"
-        @test occursin("Me", fm.byline)
-        @test occursin("keep working", fm.abstract)
-        @test fm.yrest !== nothing && occursin("Intro body", fm.yrest)   # body remainder still rendered
-        @test isempty(fm.skip)                                            # YAML cell is NOT hoisted (its body stays)
+    @testset "no :title cell → title falls back to the first markdown H1 (not the filename)" begin
+        fm = NS.report_frontmatter(
+            RE.parse_report("#%% md id=intro\n# Real Title\nsome intro\n\n#%% code id=c\n1+1\n"; title = "notebook-file"))
+        @test fm.title == "Real Title"        # derived from the H1, not the filename
+        @test isempty(fm.skip)                # non-destructive: the cell still renders in the body
+        @test !fm.has                         # no title/abstract role, so no dedicated title block
     end
 
-    @testset "no metadata → plain title from report" begin
-        fm = NS.report_frontmatter(RE.parse_report("#%% md id=a\n## Just a heading\n"; title = "Plain"))
-        @test fm.title == "Plain"
+    @testset "no heading at all → last-resort filename" begin
+        fm = NS.report_frontmatter(RE.parse_report("#%% md id=a\n## Just a subheading\n"; title = "Plain"))
+        @test fm.title == "Plain"             # no H1 anywhere → keep the report/filename title
         @test !fm.has
         @test isempty(fm.skip)
     end
