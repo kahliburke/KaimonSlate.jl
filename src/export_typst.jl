@@ -665,6 +665,36 @@ end
 
 const _BibEntry = NamedTuple{(:key, :title, :author, :year),NTuple{4,String}}
 
+# LaTeX accent command → the Unicode COMBINING mark it puts on the next letter; NFC then composes
+# (`c`+◌̧ → ç, `e`+◌́ → é). Covers the accents BibTeX author/title fields actually use.
+const _TEX_ACCENT = Dict{Char,Char}(
+    '\'' => '́', '`' => '̀', '^' => '̂', '"' => '̈', '~' => '̃',   # acute grave circumflex diaeresis tilde
+    '='  => '̄', '.' => '̇', 'c' => '̧', 'v' => '̌', 'u' => '̆',   # macron dot-above cedilla caron breve
+    'H'  => '̋', 'k' => '̨', 'r' => '̊', 'b' => '̱', 'd' => '̣')    # double-acute ogonek ring macron-below dot-below
+# Standalone LaTeX letter commands (no accent argument) → their Unicode letter. Multi-letter first so
+# `\ss` isn't split as `\s`+`s`.
+const _TEX_LETTER = ["ss" => "ß", "aa" => "å", "AA" => "Å", "ae" => "æ", "AE" => "Æ", "oe" => "œ",
+    "OE" => "Œ", "o" => "ø", "O" => "Ø", "l" => "ł", "L" => "Ł", "i" => "ı", "j" => "ȷ"]
+
+_tex_accent_sub(m::AbstractString) =
+    (mm = match(r"\\([`'^\"~=.cvuHkrbd])\s*\{?\s*([A-Za-z])\}?", m);
+     mm === nothing ? m : Base.Unicode.normalize(string(mm.captures[2], _TEX_ACCENT[mm.captures[1][1]]), :NFC))
+
+# Decode the common LaTeX accent/letter macros a BibTeX field carries (`Ko\c{c}` → `Koç`, `\'{e}`/`\'e`
+# → `é`, `{\ss}` → `ß`) and drop the case-protecting braces (`{M}ontgomery` → `Montgomery`). Best-effort
+# and used ONLY for the live card / label / autocomplete — the exported `.bib` keeps the raw source for
+# the CSL engine (which does its own decoding).
+function _delatex(s::AbstractString)
+    str = String(s)
+    (occursin('\\', str) || occursin('{', str)) || return str          # fast path: plain ASCII/Unicode
+    str = replace(str, r"\\[`'^\"~=.cvuHkrbd]\s*\{?\s*[A-Za-z]\}?" => _tex_accent_sub)
+    for (cmd, ch) in _TEX_LETTER
+        str = replace(str, Regex("\\\\" * cmd * "(?![A-Za-z])") => ch)  # \o \ss … (no trailing letter)
+    end
+    str = replace(str, r"\\([&%_#\$])" => s"\1")                        # \& \% \_ \# \$ → literal
+    return replace(str, r"[{}]" => "")                                  # drop remaining protective braces
+end
+
 # Parse BibTeX entries from a string — best-effort (not a full parser; keys are exact, fields
 # snipped) — for citation autocomplete, the card, and the live author-date label.
 function _parse_bibtex_entries(text::AbstractString)
@@ -672,9 +702,17 @@ function _parse_bibtex_entries(text::AbstractString)
     for part in split(String(text), r"(?=@\w+\s*\{)")
         m = match(r"^@\w+\s*\{\s*([^,\s]+)", part)
         m === nothing && continue
-        # Braced/quoted value (real .bib files brace their fields), else a bare token (e.g. year = 1984).
-        fld(n) = (mm = match(Regex(n * raw"\s*=\s*(?:[{\"]([^}\"\n]*)|(\d[\w\-]*))", "i"), part);
-                  mm === nothing ? "" : String(strip(something(mm.captures[1], mm.captures[2]))))
+        # A braced value with ARBITRARILY nested braces (a recursive subpattern — `{\c{C}}` nests two
+        # deep, so a fixed one-level match would truncate it), else a quoted value or a bare token
+        # (`year = 1984`). LaTeX-decoded for display.
+        function fld(n)
+            mb = match(Regex(n * raw"\s*=\s*(\{(?:[^{}]|(?1))*\})", "i"), part)
+            mb === nothing || return _delatex(strip(chop(mb.captures[1]; head = 1, tail = 1)))   # drop outer { }
+            mq = match(Regex(n * raw"\s*=\s*\"([^\"\n]*)\"", "i"), part)
+            mq === nothing || return _delatex(strip(mq.captures[1]))
+            mn = match(Regex(n * raw"\s*=\s*(\d[\w\-]*)", "i"), part)
+            mn === nothing ? "" : _delatex(strip(mn.captures[1]))
+        end
         push!(out, (key = String(m.captures[1]), title = fld("title"), author = fld("author"), year = fld("year")))
     end
     return out

@@ -142,6 +142,16 @@ x = 1
         @test idx[1].author == "Knuth" && idx[1].title == "TeX"
         file, n, es = NS.bib_cell_info(r.cells[1], "/tmp")
         @test file == "" && n == 2                      # embedded → no external file
+        # LaTeX accent macros + case-protecting braces are decoded for the live card / label, and a
+        # nested `{c}` doesn't truncate the field (the reported "Ko\\c{c" bug).
+        acc = NS._parse_bibtex_entries(
+            raw"@inproceedings{koc1996, author={Ko\c{c}, {\c{C}}etin Kaya and Acar, Tolga}, title={Analyzing and Comparing {M}ontgomery Multiplication}, year={1996}}")
+        @test length(acc) == 1
+        @test acc[1].author == "Koç, Çetin Kaya and Acar, Tolga"
+        @test acc[1].title == "Analyzing and Comparing Montgomery Multiplication"
+        @test NS._author_year_label(acc[1].author, acc[1].year) == "Koç et al., 1996"
+        @test NS._delatex(raw"Erd\H{o}s, P\'al, {\o}, {\ss}") == "Erdős, Pál, ø, ß"
+        @test NS._delatex("plain ASCII") == "plain ASCII"   # fast path unchanged
         # state_json ships the key list for [@-autocomplete; the cell renders a card, not raw BibTeX
         nb = _mknb("#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}}\n")
         sj = NS.state_json(nb)
