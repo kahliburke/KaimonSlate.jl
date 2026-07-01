@@ -371,11 +371,17 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = tr
         pushurl = "https://x-access-token:$token@github.com/$repo.git"
         ok, log = _git_run(dir, `git push --force $pushurl gh-pages`)
         ok || error("git push failed: $(replace(log, token => "***"))")
-        # Enable Pages from gh-pages/ (best-effort: 409 = already enabled). The `-f` values carry `[]`,
-        # which must reach gh as literal args, so interpolate them as variables (no shell parsing).
+        # Enable Pages from gh-pages/. The `-f` values carry `[]`, which must reach gh as literal args,
+        # so interpolate them as variables (no shell parsing). Already-enabled (409) counts as success;
+        # a plan/visibility rejection (422 — Pages needs a PUBLIC repo on the free plan) is surfaced.
         srcbranch = "source[branch]=gh-pages"; srcpath = "source[path]=/"; pagesep = "repos/$repo/pages"
-        _git_run(dir, `$gh api -X POST $pagesep -f $srcbranch -f $srcpath`)
-        return (; url = "https://$owner.github.io/$name/", repo = String(repo), created)
+        already = _gh_ok(`$gh api $pagesep`)
+        pok, plog = already ? (true, "") : _git_run(dir, `$gh api -X POST $pagesep -f $srcbranch -f $srcpath`)
+        pagesError = pok ? "" : (occursin("does not support GitHub Pages", plog) ?
+            "GitHub Pages isn't available for this repo — private Pages needs GitHub Pro/Team; on a free plan the repo must be PUBLIC." :
+            strip(replace(plog, r"\s+" => " ")))
+        return (; url = "https://$owner.github.io/$name/", repo = String(repo), created,
+                pagesEnabled = pok, pagesError)
     finally
         rm(dir; recursive = true, force = true)
     end

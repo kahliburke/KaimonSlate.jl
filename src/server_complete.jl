@@ -508,7 +508,8 @@ function _make_router(h::Hub)
         try
             r = publish_site(nb, String(repo); private = get(b, "private", true) === true,
                              theme = get(b, "theme", "dark"))
-            return _json(Dict("url" => r.url, "repo" => r.repo, "created" => r.created))
+            return _json(Dict("url" => r.url, "repo" => r.repo, "created" => r.created,
+                              "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError))
         catch e
             return HTTP.Response(500, "Publish failed: " * sprint(showerror, e))
         end

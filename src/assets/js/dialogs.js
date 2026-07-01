@@ -4,17 +4,21 @@ function _modalClose(v) {
   if (_modalResolve) { const r = _modalResolve; _modalResolve = null;
     document.getElementById('modalbg').classList.remove('show'); r(v); }
 }
-function dlg(message, buttons) {
+// `opts.html` = true renders `message` as HTML (caller must supply trusted/escaped markup); default is
+// safe textContent. `opts.buttons` on a button entry closes with that value.
+function dlg(message, buttons, opts) {
   return new Promise(resolve => {
     _modalResolve = resolve;
-    const row = document.getElementById('modalrow');
-    document.getElementById('modalmsg').textContent = message; row.innerHTML = '';
+    const row = document.getElementById('modalrow'), msgEl = document.getElementById('modalmsg');
+    if (opts && opts.html) msgEl.innerHTML = message; else msgEl.textContent = message;
+    row.innerHTML = '';
     buttons.forEach(b => { const el = document.createElement('button'); el.textContent = b.label;
       if (b.cls) el.className = b.cls; el.onclick = () => _modalClose(b.value); row.appendChild(el); });
     document.getElementById('modalbg').classList.add('show');
     const pr = row.querySelector('.primary') || row.lastChild; if (pr) pr.focus();
   });
 }
+const _escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const confirmDark = (msg, ok, cls) => dlg(msg, [{ label: 'Cancel', value: false }, { label: ok || 'OK', value: true, cls: cls || 'primary' }]);
 const alertDark = msg => dlg(msg, [{ label: 'OK', value: true, cls: 'primary' }]);
 function showLoading(m) { document.getElementById('lmsg').textContent = m || 'Working…'; document.getElementById('loading').classList.add('show'); }
@@ -159,7 +163,8 @@ async function publishSite() {
   let msg;
   if (!pf.exists) {
     msg = 'Repo ' + repo + ' does not exist.\n\nA NEW ' + (isPrivate ? 'private' : 'public') +
-      ' repo will be created, and the site pushed to its gh-pages branch.';
+      ' repo will be created, and the site pushed to its gh-pages branch.' +
+      (isPrivate ? '\n\n⚠ GitHub Pages needs a PUBLIC repo on the free plan (private Pages requires GitHub Pro). Uncheck “private” to serve the site.' : '');
   } else {
     msg = 'Repo ' + repo + ' exists (' + (pf.visibility || 'unknown') + ').\n\n' +
       (pf.hasGhPages ? '⚠ Its gh-pages branch will be FORCE-PUSHED — any existing published site there is overwritten.\n'
@@ -179,8 +184,18 @@ async function publishSite() {
   if (err) { await alertDark('Publish failed: ' + err); return; }
   if (result.error) { await alertDark('Publish failed:\n' + result.error); return; }
   localStorage.setItem('slate_siterepo', repo);
-  await alertDark('Published ✓\n\n' + result.url + '\n\n' + (result.created ? 'Repo created. ' : '') +
-    'GitHub Pages may take ~1 minute to go live on the first publish.');
+  const link = '<a href="' + _escHtml(result.url) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(result.url) + '</a>';
+  if (result.pagesEnabled === false) {
+    // The site was pushed, but GitHub Pages isn't serving it (usually: private repo on the free plan).
+    await dlg('⚠ Pushed to <code>gh-pages</code>, but GitHub Pages could not be enabled:<br><br>' +
+      _escHtml(result.pagesError || 'unknown reason') + '<br><br>Once Pages is available it will serve at ' + link + '.',
+      [{ label: 'OK', value: true, cls: 'primary' }], { html: true });
+    return;
+  }
+  const v = await dlg('Published ✓<br><br>' + link + '<br><br>' + (result.created ? 'Repo created. ' : '') +
+    'GitHub Pages may take ~1 minute to go live on the first publish.',
+    [{ label: 'Close', value: false }, { label: 'Open site', value: 'open', cls: 'primary' }], { html: true });
+  if (v === 'open') window.open(result.url, '_blank', 'noopener');
 }
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
