@@ -99,6 +99,35 @@ end
         @test qat(a, 1, 1, 1) == 0x00 && qat(a, 3, 1, 1) == 0xff
     end
 
+    @testset "kind=:image packs RGBA8 frames, no colormap" begin
+        nt(r, g, b) = (r = r, g = g, b = b)                     # duck-typed colorant, 0–1 channels
+        red   = fill(nt(1.0, 0.0, 0.0), 2, 2)
+        green = fill(nt(0.0, 1.0, 0.0), 2, 2)
+        a = animate([red, green]; kind = :image, fps = 10)
+        @test a.manifest["kind"] == "image"
+        @test a.manifest["shape"] == [2, 2, 2]
+        @test a.manifest["channels"] == 4
+        @test length(a.frames) == 2 * 2 * 2 * 4
+        @test (a.frames[1], a.frames[2], a.frames[3], a.frames[4]) == (0xff, 0x00, 0x00, 0xff)   # frame1 px1 = red
+        @test (a.frames[17], a.frames[18], a.frames[19]) == (0x00, 0xff, 0x00)                    # frame2 px1 = green
+        @test !isempty(a.lut)                                    # unused but non-empty (blob-store contract)
+    end
+
+    @testset "kind=:image accepts raw H×W×3 arrays" begin
+        f1 = zeros(UInt8, 2, 2, 3); f1[1, 1, :] = [10, 20, 30]
+        a = animate([f1, f1]; kind = :image)
+        @test (a.frames[1], a.frames[2], a.frames[3]) == (0x0a, 0x14, 0x1e)
+    end
+
+    @testset "overlay: one entry per frame, points carry (x,y,id)" begin
+        a = animate([Float64[0 1], Float64[1 0]]; overlay = [[(1.0, 2.0, 5)], [(3.0, 4.0)]])
+        @test a.manifest["overlay"] == [[[1.0, 2.0, 5]], [[3.0, 4.0, 0]]]   # missing id defaults to 0
+    end
+
+    @testset "overlay length mismatch errors" begin
+        @test_throws ArgumentError animate([Float64[0 1], Float64[1 0]]; overlay = [[(1.0, 2.0)]])
+    end
+
     @testset "argument errors" begin
         @test_throws ArgumentError animate(Matrix{Float64}[])                 # empty
         @test_throws ArgumentError animate([Float64[0 1]]; kind = :line)      # v1 heatmap only
