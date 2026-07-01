@@ -115,6 +115,18 @@ x = 1
         # GFM table helper
         @test occursin("| a | b |", NS._md_table(Dict("columns" => ["a", "b"], "rows" => [[1, 2]])))
         @test NS._first_words("# A **bold** title here now", 3) == "A bold title…"
+        # Citations render to their in-text form (not raw [@key]) + a References section; figure refs → "Figure N".
+        cnb = _mknb("#%% md id=body\nSee [@knuth1984, p. 7] and [@fig:x].\n\n" *
+                    "#%% code id=f\n1\n#%% md id=cap for=f label=fig:x caption\nA figure.\n\n" *
+                    "#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}, year={1984}}\n")
+        cf = cnb.report.cells[findfirst(x -> x.id == "f", cnb.report.cells)]
+        cf.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[1])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        cmd = NS.export_markdown(cnb)
+        @test occursin("[1, p. 7]", cmd)                     # numeric cite with locator (ieee default)
+        @test !occursin("[@knuth1984", cmd)                  # no raw citation left
+        @test occursin("Figure 1", cmd) && !occursin("[@fig:x]", cmd)   # figure cross-ref rendered
+        @test occursin("## References", cmd) && occursin("1. Knuth. TeX. 1984.", cmd)
+        @test occursin("![Figure 1](data:image/png", cmd)    # meaningful image alt text
     end
 
     @testset "figure captions: numbering + binding (flow + explicit)" begin

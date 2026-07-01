@@ -234,32 +234,86 @@ function _md_table(spec)
     return String(take!(io))
 end
 
+# Markdown citation context: `citekeys`, a plain-text `emit` that renders each `[@key]` in the
+# notebook's bibstyle (numeric `[2]` / author-date `(Knuth, 1984)`, honouring a `, p. 7` locator), and
+# the data for a References section. `nothing` when the notebook has no bibliography.
+function _md_cite_ctx(nb::LiveNotebook)
+    bi = bibliography_index(nb.report, dirname(abspath(nb.path)))
+    isempty(bi) && return nothing
+    numeric = _is_numeric_style(get(nb.report.meta, "bibstyle", "ieee"))
+    citekeys = Set(e.key for e in bi)
+    numbers = citation_numbers(nb.report, citekeys)         # first-citation order (numeric labels + ordering)
+    label = Dict{String,String}(e.key => (numeric ? string(get(numbers, e.key, 0)) : _author_year_label(e.author, e.year)) for e in bi)
+    emit = (key, sup, _form) -> begin
+        lab = get(label, String(key), String(key))
+        inner = isempty(strip(sup)) ? lab : string(lab, ", ", strip(sup))
+        numeric ? string("[", inner, "]") : string("(", inner, ")")
+    end
+    return (; citekeys, emit, bi, numeric, numbers, cited = cited_citation_keys(nb.report))
+end
+
+# The "## References" section for markdown export. Numeric styles list cited entries in citation order
+# (`N. Author. Title. Year.`); author-date lists all entries alphabetically (`Author (Year). Title.`).
+function _md_references(ctx)
+    ctx === nothing && return ""
+    io = IOBuffer(); println(io, "## References\n")
+    if ctx.numeric
+        cited = [e for e in ctx.bi if haskey(ctx.numbers, e.key)]
+        sort!(cited; by = e -> ctx.numbers[e.key])
+        for e in cited
+            parts = filter(!isempty, [strip(e.author), strip(e.title), strip(e.year)])
+            println(io, ctx.numbers[e.key], ". ", join(parts, ". "), ".")
+        end
+    else
+        for e in sort(ctx.bi; by = e -> lowercase(_author_year_label(e.author, e.year)))
+            yr = isempty(strip(e.year)) ? "" : string(" (", strip(e.year), ")")
+            head = isempty(strip(e.author)) ? strip(e.title) : string(strip(e.author), yr, ". ", strip(e.title))
+            println(io, "- ", head, ".")
+        end
+    end
+    return String(take!(io))
+end
+
 """
-    export_markdown(nb; include_source=true) -> String
+    export_markdown(nb; include_source=true, outputs="all") -> String
 
 Serialize the notebook to GitHub-flavored Markdown for copy-paste (Discourse / Slack / GitHub /
-Obsidian / docs). Prose rides verbatim; code cells become fenced ```julia blocks; text outputs are
-fenced; figures / frozen charts embed as `![](data:image/…;base64,…)`; tables become GFM tables. The
-title/abstract lead. Data-URI images are self-contained but not every host renders them — for
-Discourse, upload the standalone `.jl` (+ a PNG/SVG) alongside.
+Obsidian / docs). Prose rides verbatim; `[@cite]` and `[@fig:label]` render to their in-text form
+(per the notebook's bibstyle) with a trailing References section; code cells become fenced ```julia
+blocks; text outputs are fenced; figures / frozen charts embed as `![Figure N](data:image/…;base64,…)`;
+tables become GFM tables. Data-URI images are self-contained but not every host renders them (GitHub
+strips them) — for those, upload the standalone `.jl` (+ a PNG/SVG) alongside.
 """
 function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs::AbstractString = "all")
     texts = _outputs_text_ok(outputs); anyout = _outputs_any(outputs)
     lock(nb.lock) do
         fm = report_frontmatter(nb.report)
         figidx = figure_index(nb.report)
+        citectx = _md_cite_ctx(nb)
+        citekeys = citectx === nothing ? Set{String}() : citectx.citekeys
+        citemit = citectx === nothing ? _cite_literal : citectx.emit
+        # figure cell id → its bound caption's number (for image alt text)
+        fignum_of = Dict{String,Int}()
+        for (capid, figid) in figidx.capfor
+            (isempty(figid) || !haskey(figidx.numbers, capid)) && continue
+            get!(fignum_of, figid, figidx.numbers[capid])
+        end
+        # Rewrite `[@cite]`/`[@fig:label]` in a prose block to their markdown in-text form.
+        rw(s) = _rewrite_citations(s, citekeys; emit = citemit, figrefs = figidx.labels, figemit = _fig_text)
         io = IOBuffer()
         isempty(strip(fm.title)) || println(io, "# ", fm.title, "\n")
         isempty(strip(fm.subtitle)) || println(io, "### ", fm.subtitle, "\n")
         isempty(strip(fm.byline)) || println(io, "*", fm.byline, "*\n")
         isempty(strip(fm.abstract)) ||
-            println(io, "> **Abstract.** ", replace(strip(fm.abstract), "\n" => "\n> "), "\n")
+            println(io, "> **Abstract.** ", replace(strip(rw(fm.abstract)), "\n" => "\n> "), "\n")
         for c in nb.report.cells
             (:collapsed in c.flags) && continue
             c.id in fm.skip && continue
-            (:bibliography in c.flags) && continue
+            if :bibliography in c.flags        # rendered as the References section below, not raw BibTeX
+                continue
+            end
             if c.kind == MARKDOWN
-                s = strip(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source)
+                s = strip(rw(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source))
                 isempty(s) && continue
                 haskey(figidx.numbers, c.id) ? println(io, "**Figure ", figidx.numbers[c.id], ".** ", s, "\n") :
                                                println(io, s, "\n")
@@ -272,10 +326,11 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
             (o === nothing || !anyout) && continue
             texts && o.exception !== nothing && println(io, "```\n", rstrip(o.exception), "\n```\n")
             texts && !isempty(strip(o.stdout)) && println(io, "```\n", rstrip(o.stdout), "\n```\n")
+            alt = haskey(fignum_of, c.id) ? string("Figure ", fignum_of[c.id]) : "figure"   # meaningful alt when a data-URI won't render
             imgs = 0
             for ch in o.display
                 if startswith(ch.mime, "image/")
-                    println(io, "![](data:", ch.mime, ";base64,", Base64.base64encode(ch.data), ")\n"); imgs += 1
+                    println(io, "![", alt, "](data:", ch.mime, ";base64,", Base64.base64encode(ch.data), ")\n"); imgs += 1
                 elseif ch.mime == "text/latex"
                     println(io, "\$\$", strip(String(copy(ch.data))), "\$\$\n")
                 end
@@ -285,13 +340,15 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
             if !isempty(_echarts_specs(c))
                 png = _snapshot(nb.id, c.id)
                 png === nothing ? println(io, "*[chart — open in a browser and re-export to capture]*\n") :
-                    println(io, "![chart](data:image/png;base64,", Base64.base64encode(png), ")\n")
+                    println(io, "![", alt, "](data:image/png;base64,", Base64.base64encode(png), ")\n")
             end
             for spec in _table_specs(c)
-                t = _md_table(spec); isempty(t) || println(io, t)
+                t = _md_table(spec); isempty(t) || println(io, t, "")
             end
         end
-        return String(take!(io))
+        refs = _md_references(citectx)
+        isempty(strip(refs)) || print(io, refs)
+        return strip(String(take!(io))) * "\n"
     end
 end
 
