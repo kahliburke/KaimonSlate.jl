@@ -25,19 +25,66 @@ const SLATE_API = SlateApiEntry[
         variable re-runs when that variable changes."""),
 
     # ── Charts ───────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("echart", "Charts", "echart(kind, x, y; title, smooth, …) | echart(series...; …) | echart(; xAxis=…, series=…)",
-        """Slate's ECharts chart DSL (NOT Makie's `series`). Renders live and animates in place on
-        updates. Three forms — Express (one series), Composable (many `series(...)`), and Raw (the
-        full ECharts option surface). Kinds: line bar scatter area pie heatmap candlestick radar
-        boxplot gauge funnel … (plus any raw type).
+    SlateApiEntry("echart", "Charts", "echart(kind, x, y; title, smooth, yAxis=(type=:log,), …) | echart(series...; …) | echart(; xAxis=…, series=…)",
+        """Slate's ECharts chart DSL (NOT Makie's `series`). Returns an `EChart`; RETURN it from a cell
+        to render a live, interactive chart (zoom/pan/hover) that animates IN PLACE on reactive updates.
+        Everything is thin sugar over the raw ECharts option dict, so the ENTIRE ECharts surface stays
+        reachable — nothing is gated.
+
+        THREE FORMS
         ```julia
-        echart(:line, x, y; title="f", smooth=true)
-        echart(series(:line, x, a; name="a"), series(:bar, x, b; name="b"); legend=true)
-        echart(; xAxis=(type=:category, data=x), series=[(type=:bar, data=b)], dataZoom=[(type=:slider,)])
+        echart(:line, x, y; title="…", smooth=true)                      # Express — one series, axes inferred
+        echart(series(:line, x, a; name="a"), series(:bar, x, b; name="b"); legend=true)   # Composable — many
+        echart(; xAxis=(type=:category, data=x), series=[(type=:bar, data=b)], dataZoom=[(type=:slider,)])  # Raw
+        ```
+
+        KINDS + data shapes (Express positional args = `series` positional args)
+        - `:line` / `:bar` `(x, y)` — string x ⇒ category axis, numeric x ⇒ value axis
+        - `:area` `(x, y)` — line with a filled `areaStyle`
+        - `:scatter` `(x, y)`   ·   `:pie` `(labels, values)`
+        - `:heatmap` `(z::Matrix)` or `(xlabels, ylabels, z)` — adds category axes + a `visualMap`
+        - `:candlestick` `(dates, ohlc)` where `ohlc[i] = [open, close, low, high]`
+        - `:radar` `(indicators, values)` — `indicators = ["Sales"=>6500, …]`; values a vector, or
+          `["Allocated"=>[…], "Actual"=>[…]]` for several rings
+        - `:boxplot` `(categories, data)` — each `data[i]` is `[min,Q1,med,Q3,max]` OR raw samples (auto 5-number)
+        - any other ECharts type via `series(:kind; data=…, …)` — gauge, funnel, sankey, graph, tree, …
+
+        AXES & COMPONENTS — top-level, work in EVERY form (Express too). These kwargs go on the OPTION,
+        not the series: `xAxis yAxis grid dataZoom visualMap toolbox polar angleAxis radiusAxis radar geo
+        dataset calendar timeline singleAxis parallel parallelAxis graphic axisPointer`.
+        ```julia
+        echart(:line, x, y; yAxis=(type=:log,))                          # LOG axis (log-scaled Y)
+        echart(:bar,  x, y; grid=(left=70, right=20, containLabel=true))  # roomier plot area
+        echart(:line, x, y; dataZoom=[(type=:slider,)])                  # zoom/pan slider
+        echart(:scatter, x, y; visualMap=(min=0, max=1, dimension=1, calculable=true))
+        # Dual Y axes: give an array of axes + point a series at the 2nd:
+        echart(series(:line, x, a; name="L"), series(:line, x, b; name="R", yAxisIndex=1);
+               yAxis=[(name="L",), (name="R", type=:log)])
+        ```
+
+        SERIES STYLING — any OTHER kwarg (Express or `series`) is spliced into the series verbatim:
+        `smooth stack symbolSize step lineStyle itemStyle areaStyle label markLine markPoint markArea …`
+        ```julia
+        echart(:bar,  x, a; stack="total")                               # stacked bars
+        echart(:line, x, y; markLine=(data=[(type=:average,)],), symbolSize=6)
+        ```
+
+        DEFAULTS: dark theme + transparent bg (`theme=false` to opt out); `tooltip=true`; a `legend`
+        appears when ≥2 series are named (`legend=<spec>` to place it, `legend=false` to drop it);
+        `title="…"`. Reactive charts re-`setOption` (~300 ms transition; `animation=false` to snap).
+        Worked examples: `examples/echarts_dsl.jl`. See also `series`."""),
+    SlateApiEntry("series", "Charts", "series(kind, x, y; name, smooth, stack, symbolSize, …) -> EChartSeries",
+        """One series for the composable `echart(series(…), series(…); …)` form — combine different
+        kinds/axes in one chart. Same positional data shapes as `echart`'s Express kinds (`:line`/`:bar`/
+        `:area` `(x,y)`, `:scatter` `(x,y)`, `:pie` `(labels,vals)`, `:heatmap` `(z)`/`(xs,ys,z)`,
+        `:candlestick` `(dates,ohlc)`, `:radar` `(inds,vals)`, `:boxplot` `(cats,data)`; any other kind
+        via `series(:kind; data=…)`). `name=` labels it for the legend; every extra kwarg (`smooth`,
+        `stack`, `symbolSize`, `yAxisIndex`, `markLine`, `lineStyle`, …) splices into the series option.
+        ```julia
+        echart(series(:bar, x, a; name="obs", stack="t"),
+               series(:line, x, b; name="fit", smooth=true, yAxisIndex=1); legend=true,
+               yAxis=[(name="obs",), (name="fit", type=:log)])
         ```"""),
-    SlateApiEntry("series", "Charts", "series(kind, x, y; name, …) -> EChartSeries",
-        """One series for the composable `echart(series..., series...; …)` form. Combine different
-        kinds in one chart. `echart(series(:bar, x, a; name=\"a\"), series(:line, x, b; name=\"b\"))`."""),
 
     # ── Animation ────────────────────────────────────────────────────────────────────────────────
     SlateApiEntry("animate", "Animation", "animate(frames; kind=:heatmap, fps=30, colormap=:auto, clim=:global, transform, dither, x, y, title, loop, autoplay) -> Animation",
@@ -169,6 +216,24 @@ slate_api_version() = string(hash(slate_api_records()); base = 16)
 
 _api_categories() = unique(String[e.category for e in SLATE_API])
 
+# Resolve ONE Slate helper by exact name (case-insensitive; tolerant of a leading `@`). The docs UI's
+# drill-down / "Related" cross-references resolve a Slate helper's docs from THIS registry (the SSOT),
+# NOT from a live binding — a DSL helper like `Checkbox`/`@bind` is an injected constructor/macro with
+# no docstring, so a live `module_help` lookup returns "No documentation found". Returns the entry or
+# `nothing` (caller then falls back to live package help).
+function slate_api_entry(name::AbstractString)
+    n = lowercase(strip(String(name)))
+    isempty(n) && return nothing
+    for e in SLATE_API
+        lowercase(e.name) == n && return e
+    end
+    ns = lstrip(n, '@')
+    for e in SLATE_API
+        lowercase(lstrip(e.name, '@')) == ns && return e
+    end
+    return nothing
+end
+
 # Full reference (topic empty) or the matching entries (topic = a name/category/word). The full form
 # groups by category with signatures + docs; the filtered form returns the complete entry detail.
 function slate_api_reference(topic::AbstractString = "")
@@ -212,10 +277,14 @@ package docs). Full reference: `slate_api()`. Search any helper (incl. `@bind`, 
 Return the value to show — a number / String / DataFrame, a CairoMakie figure, `echart(…)`,
 `slate_table(df)`, or `animate(frames; …)`. `println` → stdout; a trailing `;` makes a cell quiet.
 
-## Charts — `echart` (Slate's ECharts DSL; NOT Makie's `series`)
-    echart(:line, x, y; title="…", smooth=true)            # kinds: line bar scatter area pie heatmap …
-    echart(series(:line, x, a), series(:bar, x, b); legend=true)
-    echart(; xAxis=(type=:category, data=x), series=[(type=:bar, data=b)])
+## Charts — `echart` (Slate's ECharts DSL; NOT Makie's `series`).  Full reference: `slate_api("echart")`
+    echart(:line, x, y; title="…", smooth=true)            # Express; kinds: line bar area scatter pie
+    #   heatmap(z|xs,ys,z) candlestick(dates,ohlc) radar(inds,vals) boxplot(cats,data) gauge funnel … (+ any raw type)
+    echart(:line, x, y; yAxis=(type=:log,))                # LOG axis. Top-level component kwargs (xAxis yAxis
+    #   grid dataZoom visualMap toolbox polar radar geo …) go on the OPTION even in Express; other kwargs style the series
+    echart(:bar, x, a; stack="total", markLine=(data=[(type=:average,)],))     # series styling passes through
+    echart(series(:line, x, a; name="a"), series(:bar, x, b; name="b"); legend=true)   # Composable — many series
+    echart(; xAxis=(type=:category, data=x), series=[(type=:bar, data=b)])     # Raw — full ECharts option surface
 
 ## Widgets — `@bind name Widget(…)`  (any cell that READS the var recomputes on change)
     @bind n Slider(1:100; label="n");  @bind on Toggle(true);  @bind which Radio(["sin"=>"sine"])

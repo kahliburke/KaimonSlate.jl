@@ -457,6 +457,14 @@ function _run_loop!(nb::LiveNotebook)
             _emit_pending(nb, pending)          # k/N pill: PENDING (stale+running); frontend adds done
             _eval_one!(nb, target)
         end
+        # Drained: any bare-`using` barrier cells have now run, so resolve their exports and rebuild
+        # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the
+        # "barrier" marking. Kept off the hot per-cell path — it fires once per drain and no-ops unless
+        # a NEW module got resolved.
+        if lock(nb.lock) do; ReportEngine.refine_usings!(nb.report, nb.kernel); end
+            lock(nb.lock) do; nb.version += 1; end
+            _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
+        end
     catch e
         @warn "slate async runner error" notebook = nb.id exception = (e, catch_backtrace())
     finally
@@ -605,6 +613,7 @@ include("server_agentsessions.jl")
 include("server_docs.jl")
 include("server_snapshots.jl")
 include("slate_api.jl")        # Slate notebook-API registry (SSOT for the api tool, search, prompt)
+include("echarts_docs.jl")     # curated ECharts option reference, mapped to the DSL, indexed for search
 include("server_export.jl")
 include("server_hub.jl")
 include("server_complete.jl")

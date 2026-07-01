@@ -106,6 +106,21 @@ _doc_html(doc) = (s = strip(String(doc)); isempty(s) ? "" : (try; markdown_html(
 # module_help record + a rendered `docHtml`. Powers the docs palette's ?Module drill-down +
 # cross-reference links. Best-effort: a missing kernel/binding yields an empty-ish record.
 function help_lookup(nb::LiveNotebook, name::AbstractString)
+    # A Slate helper (echart, @bind, Checkbox, animate, …) is documented in the SLATE_API registry, not
+    # as a package docstring — resolve it there FIRST so drill-down / "Related" chips show the real doc
+    # instead of "No documentation found" (the injected constructor/macro carries no docstring).
+    e = slate_api_entry(name)
+    if e !== nothing
+        doc = string("`", e.signature, "`\n\n", e.doc)
+        return Dict{String,Any}("name" => e.name, "module" => "Slate", "kind" => "slate",
+                                "doc" => doc, "exports" => Dict{String,Any}[], "docHtml" => _doc_html(doc))
+    end
+    # An ECharts option path (e.g. `yAxis.type`) — resolve from the curated registry, not a live binding.
+    ec = echarts_doc_entry(name)
+    if ec !== nothing
+        return Dict{String,Any}("name" => ec.path, "module" => "ECharts", "kind" => "echarts",
+                                "doc" => ec.doc, "exports" => Dict{String,Any}[], "docHtml" => _doc_html(ec.doc))
+    end
     rec = try
         ReportEngine.module_help(nb.kernel, nb.report, String(name))
     catch
@@ -171,7 +186,7 @@ end
 
 # Base/Core docs (if ever indexed) are relevant to every notebook — always in scope so a hard
 # module filter can never hide them. Stdlibs a notebook actually uses arrive via project_deps.
-const _UNIVERSAL_MODULES = String["Base", "Core", "Slate"]   # "Slate" = the injected notebook helpers
+const _UNIVERSAL_MODULES = String["Base", "Core", "Slate", "ECharts"]   # Slate = injected helpers; ECharts = curated option docs (echart is always available)
 
 "The package/module names in scope for `nb`: its project deps ∪ the packages its cells `using`,
 plus the universal Base/Core. Drives module-scoped doc search so the SHARED index only surfaces
@@ -195,6 +210,13 @@ function _autoindex!(nb::LiveNotebook)
         if get(_DOC_CACHE, "Slate", nothing) != slate_api_version()
             ns = index_docs!(slate_api_records())
             ns == 0 || (ensure_docs_fts!(); _doc_cache_put!("Slate", slate_api_version()))
+        end
+        # Curated ECharts option reference (module "ECharts"), mapped to the DSL — so a chart question
+        # ("logarithmic axis", "dataZoom", "markLine") surfaces the option AND how to reach it. Same
+        # version-cached path as the Slate helpers.
+        if get(_DOC_CACHE, "ECharts", nothing) != echarts_docs_version()
+            ne = index_docs!(echarts_doc_records())
+            ne == 0 || (ensure_docs_fts!(); _doc_cache_put!("ECharts", echarts_docs_version()))
         end
         want = Dict{String,String}()
         for d in (try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end)

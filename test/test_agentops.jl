@@ -95,10 +95,39 @@ const NS = KaimonSlate.NotebookServer
             one = NS.slate_api_reference("animate")
             @test occursin("animate", one) && !occursin("## Charts", one)     # filtered detail, not full ref
             @test occursin("No Slate API entry", NS.slate_api_reference("zzzznope"))
+            # The echart DSL must be documented in full AND teach the non-obvious bits — the three forms,
+            # the top-level-component routing (log axis, dataZoom, visualMap), and per-kind data shapes —
+            # so `slate.api`/`search_docs` surface them to agents instead of leaving them to grep source.
+            ec = NS.slate_api_reference("echart")
+            @test occursin("Express", ec) && occursin("Composable", ec) && occursin("Raw", ec)
+            @test occursin("type=:log", ec) || occursin("type = :log", ec)   # the log-axis pattern
+            @test occursin("dataZoom", ec) && occursin("visualMap", ec)      # components documented
+            @test occursin("candlestick", ec) && occursin("boxplot", ec)     # per-kind data shapes
+            @test occursin("type=:log", NS.slate_api_reference("log axis")) ||    # searchable by concept
+                  occursin("echart", NS.slate_api_reference("log axis"))
             recs = NS.slate_api_records()
             @test !isempty(recs) && all(r -> r["module"] == "Slate", recs)
             @test any(r -> r["name"] == "@bind", recs) && any(r -> r["name"] == "animate", recs)
             @test !isempty(NS.slate_api_version())
+            # Drill-down / "Related" resolution: a Slate helper resolves from the registry (real doc),
+            # NOT a live binding (which for a DSL constructor/macro yields "No documentation found").
+            @test NS.slate_api_entry("Checkbox") !== nothing && NS.slate_api_entry("nope_zzz") === nothing
+            @test NS.slate_api_entry("bind") === NS.slate_api_entry("@bind")   # tolerant of a leading @
+            h = NS.help_lookup(nb, "Checkbox")
+            @test h["module"] == "Slate" && h["kind"] == "slate"
+            @test !isempty(h["docHtml"]) && occursin("checkbox", lowercase(h["doc"]))
+            hb = NS.help_lookup(nb, "@bind")
+            @test hb["module"] == "Slate" && occursin("Slider", hb["doc"])
+            # Curated ECharts option docs: indexed under module "ECharts" and resolvable by path, so a
+            # chart question surfaces the option AND the Slate DSL form that reaches it.
+            erecs = NS.echarts_doc_records()
+            @test !isempty(erecs) && all(r -> r["module"] == "ECharts", erecs)
+            @test any(r -> r["name"] == "yAxis.type", erecs)
+            @test "ECharts" in NS._UNIVERSAL_MODULES        # in scope so scoped search surfaces it
+            he = NS.help_lookup(nb, "yAxis.type")
+            @test he["module"] == "ECharts" && he["kind"] == "echarts"
+            @test occursin("log", lowercase(he["doc"])) && occursin("echart(", he["doc"])   # carries the DSL mapping
+            @test !isempty(NS.echarts_docs_version()) && NS.echarts_doc_entry("nope.zzz") === nothing
         end
 
         @testset "outline shows a cell's tags" begin
