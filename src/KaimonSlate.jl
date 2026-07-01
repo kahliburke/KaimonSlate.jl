@@ -48,7 +48,10 @@ export serve_notebook, LiveNotebook, expand, register_extension
 # launches Kaimon and opens the browser. No hand-editing of config, no manual
 # `serve_notebook`. Detection is simply "Kaimon's config dir exists".
 
-const _KAIMON_DIR = joinpath(homedir(), ".config", "kaimon")
+# Kaimon's config dir. Mirrors Kaimon's own `kaimon_config_dir()` — respects `XDG_CONFIG_HOME` so a
+# notebook launched with an isolated config (e.g. a headless "run this live" instance) registers into
+# THAT config, not the user's real `~/.config/kaimon`. A function (not a const) so it re-reads ENV.
+_kaimon_dir() = joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "kaimon")
 
 """
     register_extension(; auto_start=true, enabled=true, project_path=pkgdir(KaimonSlate)) -> Bool
@@ -61,10 +64,11 @@ specific `project_path` or to flip `auto_start`.
 """
 function register_extension(; auto_start::Bool = true, enabled::Bool = true,
                             project_path = pkgdir(@__MODULE__))
-    isdir(_KAIMON_DIR) || return false                       # Kaimon not installed on this machine
+    kdir = _kaimon_dir()
+    isdir(kdir) || return false                              # Kaimon not installed / no config dir here
     project_path === nothing && return false                 # can't locate ourselves (unusual)
     path = abspath(String(project_path))
-    file = joinpath(_KAIMON_DIR, "extensions.json")
+    file = joinpath(kdir, "extensions.json")
     data = isfile(file) ? (try; JSON.parsefile(file); catch; Dict{String,Any}(); end) : Dict{String,Any}()
     exts = get(data, "extensions", nothing)
     exts isa AbstractVector || (exts = Any[])
@@ -131,10 +135,10 @@ end
 # A small JSON file alongside the extension registry. Currently holds the worker Julia-thread spec —
 # more compute threads enable true multi-core CPU parallelism for independent cells. Read at init into
 # ReportEngine.WORKER_THREADS[] (which `_spawn_worker!` consumes), and editable live from the panel.
-const _SLATE_CONFIG = joinpath(_KAIMON_DIR, "slate.json")
+_slate_config_path() = joinpath(_kaimon_dir(), "slate.json")   # XDG-aware (see _kaimon_dir)
 
-_slate_config() = isfile(_SLATE_CONFIG) ?
-    (try; JSON.parsefile(_SLATE_CONFIG); catch; Dict{String,Any}(); end) : Dict{String,Any}()
+_slate_config() = (f = _slate_config_path(); isfile(f) ?
+    (try; JSON.parsefile(f); catch; Dict{String,Any}(); end) : Dict{String,Any}())
 
 "Current worker Julia-thread spec (\"<compute>,<interactive>\"); \"\" means the default (1,1)."
 worker_threads()::String = String(get(_slate_config(), "worker_threads", ""))
@@ -151,7 +155,7 @@ function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
     ReportEngine.WORKER_THREADS[] = s
     cfg = _slate_config(); cfg["worker_threads"] = s
     try
-        isdir(_KAIMON_DIR) && write(_SLATE_CONFIG, JSON.json(cfg, 2))
+        isdir(_kaimon_dir()) && write(_slate_config_path(), JSON.json(cfg, 2))
     catch e
         @warn "slate: could not persist worker-threads setting" exception = e
     end
@@ -177,7 +181,7 @@ per-notebook Settings toggle still overrides for a specific notebook.
 function set_parallel_default!(on::Bool)
     NotebookServer.PARALLEL_DEFAULT[] = on
     cfg = _slate_config(); cfg["parallel"] = on
-    try; isdir(_KAIMON_DIR) && write(_SLATE_CONFIG, JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
+    try; isdir(_kaimon_dir()) && write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
     return on
 end
 
