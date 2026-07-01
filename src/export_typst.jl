@@ -658,24 +658,48 @@ function _bibliography_files!(dir::AbstractString, bibcells, nbdir::AbstractStri
     return files
 end
 
-# Parse BibTeX entries from a string into (key, title, author) tuples — best-effort, for citation
-# autocomplete and the bibliography card (not a full BibTeX parser; keys are exact, fields snipped).
+const _BibEntry = NamedTuple{(:key, :title, :author, :year),NTuple{4,String}}
+
+# Parse BibTeX entries from a string — best-effort (not a full parser; keys are exact, fields
+# snipped) — for citation autocomplete, the card, and the live author-date label.
 function _parse_bibtex_entries(text::AbstractString)
-    out = NamedTuple{(:key, :title, :author),Tuple{String,String,String}}[]
+    out = _BibEntry[]
     for part in split(String(text), r"(?=@\w+\s*\{)")
         m = match(r"^@\w+\s*\{\s*([^,\s]+)", part)
         m === nothing && continue
-        fld(n) = (mm = match(Regex(n * raw"\s*=\s*[{\"]([^}\"\n]*)", "i"), part);
-                  mm === nothing ? "" : String(strip(mm.captures[1])))
-        push!(out, (key = String(m.captures[1]), title = fld("title"), author = fld("author")))
+        # Braced/quoted value (real .bib files brace their fields), else a bare token (e.g. year = 1984).
+        fld(n) = (mm = match(Regex(n * raw"\s*=\s*(?:[{\"]([^}\"\n]*)|(\d[\w\-]*))", "i"), part);
+                  mm === nothing ? "" : String(strip(something(mm.captures[1], mm.captures[2]))))
+        push!(out, (key = String(m.captures[1]), title = fld("title"), author = fld("author"), year = fld("year")))
     end
     return out
+end
+
+# Numeric CSL styles cite as [1]; the rest are author-date. Drives the LIVE citation format (the PDF
+# uses the real CSL engine either way).
+_is_numeric_style(style::AbstractString) =
+    lowercase(String(style)) in ("ieee", "vancouver", "nature", "chicago-notes",
+                                 "iso-690-numeric", "american-physics-society")
+
+# A compact author-date label for the live view, e.g. "Knuth, 1984" / "Cormen et al., 2009".
+function _author_year_label(author::AbstractString, year::AbstractString)
+    a = strip(String(author))
+    surname = ""
+    if !isempty(a)
+        first = strip(split(a, r"\s+and\s+")[1])                 # first listed author
+        surname = occursin(",", first) ? strip(split(first, ",")[1]) :  # "Knuth, Donald"
+                  String(strip(split(first)[end]))                       # "Donald E. Knuth" → "Knuth"
+        occursin(r"\band\b", a) && (surname *= " et al.")
+    end
+    yr = strip(String(year))
+    isempty(surname) && return yr
+    return isempty(yr) ? surname : string(surname, ", ", yr)
 end
 
 # All citation entries defined by a report's `:bibliography` cells (embedded + external .bib),
 # resolved relative to `nbdir`. Powers `[@`-autocomplete and the per-cell card.
 function bibliography_index(report, nbdir::AbstractString)
-    entries = NamedTuple{(:key, :title, :author),Tuple{String,String,String}}[]
+    entries = _BibEntry[]
     for c in report.cells
         :bibliography in c.flags || continue
         if occursin(r"@\w+\s*\{", c.source)
@@ -731,7 +755,7 @@ function bib_cell_info(cell, nbdir::AbstractString)
         es = _parse_bibtex_entries(body)
         return ("", length(es), es)
     end
-    file = ""; es = NamedTuple{(:key, :title, :author),Tuple{String,String,String}}[]
+    file = ""; es = _BibEntry[]
     for ln in split(body, '\n')
         p = strip(ln); isempty(p) && continue
         file = String(p)

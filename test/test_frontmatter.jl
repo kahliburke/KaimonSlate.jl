@@ -168,10 +168,18 @@ x = 1
         r = RE.parse_report("#%% md id=a\nSee [@b] then [@a].\n\n#%% md id=refs bibliography\n@book{a,title={A}}\n@book{b,title={B}}\n")
         nums = NS.citation_numbers(r, Set(["a", "b"]))
         @test nums == Dict("b" => 1, "a" => 2)     # `b` is cited first → [1]
-        # live HTML-link emit renders a numbered [N] link to the bibliography cell
-        emit = NS._cite_link_emit("refs", Dict("knuth1984" => "Knuth · TeX"), Dict("knuth1984" => 3))
-        live = NS._rewrite_citations("[@knuth1984, p. 7]", Set(["knuth1984"]); emit = emit)
-        @test occursin("<a class=\"cite\" href=\"#cell-refs\"", live) && occursin(">3, p. 7</a>", live)
+        # live HTML-link emit tracks the bibstyle: numeric → [3, p. 7], author-date → (Knuth, 1984)
+        numctx = (anchor = "refs", tips = Dict("k" => "Knuth · TeX"), labels = Dict("k" => "3"),
+                  numeric = true, numbers = Dict("k" => 3))
+        num = NS._rewrite_citations("[@k, p. 7]", Set(["k"]); emit = NS._cite_link_emit(numctx))
+        @test occursin("<a class=\"cite\" href=\"#cell-refs\"", num) && occursin(">[3, p. 7]</a>", num)
+        adctx = (anchor = "refs", tips = Dict("k" => "x"), labels = Dict("k" => "Knuth, 1984"),
+                 numeric = false, numbers = Dict{String,Int}())
+        ad = NS._rewrite_citations("[@k]", Set(["k"]); emit = NS._cite_link_emit(adctx))
+        @test occursin(">(Knuth, 1984)</a>", ad)
+        @test NS._is_numeric_style("ieee") && !NS._is_numeric_style("apa")
+        @test NS._author_year_label("Donald E. Knuth", "1984") == "Knuth, 1984"
+        @test NS._author_year_label("Cormen and Leiserson", "2009") == "Cormen et al., 2009"
         # a non-citation bracket is left untouched
         @test rw("[see foo@bar]") == "[see foo@bar]"
         # end-to-end: locators compile and resolve against the bibliography

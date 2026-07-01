@@ -22,10 +22,10 @@ function _announce_cell!(nb::LiveNotebook, idx::Int)
     (1 <= idx <= length(nb.report.cells)) || return nb
     try
         bindref, hostednames = _bind_index(nb.report)
-        ba, be, bn = _bib_link_ctx(nb)
+        bibctx = _bib_link_ctx(nb)
         _broadcast(nb, "cellpre:" * JSON.json(Dict(
             "index" => idx - 1,                         # browser cells[] is 0-based
-            "cell" => cell_json(nb.report.cells[idx], bindref, hostednames; nbid = nb.id, bibanchor = ba, bibentries = be, bibnumbers = bn))))
+            "cell" => cell_json(nb.report.cells[idx], bindref, hostednames; nbid = nb.id, bibctx = bibctx))))
     catch
     end
     return nb

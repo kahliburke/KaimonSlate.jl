@@ -1062,8 +1062,6 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
    blue; the brackets stay dim and the hover reveals the full accent. */
 .md a.cite { color: color-mix(in srgb, var(--accent) 58%, var(--text)); text-decoration: none;
   cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.md a.cite::before { content: "["; color: var(--dim); }
-.md a.cite::after { content: "]"; color: var(--dim); }
 .md a.cite:hover { color: var(--accent); }
 /* Reference numbers in the bibliography card, matching the in-text [N]. */
 .bibcard-num { flex: none; color: var(--dim); font-variant-numeric: tabular-nums; font-size: .82rem; min-width: 2.2em; }

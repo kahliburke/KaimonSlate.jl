@@ -331,40 +331,44 @@ function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::Abs
     return String(take!(io))
 end
 
-# HTML link for a live citation: a numbered `[N]` (by appearance, matching the numeric PDF style),
-# jumping to the bibliography cell, with the entry as a tooltip.
-function _cite_link_emit(anchor::AbstractString, entries::Dict{String,String}, numbers::Dict{String,Int})
+# HTML link for a live citation, formatted to TRACK the notebook's bibstyle: `[1]` for numeric
+# styles, `(Knuth, 1984)` for author-date. Jumps to the bibliography cell; the tooltip is the entry.
+function _cite_link_emit(ctx)
     esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
     return (key, sup, _form) -> begin
-        n = get(numbers, String(key), 0)
-        num = n == 0 ? String(key) : string(n)                       # fall back to the key if unnumbered
-        lbl = isempty(strip(sup)) ? num : string(num, ", ", strip(sup))
-        href = isempty(anchor) ? "" : " href=\"#cell-$(esc(anchor))\""
-        string("<a class=\"cite\"", href, " title=\"", esc(get(entries, String(key), String(key))),
-               "\">", esc(lbl), "</a>")
+        core = get(ctx.labels, String(key), String(key))
+        inner = isempty(strip(sup)) ? core : string(core, ", ", strip(sup))
+        text = ctx.numeric ? string("[", inner, "]") : string("(", inner, ")")
+        href = isempty(ctx.anchor) ? "" : " href=\"#cell-$(esc(ctx.anchor))\""
+        string("<a class=\"cite\"", href, " title=\"", esc(get(ctx.tips, String(key), String(key))),
+               "\">", esc(text), "</a>")
     end
 end
-# (anchor cell id, key→"author · title", key→number) for live citation links — read from the
-# notebook's :bibliography cells. Empty anchor when the notebook has no bibliography.
+# Live-citation context from the notebook's :bibliography cells — the anchor cell, per-key tooltips,
+# per-key in-text label (a number for numeric styles, an author-year string otherwise), the
+# numeric flag, and (numeric only) the card numbers. `nothing` when the notebook has no bibliography.
 function _bib_link_ctx(nb)
     bi = bibliography_index(nb.report, dirname(abspath(nb.path)))
-    isempty(bi) && return ("", Dict{String,String}(), Dict{String,Int}())
+    isempty(bi) && return nothing
     idx = findfirst(c -> :bibliography in c.flags, nb.report.cells)
     anchor = idx === nothing ? "" : nb.report.cells[idx].id
-    entries = Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi)
-    numbers = citation_numbers(nb.report, Set(e.key for e in bi))
-    return (anchor, entries, numbers)
+    tips = Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi)
+    numeric = _is_numeric_style(get(nb.report.meta, "bibstyle", "ieee"))
+    numbers = numeric ? citation_numbers(nb.report, Set(e.key for e in bi)) : Dict{String,Int}()
+    labels = numeric ? Dict{String,String}(k => string(v) for (k, v) in numbers) :
+                       Dict{String,String}(e.key => _author_year_label(e.author, e.year) for e in bi)
+    return (anchor = anchor, tips = tips, labels = labels, numeric = numeric, numbers = numbers)
 end
+_bib_keys_meta(ctx) = ctx === nothing ? nothing : [Dict("key" => k, "label" => v) for (k, v) in ctx.tips]
 
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
                    nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
-                   bibanchor::AbstractString = "", bibentries::Dict{String,String} = Dict{String,String}(),
-                   bibnumbers::Dict{String,Int} = Dict{String,Int}())
-    # Markdown citations → numbered links to the bibliography cell (skips the bibliography cells).
-    _mdsrc = (c.kind == MARKDOWN && !isempty(bibanchor) && !(:bibliography in c.flags)) ?
-        _rewrite_citations(c.source, Set(keys(bibentries)); emit = _cite_link_emit(bibanchor, bibentries, bibnumbers)) : c.source
+                   bibctx = nothing)
+    # Markdown citations → links to the bibliography cell, formatted per bibstyle (skips bib cells).
+    _mdsrc = (c.kind == MARKDOWN && bibctx !== nothing && !(:bibliography in c.flags)) ?
+        _rewrite_citations(c.source, Set(keys(bibctx.tips)); emit = _cite_link_emit(bibctx)) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
@@ -401,7 +405,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         d["bibFile"] = file
         d["bibCount"] = n
         d["bibKeys"] = [Dict("key" => e.key, "title" => e.title, "author" => e.author) for e in es]
-        d["output"] = _bib_card_html(file, n, es, nbid, cited, bibnumbers)  # card instead of raw BibTeX
+        nums = bibctx === nothing ? Dict{String,Int}() : bibctx.numbers
+        d["output"] = _bib_card_html(file, n, es, nbid, cited, nums)  # card instead of raw BibTeX
     end
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
     # `:opaque` is inferred each eval, not a user tag, so it's excluded.
@@ -521,11 +526,11 @@ function state_json(nb::LiveNotebook)
     meta["multidefCells"] = get(nb.report.meta, "multidef_cells", Dict{String,Vector{String}}())   # name → defining cells (popup)
     nbdir = dirname(abspath(nb.path))
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
-    bibanchor, bibentries, bibnumbers = _bib_link_ctx(nb)   # live citation links → the bibliography cell
+    bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibanchor = bibanchor, bibentries = bibentries, bibnumbers = bibnumbers) for c in nb.report.cells]
+        cited = cited, bibctx = bibctx) for c in nb.report.cells]
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
-    isempty(bibentries) || (meta["bibKeys"] = [Dict("key" => k, "label" => v) for (k, v) in bibentries])
+    let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
     return meta
 end
