@@ -84,15 +84,6 @@ function _has_bundle_footer(path::AbstractString)
     return false
 end
 
-# The single notebook `.jl` at the root of an expanded bundle (Project/Manifest/local/repo are
-# the only other root entries). "" if none found.
-function _expanded_notebook(tdir::AbstractString)
-    for f in readdir(tdir)
-        (endswith(f, ".jl") && isfile(joinpath(tdir, f))) && return joinpath(tdir, f)
-    end
-    return ""
-end
-
 # SSE handler for `GET /api/import-standalone?path=&target=` — the **Import** flow: expand the
 # bundle into `target` (a real project the user owns) and open it, streaming progress. ("Run
 # (temporary)" is a plain open instead: load_notebook hydrates against the depot cache, so it
@@ -139,10 +130,11 @@ function _sse_import(stream::HTTP.Stream, h)
             return emit("failed", "Target directory already exists and isn't empty:\n$target")
         emit("status", "Expanding bundle…")
         tdir = expand(path; target = target)
-        openpath = _expanded_notebook(tdir)
+        co = _read_coords(tdir)                       # (root, envdir, parent, notebook)
+        openpath = co.notebook
         isempty(openpath) && return emit("failed", "Expanded, but found no notebook .jl in $tdir")
-        emit("log", "Expanded to $tdir")
-        r = instantiate!(tdir)
+        emit("log", "Expanded to $tdir" * (co.envdir == tdir ? "" : " (env: $(co.envdir))"))
+        r = instantiate!(co.envdir)
         r === :aborted && return            # client gone
         r === :failed && return emit("failed",
             "Package instantiation failed.\nThe project is at $tdir — open it and retry there.")

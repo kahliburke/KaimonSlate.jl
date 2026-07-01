@@ -192,31 +192,64 @@ function _unpack_tree(packed::Vector{UInt8}, dest::AbstractString)
     return dest
 end
 
-# Build the base64 archive from explicit coordinates (kernel-independent, so it's unit
-# testable): the active project dir, its path deps `[(name, source)]`, and the notebook.
-function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::AbstractString, cells::AbstractString)
+_pd_source(pd) = pd isa NamedTuple ? pd.source : pd[2]
+_pd_name(pd) = String(pd isa NamedTuple ? pd.name : pd[1])
+
+# Build the base64 archive from explicit coordinates (kernel-independent, so it's unit testable):
+# the active project (env) dir, its path deps `[(name, source)]`, and the notebook's absolute path.
+#
+# Two layouts:
+#  • REPO-ROOTED — the env, the notebook, and every path-dep source all live inside ONE git repo.
+#    Bundle the repo (a matching-SHA git bundle) plus an `overlay/` of the LIVE env files + notebook
+#    at their repo-relative paths. On expand the repo becomes the project ROOT with the notebook back
+#    in place (e.g. `WindowPrimes.jl/` with `src/` + `notebooks/presentation.jl`), so a `{path=".."}`
+#    / relative Manifest source resolves naturally — no `local/` vendoring, no path rewriting, and
+#    the result is a real git checkout wired to `origin` (branch & PR with matching SHAs).
+#  • FLAT (fallback) — no enclosing repo, or a path-dep lives outside it. Stage the env at the root,
+#    vendor path-dep sources under `local/<name>` (rewriting the Manifest), and drop the notebook at
+#    the root. Self-contained but structure-less.
+function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString)
     stage = mktempdir()
+    top = _git_toplevel(projectdir)
+    if top !== nothing
+        prel = _within(top, _safe_realpath(projectdir))                       # env dir relative to repo
+        nrel = _within(top, _safe_realpath(nbpath))                           # notebook file relative to repo
+        allin = all(pd -> (s = _pd_source(pd); isdir(s) && _within(top, realpath(s)) !== nothing), pathdeps)
+        # Only when this repo IS the notebook's project — the repo root is the env dir (package-as-
+        # project) or the source of a path-dep the notebook develops. Otherwise a notebook merely
+        # sitting inside a big unrelated checkout would drag the whole thing into the bundle.
+        repo_is_project = _safe_realpath(projectdir) == top ||
+            any(pd -> (s = _pd_source(pd); isdir(s) && _safe_realpath(s) == top), pathdeps)
+        if repo_is_project && prel !== nothing && nrel !== nothing && allin && _git_bundle!(stage, top)
+            write(joinpath(stage, "bundle.json"),
+                  JSON.json(Dict("mode" => "repo-rooted", "env" => prel, "notebook" => nrel, "parent" => ".")))
+            ov = joinpath(stage, "overlay")
+            for f in ("Project.toml", "Manifest.toml")                        # live env files overlay the committed ones
+                s = joinpath(projectdir, f)
+                isfile(s) && (mkpath(joinpath(ov, prel)); cp(s, joinpath(ov, prel, f); force = true))
+            end
+            mkpath(dirname(joinpath(ov, nrel)))
+            write(joinpath(ov, nrel), cells)                                  # live notebook cells
+            return Base64.base64encode(_pack_tree(stage))
+        end
+        # fall through to the flat layout (repo present but not self-contained, or bundle failed)
+    end
+    # ── Flat fallback ────────────────────────────────────────────────────────────────────────────
     for f in ("Project.toml", "Manifest.toml")
         s = joinpath(projectdir, f)
         isfile(s) && cp(s, joinpath(stage, f); force = true)
     end
-    # Bundle the project's git repo ONLY when the project IS that repo's root — i.e. the
-    # notebook lives in a repo-as-project being shared for collaboration. When the project
-    # merely sits nested inside a larger, unrelated git checkout, walking up to that repo would
-    # drag in the whole thing (whose source isn't even a dependency), so skip it. When bundled,
-    # a path-dep whose committed-clean source lives inside the repo is reused from the cloned
-    # `repo/` on expand (no redundant `local/<name>` copy). `gitok` says the bundle was written.
-    top = let t = _git_toplevel(projectdir)
-        (t !== nothing && t == _safe_realpath(projectdir)) ? t : nothing
-    end
-    gitok = top !== nothing && _git_bundle!(stage, top)
+    # Bundle the git repo only when the project IS that repo's root (repo-as-project shared for
+    # collaboration); a project merely nested in a larger checkout would otherwise drag in the whole
+    # thing. A committed-clean path-dep inside that repo is reused from the cloned `repo/`.
+    rtop = (top !== nothing && top == _safe_realpath(projectdir)) ? top : nothing
+    gitok = rtop !== nothing && _git_bundle!(stage, rtop)
     targets = Dict{String,String}()                  # dep name → in-bundle relative source path
     for pd in pathdeps
-        src = pd isa NamedTuple ? pd.source : pd[2]
-        nm = String(pd isa NamedTuple ? pd.name : pd[1])
+        src = _pd_source(pd); nm = _pd_name(pd)
         isdir(src) || continue
-        rel = gitok ? _within(top, realpath(src)) : nothing
-        if rel !== nothing && _subtree_clean(top, rel)
+        rel = gitok ? _within(rtop, realpath(src)) : nothing
+        if rel !== nothing && _subtree_clean(rtop, rel)
             targets[nm] = rel == "." ? "repo" : "repo/" * rel    # reuse the cloned repo source
         else
             _copy_tree!(joinpath(stage, "local", nm), src)       # ship our own copy
@@ -224,17 +257,13 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbname::Abstract
         end
     end
     _rewrite_manifest_paths!(joinpath(stage, "Manifest.toml"), targets)
-    # Package-as-project: when the active project carries its OWN package source (`src/`, plus
-    # `ext/` for extensions), that source must sit at the expanded project root or `using <Pkg>`
-    # fails there — Julia loads the active project's package from `<root>/src`, and otherwise it
-    # would ride only inside `repo/`. Independent of the git bundle (best-effort, collaboration
-    # only), so a package round-trips even when no `repo/` is shipped. A bare env project (the
-    # path-dep / monorepo case — no `src/` of its own) is a no-op here.
+    # Package-as-project: an active project carrying its OWN package source (`src/`, `ext/`) needs
+    # that source at the expanded root or `using <Pkg>` fails there.
     for d in ("src", "ext")
         s = joinpath(projectdir, d)
         isdir(s) && _copy_tree!(joinpath(stage, d), s)
     end
-    write(joinpath(stage, nbname), cells)
+    write(joinpath(stage, basename(nbpath)), cells)
     return Base64.base64encode(_pack_tree(stage))
 end
 
@@ -277,7 +306,7 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true)
         isempty(info.projectdir) &&
             error("this notebook has no project environment to bundle (in-process kernel)")
         cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
-        b64 = _make_bundle_b64(info.projectdir, info.pathdeps, basename(nb.path), cells)
+        b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells)
         out = cells * "\n" * _bundle_footer(b64)
         include_preview && try
             out *= "\n" * _preview_footer(state_json(nb)["cells"])   # frozen render for instant display
@@ -297,12 +326,105 @@ end
 # True if `text` carries a `Slate.bundle` footer (cheap marker scan, no base64 decode).
 _has_bundle(text::AbstractString) = occursin(_BUNDLE_OPEN, text)
 
-# Extract a decoded bundle payload (Project/Manifest/src/local/notebook + git bundle) into
-# `dir`, then clone+wire the embedded git repo. Returns the cloned repo path or `nothing`.
-# Shared by `expand` (user-chosen dir) and `_reconstruct_bundle!` (depot cache).
+# The single notebook `.jl` at the root of a FLAT expanded bundle (Project/Manifest/local are the
+# only other root entries). "" if none found. (Repo-rooted bundles record the path in `bundle.json`.)
+function _expanded_notebook(tdir::AbstractString)
+    for f in readdir(tdir)
+        (endswith(f, ".jl") && isfile(joinpath(tdir, f))) && return joinpath(tdir, f)
+    end
+    return ""
+end
+
+# The bundle layout marker unpacked at `dir` (repo-rooted bundles ship `bundle.json`), else `nothing`.
+function _read_bundle_meta(dir::AbstractString)
+    f = joinpath(dir, "bundle.json")
+    isfile(f) || return nothing
+    return try; JSON.parse(read(f, String)); catch; nothing; end
+end
+
+_joinrel(dir, rel) = (rel == "." || isempty(rel)) ? String(dir) : normpath(joinpath(dir, rel))
+
+# Persist the expanded project's coordinates so the open/reconstruct paths (and cache hits) know the
+# ENV dir to activate, the PARENT package, and where the notebook landed — without re-deriving.
+_write_coords!(dir; mode, env, parent, notebook) =
+    write(joinpath(dir, ".slatebundle.json"),
+          JSON.json(Dict("mode" => mode, "env" => env, "parent" => parent, "notebook" => notebook)))
+
+# Read `.slatebundle.json` → absolute coordinates `(root, envdir, parent, notebook)`.
+function _read_coords(dir::AbstractString)
+    f = joinpath(dir, ".slatebundle.json")
+    m = isfile(f) ? (try; JSON.parse(read(f, String)); catch; Dict{String,Any}(); end) : Dict{String,Any}()
+    env = String(get(m, "env", ".")); parent = String(get(m, "parent", "")); nb = String(get(m, "notebook", ""))
+    return (root = String(dir), envdir = _joinrel(dir, env),
+            parent = isempty(parent) ? "" : _joinrel(dir, parent),
+            notebook = isempty(nb) ? _expanded_notebook(dir) : _joinrel(dir, nb))
+end
+
+# Move every top-level entry of `src` into `dst` (preserves `.git`; cross-filesystem safe).
+function _move_contents!(src::AbstractString, dst::AbstractString)
+    mkpath(dst)
+    for e in readdir(src)
+        s = joinpath(src, e); d = joinpath(dst, e)
+        rm(d; recursive = true, force = true)
+        try; mv(s, d); catch; cp(s, d; force = true, follow_symlinks = true); rm(s; recursive = true, force = true); end
+    end
+    return dst
+end
+
+# Materialise a bundle payload into `dir` and return `(root, envdir, parent, notebook)` (absolute;
+# `parent=""` when detached). Shared by `expand` and `_reconstruct_bundle!`.
+#  • REPO-ROOTED — clone the embedded repo as the ROOT (wire `origin`), then overlay the LIVE env
+#    files + notebook so the checkout matches the author's tree with the current cells in place.
+#  • FLAT — unpack in place; clone the optional git repo into `repo/` (legacy self-contained layout).
 function _extract_bundle!(b64::AbstractString, dir::AbstractString)
     _unpack_tree(Base64.base64decode(b64), dir)
-    return _attach_git_repo(dir)                     # clone repo.gitbundle + wire origin
+    meta = _read_bundle_meta(dir)
+    if meta !== nothing && get(meta, "mode", "") == "repo-rooted"
+        Sys.which("git") === nothing && error("expand: this is a repo-rooted bundle but `git` isn't available")
+        clone = joinpath(mktempdir(), "r")
+        run(pipeline(`git clone -q $(joinpath(dir, "repo.gitbundle")) $clone`; stdout = devnull, stderr = devnull))
+        urlf = joinpath(dir, "git-remote.txt")
+        if isfile(urlf)
+            url = strip(read(urlf, String))
+            isempty(url) || try
+                run(pipeline(`git -C $clone remote set-url origin $url`; stdout = devnull, stderr = devnull))
+            catch
+                try; run(pipeline(`git -C $clone remote add origin $url`; stdout = devnull, stderr = devnull)); catch; end
+            end
+        end
+        ov = joinpath(dir, "overlay")
+        for f in ("repo.gitbundle", "git-remote.txt", "bundle.json")   # drop the scaffolding
+            rm(joinpath(dir, f); force = true)
+        end
+        ovkeep = isdir(ov) ? mktempdir() : ""
+        isempty(ovkeep) || _move_contents!(ov, ovkeep)                 # stash overlay before the repo lands
+        rm(ov; recursive = true, force = true)
+        _move_contents!(clone, dir)                                    # the repo IS the root (incl .git)
+        isempty(ovkeep) || _copy_tree_overlay!(dir, ovkeep)           # live env + notebook overwrite committed
+        env = String(get(meta, "env", ".")); nb = String(get(meta, "notebook", ""))
+        _write_coords!(dir; mode = "repo-rooted", env = env, parent = ".", notebook = nb)
+        return _read_coords(dir)
+    end
+    # FLAT
+    repo = _attach_git_repo(dir)                     # clone repo.gitbundle + wire origin → dir/repo
+    nb = _expanded_notebook(dir)
+    _write_coords!(dir; mode = "flat", env = ".", parent = "",
+                   notebook = isempty(nb) ? "" : replace(relpath(nb, dir), '\\' => '/'))
+    return _read_coords(dir)
+end
+
+# Deep-merge overlay files into `dir` (file-by-file, overwriting individual files — NOT replacing whole
+# dirs, so the repo's other files in an overlaid dir survive). Unlike `_copy_tree!`, keeps `.git`-named
+# paths (none expected in an overlay, but don't special-case).
+function _copy_tree_overlay!(dest::AbstractString, src::AbstractString)
+    for (root, _, files) in walkdir(src)
+        rel = relpath(root, src)
+        mkpath(joinpath(dest, rel))
+        for f in files
+            try; cp(joinpath(root, f), joinpath(dest, rel, f); force = true, follow_symlinks = true); catch; end
+        end
+    end
+    return dest
 end
 
 # Content-addressed cache dir under the depot for a bundle payload, keyed by a SHA-256 of the
@@ -316,39 +438,40 @@ function _bundle_cache_dir(b64::AbstractString)
 end
 
 """
-    _reconstruct_bundle!(jl_path) -> (dir, fresh)
+    _reconstruct_bundle!(jl_path) -> (root, envdir, parent, notebook, fresh)
 
 Reconstruct a standalone `.jl`'s embedded environment into the content-addressed depot cache
-(`_bundle_cache_dir`) and return `(dir, fresh)` — `fresh=false` when the cache was already
-populated (reused as-is, instantly). The notebook file is NOT moved; this just materialises a
-runnable project the kernel can activate in place. Does not instantiate (the caller does, so
-package download/precompile can be streamed/backgrounded). Extraction is staged in a sibling
-`.partial` dir and swapped in, so a crash mid-extract can't leave a half-populated cache.
+(`_bundle_cache_dir`) and return its coordinates — the project ROOT, the ENV dir the kernel should
+activate, the PARENT package dir (`""` if none), the reconstructed NOTEBOOK path, and `fresh`
+(`false` when the cache was already populated, reused instantly). Does not instantiate (the caller
+does, so download/precompile can be streamed). Extraction is staged in a sibling `.partial` dir and
+swapped in, so a crash mid-extract can't leave a half-populated cache.
 """
 function _reconstruct_bundle!(jl_path::AbstractString)
     b64 = _read_bundle_b64(read(jl_path, String))
     dir = _bundle_cache_dir(b64)
-    isfile(joinpath(dir, "Project.toml")) && return (dir = dir, fresh = false)   # cache hit
+    isfile(joinpath(dir, ".slatebundle.json")) && return (; _read_coords(dir)..., fresh = false)   # cache hit
     mkpath(dirname(dir))
     staging = dir * ".partial"
     rm(staging; recursive = true, force = true)
     _extract_bundle!(b64, staging)
-    if isfile(joinpath(dir, "Project.toml"))         # someone raced us → keep theirs
+    if isfile(joinpath(dir, ".slatebundle.json"))    # someone raced us → keep theirs
         rm(staging; recursive = true, force = true)
-    else
-        rm(dir; recursive = true, force = true)
-        mv(staging, dir)
+        return (; _read_coords(dir)..., fresh = false)
     end
-    return (dir = dir, fresh = true)
+    rm(dir; recursive = true, force = true)
+    mv(staging, dir)
+    return (; _read_coords(dir)..., fresh = true)
 end
 
 """
     expand(jl_path; target="") -> String
 
-Reinflate a standalone `.jl` (one carrying a `Slate.bundle` footer) into a project directory
-at `target` (default: `<jl>.expanded/`): writes Project.toml + Manifest.toml, the local
-package source under `local/`, the runnable notebook, and — when present — a `repo.gitbundle`
-(+ `git-remote.txt`) for attaching to the original repo. Returns the target dir.
+Reinflate a standalone `.jl` (one carrying a `Slate.bundle` footer) into a project directory at
+`target` (default: `<jl>.expanded/`). A REPO-ROOTED bundle expands to a real git checkout of the
+original project (its `src/`, `notebooks/`, …) with the LIVE notebook cells in place, wired to
+`origin` (branch & PR with matching SHAs). A FLAT bundle writes Project + Manifest, any `local/`
+package source, and the notebook at the root. Returns the target dir.
 """
 function expand(jl_path::AbstractString; target::AbstractString = "", force::Bool = false)
     txt = read(jl_path, String)
@@ -358,14 +481,15 @@ function expand(jl_path::AbstractString; target::AbstractString = "", force::Boo
     # states + leave unrelated files behind). Require force=true to extract into it.
     (isdir(tdir) && !isempty(readdir(tdir)) && !force) &&
         error("expand: target exists and is not empty: $tdir  (pass force=true to overwrite)")
-    repo = _extract_bundle!(b64, tdir)               # unpack + clone the embedded git bundle
+    force && isdir(tdir) && rm(tdir; recursive = true, force = true)
+    co = _extract_bundle!(b64, tdir)
+    isrepo = isdir(joinpath(tdir, ".git"))
     @info "Expanded standalone notebook" target = tdir
     println("Expanded to: $tdir\n" *
-            "  • instantiate the environment:   julia --project=$tdir -e 'using Pkg; Pkg.instantiate()'" *
-            (isdir(joinpath(tdir, "local")) ?
-             "\n  • local package source is under: $(joinpath(tdir, "local"))" : "") *
-            (repo === nothing ? "" :
-             "\n  • git repo (matching origin SHAs, ready to branch & PR): $repo") * "\n")
+            "  • notebook:   $(co.notebook)\n" *
+            "  • instantiate: julia --project=$(co.envdir) -e 'using Pkg; Pkg.instantiate()'" *
+            (isdir(joinpath(tdir, "local")) ? "\n  • local package source: $(joinpath(tdir, "local"))" : "") *
+            (isrepo ? "\n  • git checkout wired to origin (matching SHAs) — ready to branch & PR" : "") * "\n")
     return tdir
 end
 

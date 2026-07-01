@@ -269,6 +269,58 @@ if Sys.which("git") !== nothing
         end
     end
 
+    # Repo-rooted: the notebook + its env live INSIDE a git repo (the WindowPrimes.jl/notebooks case),
+    # and the package it uses is that same repo. `expand` must reproduce the REAL project structure —
+    # the repo at the root (its src/ + notebooks/), the notebook back in its subdir, the {path=".."}
+    # source intact — NOT a wrapper with a vendored local/ package.
+    @testset "repo-rooted: expand reproduces the project (package root + notebook subdir)" begin
+        repo = mktempdir()
+        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
+        write(joinpath(repo, "Project.toml"), "name=\"WinP\"\nuuid=\"00000000-0000-0000-0000-0000000000a1\"\nversion=\"0.1.0\"\n[deps]\n")
+        write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+        write(joinpath(repo, "src", "WinP.jl"), "module WinP\ngo() = 42\nend\n")
+        # notebook env: its OWN Project (deps + a {path=\"..\"} source), Manifest, and the notebook.
+        write(joinpath(repo, "notebooks", "Project.toml"),
+            "[deps]\nWinP = \"00000000-0000-0000-0000-0000000000a1\"\n\n[sources]\nWinP = {path = \"..\"}\n")
+        write(joinpath(repo, "notebooks", "Manifest.toml"),
+            "manifest_format=\"2.0\"\n\n[[deps.WinP]]\npath = \"..\"\nuuid = \"00000000-0000-0000-0000-0000000000a1\"\nversion = \"0.1.0\"\n")
+        write(joinpath(repo, "notebooks", "presentation.jl"), "#%% code id=a\nx=1\n")
+        write(joinpath(repo, "notebooks", "references.bib"), "@book{k,title={T}}\n")
+        run(pipeline(`git -C $repo init -q`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        run(pipeline(`git -C $repo remote add origin https://example.com/winp.git`; stderr = devnull))
+
+        envdir = joinpath(repo, "notebooks")
+        nbpath = joinpath(envdir, "presentation.jl")
+        deps = [(name = "WinP", source = repo)]                      # the package IS the repo root
+        cells = "#%% code id=a\nx=2\n"                               # LIVE cells differ from the committed file
+        b64 = _make_bundle_b64(envdir, deps, nbpath, cells)
+        sj = joinpath(mktempdir(), "presentation.standalone.jl")
+        write(sj, cells * "\n" * _bundle_footer(b64) * "\n")
+        tdir = expand(sj)
+
+        @test isdir(joinpath(tdir, ".git"))                          # a real git checkout at the ROOT
+        @test isfile(joinpath(tdir, "src", "WinP.jl"))               # the package lives at the root
+        @test isfile(joinpath(tdir, "notebooks", "presentation.jl")) # notebook back in its subdir
+        @test isfile(joinpath(tdir, "notebooks", "references.bib"))  # committed sibling files survive the overlay
+        @test !ispath(joinpath(tdir, "local"))                       # NO vendored local/ package
+        @test !isfile(joinpath(tdir, "presentation.jl"))             # NOT flattened to the root
+        # the {path=".."} source is untouched (resolves to the package at the repo root)
+        @test occursin("path = \"..\"", read(joinpath(tdir, "notebooks", "Manifest.toml"), String))
+        @test occursin("{path = \"..\"}", read(joinpath(tdir, "notebooks", "Project.toml"), String))
+        # the overlay wins: the expanded notebook carries the LIVE cells, not the committed ones
+        @test occursin("x=2", read(joinpath(tdir, "notebooks", "presentation.jl"), String))
+        @test strip(read(`git -C $tdir remote get-url origin`, String)) == "https://example.com/winp.git"
+        # matching SHAs — ready to branch & PR
+        @test strip(read(`git -C $repo rev-parse HEAD`, String)) == strip(read(`git -C $tdir rev-parse HEAD`, String))
+
+        # reconstruct coords point the kernel at the notebook env (nested), with the repo root as parent
+        co = _read_coords(tdir)
+        @test co.envdir == joinpath(tdir, "notebooks") && co.parent == tdir
+        @test co.notebook == joinpath(tdir, "notebooks", "presentation.jl")
+    end
+
     # The git bundle is gated to project-IS-repo-root: a project merely NESTED inside a larger
     # repo must not drag that whole repo into the bundle (only the project itself travels).
     @testset "nested project does not bundle the enclosing repo" begin
@@ -323,22 +375,26 @@ end
     @test _has_bundle(read(sj, String))
     @test !_has_bundle("#%% code id=a\nx=1\n")
 
+    # The cache is content-addressed and persists in the depot — clear this bundle's dir so `fresh`
+    # is deterministic regardless of a prior run (or a prior errored run that skipped the cleanup).
+    rm(_bundle_cache_dir(_read_bundle_b64(read(sj, String))); recursive = true, force = true)
     r1 = _reconstruct_bundle!(sj)
     @test r1.fresh                                       # first time: extracted
-    @test occursin("kaimonslate-bundles", r1.dir)        # depot cache, not a sibling dir
-    @test isfile(joinpath(r1.dir, "Project.toml"))
-    @test isfile(joinpath(r1.dir, "demo.jl"))
+    @test occursin("kaimonslate-bundles", r1.root)       # depot cache, not a sibling dir
+    @test r1.envdir == r1.root && r1.parent == ""        # flat bundle → env is the root, no parent
+    @test isfile(joinpath(r1.root, "Project.toml"))
+    @test isfile(joinpath(r1.root, "demo.jl"))
 
     r2 = _reconstruct_bundle!(sj)
-    @test !r2.fresh && r2.dir == r1.dir                  # same content → cache hit, reused
+    @test !r2.fresh && r2.root == r1.root                # same content → cache hit, reused
 
     sj2 = joinpath(mktempdir(), "other.standalone.jl")
     write(sj2, cells * "y=2\n\n" * _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "other.jl", cells * "y=2\n")) * "\n")
     r3 = _reconstruct_bundle!(sj2)
-    @test r3.dir != r1.dir                               # different content → different dir
+    @test r3.root != r1.root                             # different content → different dir
 
-    rm(r1.dir; recursive = true, force = true)           # don't litter the depot
-    rm(r3.dir; recursive = true, force = true)
+    rm(r1.root; recursive = true, force = true)          # don't litter the depot
+    rm(r3.root; recursive = true, force = true)
 end
 
 # Frozen-render preview: the rendered-cells payload round-trips (gzip+base64) and the footer

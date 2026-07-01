@@ -188,8 +188,8 @@ end
 function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
     try
         rc = _reconstruct_bundle!(path)
-        rc.fresh && _instantiate_env!(rc.dir)
-        kernel = GateKernel(rc.dir; parent = "", envdir = rc.dir)
+        rc.fresh && _instantiate_env!(rc.envdir)
+        kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir)
         lock(nb.lock) do
             nb.kernel = kernel
             delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
