@@ -36,6 +36,8 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
 .exp-meta{color:var(--dim);font-size:.78rem;font-family:monospace;margin-bottom:24px;
   border-bottom:1px solid var(--border);padding-bottom:14px;}
 .exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
+.exp-figcap{margin:2px 24px 16px;font-size:.85rem;color:var(--dim);line-height:1.5;}
+.exp-figcap b{color:var(--text);}.exp-figcap p{display:inline;margin:0;}
 .exp-md table,.exp-table{border-collapse:collapse;margin:8px 0;font-size:.84rem;}
 .exp-md td,.exp-md th,.exp-table td,.exp-table th{border:1px solid var(--border);padding:4px 10px;text-align:left;}
 .exp-table th{background:var(--bg3);color:var(--dim);} .exp-table td{font-variant-numeric:tabular-nums;}
@@ -140,6 +142,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
         fm = fm0
+        figidx = figure_index(nb.report)
         print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
               _esc(fm.title), "</h1>")
         isempty(strip(fm.subtitle)) || print(io, "<div class=\"exp-subtitle\">", _esc(fm.subtitle), "</div>")
@@ -158,7 +161,12 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
             if c.kind == MARKDOWN
                 mdsrc = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
-                print(io, "<section class=\"exp-md\">", markdown_html(mdsrc, c.interp), "</section>")
+                if haskey(figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
+                    print(io, "<figcaption class=\"exp-figcap\" id=\"fig-", _esc(c.id), "\"><b>Figure ",
+                          figidx.numbers[c.id], ".</b> ", markdown_html(mdsrc, c.interp), "</figcaption>")
+                else
+                    print(io, "<section class=\"exp-md\">", markdown_html(mdsrc, c.interp), "</section>")
+                end
             else
                 print(io, "<section class=\"exp-code\">")
                 # Show source only when the NOTEBOOK shows it: respect the global `?source=0` toggle,
@@ -239,6 +247,7 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
     texts = _outputs_text_ok(outputs); anyout = _outputs_any(outputs)
     lock(nb.lock) do
         fm = report_frontmatter(nb.report)
+        figidx = figure_index(nb.report)
         io = IOBuffer()
         isempty(strip(fm.title)) || println(io, "# ", fm.title, "\n")
         isempty(strip(fm.subtitle)) || println(io, "### ", fm.subtitle, "\n")
@@ -251,7 +260,9 @@ function export_markdown(nb::LiveNotebook; include_source::Bool = true, outputs:
             (:bibliography in c.flags) && continue
             if c.kind == MARKDOWN
                 s = strip(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source)
-                isempty(s) || println(io, s, "\n")
+                isempty(s) && continue
+                haskey(figidx.numbers, c.id) ? println(io, "**Figure ", figidx.numbers[c.id], ".** ", s, "\n") :
+                                               println(io, s, "\n")
                 continue
             end
             if include_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))

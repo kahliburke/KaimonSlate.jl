@@ -162,6 +162,7 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 8.5pt, fill: $(p.errfg), raw(s)))
     #let figureimg(p) = align(center, image(p, width: 85%))
     #let notefig(s) = block(width: 100%, inset: 7pt, text(size: 8.5pt, style: "italic", fill: $(p.parlabel), s))
+    #let figcaption(lbl, body) = block(width: 100%, inset: (x: 24pt, y: 4pt), text(size: 8.6pt, fill: $(p.parlabel))[#text(weight: "bold")[#lbl.] #body])
     #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
       text(size: 8.5pt)[#text(fill: $(p.parlabel), weight: "bold")[parameters] #h(6pt) #items.map(it => [#raw(it.at(0)) = #text(weight: "bold", it.at(1))]).join([#h(10pt)])])
 
@@ -592,6 +593,56 @@ function report_frontmatter(report)
     return (; title, subtitle, byline, abstract, skip, bibcells, titlecell, has)
 end
 
+# ── Figure captions + numbering ───────────────────────────────────────────────────────────────
+# A caption is an ORDINARY markdown cell tagged `caption` (so it carries full markdown / $math$ /
+# {{ }} / [@cite]). It attaches to a figure cell either by FLOW (the nearest preceding figure-bearing
+# cell) or EXPLICITLY (`for=<id>`), and cross-refs resolve `[@fig:<label>]` → "Figure N" (label =
+# `label=<name>`, else the caption cell's id). The `for=`/`label=` bindings ride the header as free-
+# form tokens (they round-trip through `_parse_header`/`_cell_source`), so no schema change is needed.
+
+# Value of a `key=…` header token stored as a free-form flag on the cell (e.g. `for=scaling`), or "".
+function _flag_attr(cell::Cell, key::AbstractString)
+    pre = key * "="
+    for f in cell.flags
+        s = String(f)
+        startswith(s, pre) && return s[(length(pre) + 1):end]
+    end
+    return ""
+end
+
+# A code cell counts as a "figure" once it has run and produced an image / chart / table.
+function _cell_has_figure(c::Cell)
+    c.kind == CODE || return false
+    o = c.output
+    o === nothing && return false
+    return any(ch -> startswith(ch.mime, "image/"), o.display) ||
+           !isempty(_echarts_specs(c)) || !isempty(_table_specs(c))
+end
+
+"""
+    figure_index(report) -> (; numbers, labels, capfor)
+
+Resolve figure numbering from `caption`-tagged cells (document order):
+- `numbers`  :: caption-cell-id → Figure number (Int)
+- `labels`   :: cross-ref label → (num, anchor)  (label = `label=` attr, else the caption cell id;
+               anchor = the bound figure cell's id when known, else the caption cell id)
+- `capfor`   :: caption-cell-id → bound figure cell id ("" if none resolved)
+"""
+function figure_index(report)
+    numbers = Dict{String,Int}(); labels = Dict{String,Tuple{Int,String}}(); capfor = Dict{String,String}()
+    lastfig = ""; n = 0
+    for c in report.cells
+        _cell_has_figure(c) && (lastfig = c.id)
+        (c.kind == MARKDOWN && :caption in c.flags) || continue
+        n += 1; numbers[c.id] = n
+        forid = _flag_attr(c, "for"); forid = isempty(forid) ? lastfig : forid
+        capfor[c.id] = forid
+        label = _flag_attr(c, "label"); label = isempty(label) ? c.id : label
+        labels[label] = (n, isempty(forid) ? c.id : forid)
+    end
+    return (; numbers, labels, capfor)
+end
+
 # Drop the FIRST H1 line (and any blank lines it leaves at the top) from a markdown source — used to
 # suppress the body copy of a heading that `report_frontmatter` hoisted into the title block.
 function _strip_leading_h1(src::AbstractString)
@@ -859,6 +910,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         # the hoisted cells are then dropped from the body.
         cells = nb.report.cells
         fm = report_frontmatter(nb.report)
+        figidx = figure_index(nb.report)
         citekeys = Set(e.key for e in bibliography_index(nb.report, dirname(abspath(nb.path))))
         arg(s) = isempty(strip(s)) ? "none" : "\"" * _typ_str(s) * "\""
         if !fm.has
@@ -882,7 +934,12 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                 md = _md_for_typst(c, src; citekeys = citekeys)
                 isempty(strip(md)) && continue       # empty markdown cell leaves nothing to render
                 write(joinpath(dir, base * ".md"), md)
-                print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
+                if haskey(figidx.numbers, c.id)      # a caption cell → numbered "Figure N." block
+                    print(io, "#figcaption(\"Figure ", figidx.numbers[c.id],
+                          "\", cmarker.render(read(\"", base, ".md\"), math: mathfn))\n\n")
+                else
+                    print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
+                end
             else
                 # Match the browser: `show_source` is the global toggle; also hide source for the
                 # per-cell 🙈 `hidecode` flag and for `@bind` cells (which show their widget, not code).

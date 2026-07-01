@@ -23,6 +23,16 @@ using Statistics
 samples = randn(1000)
 (; mean = round(mean(samples); digits=3), sd = round(std(samples); digits=3))
 
+#%% code id=hist
+let edges = -4:0.5:4, h = [count(x -> edges[i] <= x < edges[i+1], samples) for i in 1:length(edges)-1]
+    echart(:bar, string.(round.(edges[1:end-1]; digits=1)), h; title = "Sample histogram")
+end
+
+#%% md id=histcap caption label=fig:hist
+Histogram of the $n = 1000$ standard-normal draws — a `caption`-tagged cell binds to the
+figure above (auto-numbered, and referenceable as `[@fig:hist]`). Captions are ordinary
+markdown, so **bold**, `code`, and math like $\mu \approx 0$ all render.
+
 #%% md id=method
 ## Method
 
@@ -69,5 +79,6 @@ notebook can render in any of these — switch and re-export to compare:
 references.bib
 
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   parallel = false
 #   bibstyle = ieee
 # ╚═╡

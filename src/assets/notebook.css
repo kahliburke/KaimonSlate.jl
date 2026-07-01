@@ -1035,6 +1035,11 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
   text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: var(--dim);
   margin-bottom: 6px; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
 
+/* Figure caption cell (role-caption) — a numbered, dimmed caption that sits under its figure. */
+.cell.role-caption .md { font-size: .86em; color: var(--dim); margin: 0 0 4px 18px; line-height: 1.5; }
+.cell.role-caption .md p { display: inline; margin: 0; }
+.cell.role-caption .md .figlabel { font-weight: 700; color: var(--text); }
+
 /* Bibliography cell card (role-bib) — rendered instead of raw BibTeX. */
 .cell.role-bib .md::before { content: none; }   /* the card carries its own header */
 .bibcard { border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); padding: 10px 14px; font-size: .9em; }

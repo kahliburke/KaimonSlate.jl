@@ -365,7 +365,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
                    nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
-                   bibctx = nothing)
+                   bibctx = nothing, fignums::Dict{String,Int} = Dict{String,Int}())
     # Markdown citations → links to the bibliography cell, formatted per bibstyle (skips bib cells).
     _mdsrc = (c.kind == MARKDOWN && bibctx !== nothing && !(:bibliography in c.flags)) ?
         _rewrite_citations(c.source, Set(keys(bibctx.tips)); emit = _cite_link_emit(bibctx)) : c.source
@@ -399,6 +399,13 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     (:notes in c.flags) && (d["notes"] = true)           # speaker notes — presenter view only
     (:title in c.flags) && (d["roleTitle"] = true)       # document title block (export metadata)
     (:abstract in c.flags) && (d["roleAbstract"] = true) # abstract — hoisted into the title block on export
+    if :caption in c.flags                               # figure caption — numbered, rendered under its figure
+        d["roleCaption"] = true
+        if haskey(fignums, c.id)
+            d["figNum"] = fignums[c.id]
+            d["output"] = "<span class=\"figlabel\">Figure " * string(fignums[c.id]) * ".</span> " * d["output"]
+        end
+    end
     if :bibliography in c.flags                          # bibliography / references
         d["roleBib"] = true
         file, n, es = bib_cell_info(c, nbdir)            # external file (or "") + entry count + keys
@@ -527,8 +534,9 @@ function state_json(nb::LiveNotebook)
     nbdir = dirname(abspath(nb.path))
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
     bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
+    fignums = figure_index(nb.report).numbers   # caption-cell id → Figure number
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibctx = bibctx) for c in nb.report.cells]
+        cited = cited, bibctx = bibctx, fignums = fignums) for c in nb.report.cells]
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
     let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])

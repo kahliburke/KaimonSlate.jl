@@ -237,7 +237,8 @@ function server_refresh(nb::LiveNotebook, vars)
         # patches just those (charts `setOption`, output swap) instead of pulling the whole state.
         bindref, hostednames = _bind_index(nb.report)
         bibctx = _bib_link_ctx(nb)
-        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx) for c in nb.report.cells if c.id in changed]
+        fignums = figure_index(nb.report).numbers
+        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, fignums = fignums) for c in nb.report.cells if c.id in changed]
         msg = "refresh:" * JSON.json(Dict("cells" => cells))
     end
     isempty(msg) || _broadcast(nb, msg)
@@ -256,7 +257,8 @@ function _broadcast_progress(nb::LiveNotebook, cell)
         else
             bindref, hostednames = _bind_index(nb.report)
             bibctx = _bib_link_ctx(nb)
-            _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames; nbid = nb.id, bibctx = bibctx)))
+            fignums = figure_index(nb.report).numbers
+            _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames; nbid = nb.id, bibctx = bibctx, fignums = fignums)))
         end
     catch
     end

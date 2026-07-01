@@ -253,7 +253,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   // Document-metadata roles (title / abstract / bibliography) style the cell in place, so what
   // you author flows naturally in the notebook and exports interpret the role for placement.
   const roleCls = (c.roleTitle ? ' role-title' : '') + (c.roleAbstract ? ' role-abstract' : '')
-    + (c.roleBib ? ' role-bib' : '');
+    + (c.roleBib ? ' role-bib' : '') + (c.roleCaption ? ' role-caption' : '');
   const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     + roleCls + selCls + (focusId === c.id ? ' dep-focus' : '');

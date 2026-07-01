@@ -117,6 +117,33 @@ x = 1
         @test NS._first_words("# A **bold** title here now", 3) == "A bold title…"
     end
 
+    @testset "figure captions: numbering + binding (flow + explicit)" begin
+        @test :caption in RE._KNOWN_TAGS
+        # caption tag + for=/label= round-trip through the header
+        r = RE.parse_report("#%% md id=cap for=scaling label=fig:scale caption\nHello\n")
+        c = r.cells[1]
+        @test :caption in c.flags
+        @test NS._flag_attr(c, "for") == "scaling"
+        @test NS._flag_attr(c, "label") == "fig:scale"
+        @test occursin("for=scaling", RE.serialize_cells(r)) && occursin("label=fig:scale", RE.serialize_cells(r))
+
+        # numbering by document order; flow binds to the nearest preceding figure cell, explicit for= overrides
+        r2 = RE.parse_report("#%% code id=f1\n1\n#%% md id=c1 caption\nFirst\n" *
+                             "#%% code id=f2\n2\n#%% md id=c2 for=f1 label=fig:a caption\nSecond\n")
+        # mark f1/f2 as figure-bearing (an image display chunk)
+        img = RE.MimeChunk("image/png", UInt8[1])
+        for id in ("f1", "f2")
+            fc = r2.cells[findfirst(x -> x.id == id, r2.cells)]
+            fc.output = RE.CellOutput("", [img], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        end
+        idx = NS.figure_index(r2)
+        @test idx.numbers == Dict("c1" => 1, "c2" => 2)
+        @test idx.capfor["c1"] == "f1"                 # flow → nearest preceding figure
+        @test idx.capfor["c2"] == "f1"                 # explicit for= overrides (would be f2 by flow)
+        @test idx.labels["c1"] == (1, "f1")            # default label = caption id
+        @test idx.labels["fig:a"] == (2, "f1")         # explicit label
+    end
+
     @testset "outputs filter (all / figures / none)" begin
         @test NS._outputs_text_ok("all") && !NS._outputs_text_ok("figures") && !NS._outputs_text_ok("none")
         @test NS._outputs_any("all") && NS._outputs_any("figures") && !NS._outputs_any("none")
