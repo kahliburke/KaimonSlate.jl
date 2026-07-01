@@ -6,13 +6,26 @@
 # outputs embedded (images as base64), client-rendered ECharts frozen to their latest
 # snapshot PNG, interactive tables flattened to static HTML. KaTeX from a CDN typesets
 # math. No server, no scripts to boot — openable offline and printable to PDF.
-const _EXPORT_CSS = """
-:root{--bg:#0d1120;--bg2:#141828;--bg3:#1a1e2e;--border:#2a2e40;--text:#d4d8e8;--dim:#6a7090;
-  --accent:#569cd6;--green:#56d364;--red:#e57575;--gold:#ffd700;}
+# Theme palettes (`:root` vars) + syntax-highlight colours for the two export themes. `dark` matches
+# the live UI; `light` is publication-style (matches the PDF's light default). The structural CSS below
+# is theme-agnostic (all colours flow through the vars / `.hl-*` rules).
+const _EXPORT_THEMES = Dict(
+    "dark" => (root = "--bg:#0d1120;--bg2:#141828;--bg3:#1a1e2e;--border:#2a2e40;--text:#d4d8e8;--dim:#6a7090;--accent:#569cd6;--green:#56d364;--red:#e57575;--gold:#ffd700;--titlefg:#ffffff;",
+               hl = ".hl-kw{color:#c586c0;} .exp-src .hl-com{color:#6a9955;font-style:italic;} .exp-src .hl-num{color:#b5cea8;} .exp-src .hl-str{color:#ce9178;} .exp-src .hl-macro{color:#569cd6;} .exp-src .hl-op{color:#56b6c2;} .exp-src .hl-fn{color:#dcdcaa;} .exp-src .hl-type{color:#4ec9b0;} .exp-src .hl-sym{color:#d19a66;}"),
+    "light" => (root = "--bg:#ffffff;--bg2:#f6f7f9;--bg3:#eceef2;--border:#d8dce4;--text:#1f2430;--dim:#68708a;--accent:#2660a4;--green:#1a7f37;--red:#b4232a;--gold:#8a6d00;--titlefg:#0b0e16;",
+                hl = ".hl-kw{color:#af00db;} .exp-src .hl-com{color:#008000;font-style:italic;} .exp-src .hl-num{color:#098658;} .exp-src .hl-str{color:#a31515;} .exp-src .hl-macro{color:#0000ff;} .exp-src .hl-op{color:#0451a5;} .exp-src .hl-fn{color:#795e26;} .exp-src .hl-type{color:#267f99;} .exp-src .hl-sym{color:#b26900;}"))
+
+# Code-listing font size, mirroring the PDF's `code` option.
+_export_code_size(code) = get(Dict("normal" => ".82rem", "small" => ".76rem", "smaller" => ".70rem", "tiny" => ".64rem"), String(code), ".82rem")
+
+function _export_css(theme::AbstractString = "dark", code::AbstractString = "normal")
+    t = get(_EXPORT_THEMES, lowercase(String(theme)), _EXPORT_THEMES["dark"])
+    return """
+:root{$(t.root)}
 *{box-sizing:border-box;} body{background:var(--bg);color:var(--text);margin:0;
   font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
 .export{max-width:900px;margin:0 auto;padding:36px 24px 80px;}
-.exp-title{color:#fff;font-size:1.9rem;margin:0 0 2px;}
+.exp-title{color:var(--titlefg);font-size:1.9rem;margin:0 0 2px;}
 .exp-titleblock{text-align:center;padding:8px 0 4px;}
 .exp-subtitle{color:var(--text);font-size:1.2rem;margin-top:4px;}
 .exp-byline{color:var(--dim);font-size:.86rem;margin-top:8px;}
@@ -29,11 +42,8 @@ const _EXPORT_CSS = """
 .exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
 .exp-code{margin:14px 0;border:1px solid var(--border);border-radius:8px;background:var(--bg2);overflow:hidden;}
 .exp-src{margin:0;padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);overflow-x:auto;}
-.exp-src code{font-family:'Cascadia Code','Fira Code',monospace;font-size:.82rem;color:var(--text);white-space:pre;}
-.exp-src .hl-kw{color:#c586c0;} .exp-src .hl-com{color:#6a9955;font-style:italic;}
-.exp-src .hl-num{color:#b5cea8;} .exp-src .hl-str{color:#ce9178;}
-.exp-src .hl-macro{color:#569cd6;} .exp-src .hl-op{color:#56b6c2;}
-.exp-src .hl-fn{color:#dcdcaa;} .exp-src .hl-type{color:#4ec9b0;} .exp-src .hl-sym{color:#d19a66;}
+.exp-src code{font-family:'Cascadia Code','Fira Code',monospace;font-size:$(_export_code_size(code));color:var(--text);white-space:pre;}
+.exp-src $(t.hl)
 .exp-out{font-size:.86rem;} .exp-out .out,.exp-out .val,.exp-out .err{padding:8px 14px;}
 .exp-out .out{color:var(--dim);} .exp-out .val{color:var(--green);} .exp-out .err{color:var(--red);}
 .exp-out pre{margin:0;white-space:pre-wrap;} .exp-out .dispwrap,.disp.img{padding:10px 14px;}
@@ -41,6 +51,7 @@ const _EXPORT_CSS = """
 .disp.latex{padding:6px 14px;overflow-x:auto;} .katex{font-size:1.1em;}
 @media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
 """
+end
 
 function _export_table_html(spec)
     cols = get(spec, "columns", Any[])
@@ -105,7 +116,9 @@ function _highlight_julia(code::AbstractString)
     end
 end
 
-function export_html(nb::LiveNotebook; include_source::Bool = true)
+function export_html(nb::LiveNotebook; include_source::Bool = true,
+                     theme::AbstractString = "dark", code::AbstractString = "normal")
+    show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         title = _esc(nb.report.title)
         io = IOBuffer()
@@ -114,7 +127,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
               "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
-              "<style>", _EXPORT_CSS, "</style></head><body><article class=\"export\">")
+              "<style>", _export_css(theme, code), "</style></head><body><article class=\"export\">")
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
         fm = report_frontmatter(nb.report)
@@ -141,7 +154,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true)
                 # Show source only when the NOTEBOOK shows it: respect the global `?source=0` toggle,
                 # the per-cell `hidecode` (🙈) flag, AND `@bind` cells (which render their widget,
                 # not the code editor, in the browser) — so the export matches what's on screen.
-                (include_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))) &&
+                (show_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))) &&
                     print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
                 print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
                 if !isempty(_echarts_specs(c))            # client-rendered chart → freeze to snapshot

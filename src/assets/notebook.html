@@ -248,10 +248,19 @@
   <div class="setrow exrow fmt-pdf"><label>Typst source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdftypst"> Also download the editable Typst project (<code>.tar.gz</code>)</label></div>
+  <div class="setrow exrow fmt-html"><label>Theme</label>
+    <select id="htmltheme"><option value="dark">Dark (matches UI)</option><option value="light">Light (publication)</option></select></div>
+  <div class="setrow exrow fmt-html"><label>Code size</label>
+    <select id="htmlcode">
+      <option value="normal">Normal</option>
+      <option value="small">Small</option>
+      <option value="smaller">Smaller</option>
+      <option value="tiny">Tiny</option>
+    </select></div>
   <div class="setrow exrow fmt-html"><label>Source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmlsource" checked> Include cell source (uncheck for outputs only)</label></div>
-  <div class="setrow exrow fmt-html sethint"><span></span>A self-contained page — figures embedded, math via KaTeX. No server needed; print it to PDF from the browser.</div>
+  <div class="setrow exrow fmt-html sethint"><span></span>A self-contained page — figures embedded, math via KaTeX. No server needed.</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
   <div class="row"><button onclick="closeExport(false)">Cancel</button><button class="primary" onclick="closeExport(true)">Export</button></div>
 </div></div>

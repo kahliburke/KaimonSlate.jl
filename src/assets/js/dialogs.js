@@ -56,8 +56,13 @@ function _saveBlob(blob, ext) {
 // Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
 function exportHtml(dl) {
   const src = document.getElementById('htmlsource');
-  const noSrc = src && !src.checked;
-  const q = noSrc ? '?source=0' : '';
+  const theme = (document.getElementById('htmltheme') || {}).value || 'dark';
+  const code = (document.getElementById('htmlcode') || {}).value || 'normal';
+  const parts = [];
+  if (src && !src.checked) parts.push('source=0');
+  if (theme !== 'dark') parts.push('theme=' + theme);
+  if (code !== 'normal') parts.push('code=' + code);
+  const q = parts.length ? '?' + parts.join('&') : '';
   if (dl === false) { window.open(_apipath('/api/export.html' + q), '_blank'); return; }
   const a = document.createElement('a');
   a.href = _apipath('/api/export.html' + (q ? q + '&dl=1' : '?dl=1')); a.download = _dlName('.html');
@@ -128,6 +133,7 @@ function openExport(preset) {
   document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';
   document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
+  ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
@@ -140,6 +146,7 @@ function closeExport(go) {
   closeExportModal();
   if (fmt === 'html') {
     const hs = document.getElementById('htmlsource'); localStorage.setItem('slate_htmlsource', hs && hs.checked ? '1' : '0');
+    ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     return exportHtml(true);
   }
   if (fmt === 'standalone') return exportStandalone();

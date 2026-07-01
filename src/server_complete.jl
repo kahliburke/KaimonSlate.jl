@@ -395,12 +395,13 @@ function _make_router(h::Hub)
         _eval!(nb)
         _json(state_json(nb))
     end))
-    # Static export: a self-contained HTML document of the notebook (also the print →
-    # PDF path — the browser's print dialog saves it as PDF). `?dl=1` downloads; `?source=0`
-    # hides code. No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.
+    # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`
+    # hides code; `?theme=light|dark`; `?code=normal|small|smaller|tiny|hidden` sizes/hides listings.
+    # No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.
     HTTP.register!(router, "GET", "/api/{id}/export.html", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
-        html = export_html(nb; include_source = get(qp, "source", "1") != "0")
+        html = export_html(nb; include_source = get(qp, "source", "1") != "0",
+                           theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"))
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
             fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
