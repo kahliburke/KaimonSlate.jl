@@ -229,6 +229,10 @@ function build_dependencies!(report::Report)
             end
             barrier === nothing || push!(c.deps, barrier)
             delete!(c.deps, c.id)
+            # Static markdown (no `{{ }}` interpolation reads) needs no computation — it renders
+            # straight from its source — so it is FRESH, not STALE. Keeps prose from flashing "stale"
+            # on open and from sitting stale behind code cells during a run (it never has to wait).
+            isempty(c.reads) && c.state == STALE && (c.state = FRESH)
             continue
         end
         c.kind == CODE || continue
