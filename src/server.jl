@@ -224,8 +224,8 @@ function server_refresh(nb::LiveNotebook, vars)
         # Push ONLY the cells that recomputed (seed + dependents), inline in the event — the browser
         # patches just those (charts `setOption`, output swap) instead of pulling the whole state.
         bindref, hostednames = _bind_index(nb.report)
-        ba, be = _bib_link_ctx(nb)
-        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibanchor = ba, bibentries = be) for c in nb.report.cells if c.id in changed]
+        ba, be, bn = _bib_link_ctx(nb)
+        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibanchor = ba, bibentries = be, bibnumbers = bn) for c in nb.report.cells if c.id in changed]
         msg = "refresh:" * JSON.json(Dict("cells" => cells))
     end
     isempty(msg) || _broadcast(nb, msg)
@@ -243,8 +243,8 @@ function _broadcast_progress(nb::LiveNotebook, cell)
             _broadcast(nb, "cellrun:" * cell.id)
         else
             bindref, hostednames = _bind_index(nb.report)
-            ba, be = _bib_link_ctx(nb)
-            _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames; nbid = nb.id, bibanchor = ba, bibentries = be)))
+            ba, be, bn = _bib_link_ctx(nb)
+            _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames; nbid = nb.id, bibanchor = ba, bibentries = be, bibnumbers = bn)))
         end
     catch
     end

@@ -291,14 +291,17 @@ end
 # a large library shows the count and lists ONLY the cited entries (so a 2000-entry Zotero file
 # doesn't flood the cell). External files get a "view" link (the /bibfile route).
 const _BIB_CARD_LIMIT = 10
-function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited)
+function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited,
+                        numbers::Dict{String,Int} = Dict{String,Int}())
     esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
     ncited = Base.count(e -> e.key in cited, entries)
     meta(e) = strip(join(filter(!isempty, [String(e.author), String(e.title)]), " · "))
-    item(e) = (isin = e.key in cited; string("<li class=\"", isin ? "cited" : "uncited", "\">",
-        isin ? "<span class=\"bibcard-tick\">●</span>" : "<span class=\"bibcard-tick\">○</span>",
+    # Cited entries get their [N] (matching the in-text numbers); uncited get a hollow marker.
+    mark(e) = haskey(numbers, e.key) ? "<span class=\"bibcard-num\">[$(numbers[e.key])]</span>" :
+              (e.key in cited ? "<span class=\"bibcard-tick\">●</span>" : "<span class=\"bibcard-tick\">○</span>")
+    item(e) = string("<li class=\"", e.key in cited ? "cited" : "uncited", "\">", mark(e),
         "<code>", esc(e.key), "</code>",
-        isempty(meta(e)) ? "" : "<span class=\"bibcard-meta\">" * esc(meta(e)) * "</span></li>"))
+        isempty(meta(e)) ? "" : "<span class=\"bibcard-meta\">" * esc(meta(e)) * "</span></li>")
     io = IOBuffer()
     print(io, "<div class=\"bibcard\"><div class=\"bibcard-hd\">📚 <strong>References</strong>",
           "<span class=\"bibcard-n\">", count, count == 1 ? " entry" : " entries",
@@ -328,34 +331,40 @@ function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::Abs
     return String(take!(io))
 end
 
-# HTML link for a live citation: jumps to the bibliography cell, with the entry as a tooltip.
-function _cite_link_emit(anchor::AbstractString, entries::Dict{String,String})
+# HTML link for a live citation: a numbered `[N]` (by appearance, matching the numeric PDF style),
+# jumping to the bibliography cell, with the entry as a tooltip.
+function _cite_link_emit(anchor::AbstractString, entries::Dict{String,String}, numbers::Dict{String,Int})
     esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
     return (key, sup, _form) -> begin
-        lbl = isempty(strip(sup)) ? String(key) : string(key, ", ", strip(sup))
+        n = get(numbers, String(key), 0)
+        num = n == 0 ? String(key) : string(n)                       # fall back to the key if unnumbered
+        lbl = isempty(strip(sup)) ? num : string(num, ", ", strip(sup))
         href = isempty(anchor) ? "" : " href=\"#cell-$(esc(anchor))\""
         string("<a class=\"cite\"", href, " title=\"", esc(get(entries, String(key), String(key))),
                "\">", esc(lbl), "</a>")
     end
 end
-# (anchor cell id, key→"author · title") for live citation links — read from the notebook's
-# :bibliography cells. "" anchor when the notebook has no bibliography.
+# (anchor cell id, key→"author · title", key→number) for live citation links — read from the
+# notebook's :bibliography cells. Empty anchor when the notebook has no bibliography.
 function _bib_link_ctx(nb)
     bi = bibliography_index(nb.report, dirname(abspath(nb.path)))
-    isempty(bi) && return ("", Dict{String,String}())
+    isempty(bi) && return ("", Dict{String,String}(), Dict{String,Int}())
     idx = findfirst(c -> :bibliography in c.flags, nb.report.cells)
     anchor = idx === nothing ? "" : nb.report.cells[idx].id
-    return (anchor, Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi))
+    entries = Dict{String,String}(e.key => strip(join(filter(!isempty, [e.author, e.title]), " · ")) for e in bi)
+    numbers = citation_numbers(nb.report, Set(e.key for e in bi))
+    return (anchor, entries, numbers)
 end
 
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
                    nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
-                   bibanchor::AbstractString = "", bibentries::Dict{String,String} = Dict{String,String}())
-    # Markdown citations → links to the bibliography cell (skips the bibliography cells themselves).
+                   bibanchor::AbstractString = "", bibentries::Dict{String,String} = Dict{String,String}(),
+                   bibnumbers::Dict{String,Int} = Dict{String,Int}())
+    # Markdown citations → numbered links to the bibliography cell (skips the bibliography cells).
     _mdsrc = (c.kind == MARKDOWN && !isempty(bibanchor) && !(:bibliography in c.flags)) ?
-        _rewrite_citations(c.source, Set(keys(bibentries)); emit = _cite_link_emit(bibanchor, bibentries)) : c.source
+        _rewrite_citations(c.source, Set(keys(bibentries)); emit = _cite_link_emit(bibanchor, bibentries, bibnumbers)) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
@@ -392,7 +401,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         d["bibFile"] = file
         d["bibCount"] = n
         d["bibKeys"] = [Dict("key" => e.key, "title" => e.title, "author" => e.author) for e in es]
-        d["output"] = _bib_card_html(file, n, es, nbid, cited)  # render a card instead of raw BibTeX
+        d["output"] = _bib_card_html(file, n, es, nbid, cited, bibnumbers)  # card instead of raw BibTeX
     end
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
     # `:opaque` is inferred each eval, not a user tag, so it's excluded.
@@ -512,9 +521,9 @@ function state_json(nb::LiveNotebook)
     meta["multidefCells"] = get(nb.report.meta, "multidef_cells", Dict{String,Vector{String}}())   # name → defining cells (popup)
     nbdir = dirname(abspath(nb.path))
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
-    bibanchor, bibentries = _bib_link_ctx(nb)   # live citation links → the bibliography cell
+    bibanchor, bibentries, bibnumbers = _bib_link_ctx(nb)   # live citation links → the bibliography cell
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibanchor = bibanchor, bibentries = bibentries) for c in nb.report.cells]
+        cited = cited, bibanchor = bibanchor, bibentries = bibentries, bibnumbers = bibnumbers) for c in nb.report.cells]
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
     isempty(bibentries) || (meta["bibKeys"] = [Dict("key" => k, "label" => v) for (k, v) in bibentries])
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])

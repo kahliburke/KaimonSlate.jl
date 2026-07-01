@@ -164,10 +164,14 @@ x = 1
         @test rw("```\n@knuth1984\n```") == "```\n@knuth1984\n```"
         # inline code spans are protected (a literal citation in backticks stays literal)
         @test rw("show `[@knuth1984]` then [@knuth1984]") == "show `[@knuth1984]` then §c§n§knuth1984§§"
-        # live HTML-link emit (cell_json renders citations as links to the bibliography cell)
-        emit = NS._cite_link_emit("refs", Dict("knuth1984" => "Knuth · TeX"))
+        # citation numbering by first appearance (matches the numeric PDF order)
+        r = RE.parse_report("#%% md id=a\nSee [@b] then [@a].\n\n#%% md id=refs bibliography\n@book{a,title={A}}\n@book{b,title={B}}\n")
+        nums = NS.citation_numbers(r, Set(["a", "b"]))
+        @test nums == Dict("b" => 1, "a" => 2)     # `b` is cited first → [1]
+        # live HTML-link emit renders a numbered [N] link to the bibliography cell
+        emit = NS._cite_link_emit("refs", Dict("knuth1984" => "Knuth · TeX"), Dict("knuth1984" => 3))
         live = NS._rewrite_citations("[@knuth1984, p. 7]", Set(["knuth1984"]); emit = emit)
-        @test occursin("<a class=\"cite\" href=\"#cell-refs\"", live) && occursin("knuth1984, p. 7</a>", live)
+        @test occursin("<a class=\"cite\" href=\"#cell-refs\"", live) && occursin(">3, p. 7</a>", live)
         # a non-citation bracket is left untouched
         @test rw("[see foo@bar]") == "[see foo@bar]"
         # end-to-end: locators compile and resolve against the bibliography

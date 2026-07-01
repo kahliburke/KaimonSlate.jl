@@ -711,6 +711,19 @@ function cited_citation_keys(report)
     return keys
 end
 
+# Citation NUMBERS by first appearance (key → 1,2,3…) across the notebook's prose — matches the
+# numeric CSL ordering, so the live view can show [1]/[2] like the PDF. Reuses the rewriter's exact
+# detection (code-skipping + defined-key check) via a recording emit, so it never drifts.
+function citation_numbers(report, citekeys)
+    order = String[]; seen = Set{String}()
+    rec = (key, _sup, _form) -> (k = String(key); (k in seen || (push!(order, k); push!(seen, k))); "")
+    for c in report.cells
+        (c.kind == MARKDOWN && !(:bibliography in c.flags)) || continue
+        _rewrite_citations(c.source, citekeys; emit = rec)
+    end
+    return Dict{String,Int}(k => i for (i, k) in enumerate(order))
+end
+
 # Per-cell bibliography summary for the live card: (external-file-or-"", entry count, entries).
 function bib_cell_info(cell, nbdir::AbstractString)
     body = cell.source
