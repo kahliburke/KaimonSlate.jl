@@ -164,15 +164,57 @@ function _quantize8(frames, mode, lo, hi, ranges, transform)
     return buf, H, W, nf
 end
 
+# ── RGBA image frames (kind=:image) ───────────────────────────────────────────────────────────
+# A frame is either an H×W matrix of colors (duck-typed via `_rgb_of`, e.g. `Matrix{RGB{N0f8}}`
+# as returned by VideoIO.jl/Images.jl) or a raw H×W×3 array. No quantization needed — packed
+# straight to RGBA8 (opaque) so the player can upload it into an RGBA texture array.
+_image_hw(f) = ndims(f) == 3 ? (size(f, 1), size(f, 2)) : size(f)
+_image_px(f, r, c) = ndims(f) == 3 ? _rgb_of(view(f, r, c, :)) : _rgb_of(f[r, c])
+
+function _quantize_rgba(frames)
+    nf = length(frames)
+    H, W = _image_hw(first(frames))
+    buf = Vector{UInt8}(undef, nf * H * W * 4)
+    k = 1
+    @inbounds for fr in frames
+        for r in 1:H, c in 1:W
+            rr, gg, bb = _image_px(fr, r, c)
+            buf[k] = UInt8(rr); buf[k+1] = UInt8(gg); buf[k+2] = UInt8(bb); buf[k+3] = 0xff
+            k += 4
+        end
+    end
+    return buf, H, W, nf
+end
+
+# ── Overlay (frame-synced markers, e.g. tracked object positions) ────────────────────────────────
+# One entry per frame, each a list of points `(x, y[, id])` in the SAME index space as the frame
+# data (x ∈ [1,W], y ∈ [1,H], row 1 = top). `id` (default 0) gives a point a stable color/trail
+# across frames — e.g. a track identity. Rendered client-side, independent of the frame texture.
+function _overlay_json(overlay, nf)
+    overlay === nothing && return nothing
+    length(overlay) == nf ||
+        throw(ArgumentError("animate: `overlay` must have one entry per frame ($(length(overlay)) given, $nf frames)"))
+    return [[_overlay_point(p) for p in pts] for pts in overlay]
+end
+_overlay_point(p) = length(p) >= 3 ? [Float64(p[1]), Float64(p[2]), Int(p[3])] : [Float64(p[1]), Float64(p[2]), 0]
+
 # ── Public API ──────────────────────────────────────────────────────────────────────────────────
 """
     animate(frames; kind=:heatmap, fps=30, colormap=:viridis, clim=:global, transform=nothing,
             dither=true, bits=8, x=nothing, y=nothing, title="", colorbar=true,
-            loop=true, autoplay=false, maxbytes=128_000_000) -> Animation
+            loop=true, autoplay=false, overlay=nothing, maxbytes=128_000_000) -> Animation
 
-Build a client-side-playable animation from an already-computed stack of 2-D fields (`frames`, a
-vector of matrices). The heavy compute is yours and runs once; `animate` only quantizes + packages.
-Playback happens entirely in the browser. See ANIMATION_PIPELINE_DESIGN.md.
+Build a client-side-playable animation from an already-computed stack of frames. The heavy compute
+is yours and runs once; `animate` only quantizes + packages. Playback happens entirely in the
+browser. See ANIMATION_PIPELINE_DESIGN.md.
+
+`kind=:heatmap` (default) takes a vector of 2-D scalar matrices, colormapped via `colormap`/`clim`.
+`kind=:image` takes a vector of H×W color matrices (e.g. `Matrix{RGB}` from VideoIO.jl/Images.jl)
+or H×W×3 arrays — real video/image frames, played back as true color (no colormap).
+
+`overlay` (either kind) draws frame-synced markers on top — a vector with one entry per frame, each
+a list of `(x, y[, id])` points in frame pixel space; `id` keeps a point's color/trail stable across
+frames, e.g. a tracked object's identity.
 """
 function animate(frames::AbstractVector;
                  kind::Symbol = :heatmap, fps::Real = 30, times = nothing,
@@ -180,10 +222,42 @@ function animate(frames::AbstractVector;
                  dither::Bool = true, bits::Integer = 8,
                  x = nothing, y = nothing, title::AbstractString = "",
                  colorbar::Bool = true, loop::Bool = true, autoplay::Bool = false,
-                 maxbytes::Integer = 128_000_000)
-    kind === :heatmap || throw(ArgumentError("animate: only kind=:heatmap is supported in v1 (got $kind)"))
+                 overlay = nothing, maxbytes::Integer = 128_000_000)
+    kind === :heatmap || kind === :image ||
+        throw(ArgumentError("animate: kind must be :heatmap or :image (got $kind)"))
     isempty(frames) && throw(ArgumentError("animate: `frames` is empty"))
-    bits == 8 || throw(ArgumentError("animate: only bits=8 is supported in v1 (bits=16 is schema-reserved)"))
+    bits == 8 || throw(ArgumentError("animate: only bits=8 is supported (bits=16 is schema-reserved)"))
+
+    if kind === :image
+        all(f -> f isa AbstractMatrix || (f isa AbstractArray && ndims(f) == 3), frames) ||
+            throw(ArgumentError("animate(kind=:image) needs a vector of H×W color matrices or H×W×3 arrays"))
+        sz = _image_hw(first(frames))
+        all(f -> _image_hw(f) == sz, frames) || throw(ArgumentError("animate: all frames must share the same size"))
+        nbytes = length(frames) * sz[1] * sz[2] * 4
+        nbytes > maxbytes && throw(ArgumentError(
+            "animate: stack is $(round(nbytes/1e6; digits=1)) MB raw (> maxbytes $(round(maxbytes/1e6; digits=1)) MB). " *
+            "Use fewer frames, a smaller frame, or raise maxbytes="))
+        buf, H, W, nf = _quantize_rgba(frames)
+        # A LUT isn't used in image mode, but the blob-store contract (server_history.jl) requires a
+        # non-empty one alongside the frame stack, so ship a trivial one.
+        lut = _lut_from_anchors(_CMAP_ANCHORS[:gray])
+        manifest = Dict{String,Any}(
+            "kind"   => "image",
+            "animId" => string(hash(buf); base = 16),
+            "shape"  => [nf, H, W],
+            "channels" => 4,
+            "bits"   => 8,
+            "fps"    => Float64(fps),
+            "times"  => times === nothing ? nothing : Float64.(collect(times)),
+            "axes"   => Dict("x" => x === nothing ? nothing : Float64.(collect(x)),
+                             "y" => y === nothing ? nothing : Float64.(collect(y)),
+                             "title" => String(title), "colorbar" => false),
+            "controls" => Dict("loop" => loop, "autoplay" => autoplay),
+            "overlay" => _overlay_json(overlay, nf),
+        )
+        return Animation(manifest, buf, lut)
+    end
+
     all(f -> f isa AbstractMatrix, frames) ||
         throw(ArgumentError("animate(kind=:heatmap) needs a vector of matrices"))
     sz = size(first(frames))
@@ -221,6 +295,7 @@ function animate(frames::AbstractVector;
                          "y" => y === nothing ? nothing : Float64.(collect(y)),
                          "title" => String(title), "colorbar" => colorbar),
         "controls" => Dict("loop" => loop, "autoplay" => autoplay),
+        "overlay" => _overlay_json(overlay, nf),
     )
     return Animation(manifest, buf, lut)
 end

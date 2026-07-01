@@ -87,16 +87,24 @@ const SLATE_API = SlateApiEntry[
         ```"""),
 
     # ── Animation ────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("animate", "Animation", "animate(frames; kind=:heatmap, fps=30, colormap=:auto, clim=:global, transform, dither, x, y, title, loop, autoplay) -> Animation",
-        """Precompute a stack of 2-D fields (a `Vector` of matrices) ONCE, then play it back entirely
-        in the browser on a WebGL canvas — nothing touches Julia during playback, so a slow simulation
-        still plays at 60 fps. `clim`: `:global` (comparable frames) | `:symmetric` (signed fields →
-        diverging map; skips `transform`) | `:perframe` | `(lo,hi)`. `colormap`: a name (`:viridis`,
-        `:magma`, …) or a `cgrad(:magma)` from your own Makie env. Pair with `playhead` to react to the
-        current frame.
+    SlateApiEntry("animate", "Animation", "animate(frames; kind=:heatmap, fps=30, colormap=:auto, clim=:global, transform, dither, x, y, title, loop, autoplay, overlay) -> Animation",
+        """Precompute a stack of frames ONCE, then play it back entirely in the browser on a WebGL
+        canvas — nothing touches Julia during playback, so a slow simulation still plays at 60 fps.
+        `kind=:heatmap` (default) takes 2-D scalar matrices, colormapped via `colormap`/`clim`:
+        `:global` (comparable frames) | `:symmetric` (signed fields → diverging map; skips `transform`)
+        | `:perframe` | `(lo,hi)`. `kind=:image` takes real color frames — a `Vector` of H×W color
+        matrices (e.g. `Matrix{RGB}` from VideoIO.jl/Images.jl) or H×W×3 arrays — played back true
+        color, no colormap. `overlay` draws frame-synced markers (e.g. tracked positions) on top of
+        either kind: a `Vector` with one entry per frame, each a list of `(x, y[, id])` points in
+        frame pixel space; `id` keeps a point's color/trail stable across frames. Pair with `playhead`
+        to react to the current frame.
         ```julia
         frames = [density(t) for t in times]          # heavy compute, once (cache it)
         animate(frames; clim=:symmetric, x=r, y=r, title="ψ(t)", autoplay=true)
+
+        vidframes = [read(reader) for _ in 1:n]        # Matrix{RGB{N0f8}} from VideoIO.jl
+        tracks = [[(x1,y1,1), (x2,y2,2)] for _ in 1:n] # per-frame (x,y,id) detections
+        animate(vidframes; kind=:image, overlay=tracks, fps=25, title="tracked beetles")
         ```"""),
 
     # ── Widgets (@bind) ────────────────────────────────────────────────────────────────────────────

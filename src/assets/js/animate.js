@@ -57,6 +57,23 @@
     outColor = texture(lut, vec2(v, 0.5));
   }`;
 
+  // Fragment for kind=:image (RGBA8 frames, real color — no LUT/dither, just temporal lerp).
+  const FRAG_IMG = `#version 300 es
+  precision highp float; precision highp sampler2DArray;
+  in vec2 uv; out vec4 outColor;
+  uniform sampler2DArray frames; uniform float layer; uniform int n;
+  void main(){
+    float f0 = floor(layer);
+    float f1 = min(f0 + 1.0, float(n - 1));
+    float fr = layer - f0;
+    vec4 c0 = texture(frames, vec3(uv, f0));
+    vec4 c1 = texture(frames, vec3(uv, f1));
+    outColor = mix(c0, c1, fr);
+  }`;
+
+  // Stable per-id colors for overlay markers/trails (e.g. tracked-object identity).
+  const OVERLAY_COLORS = ['#ff5252', '#40c4ff', '#ffd740', '#69f0ae', '#e040fb', '#ff6e40', '#18ffff', '#eeff41'];
+
   function compile(gl, type, src) {
     const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.warn('anim shader:', gl.getShaderInfoLog(s)); }
@@ -69,6 +86,7 @@
       this.manifest = null; this.key = '';
       this.frames = null; this.lut = null;          // Uint8Array stack + 256*4 LUT
       this.N = 0; this.H = 0; this.W = 0;
+      this.kind = 'heatmap'; this.overlay = null;   // 'heatmap' (scalar+LUT) or 'image' (RGBA video)
       this.fps = 30; this.times = null;
       this.playing = false; this.loop = true; this.speed = 1;
       this.t0 = 0; this.layer = 0;                   // wall-clock anchor + current fractional frame
@@ -90,7 +108,8 @@
     _buildDom() {
       const b = this.box;
       b.innerHTML =
-        '<div class="anim-stage"><canvas class="anim-canvas"></canvas>' +
+        '<div class="anim-stage"><div class="anim-canvas-wrap">' +
+        '<canvas class="anim-canvas"></canvas><canvas class="anim-overlay"></canvas></div>' +
         '<canvas class="anim-cbar" title="colorbar"></canvas></div>' +
         '<div class="anim-axes"></div>' +
         '<div class="anim-bar">' +
@@ -104,6 +123,8 @@
           '<button class="anim-loop anim-on" title="Loop">↻</button>' +
         '</div>';
       this.canvas = b.querySelector('.anim-canvas');
+      this.overlayCanvas = b.querySelector('.anim-overlay');
+      this.octx = this.overlayCanvas.getContext('2d');
       this.cbar = b.querySelector('.anim-cbar');
       this.axes = b.querySelector('.anim-axes');
       this.elPlay = b.querySelector('.anim-play');
@@ -137,6 +158,9 @@
       this.fps = m.fps || 30;
       this.times = (m.times && m.times.length === this.N) ? m.times : null;
       this.dither = !(m.dither === false);
+      this.kind = m.kind === 'image' ? 'image' : 'heatmap';
+      this.overlay = m.overlay || null;                 // frame-synced markers, either kind
+      this.cbar.style.display = this.kind === 'image' ? 'none' : '';
       // Only adopt the manifest's loop/autoplay on a NEW stack — don't override the user's live toggle
       // or restart playback on an unrelated axis edit.
       if (!sameStack) {
@@ -164,9 +188,10 @@
       if (this.visible) this._ensureData();
     }
 
-    // Re-fetch just the LUT (colormap changed but frames didn't) and recolor in place.
+    // Re-fetch just the LUT (colormap changed but frames didn't) and recolor in place. Not applicable
+    // in image mode — true color, no colormap.
     async _reloadLut() {
-      if (!this.manifest || !this.manifest.lutUrl) return;
+      if (this.kind === 'image' || !this.manifest || !this.manifest.lutUrl) return;
       try {
         const lb = await fetch(this._url(this.manifest.lutUrl)).then(r => r.arrayBuffer());
         this.lut = new Uint8Array(lb);
@@ -203,46 +228,59 @@
       const gl = this.canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: false });
       if (!gl) { this.gl = null; this._initLUT2D(); return; }
       this.gl = gl;
+      this.imageMode = this.kind === 'image';
       const prog = gl.createProgram();
       gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VERT));
-      gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FRAG));
+      gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, this.imageMode ? FRAG_IMG : FRAG));
       gl.bindAttribLocation(prog, 0, 'p'); gl.linkProgram(prog);
       this.prog = prog; gl.useProgram(prog);
       const quad = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
       const vbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
       gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
       gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-      // Frame stack → R8 2D array texture (LINEAR for free bilinear spatial interpolation).
+      // Frame stack → 2D array texture. Heatmap: single-channel R8 + a colormap LUT. Image (real
+      // video/RGB frames): RGBA8, sampled directly — no LUT. Both LINEAR for free bilinear spatial
+      // interpolation.
       const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, this.W, this.H, this.N, 0, gl.RED, gl.UNSIGNED_BYTE, this.frames);
+      if (this.imageMode) {
+        gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8, this.W, this.H, this.N, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.frames);
+      } else {
+        gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, this.W, this.H, this.N, 0, gl.RED, gl.UNSIGNED_BYTE, this.frames);
+      }
       this.tex = tex;
-      // LUT → 256×1 RGBA texture.
-      const lt = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, lt);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.lut);
-      this.lutTex = lt;
+      if (!this.imageMode) {
+        // LUT → 256×1 RGBA texture (heatmap only).
+        const lt = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, lt);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.lut);
+        this.lutTex = lt;
+        gl.uniform1i(gl.getUniformLocation(prog, 'lut'), 1);
+        gl.uniform1f(gl.getUniformLocation(prog, 'dither'), this.dither ? 1 : 0);
+      } else {
+        this.lutTex = null;
+      }
       gl.uniform1i(gl.getUniformLocation(prog, 'frames'), 0);
-      gl.uniform1i(gl.getUniformLocation(prog, 'lut'), 1);
       gl.uniform1i(gl.getUniformLocation(prog, 'n'), this.N);
-      gl.uniform1f(gl.getUniformLocation(prog, 'dither'), this.dither ? 1 : 0);
       this.uLayer = gl.getUniformLocation(prog, 'layer');
       this._sizeCanvas();
-      this._drawCbar();
+      if (!this.imageMode) this._drawCbar();
     }
 
     _initLUT2D() {  // CPU fallback: precompute an ImageData per draw (nearest frame, no temporal lerp)
+      this.imageMode = this.kind === 'image';
       this.ctx2d = this.canvas.getContext('2d');
       this.canvas.width = this.W; this.canvas.height = this.H;
       this._img = this.ctx2d.createImageData(this.W, this.H);
-      this._sizeCanvas(); this._drawCbar();
+      this._sizeCanvas();
+      if (!this.imageMode) this._drawCbar();
     }
 
     _sizeCanvas() {
@@ -256,6 +294,10 @@
         this.canvas.width = Math.round(cssW * dpr); this.canvas.height = Math.round(cssH * dpr);
         this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       }
+      // Overlay canvas always tracks the on-screen size at dpr, independent of the GL/2D frame path.
+      const odpr = Math.min(2, window.devicePixelRatio || 1);
+      this.overlayCanvas.style.width = cssW + 'px'; this.overlayCanvas.style.height = cssH + 'px';
+      this.overlayCanvas.width = Math.round(cssW * odpr); this.overlayCanvas.height = Math.round(cssH * odpr);
     }
 
     _drawCbar() {
@@ -362,17 +404,55 @@
         const gl = this.gl;
         gl.useProgram(this.prog);
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.tex);
-        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
+        if (!this.imageMode) { gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.lutTex); }
         gl.uniform1f(this.uLayer, this.layer);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
       } else if (this.ctx2d) {
-        const f = Math.round(this.layer), base = f * this.H * this.W, d = this._img.data;
-        for (let i = 0, p = base; i < this.H * this.W; i++, p++) {
-          const idx = this.frames[p] * 4, o = i * 4;
-          d[o] = this.lut[idx]; d[o+1] = this.lut[idx+1]; d[o+2] = this.lut[idx+2]; d[o+3] = 255;
+        const f = Math.round(this.layer), d = this._img.data;
+        if (this.imageMode) {
+          const base = f * this.H * this.W * 4;
+          d.set(this.frames.subarray(base, base + this.H * this.W * 4));
+        } else {
+          const base = f * this.H * this.W;
+          for (let i = 0, p = base; i < this.H * this.W; i++, p++) {
+            const idx = this.frames[p] * 4, o = i * 4;
+            d[o] = this.lut[idx]; d[o+1] = this.lut[idx+1]; d[o+2] = this.lut[idx+2]; d[o+3] = 255;
+          }
         }
         this.ctx2d.putImageData(this._img, 0, 0);
       }
+      this._drawOverlay();
+    }
+
+    // Frame-synced markers (e.g. tracked object positions) drawn on a transparent canvas layered
+    // over the frame — independent of the frame texture/kind. A short fading trail per point `id`
+    // shows recent motion without needing per-frame baked-in pixels.
+    _drawOverlay() {
+      const ctx = this.octx;
+      const cw = this.overlayCanvas.width, ch = this.overlayCanvas.height;
+      ctx.clearRect(0, 0, cw, ch);
+      if (!this.overlay || !this.overlay.length || !this.W || !this.H) return;
+      const cur = Math.round(this.layer);
+      const sx = cw / this.W, sy = ch / this.H;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const trail = 12;
+      for (let k = trail; k >= 0; k--) {
+        const fi = cur - k;
+        const pts = (fi >= 0 && fi < this.overlay.length) ? this.overlay[fi] : null;
+        if (!pts) continue;
+        const alpha = k === 0 ? 1 : Math.max(0, 0.35 * (1 - k / trail));
+        const rad = (k === 0 ? 5 : 2.5) * dpr;
+        for (const p of pts) {
+          const col = OVERLAY_COLORS[Math.abs(p[2] | 0) % OVERLAY_COLORS.length];
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = col;
+          ctx.beginPath();
+          ctx.arc(p[0] * sx, p[1] * sy, rad, 0, Math.PI * 2);
+          ctx.fill();
+          if (k === 0) { ctx.globalAlpha = 1; ctx.lineWidth = 1; ctx.strokeStyle = '#000'; ctx.stroke(); }
+        }
+      }
+      ctx.globalAlpha = 1;
     }
 
     dispose() {

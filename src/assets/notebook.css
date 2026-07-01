@@ -317,7 +317,9 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   content:"loading…"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
   color:var(--muted); font-size:12px; background:var(--bg); }
 .anim-stage { position:relative; display:flex; align-items:flex-start; gap:8px; }
+.anim-canvas-wrap { position:relative; display:block; max-width:100%; }
 .anim-canvas { display:block; border-radius:4px; background:#000; image-rendering:auto; max-width:100%; }
+.anim-overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 .anim-cbar { width:14px; height:auto; align-self:stretch; border-radius:2px; }
 .anim-axes { margin:4px 2px; font-size:11px; color:var(--muted); }
 .anim-axes .anim-sep { margin:0 6px; opacity:0.5; }
