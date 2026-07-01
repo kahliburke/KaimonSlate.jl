@@ -125,9 +125,13 @@ function startRename(span) {
     if (commit && v && v !== oldid) {
       const r = await fetch(_apipath('/api/cell-rename/' + oldid),
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ newid: v }) });
-      if (r.ok) { renderAll(await r.json()); selectCell(v); }
-      else { await alertDark('Rename failed: ' + (await r.text())); renderAll(nbState); }
-    } else { renderAll(nbState); }   // cancel → rebuild the label
+      if (r.ok) { renderAll(await r.json()); selectCell(v); return; }
+      await alertDark('Rename failed: ' + (await r.text()));
+    }
+    // Cancel (Esc/blur) or a failed commit: put the ORIGINAL label node back. We can't lean on
+    // renderAll(nbState) here — the state is unchanged, so Preact diffs identical vdom and skips the
+    // re-render, leaving our raw <input> orphaned in the DOM (that was the "Esc won't close it" bug).
+    if (inp.isConnected) inp.replaceWith(span);
   };
   inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); finish(true); }
     else if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
