@@ -8,7 +8,7 @@
 (function () {
   const running = new Map();     // cellId -> start time (performance.now)
   let total = 0, done = 0, errs = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone)
-  let tick = null, idleTimer = null;
+  let tick = null, idleTimer = null, _convergeT = null;
   const bars = new Map();              // bar id -> {frac,msg}  (one per @withprogress scope / slate_progress id)
   let prog = { frac: 0, msg: '' };     // the latest update (drives the chip + badge %)
   const erroredIds = [];               // cells that errored this streak (for the pill to jump through)
@@ -34,6 +34,7 @@
   // A batch is "active" while there are cells left to run (or any cell is still executing). Pill
   // visibility tracks the BATCH, not `running.size`, so it doesn't flicker between sequential cells.
   const active = () => (total > 0 && done < total) || running.size > 0;
+  window._runActive = active;   // the "Run stale" badge hides itself while a run is in flight
 
   function ensureTick() {
     if (tick) return;
@@ -52,6 +53,7 @@
   function clearAllReveals() { for (const t of cellReveal.values()) clearTimeout(t); cellReveal.clear(); }
   function reveal() {
     if (revealed) return; revealed = true; clearAllReveals();
+    const rs = document.getElementById('runstale'); if (rs) rs.style.display = 'none';   // pill covers status during a run
     for (const id of running.keys()) { setLive(id, 'running'); activity('run', id, ''); }   // catch up deferred starts
     ensureTick(); renderPill(); renderChip(); renderTimers();
   }
@@ -198,8 +200,17 @@
     // and back-to-back batches, so the pill doesn't flicker). `errs` persists so the error pill stays.
     if (!active()) {
       clearTimeout(idleTimer);
-      if (revealed) idleTimer = setTimeout(() => { total = 0; done = 0; revealed = false; renderPill(); }, 600);
-      else { clearAllReveals(); total = 0; done = 0; }   // nothing was ever shown → reset silently
+      if (revealed) {
+        idleTimer = setTimeout(() => { total = 0; done = 0; revealed = false; renderPill(); }, 600);
+        // Converge the topbar after a VISIBLE run: `celldone` patches update each cell, but the worker
+        // dot and the "Run stale" count only recompute on a full state pull — and a parallel/initial
+        // run's final pull can be raced. One pull here settles the dot, the stale count, and any state
+        // the patches missed. (Fast reactive churn never `reveal()`s, so it doesn't trigger this.)
+        clearTimeout(_convergeT);
+        _convergeT = setTimeout(() => {
+          try { window.updateStates && api('GET', '/api/state').then(function (s) { updateStates(s); }).catch(function () {}); } catch (_) {}
+        }, 250);
+      } else { clearAllReveals(); total = 0; done = 0; }   // nothing was ever shown → reset silently
     }
   };
 
