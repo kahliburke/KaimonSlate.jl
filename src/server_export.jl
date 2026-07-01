@@ -203,6 +203,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 print(io, "</section>")
             end
         end
+        # (og:image sidecar + site builder live in export_site, below.)
         print(io, "</article><script>window.addEventListener('load',function(){",
               "if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[",
               "{left:'\$\$',right:'\$\$',display:true},{left:'\\\\[',right:'\\\\]',display:true},",
@@ -211,6 +212,91 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               "ignoredClasses:['exp-src','exp-table'],throwOnError:false});});",
               "</script></body></html>")
         return String(take!(io))
+    end
+end
+
+# ── Site publishing (a hosted web page: index.html + og-image.png) ────────────────────────────
+# The FIRST figure in the notebook as PNG bytes (a display raster or a client-rendered chart's
+# snapshot), or `nothing` if there is none / none captured.
+function _first_figure_png(nb::LiveNotebook)
+    for c in nb.report.cells
+        c.kind == CODE || continue
+        (:collapsed in c.flags) && continue
+        img = cell_image(nb, c.id)
+        img === nothing || return img
+    end
+    return nothing
+end
+
+# A generated OG title-card PNG (~1200×630) from the document metadata, rendered via the Typst binary
+# (already a dependency for PDF export). `nothing` if Typst is unavailable or compilation fails.
+function _title_card_png(nb::LiveNotebook)
+    fm = report_frontmatter(nb.report)
+    isempty(strip(fm.title)) && return nothing
+    dir = mktempdir()
+    try
+        line(kind, s) = isempty(strip(s)) ? "" : kind * "[#" * s * "]\n"
+        typ = string(
+            "#set page(width: 1200pt, height: 630pt, margin: 72pt, fill: rgb(\"#0d1120\"))\n",
+            "#set text(fill: rgb(\"#d4d8e8\"), font: (\"Libertinus Serif\", \"New Computer Modern\", \"DejaVu Serif\"))\n",
+            "#align(center + horizon)[\n",
+            "  #text(size: 52pt, weight: \"bold\", fill: white)[#", _typ_str(fm.title), "]\n",
+            isempty(strip(fm.subtitle)) ? "" : "  #v(14pt)\n  #text(size: 28pt, fill: rgb(\"#9aa0c0\"))[#" * _typ_str(fm.subtitle) * "]\n",
+            isempty(strip(fm.byline)) ? "" : "  #v(20pt)\n  #text(size: 20pt, fill: rgb(\"#6a7090\"))[#" * _typ_str(fm.byline) * "]\n",
+            "  #v(28pt)\n  #line(length: 40%, stroke: 1pt + rgb(\"#2a2e40\"))\n",
+            "  #v(10pt)\n  #text(size: 16pt, fill: rgb(\"#569cd6\"))[Kaimon Slate]\n",
+            "]\n")
+        write(joinpath(dir, "card.typ"), typ)
+        png = joinpath(dir, "card.png")
+        _typst_compile(joinpath(dir, "card.typ"), png)
+        return isfile(png) ? read(png) : nothing
+    catch
+        return nothing
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+"""
+    og_image(nb) -> Vector{UInt8} | nothing
+
+The social-preview image for the notebook: its first figure, else a generated title card, else
+`nothing`. Used as the `og:image` for a published page.
+"""
+function og_image(nb::LiveNotebook)
+    fig = _first_figure_png(nb)
+    fig === nothing || return fig          # a real figure short-circuits the (slow) title-card render
+    return _title_card_png(nb)
+end
+
+"""
+    export_site(nb; kwargs...) -> Vector{UInt8}
+
+Build a self-contained, publishable website for the notebook — `index.html` (the HTML export, wired
+to an `og-image.png` sidecar so a shared link unfurls with a preview) plus that image — as a
+gzip-compressed tarball. Unpack it into a `gh-pages` branch / any static host. HTML options
+(`theme`, `code`, `outputs`, `include_source`) pass through to the page.
+"""
+function export_site(nb::LiveNotebook; kwargs...)
+    dir = mktempdir()
+    try
+        img = og_image(nb)
+        ogpath = ""
+        if img !== nothing
+            write(joinpath(dir, "og-image.png"), img)
+            ogpath = "og-image.png"
+        end
+        html = export_html(nb; og_image = ogpath, kwargs...)
+        write(joinpath(dir, "index.html"), html)
+        write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
+        tarball = Tar.create(dir)
+        try
+            return transcode(GzipCompressor, read(tarball))
+        finally
+            rm(tarball; force = true)
+        end
+    finally
+        rm(dir; recursive = true, force = true)
     end
 end
 

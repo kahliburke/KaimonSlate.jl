@@ -186,6 +186,23 @@ x = 1
         @test occursin("exp-out", NS.export_html(nb; outputs = "all"))          # 'all' keeps the output block
     end
 
+    @testset "site export: og:image meta + tarball" begin
+        nb = _mknb(ROLES_SRC)
+        # og:image wiring in the HTML head (+ summary_large_image card when an image is set)
+        h = NS.export_html(nb; og_image = "og-image.png")
+        @test occursin("property=\"og:image\" content=\"og-image.png\"", h)
+        @test occursin("summary_large_image", h)
+        @test !occursin("og:image", NS.export_html(nb))          # none when no image supplied
+        # first-figure detection: a code cell with a PNG raster is the og image source
+        fnb = _mknb("#%% code id=f\n1\n")
+        fc = fnb.report.cells[findfirst(x -> x.id == "f", fnb.report.cells)]
+        fc.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        @test NS._first_figure_png(fnb) == UInt8[0x89, 0x50]
+        # the site tarball is a valid gzip stream (starts with the gzip magic)
+        site = NS.export_site(fnb)
+        @test length(site) > 20 && site[1] == 0x1f && site[2] == 0x8b
+    end
+
     @testset "HTML export options: theme + code size + hide source" begin
         nb = _mknb("#%% code id=c\nx = 1\n")
         dark = NS.export_html(nb; theme = "dark")

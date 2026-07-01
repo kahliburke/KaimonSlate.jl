@@ -127,6 +127,20 @@ async function exportMarkdown(mode) {
     }
   } catch (e) { await alertDark('Markdown export failed: ' + e); }
 }
+// Publishable website (index.html + og-image.png) as a .tar.gz. Rendering the og:image (first figure,
+// or a Typst title card) can take a moment.
+async function exportSite() {
+  const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
+  const outv = (document.getElementById('exoutputs') || {}).value || 'all';
+  const parts = ['theme=' + theme]; if (outv !== 'all') parts.push('outputs=' + outv);
+  showLoading('Building site + preview image…');
+  try {
+    const r = await fetch(_apipath('/api/export.site?' + parts.join('&')));
+    if (!r.ok) { await alertDark('Site export failed:\n' + (await r.text())); return; }
+    _saveBlob(await r.blob(), '.site.tar.gz');
+  } catch (e) { await alertDark('Site export failed: ' + e); }
+  finally { hideLoading(); }
+}
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
@@ -194,7 +208,7 @@ function openExport(preset) {
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
-  ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
+  ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
@@ -218,6 +232,7 @@ function closeExport(go) {
     const mi = document.getElementById('mdimg'); if (mi) localStorage.setItem('slate_mdimg', mi.value);
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
+  if (fmt === 'website') { const st = document.getElementById('sitetheme'); if (st) localStorage.setItem('slate_sitetheme', st.value); return exportSite(); }
   if (fmt === 'standalone') return exportStandalone();
   return _runPdfExport();
 }

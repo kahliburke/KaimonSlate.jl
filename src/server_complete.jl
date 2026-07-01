@@ -479,6 +479,21 @@ function _make_router(h::Hub)
         HTTP.Response(200, ["Content-Type" => "application/gzip",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], data)
     end))
+    # Publishable website (index.html + og-image.png) as a .tar.gz — drop into a gh-pages branch or any
+    # static host. Same HTML options as export.html (theme/code/outputs/source).
+    HTTP.register!(router, "GET", "/api/{id}/export.site", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        data = try
+            export_site(nb; include_source = get(qp, "source", "1") != "0",
+                        theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
+                        outputs = get(qp, "outputs", "all"))
+        catch e
+            return HTTP.Response(500, "Site export failed: " * sprint(showerror, e))
+        end
+        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".site.tar.gz"
+        HTTP.Response(200, ["Content-Type" => "application/gzip",
+                            "Content-Disposition" => "attachment; filename=\"$fn\""], data)
+    end))
     # Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a
     # shallow git bundle when the project is a repo). Reinflate with `KaimonSlate.expand`.
     HTTP.register!(router, "GET", "/api/{id}/export.standalone.jl", req -> _withnb(h, req, nb -> begin

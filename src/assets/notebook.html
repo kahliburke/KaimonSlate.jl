@@ -212,9 +212,10 @@
       <option value="html">HTML — self-contained page</option>
       <option value="pdf">PDF — publication (Typst)</option>
       <option value="markdown">Markdown — file or clipboard</option>
+      <option value="website">Website — publishable page (+ og:image)</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
     </select></div>
-  <div class="setrow exrow fmt-pdf fmt-html fmt-markdown"><label title="Filter which cell outputs appear">Outputs</label>
+  <div class="setrow exrow fmt-pdf fmt-html fmt-website fmt-markdown"><label title="Filter which cell outputs appear">Outputs</label>
     <select id="exoutputs">
       <option value="all">All (text, values, figures)</option>
       <option value="figures">Figures only (images / charts / tables)</option>
@@ -281,6 +282,9 @@
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="mdreadme"> Save as <code>README.md</code> (renders on GitHub)</label></div>
   <div class="setrow exrow fmt-markdown sethint"><span></span>GitHub-flavored Markdown — paste into Discourse / Slack / GitHub, or save a <code>.md</code>. Figures embed as data-URI images (GitHub won't render those; upload a PNG alongside).</div>
+  <div class="setrow exrow fmt-website"><label>Theme</label>
+    <select id="sitetheme"><option value="dark">Dark (matches UI)</option><option value="light">Light (publication)</option></select></div>
+  <div class="setrow exrow fmt-website sethint"><span></span>A publishable web page (<code>index.html</code> + an <code>og-image.png</code> so shared links unfurl with a preview), as a <code>.tar.gz</code>. Drop it into a <code>gh-pages</code> branch or any static host — or use <b>Publish to GitHub Pages</b>.</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
   <div class="row"><button onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
