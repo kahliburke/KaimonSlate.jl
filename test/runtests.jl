@@ -10,6 +10,7 @@ module Demux;     include("test_demux.jl");     end
 module Parsched;  include("test_parsched.jl");  end
 module Parallel;  include("test_parallel.jl");  end
 module Animation; include("test_animation.jl"); end
+module Echarts;   include("test_echarts.jl");   end
 module Engine;    include("test_engine.jl");    end
 module Eval;      include("test_eval.jl");      end
 module Deps;      include("test_deps.jl");      end
@@ -24,7 +25,7 @@ module Repro;     include("test_repro.jl");     end
 module Slides;    include("test_slides.jl");    end
 module Frontmatter; include("test_frontmatter.jl"); end
 
-const _TESTMODS = (Defname, Demux, Parsched, Parallel, Animation, Engine, Eval, Deps,
+const _TESTMODS = (Defname, Demux, Parsched, Parallel, Animation, Echarts, Engine, Eval, Deps,
                    Bind, Render, Tables, Trace, Complete, History, Agentops, Repro, Slides,
                    Frontmatter)
 

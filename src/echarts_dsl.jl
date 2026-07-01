@@ -222,6 +222,16 @@ echart(:bar, days, counts);  echart(:scatter, randn(500), randn(500); symbolSize
 echart(:pie, ["A", "B", "C"], [10, 20, 30])
 ```
 
+# Axis / grid / zoom config in Express mode — top-level component kwargs go on the OPTION, not the
+# series, so a **log axis** (or category axis, slider zoom, custom grid) works on a one-series chart:
+```julia
+echart(:line, x, y; yAxis = (type = :log,), title = "log-y")   # log-scaled Y axis
+echart(:line, x, y; yAxis = (type = :log, min = 1), grid = (left = 60,), dataZoom = [(type = :slider,)])
+```
+Recognised top-level kwargs: `xAxis yAxis grid dataZoom visualMap toolbox polar angleAxis radiusAxis
+radar geo dataset calendar timeline singleAxis parallel parallelAxis brush graphic axisPointer`.
+Everything else (`smooth`, `symbolSize`, `stack`, `areaStyle`, `markLine`, …) styles the series.
+
 # Ergonomic kinds — know their data shape AND bring the components they imply
 `:heatmap` (matrix → category axes + visualMap), `:candlestick` (OHLC), `:radar` (indicators),
 `:boxplot` (raw samples → 5-number summary):
@@ -242,14 +252,38 @@ echart(; xAxis = (type = :category, data = days), yAxis = (type = :value,),
          series = [(type = :bar, data = counts)], dataZoom = [(type = :slider,)])
 ```
 
+# Series styling — any kwarg that ISN'T a top-level component styles the series
+```julia
+echart(:bar,  x, a; stack = "total")                                   # stacked bars
+echart(:line, x, y; smooth = true, symbolSize = 6, markLine = (data = [(type = :average,)],))
+```
+Splice-through kwargs: `smooth stack step symbolSize lineStyle itemStyle areaStyle label markLine
+markPoint markArea …`. Dual Y axes: pass `yAxis = [(…,), (…, type = :log)]` and point a series at the
+second with `series(:line, x, y; yAxisIndex = 1)`.
+
 Dark theme + tooltip default on; a legend appears when several series are named; extra kwargs and
 top-level components (`grid`, `dataZoom`, `visualMap`, `markLine`, …) pass through verbatim. Pairs
 with `@bind` (read a control in the cell → it recomputes) and `reactive`/`@onclick` (stream updates
 into a live value) — see the `slate.api` reference.
 """
-# Express: a single series + simple layout (title/legend/tooltip/theme); ALL OTHER kwargs → the series.
-echart(kind::Symbol, args...; title = nothing, legend = nothing, tooltip = true, theme = true, kwargs...) =
-    EChart(_echart_build([series(kind, args...; kwargs...)]; title = title, legend = legend, tooltip = tooltip, theme = theme))
+# Top-level ECharts COMPONENTS — never series fields. In Express mode a bare kwarg would otherwise be
+# spliced into the SERIES, so `echart(:line, x, y; yAxis=(type=:log,))` would set a bogus series field
+# and quietly do nothing. These keys are lifted onto the OPTION instead, so axis/grid/zoom config
+# "just works" on a one-series chart (e.g. a log axis, a category x-axis, a slider zoom).
+const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualMap", "polar",
+    "angleAxis", "radiusAxis", "radar", "geo", "toolbox", "dataset", "brush", "calendar", "timeline",
+    "singleAxis", "parallel", "parallelAxis", "graphic", "axisPointer"])
+
+# Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
+# go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.
+function echart(kind::Symbol, args...; title = nothing, legend = nothing, tooltip = true, theme = true, kwargs...)
+    serieskw = Pair{Symbol,Any}[]; topkw = Pair{Symbol,Any}[]
+    for (k, v) in kwargs
+        push!(String(k) in _EC_TOPLEVEL ? topkw : serieskw, k => v)
+    end
+    EChart(_echart_build([series(kind, args...; serieskw...)];
+                         title = title, legend = legend, tooltip = tooltip, theme = theme, topkw...))
+end
 # Composable: one or more `series(...)`, plus raw layout/components (grid/dataZoom/visualMap/…).
 echart(s::EChartSeries, more::EChartSeries...; kwargs...) = EChart(_echart_build([s, more...]; kwargs...))
 # Raw NamedTuple/keyword options — the full ECharts surface, Symbol/NamedTuple-friendly.
