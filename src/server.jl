@@ -149,8 +149,9 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
             kernel = _select_kernel(path, r)         # boot the (gate) worker
             lock(nb.lock) do; nb.kernel = kernel; nb.version += 1; end
             try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
+            _drain!(nb)                              # initial full run — WAIT for it to fully complete, so
+                                                     # `hydrating` (and its banner) stays up for the whole run
             lock(nb.lock) do
-                _eval!(nb)                           # initial full run (streams cells via the async runner)
                 delete!(nb.report.meta, "hydrating")
                 nb.version += 1
             end
@@ -183,8 +184,10 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
         lock(nb.lock) do
             nb.kernel = kernel
             delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
+        end
+        _drain!(nb)                                  # run everything + WAIT, so `hydrating` stays up for it
+        lock(nb.lock) do
             delete!(nb.report.meta, "hydrating")
-            _eval!(nb)                               # run everything in the reconstructed env (async runner)
             nb.version += 1
         end
         _history!(nb; source = "open")

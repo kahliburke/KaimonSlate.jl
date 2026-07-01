@@ -40,12 +40,14 @@ function openSettings() {
   // Per-notebook: pick up parent /src edits (Revise) and mark affected cells stale (default on).
   const hr = document.getElementById('sethotreload');
   hr.checked = !(nbState && nbState.hotreload === false);
-  hr.onchange = () => api('POST', '/api/hotreload', { enabled: hr.checked }).catch(() => {});
+  // Apply the returned state so nbState stays in sync — else reopening Settings reads a stale value
+  // and the checkbox appears to "revert".
+  hr.onchange = () => api('POST', '/api/hotreload', { enabled: hr.checked }).then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
   // Per-notebook: run independent cells concurrently in the worker (default off — the serial path).
   const par = document.getElementById('setparallel');
   if (par) {
     par.checked = !!(nbState && nbState.parallel === true);
-    par.onchange = () => api('POST', '/api/parallel', { enabled: par.checked }).catch(() => {});
+    par.onchange = () => api('POST', '/api/parallel', { enabled: par.checked }).then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
   }
   // Per-notebook worker thread override. Blank = global. Apply POSTs /threads, which restarts the
   // worker (warm namespace is lost), so it's a button, not live-on-change.

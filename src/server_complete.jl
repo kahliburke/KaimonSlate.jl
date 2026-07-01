@@ -138,8 +138,8 @@ function restart_kernel!(nb::LiveNotebook)
     _broadcast(nb, "restart")
     @async begin
         try
-            lock(nb.lock) do
-                _eval!(nb)         # respawns the worker, streams cellrun/celldone
+            _drain!(nb)            # respawns the worker + streams cells; WAIT for full completion so the
+            lock(nb.lock) do       # hydrating banner stays up for the whole re-run
                 delete!(nb.report.meta, "hydrating")
                 nb.version += 1
             end
@@ -657,14 +657,14 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/hotreload", req -> _withnb(h, req, nb -> begin
         nb.report.meta["hotreload"] = get(_body(req), "enabled", true) === true
         _persist!(nb)                                    # write the Slate.config footer so it sticks
-        _json(Dict("ok" => true, "hotreload" => nb.report.meta["hotreload"]))
+        _json(state_json(nb))                            # return the full state so the client stays in sync
     end))
     # Per-notebook toggle for parallel (inter-cell) execution. Stored in report meta; the runner reads
     # it each iteration, so it takes effect on the next run with no worker restart.
     HTTP.register!(router, "POST", "/api/{id}/parallel", req -> _withnb(h, req, nb -> begin
         nb.report.meta["parallel"] = get(_body(req), "enabled", false) === true
         _persist!(nb)                                    # write the Slate.config footer so it sticks
-        _json(Dict("ok" => true, "parallel" => nb.report.meta["parallel"]))
+        _json(state_json(nb))                            # return the full state so the client stays in sync
     end))
     # Per-notebook slide-deck presentation prefs (heading level / transition / theme / PDF ratio).
     # Stored in report meta; persisted to the Slate.config footer. No worker restart — purely
