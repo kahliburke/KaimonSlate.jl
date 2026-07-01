@@ -33,8 +33,6 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
   color:var(--text);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:12px 0;}
 .exp-abslabel{display:block;font-style:normal;font-size:.7rem;text-transform:uppercase;letter-spacing:.09em;
   font-weight:700;color:var(--accent);margin-bottom:5px;text-align:left;}
-.exp-meta{color:var(--dim);font-size:.78rem;font-family:monospace;margin-bottom:24px;
-  border-bottom:1px solid var(--border);padding-bottom:14px;}
 .exp-md{margin:14px 0;} .exp-md h1{font-size:1.6rem;border-bottom:1px solid var(--border);padding-bottom:.2em;}
 .exp-figcap{margin:2px 24px 16px;font-size:.85rem;color:var(--dim);line-height:1.5;}
 .exp-figcap b{color:var(--text);}.exp-figcap p{display:inline;margin:0;}
@@ -169,7 +167,6 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   markdown_html(rw(fm.abstract), CellOutput[]), "</div>")
         end
         print(io, "</header>")
-        print(io, "<div class=\"exp-meta\">Exported from Kaimon Slate · ", _esc(abspath(nb.path)), "</div>")
         for c in nb.report.cells
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
             # the export too (both code and output), for markdown and code alike.
