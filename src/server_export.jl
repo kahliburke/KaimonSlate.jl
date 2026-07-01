@@ -337,14 +337,15 @@ function publish_preflight(repo::AbstractString)
 end
 
 """
-    publish_site(nb, repo; private=true, kwargs...) -> (; url, repo, created)
+    publish_site(nb, repo; private=false, create=true, kwargs...) -> (; url, repo, created, pagesEnabled, pagesError)
 
 Publish the notebook as a GitHub Pages site to `repo` (`"owner/name"`), using the user's installed +
-authenticated `gh` CLI. Creates the repo (private by default) if it doesn't exist, force-pushes the
-built site to the `gh-pages` branch, enables Pages, and returns the public URL. Idempotent — re-runs
-just update the branch. Requires `gh` on PATH and `gh auth login` already done.
+authenticated `gh` CLI. If the repo is missing and `create` is set, it's created with the requested
+visibility (`private`); the built site is force-pushed to `gh-pages`, Pages is enabled, and the URL
+returned. An EXISTING repo's visibility is left untouched. Idempotent — re-runs just update the branch.
+Requires `gh` on PATH and `gh auth login`. (Pages needs a PUBLIC repo on the free plan.)
 """
-function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = true, kwargs...)
+function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = false, create::Bool = true, kwargs...)
     gh = Sys.which("gh")
     gh === nothing && error("`gh` CLI not found on PATH. Install it and run `gh auth login`, then retry.")
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be \"owner/name\" (got \"$repo\")")
@@ -360,9 +361,10 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = tr
                     `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish notebook site"`)
             ok, log = _git_run(dir, cmd); ok || error("git failed: $log")
         end
-        # Ensure the repo exists (create private/public if missing).
+        # Create the repo only when missing AND `create` is set; never change an existing repo's visibility.
         created = false
-        if !success(`$gh repo view $repo`)
+        if !_gh_ok(`$gh repo view $repo`)
+            create || error("Repo $repo doesn't exist. Enable “create repo if missing”, or create it first.")
             vis = private ? "--private" : "--public"
             ok, log = _git_run(dir, `$gh repo create $repo $vis`)
             ok || error("gh repo create failed: $log")

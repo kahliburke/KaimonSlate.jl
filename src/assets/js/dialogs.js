@@ -150,34 +150,36 @@ async function exportSite() {
 async function publishSite() {
   const repo = ((document.getElementById('siterepo') || {}).value || '').trim();
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter the target repo as owner/name.'); return; }
-  const isPrivate = !!(document.getElementById('siteprivate') || {}).checked;
+  const isPrivate = ((document.getElementById('sitevis') || {}).value || 'public') === 'private';
+  const create = !!(document.getElementById('sitecreate') || { checked: true }).checked;
   const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
-  // Preflight: tell the user exactly what will happen (new repo vs overwrite an existing site).
+  // Preflight: tell the user exactly what will happen (create new vs overwrite an existing site).
   let pf;
   try {
     const pr = await fetch(_apipath('/api/publish-check'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: repo }) });
     pf = pr.ok ? await pr.json() : {};
   } catch (_) { pf = {}; }
   if (pf.gh === false) { await alertDark('The `gh` CLI was not found on the server. Install it and run `gh auth login`, then retry.'); return; }
-  let msg;
+  let msg, ok = 'Publish', cls = 'primary';
   if (!pf.exists) {
-    msg = 'Repo ' + repo + ' does not exist.\n\nA NEW ' + (isPrivate ? 'private' : 'public') +
-      ' repo will be created, and the site pushed to its gh-pages branch.' +
-      (isPrivate ? '\n\n⚠ GitHub Pages needs a PUBLIC repo on the free plan (private Pages requires GitHub Pro). Uncheck “private” to serve the site.' : '');
+    if (!create) { await alertDark('Repo ' + repo + ' does not exist, and “Create the repo if it doesn’t exist” is off.\n\nEnable it, or create the repo first.'); return; }
+    msg = 'Create a NEW ' + (isPrivate ? 'private' : 'public') + ' repo ' + repo + ' and publish the site to its gh-pages branch.' +
+      (isPrivate ? '\n\n⚠ GitHub Pages needs a PUBLIC repo on the free plan (private Pages requires GitHub Pro), so a private repo may not serve.' : '');
+    ok = 'Create & publish';
   } else {
-    msg = 'Repo ' + repo + ' exists (' + (pf.visibility || 'unknown') + ').\n\n' +
-      (pf.hasGhPages ? '⚠ Its gh-pages branch will be FORCE-PUSHED — any existing published site there is overwritten.\n'
-                     : 'A gh-pages branch will be created and Pages enabled.\n') +
-      (pf.pagesUrl ? '\nCurrently live at: ' + pf.pagesUrl : '');
+    msg = 'Repo ' + repo + ' already exists (' + (pf.visibility || 'unknown') + '; its visibility is left unchanged).\n\n' +
+      (pf.hasGhPages ? '⚠ Its gh-pages branch will be FORCE-PUSHED — any existing published site there is overwritten.'
+                     : 'A gh-pages branch will be created and Pages enabled.') +
+      (pf.pagesUrl ? '\n\nCurrently live at: ' + pf.pagesUrl : '');
+    if (pf.hasGhPages) { ok = 'Overwrite & publish'; cls = 'danger'; }
   }
-  if (!await confirmDark(msg, pf.exists && pf.hasGhPages ? 'Overwrite & publish' : 'Publish',
-      pf.exists && pf.hasGhPages ? 'danger' : 'primary')) return;
+  if (!await confirmDark(msg, ok, cls)) return;
   showLoading('Building + pushing to GitHub Pages…');
   let result = null, err = null;
   try {
     const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repo, private: isPrivate, theme: theme, outputs: outv }) });
+      body: JSON.stringify({ repo: repo, private: isPrivate, create: create, theme: theme, outputs: outv }) });
     result = r.ok ? await r.json() : { error: await r.text() };
   } catch (e) { err = e; }
   hideLoading();                                          // drop the spinner BEFORE the result dialog
@@ -265,7 +267,7 @@ function openExport(preset) {
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = localStorage.getItem('slate_siterepo') || '';
-  ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
+  ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
@@ -290,7 +292,7 @@ function closeExport(go) {
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
   if (fmt === 'website') {
-    const st = document.getElementById('sitetheme'); if (st) localStorage.setItem('slate_sitetheme', st.value);
+    ['sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     return go === 'publish' ? publishSite() : exportSite();
   }
   if (fmt === 'standalone') return exportStandalone();

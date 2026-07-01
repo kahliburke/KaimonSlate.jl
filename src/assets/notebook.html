@@ -287,9 +287,11 @@
   <div class="setrow exrow fmt-website"><label title="For Publish to GitHub Pages — the target repo (created if missing)">GitHub repo</label>
     <input id="siterepo" type="text" placeholder="owner/name" autocomplete="off" spellcheck="false"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
-  <div class="setrow exrow fmt-website"><label>Visibility</label>
+  <div class="setrow exrow fmt-website"><label title="Visibility for a repo we CREATE (an existing repo is left as-is). GitHub Pages needs Public on the free plan.">New repo visibility</label>
+    <select id="sitevis"><option value="public">Public (required for Pages on free plans)</option><option value="private">Private (Pages needs GitHub Pro)</option></select></div>
+  <div class="setrow exrow fmt-website"><label>If missing</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
-      <input type="checkbox" id="siteprivate" checked> Create the repo private (if it doesn't exist)</label></div>
+      <input type="checkbox" id="sitecreate" checked> Create the repo if it doesn't exist</label></div>
   <div class="setrow exrow fmt-website sethint"><span></span>A publishable web page (<code>index.html</code> + an <code>og-image.png</code> so shared links unfurl with a preview). <b>Export</b> downloads a <code>.tar.gz</code>; <b>Publish</b> pushes it to the repo's <code>gh-pages</code> via your <code>gh</code> CLI (must be installed + <code>gh auth login</code>).</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
   <div class="row"><button onclick="closeExport(false)">Cancel</button>
