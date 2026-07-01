@@ -71,6 +71,33 @@ function exportHtml(dl) {
   a.href = _apipath('/api/export.html' + (q ? q + '&dl=1' : '?dl=1')); a.download = _dlName('.html');
   document.body.appendChild(a); a.click(); a.remove();
 }
+// Downscale one `data:image/…;base64,…` URI to `maxW` px wide (canvas re-encode, PNG kept for
+// transparency). Returns the original if it's already narrow enough or anything fails.
+function _downscaleDataUri(uri, maxW) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      if (!img.width || img.width <= maxW) { resolve(uri); return; }
+      const w = maxW, h = Math.round(img.height * (maxW / img.width));
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      try { cv.getContext('2d').drawImage(img, 0, 0, w, h); resolve(cv.toDataURL('image/png')); }
+      catch (_) { resolve(uri); }
+    };
+    img.onerror = () => resolve(uri);
+    img.src = uri;
+  });
+}
+// Shrink every embedded data-URI image in `md` to `maxW` px (dedup'd), so the Markdown fits
+// upload/paste size limits. maxW=0 → unchanged.
+async function _compactMarkdownImages(md, maxW) {
+  if (!maxW) return md;
+  const re = /data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+/g;
+  const uniq = [...new Set(md.match(re) || [])];
+  if (!uniq.length) return md;
+  const scaled = await Promise.all(uniq.map(u => _downscaleDataUri(u, maxW)));
+  const map = new Map(uniq.map((u, i) => [u, scaled[i]]));
+  return md.replace(re, m => map.get(m) || m);
+}
 // GitHub-flavored Markdown. `mode='copy'` → clipboard (download fallback), else save a `.md` file.
 async function exportMarkdown(mode) {
   const src = document.getElementById('mdsource');
@@ -81,7 +108,9 @@ async function exportMarkdown(mode) {
   try {
     const r = await fetch(_apipath('/api/export.md' + q));
     if (!r.ok) { await alertDark('Markdown export failed:\n' + (await r.text())); return; }
-    const md = await r.text();
+    let md = await r.text();
+    const mw = { medium: 800, small: 480 }[(document.getElementById('mdimg') || {}).value] || 0;
+    md = await _compactMarkdownImages(md, mw);
     const readme = document.getElementById('mdreadme');
     const name = readme && readme.checked ? 'README.md' : _dlName('.md');
     const save = () => {                                  // download the markdown as `name`
@@ -165,7 +194,7 @@ function openExport(preset) {
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
-  ['htmltheme', 'htmlcode', 'exoutputs'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
+  ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
@@ -186,6 +215,7 @@ function closeExport(go) {
   if (fmt === 'markdown') {
     const ms = document.getElementById('mdsource'); localStorage.setItem('slate_mdsource', ms && ms.checked ? '1' : '0');
     const rm = document.getElementById('mdreadme'); localStorage.setItem('slate_mdreadme', rm && rm.checked ? '1' : '0');
+    const mi = document.getElementById('mdimg'); if (mi) localStorage.setItem('slate_mdimg', mi.value);
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
   if (fmt === 'standalone') return exportStandalone();

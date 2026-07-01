@@ -271,6 +271,12 @@
   <div class="setrow exrow fmt-markdown"><label>Source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="mdsource" checked> Include cell source as <code>```julia</code> blocks</label></div>
+  <div class="setrow exrow fmt-markdown"><label title="Downscale embedded figures so the Markdown fits upload/paste size limits (e.g. Discourse)">Images</label>
+    <select id="mdimg">
+      <option value="full">Full resolution</option>
+      <option value="medium">Compact — max 800px wide</option>
+      <option value="small">Small — max 480px wide</option>
+    </select></div>
   <div class="setrow exrow fmt-markdown"><label>Filename</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="mdreadme"> Save as <code>README.md</code> (renders on GitHub)</label></div>
