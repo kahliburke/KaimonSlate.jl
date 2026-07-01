@@ -25,6 +25,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .ritem .rp{color:#6a7090;font-family:monospace;font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ritem .rx{background:none;border:none;color:#6a7090;cursor:pointer;font-size:.95rem;padding:2px 6px;border-radius:5px;line-height:1;}
 .ritem .rx:hover{color:#e57575;background:rgba(229,117,117,.1);}
+.ritem.isopen{border-left:2px solid #56d364;} .rdot{color:#56d364;font-size:.6rem;vertical-align:middle;margin-left:5px;}
 .nb .kill{background:#141828;color:#e57575;border:1px solid #3a2030;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.78rem;white-space:nowrap;}
 .nb .kill:hover{border-color:#e57575;background:rgba(229,117,117,.1);}
 .cols{display:grid;grid-template-columns:minmax(340px,1fr) minmax(360px,1.05fr);gap:36px;align-items:start;max-width:1160px;margin:6px 0 8px;}
@@ -228,8 +229,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     if(!await confirmDark('Shut down session “'+id+'”? Its worker stops and the notebook closes.','Shutdown','danger'))return;
     showLoading('Shutting down “'+id+'”…');
     fetch('/api/'+encodeURIComponent(id)+'/shutdown',{method:'POST'}).then(function(){hideLoading();loadSessions();});});
-  // Recently opened notebooks (per-browser, localStorage). Click to re-open;
-  // ones already open are hidden (they're listed below). ✕ forgets an entry.
+  // Recently opened notebooks (per-browser, localStorage). Click to open (or jump to it if it's
+  // already running — marked with a green ● dot). ✕ forgets an entry.
   var RECENT_KEY='slateRecents';
   function getRecents(){try{return JSON.parse(localStorage.getItem(RECENT_KEY)||'[]');}catch(e){return [];}}
   function saveRecents(a){try{localStorage.setItem(RECENT_KEY,JSON.stringify(a.slice(0,12)));}catch(e){}}
@@ -239,9 +240,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function baseName(p){var q=p.replace(/\/+$/,'');var i=q.lastIndexOf('/');return i<0?q:q.slice(i+1);}
   function renderRecents(){
     var box=document.getElementById('recent'),open=openPaths();
-    var list=getRecents().filter(function(p){return !open[p];});
+    var list=getRecents();   // show ALL recents — currently-open ones get an "open" dot, not hidden
     box.innerHTML=list.length? '<h2 class="sect">Recent</h2>'+list.map(function(p){
-      return '<div class="ritem" data-p="'+esc(p)+'"><div class="rt"><span class="rb">'+esc(baseName(p))+
+      var isOpen=!!open[p];
+      return '<div class="ritem'+(isOpen?' isopen':'')+'" data-p="'+esc(p)+'"><div class="rt"><span class="rb">'+
+        esc(baseName(p))+(isOpen?' <span class="rdot" title="currently open">●</span>':'')+
         '</span><span class="rp">'+esc(p)+'</span></div><button class="rx" data-p="'+esc(p)+'" title="remove from recents">✕</button></div>';
     }).join('') : '';
   }
@@ -279,10 +282,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
           '<span class="meta">'+nbBadges(n)+'</span>'+nbFoot(n)+'</a>'+
           '<button class="kill" data-id="'+esc(n.id)+'" title="shut down this session">⨯ shutdown</button></div>';
       }).join('') : '<p class="empty">No notebooks open — open one above.</p>';
-      renderRecents();   // recents hides notebooks already open (reads .nb .p)
+      renderRecents();   // recents marks (not hides) notebooks already open (reads .nb .p)
     }).catch(function(){});
   }
   loadSessions();
+  // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
+  // from other tabs, agents, or MCP tools), and refresh immediately when the tab regains focus.
+  setInterval(function(){ if(!document.hidden) loadSessions(); }, 4000);
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden) loadSessions(); });
+  window.addEventListener('pageshow',function(){ loadSessions(); });   // back/forward cache restore
   // Prefill the last directory we opened from (but DON'T open the completion
   // dropdown on load — it would cover the open-sessions list; it opens when the
   // user types or Tabs).
