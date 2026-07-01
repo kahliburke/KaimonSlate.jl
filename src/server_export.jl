@@ -134,7 +134,8 @@ end
 
 function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", code::AbstractString = "normal",
-                     outputs::AbstractString = "all", og_image::AbstractString = "", runnable::Bool = false)
+                     outputs::AbstractString = "all", og_image::AbstractString = "",
+                     runnable::Bool = false, embed_bundle::Bool = false)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
@@ -226,20 +227,28 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         refs = _md_references(citectx)
         isempty(strip(refs)) || print(io, "<section class=\"exp-md exp-refs\">", markdown_html(refs, CellOutput[]), "</section>")
         print(io, "</article>")
-        # "Run this live" overlay: a one-liner (built from the page's own URL so it works wherever the
-        # site is hosted) + download links for the launch script and the reproducible bundle.
+        # "Run this live" overlay. Two modes: SITE (sidecar run.jl + bundle next to index.html → a
+        # copy-paste one-liner) and EMBED (single-file HTML → the bundle + run.jl ride inside the page and
+        # are handed out as client-side Blob downloads, so nothing external is needed).
         if runnable
             print(io, "<div id=\"exp-run-bg\"><div class=\"exp-run-modal\">",
                   "<h2>Run this notebook live</h2>",
                   "<p>Get the full interactive notebook (with the AI agent) on your machine. Needs ",
                   "<a href=\"https://julialang.org/downloads/\" target=\"_blank\" rel=\"noopener\">Julia 1.10+</a>. ",
-                  "The script installs Kaimon + KaimonSlate, downloads this notebook's reproducible bundle, and launches it.</p>",
-                  "<p><b>One-liner</b> — paste into a terminal:</p>",
-                  "<pre class=\"exp-run-cmd\"><code id=\"exp-run-oneliner\"></code></pre>",
-                  "<p><b>Or</b> <a id=\"exp-run-dl\" download=\"", _SITE_RUNJL, "\">download run.jl</a> to inspect first, then <code>julia run.jl</code>. ",
-                  "Just the env? <a id=\"exp-run-bundle\" download=\"", _SITE_BUNDLE, "\">download the bundle</a>.</p>",
-                  "<div class=\"exp-run-row\"><button id=\"exp-run-copy\">Copy one-liner</button><button id=\"exp-run-close\">Close</button></div>",
-                  "</div></div>")
+                  "The launch script installs Kaimon + KaimonSlate and starts the notebook (its exact environment is reconstructed from the bundle).</p>")
+            if embed_bundle
+                print(io, "<p>Download BOTH files into one folder, then run <code>julia run.jl</code>:</p>",
+                      "<div class=\"exp-run-row\" style=\"justify-content:flex-start\">",
+                      "<button id=\"exp-run-dl\">⬇ run.jl</button><button id=\"exp-run-bundle\">⬇ notebook bundle</button></div>")
+            else
+                print(io, "<p><b>One-liner</b> — paste into a terminal:</p>",
+                      "<pre class=\"exp-run-cmd\"><code id=\"exp-run-oneliner\"></code></pre>",
+                      "<p><b>Or</b> <a id=\"exp-run-dl\" download=\"", _SITE_RUNJL, "\">download run.jl</a> to inspect first, then <code>julia run.jl</code>. ",
+                      "Just the env? <a id=\"exp-run-bundle\" download=\"", _SITE_BUNDLE, "\">download the bundle</a>.</p>")
+            end
+            print(io, "<div class=\"exp-run-row\">",
+                  embed_bundle ? "" : "<button id=\"exp-run-copy\">Copy one-liner</button>",
+                  "<button id=\"exp-run-close\">Close</button></div></div></div>")
         end
         # ECharts: render each embedded spec client-side (real, interactive charts with data). The specs
         # are emitted as a JS array; a resize handler keeps them responsive.
@@ -253,19 +262,32 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
         end
         if runnable
-            # Build the one-liner + download links from THIS page's URL, so it works on any host.
-            print(io, "(function(){var base=location.href.replace(/[^/]*(\\?.*)?(#.*)?\$/,'');",
-                  "var runjl=base+", JSON.json(_SITE_RUNJL), ";var bundle=base+", JSON.json(_SITE_BUNDLE), ";",
-                  "var cmd=\"julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
-                  "var q=function(id){return document.getElementById(id);};",
-                  "if(q('exp-run-oneliner'))q('exp-run-oneliner').textContent=cmd;",
-                  "if(q('exp-run-dl'))q('exp-run-dl').href=runjl;if(q('exp-run-bundle'))q('exp-run-bundle').href=bundle;",
+            print(io, "(function(){var q=function(id){return document.getElementById(id);};",
                   "var bg=q('exp-run-bg');var show=function(v){if(bg)bg.style.display=v?'flex':'none';};",
                   "if(q('exp-run-btn'))q('exp-run-btn').onclick=function(){show(true);};",
                   "if(q('exp-run-close'))q('exp-run-close').onclick=function(){show(false);};",
-                  "if(bg)bg.onclick=function(e){if(e.target===bg)show(false);};",
-                  "if(q('exp-run-copy'))q('exp-run-copy').onclick=function(){navigator.clipboard&&navigator.clipboard.writeText(cmd);this.textContent='Copied ✓';};",
-                  "})();")
+                  "if(bg)bg.onclick=function(e){if(e.target===bg)show(false);};")
+            if embed_bundle
+                # The bundle + run.jl ride inside the page; the buttons hand them out as Blob downloads.
+                # A notebook with no project env (in-process) can't be bundled → embed empty (button no-ops).
+                runjl = _run_script(""; agent = true, localbundle = true)
+                bundle_b64 = try; Base64.base64encode(export_standalone(nb)); catch; ""; end
+                print(io, "var _rj=", JSON.json(runjl), ";var _bb64=", JSON.json(bundle_b64), ";",
+                      "var _save=function(name,blob){var u=URL.createObjectURL(blob),a=document.createElement('a');",
+                      "a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);};",
+                      "if(q('exp-run-dl'))q('exp-run-dl').onclick=function(){_save(", JSON.json(_SITE_RUNJL), ",new Blob([_rj],{type:'text/plain'}));};",
+                      "if(q('exp-run-bundle'))q('exp-run-bundle').onclick=function(){var bin=atob(_bb64),n=bin.length,arr=new Uint8Array(n);",
+                      "for(var i=0;i<n;i++)arr[i]=bin.charCodeAt(i);_save(", JSON.json(_SITE_BUNDLE), ",new Blob([arr],{type:'text/plain'}));};")
+            else
+                # SITE mode: sidecar files next to index.html; the one-liner is built from the page URL.
+                print(io, "var base=location.href.replace(/[^/]*(\\?.*)?(#.*)?\$/,'');",
+                      "var runjl=base+", JSON.json(_SITE_RUNJL), ";var bundle=base+", JSON.json(_SITE_BUNDLE), ";",
+                      "var cmd=\"julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
+                      "if(q('exp-run-oneliner'))q('exp-run-oneliner').textContent=cmd;",
+                      "if(q('exp-run-dl'))q('exp-run-dl').href=runjl;if(q('exp-run-bundle'))q('exp-run-bundle').href=bundle;",
+                      "if(q('exp-run-copy'))q('exp-run-copy').onclick=function(){navigator.clipboard&&navigator.clipboard.writeText(cmd);this.textContent='Copied ✓';};")
+            end
+            print(io, "})();")
         end
         print(io, "window.addEventListener('load',function(){",
               "if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[",
@@ -337,66 +359,58 @@ end
 const _SITE_BUNDLE = "notebook.standalone.jl"   # the reproducible env (export_standalone)
 const _SITE_RUNJL = "run.jl"                     # the generated bootstrap script
 
-# The `run.jl` bootstrap: install the packages, download the notebook's reproducible bundle from
-# `bundle_url`, expand it, and (agent=true) set up the full Kaimon/agent experience. Discrete step
-# functions so it can be extended (auto-launch, Julia bootstrap). Idempotent.
-function _run_script(bundle_url::AbstractString; agent::Bool = true)
-    KAIMON = "https://github.com/kahliburke/Kaimon.jl"
+# The `run.jl` bootstrap. Installs KaimonSlate into a DEDICATED environment (never the user's default —
+# that avoids clobbering their setup, and Kaimon+KaimonSlate can't share one env anyway: they run as
+# separate processes in the real extension model), fetches the notebook's reproducible bundle, and
+# serves it standalone — the notebook's own env reconstructs in its gate worker on open. With
+# `localbundle`, reads the bundle from a sibling file (the embedded single-file HTML case) instead of
+# fetching `bundle_url`. `agent` only adds guidance for the extra Kaimon/agent setup (installed
+# separately, per the docs). Discrete step functions so it's easy to extend/audit. Idempotent.
+function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle::Bool = false)
     SLATE = "https://github.com/kahliburke/KaimonSlate.jl"
-    installs = agent ?
-        "    Pkg.add(url = \"$KAIMON\")   # gate workers + the AI agent\n    Pkg.add(url = \"$SLATE\")  # auto-registers as a Kaimon extension on load" :
-        "    Pkg.add(url = \"$SLATE\")"
-    launch = agent ? """
+    agentnote = agent ? """
         println(""\"
-        ✓ Installed. Notebook bundle saved to: \$nb
-
-        To run it with the FULL experience (per-notebook workers + AI agent):
-          1. Start Kaimon the way you normally do — it auto-starts the Slate server at
-             http://127.0.0.1:8765 and loads the `slate` tools.
-          2. Open that URL, then open the notebook file — or just ask the agent:
-                slate.open \$nb
-             Slate reconstructs the notebook's exact environment from the bundle on open.
-
-        For a quick look WITHOUT the agent, run instead:
-          julia -e 'using KaimonSlate; KaimonSlate.serve_notebook(raw"\$nb")'
-        ""\")""" : """
-        println("✓ Installed. Serving at http://127.0.0.1:8765 — the env reconstructs on open…")
-        @eval using KaimonSlate
-        Base.invokelatest(getfield(KaimonSlate, :serve_notebook), nb)"""
+        ┌ For the AI agent (optional): install & run Kaimon separately (it runs KaimonSlate as an
+        │ extension in its own process). See https://github.com/kahliburke/Kaimon.jl and the
+        └ KaimonSlate install docs. This script runs the notebook in standalone mode.
+        ""\")""" : ""
     return """
     #!/usr/bin/env julia
     # ── Run this Kaimon Slate notebook live on your machine ──────────────────────────────────────
-    # Auto-generated. Installs the packages, downloads this notebook's reproducible bundle, and gets
-    # you running — Slate reconstructs the exact environment from the bundle when the notebook opens.
-    # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).$(agent ? " For the agent: a logged-in `claude` CLI and/or Ollama (optional)." : "")
+    # Auto-generated. Installs KaimonSlate into a dedicated environment, gets this notebook's
+    # reproducible bundle, and serves it — the notebook's exact environment reconstructs on open.
+    # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).
     #
     # Steps are separate functions so this is easy to extend or audit.
-    using Pkg, Downloads
+    using Pkg$(localbundle ? "" : ", Downloads")
 
-    # The bundle lives next to this script on the published site; override to self-host.
-    const BUNDLE_URL = get(() -> "$bundle_url", ENV, "SLATE_BUNDLE_URL")
-
+    # A dedicated project env keeps this off your default environment.
+    const ENVDIR = joinpath(first(DEPOT_PATH), "environments", "kaimonslate-run")
+    $(localbundle ? "" : "# The bundle lives next to this script on the published site; override to self-host.\n    const BUNDLE_URL = get(() -> \"$bundle_url\", ENV, \"SLATE_BUNDLE_URL\")\n")
     function ensure_julia()
         VERSION >= v"1.10" || error("Julia 1.10+ required (found \$VERSION). See https://julialang.org/downloads")
     end
 
     function install_packages()
-        @info "Installing packages (first run compiles — this can take a few minutes)…"
-    $installs
+        @info "Installing KaimonSlate into \$ENVDIR (first run compiles — this can take a few minutes)…"
+        mkpath(ENVDIR); Pkg.activate(ENVDIR)
+        Pkg.add(url = "$SLATE")
     end
 
     function fetch_bundle()
-        @info "Downloading the notebook bundle" BUNDLE_URL
-        nb = joinpath(pwd(), $(JSON.json(_SITE_BUNDLE)))
-        Downloads.download(BUNDLE_URL, nb)
+    $(localbundle ?
+        "    nb = joinpath(@__DIR__, $(JSON.json(_SITE_BUNDLE)))\n        isfile(nb) || error(\"Put $(_SITE_BUNDLE) next to this script (download it from the page), then re-run.\")" :
+        "    @info \"Downloading the notebook bundle\" BUNDLE_URL\n        nb = joinpath(pwd(), $(JSON.json(_SITE_BUNDLE)))\n        Downloads.download(BUNDLE_URL, nb)")
         return nb
     end
 
     function main()
         ensure_julia()
         install_packages()
-        nb = fetch_bundle()
-    $launch
+        nb = fetch_bundle()$agentnote
+        println("✓ Serving at http://127.0.0.1:8765 — the notebook's environment reconstructs on open…")
+        @eval using KaimonSlate
+        Base.invokelatest(getfield(KaimonSlate, :serve_notebook), nb)
     end
 
     main()

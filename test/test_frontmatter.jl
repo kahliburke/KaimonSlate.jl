@@ -229,9 +229,18 @@ x = 1
         @test occursin("<button id=\"exp-run-btn\">", rh) && occursin("Run this notebook live", rh) && occursin("run.jl", rh)
         @test !occursin("<button id=\"exp-run-btn\">", NS.export_html(fnb))   # only when runnable (CSS is always present)
         rj = NS._run_script("https://x.github.io/y/notebook.standalone.jl"; agent = true)
-        @test occursin("Downloads.download(BUNDLE_URL", rj) && occursin("Kaimon.jl", rj) && occursin("KaimonSlate.jl", rj)
+        @test occursin("Downloads.download(BUNDLE_URL", rj) && occursin("KaimonSlate.jl", rj)
         @test occursin("x.github.io/y/notebook.standalone.jl", rj)
-        @test !occursin("Kaimon.jl", NS._run_script("u"; agent = false))   # standalone bootstrap omits Kaimon
+        @test occursin("kaimonslate-run", rj)                        # installs into a dedicated env, not the default
+        @test !occursin("Pkg.add(url = \"https://github.com/kahliburke/Kaimon.jl", rj)   # never adds Kaimon to this env
+        # local-bundle run.jl reads a sibling file instead of downloading
+        rjl = NS._run_script(""; localbundle = true)
+        @test occursin("@__DIR__", rjl) && !occursin("Downloads.download", rjl)
+        # embedded single-file HTML: run.jl rides inside the page (Blob downloads, no sidecars)
+        eh = NS.export_html(fnb; runnable = true, embed_bundle = true)
+        @test occursin("<button id=\"exp-run-btn\">", eh)
+        @test occursin("_rj=", eh) && occursin("_bb64=", eh)         # embedded script + bundle slot
+        @test !occursin("exp-run-oneliner", eh)                      # no URL one-liner in embed mode
     end
 
     @testset "HTML export options: theme + code size + hide source" begin

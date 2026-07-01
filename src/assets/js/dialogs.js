@@ -69,6 +69,7 @@ function exportHtml(dl) {
   if (theme !== 'dark') parts.push('theme=' + theme);
   if (code !== 'normal') parts.push('code=' + code);
   const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
+  if ((document.getElementById('htmlrunnable') || {}).checked) parts.push('bundle=1');
   const q = parts.length ? '?' + parts.join('&') : '';
   if (dl === false) { window.open(_apipath('/api/export.html' + q), '_blank'); return; }
   const a = document.createElement('a');
@@ -268,6 +269,7 @@ function openExport(preset) {
   document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';
   document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
+  const hr = document.getElementById('htmlrunnable'); if (hr) hr.checked = localStorage.getItem('slate_htmlrunnable') === '1';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = localStorage.getItem('slate_siterepo') || '';
@@ -288,6 +290,7 @@ function closeExport(go) {
   closeExportModal();
   if (fmt === 'html') {
     const hs = document.getElementById('htmlsource'); localStorage.setItem('slate_htmlsource', hs && hs.checked ? '1' : '0');
+    const hr = document.getElementById('htmlrunnable'); if (hr) localStorage.setItem('slate_htmlrunnable', hr.checked ? '1' : '0');
     ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     return exportHtml(true);
   }
