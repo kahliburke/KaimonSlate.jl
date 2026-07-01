@@ -82,13 +82,19 @@ async function exportMarkdown(mode) {
     const r = await fetch(_apipath('/api/export.md' + q));
     if (!r.ok) { await alertDark('Markdown export failed:\n' + (await r.text())); return; }
     const md = await r.text();
+    const readme = document.getElementById('mdreadme');
+    const name = readme && readme.checked ? 'README.md' : _dlName('.md');
+    const save = () => {                                  // download the markdown as `name`
+      const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), a = document.createElement('a');
+      a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    };
     if (mode === 'copy') {
       try {
         await navigator.clipboard.writeText(md);
         showLoading('Copied Markdown to clipboard ✓'); setTimeout(hideLoading, 850);
-      } catch (_) { _saveBlob(new Blob([md], { type: 'text/markdown' }), '.md'); }   // clipboard blocked → download
+      } catch (_) { save(); }                             // clipboard blocked → download instead
     } else {
-      _saveBlob(new Blob([md], { type: 'text/markdown' }), '.md');
+      save();
     }
   } catch (e) { await alertDark('Markdown export failed: ' + e); }
 }
@@ -158,6 +164,7 @@ function openExport(preset) {
   document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
+  const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   ['htmltheme', 'htmlcode', 'exoutputs'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
@@ -178,6 +185,7 @@ function closeExport(go) {
   }
   if (fmt === 'markdown') {
     const ms = document.getElementById('mdsource'); localStorage.setItem('slate_mdsource', ms && ms.checked ? '1' : '0');
+    const rm = document.getElementById('mdreadme'); localStorage.setItem('slate_mdreadme', rm && rm.checked ? '1' : '0');
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
   if (fmt === 'standalone') return exportStandalone();
