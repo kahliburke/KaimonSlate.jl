@@ -382,10 +382,18 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle
     # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).
     #
     # Steps are separate functions so this is easy to extend or audit.
-    using Pkg$(localbundle ? "" : ", Downloads")
+    using Pkg, Sockets$(localbundle ? "" : ", Downloads")
+
+    # Don't auto-register into the user's Kaimon config — this is a self-contained standalone run.
+    ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"
 
     # A dedicated project env keeps this off your default environment.
     const ENVDIR = joinpath(first(DEPOT_PATH), "environments", "kaimonslate-run")
+
+    # Pick a free TCP port (the default 8765 may already be taken, e.g. by a running Kaimon).
+    function free_port()
+        s = Sockets.listen(Sockets.localhost, 0); p = Int(Sockets.getsockname(s)[2]); close(s); return p
+    end
     $(localbundle ? "" : "# The bundle lives next to this script on the published site; override to self-host.\n    const BUNDLE_URL = get(() -> \"$bundle_url\", ENV, \"SLATE_BUNDLE_URL\")\n")
     function ensure_julia()
         VERSION >= v"1.10" || error("Julia 1.10+ required (found \$VERSION). See https://julialang.org/downloads")
@@ -404,16 +412,21 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle
         return nb
     end
 
-    function main()
+    function setup()
         ensure_julia()
         install_packages()
-        nb = fetch_bundle()$agentnote
-        println("✓ Serving at http://127.0.0.1:8765 — the notebook's environment reconstructs on open…")
-        @eval using KaimonSlate
-        Base.invokelatest(getfield(KaimonSlate, :serve_notebook), nb)
+        nb = fetch_bundle()
+        $agentnote
+        return nb
     end
 
-    main()
+    # `using` + serve run at TOP LEVEL (not inside a function): the world age advances between
+    # top-level statements, so the just-loaded `KaimonSlate` binding is visible for the serve call.
+    const NB = setup()
+    port = free_port()
+    println("✓ Serving at http://127.0.0.1:\$port — the notebook's environment reconstructs on open…")
+    using KaimonSlate
+    KaimonSlate.serve_notebook(NB; port = port)
     """
 end
 

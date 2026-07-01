@@ -233,6 +233,11 @@ x = 1
         @test occursin("x.github.io/y/notebook.standalone.jl", rj)
         @test occursin("kaimonslate-run", rj)                        # installs into a dedicated env, not the default
         @test !occursin("Pkg.add(url = \"https://github.com/kahliburke/Kaimon.jl", rj)   # never adds Kaimon to this env
+        @test !occursin("fetch_bundle()println", rj)                 # statements not glued onto one line (juxtaposition bug)
+        @test occursin("nb = fetch_bundle()\n", rj)
+        @test occursin("KAIMONSLATE_NO_AUTOREGISTER", rj)            # don't touch the user's Kaimon config
+        @test occursin("free_port()", rj)                            # pick a free port (8765 may be taken)
+        @test occursin("using KaimonSlate\n", rj)                    # load at top level (world-age safe)
         # local-bundle run.jl reads a sibling file instead of downloading
         rjl = NS._run_script(""; localbundle = true)
         @test occursin("@__DIR__", rjl) && !occursin("Downloads.download", rjl)
