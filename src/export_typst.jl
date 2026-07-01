@@ -632,14 +632,56 @@ _tex_accent_sub(m::AbstractString) =
     (mm = match(r"\\([`'^\"~=.cvuHkrbd])\s*\{?\s*([A-Za-z])\}?", m);
      mm === nothing ? m : Base.Unicode.normalize(string(mm.captures[2], _TEX_ACCENT[mm.captures[1][1]]), :NFC))
 
-# Decode the common LaTeX accent/letter macros a BibTeX field carries (`Ko\c{c}` → `Koç`, `\'{e}`/`\'e`
-# → `é`, `{\ss}` → `ß`) and drop the case-protecting braces (`{M}ontgomery` → `Montgomery`). Best-effort
-# and used ONLY for the live card / label / autocomplete — the exported `.bib` keeps the raw source for
-# the CSL engine (which does its own decoding).
+# Common LaTeX math commands → their Unicode glyph (decoded only INSIDE `$…$`, so an operator like
+# `\cdot` isn't confused with the `\c` cedilla accent, and Greek/ops in titles render). Word commands,
+# matched with a trailing non-letter boundary; longer names win by that boundary (`\cdots` vs `\cdot`).
+const _TEX_CMD = ["cdots" => "⋯", "cdot" => "·", "times" => "×", "div" => "÷", "pm" => "±", "mp" => "∓",
+    "leq" => "≤", "geq" => "≥", "neq" => "≠", "approx" => "≈", "equiv" => "≡", "sim" => "∼", "propto" => "∝",
+    "infty" => "∞", "ldots" => "…", "dots" => "…", "rightarrow" => "→", "leftarrow" => "←", "to" => "→",
+    "partial" => "∂", "nabla" => "∇", "sum" => "∑", "prod" => "∏", "int" => "∫", "sqrt" => "√", "in" => "∈",
+    "subset" => "⊂", "cup" => "∪", "cap" => "∩", "varepsilon" => "ε", "epsilon" => "ε", "varphi" => "φ",
+    "alpha" => "α", "beta" => "β", "gamma" => "γ", "delta" => "δ", "zeta" => "ζ", "eta" => "η", "theta" => "θ",
+    "iota" => "ι", "kappa" => "κ", "lambda" => "λ", "mu" => "μ", "nu" => "ν", "xi" => "ξ", "rho" => "ρ",
+    "sigma" => "σ", "tau" => "τ", "phi" => "φ", "chi" => "χ", "psi" => "ψ", "omega" => "ω", "pi" => "π",
+    "Gamma" => "Γ", "Delta" => "Δ", "Theta" => "Θ", "Lambda" => "Λ", "Xi" => "Ξ", "Pi" => "Π", "Sigma" => "Σ",
+    "Phi" => "Φ", "Psi" => "Ψ", "Omega" => "Ω"]
+const _TEX_SUP = Dict('0'=>'⁰','1'=>'¹','2'=>'²','3'=>'³','4'=>'⁴','5'=>'⁵','6'=>'⁶','7'=>'⁷','8'=>'⁸','9'=>'⁹','+'=>'⁺','-'=>'⁻','='=>'⁼','('=>'⁽',')'=>'⁾','n'=>'ⁿ','i'=>'ⁱ')
+const _TEX_SUB = Dict('0'=>'₀','1'=>'₁','2'=>'₂','3'=>'₃','4'=>'₄','5'=>'₅','6'=>'₆','7'=>'₇','8'=>'₈','9'=>'₉','+'=>'₊','-'=>'₋','='=>'₌','('=>'₍',')'=>'₎')
+# Map every char of `s` through `tbl` (super/subscript), or `nothing` if any char has no mapping.
+function _tex_mapscript(s, tbl)
+    io = IOBuffer()
+    for c in s; haskey(tbl, c) ? print(io, tbl[c]) : return nothing; end
+    return String(take!(io))
+end
+_tex_script_sub(m::AbstractString, tbl) =
+    (mm = match(r"[\^_]\{?([^{}]+)\}?", m); mm === nothing ? m : something(_tex_mapscript(mm.captures[1], tbl), m))
+
+# Decode a `$…$` math span (the `$` are dropped): operators/Greek, then super/subscripts.
+function _tex_math_sub(m::AbstractString)
+    inner = String(SubString(m, nextind(m, firstindex(m)), prevind(m, lastindex(m))))
+    for (cmd, ch) in _TEX_CMD
+        inner = replace(inner, Regex("\\\\" * cmd * "(?![A-Za-z])") => ch)
+    end
+    inner = replace(inner, r"\^\{[^{}]+\}" => x -> _tex_script_sub(x, _TEX_SUP))
+    inner = replace(inner, r"\^[A-Za-z0-9+\-]" => x -> _tex_script_sub(x, _TEX_SUP))
+    inner = replace(inner, r"_\{[^{}]+\}" => x -> _tex_script_sub(x, _TEX_SUB))
+    inner = replace(inner, r"_[A-Za-z0-9+\-]" => x -> _tex_script_sub(x, _TEX_SUB))
+    return inner
+end
+
+# Decode the common LaTeX macros a BibTeX field carries so the LIVE view reads cleanly:
+#  • accents — SYMBOL accents (`\'e`/`\'{e}` → é) bare or braced; LETTER accents (`\c{c}` → ç, `\H{o}`
+#    → ő) ONLY braced, so a word command like `\cdot`/`\vec` isn't mis-read as `\c`+`d` / `\v`+`e`;
+#  • standalone letters (`{\ss}` → ß, `{\o}` → ø);
+#  • `$…$` math — operators/Greek (`\cdot` → ·) + super/subscripts (`10^9` → 10⁹), dropping the `$`;
+#  • case-protecting braces (`{M}ontgomery` → `Montgomery`).
+# Best-effort, LIVE-view only — the exported `.bib` keeps the raw source for the CSL engine.
 function _delatex(s::AbstractString)
     str = String(s)
-    (occursin('\\', str) || occursin('{', str)) || return str          # fast path: plain ASCII/Unicode
-    str = replace(str, r"\\[`'^\"~=.cvuHkrbd]\s*\{?\s*[A-Za-z]\}?" => _tex_accent_sub)
+    (occursin('\\', str) || occursin('{', str) || occursin('$', str)) || return str   # fast path
+    str = replace(str, r"\$[^$]*\$" => _tex_math_sub)                  # math spans first (scopes ^/_ )
+    str = replace(str, r"\\['`^\"~=.]\s*\{?\s*[A-Za-z]\}?" => _tex_accent_sub)   # symbol accents (bare/braced)
+    str = replace(str, r"\\[cvuHkrbd]\{[A-Za-z]\}" => _tex_accent_sub)           # letter accents (braced only)
     for (cmd, ch) in _TEX_LETTER
         str = replace(str, Regex("\\\\" * cmd * "(?![A-Za-z])") => ch)  # \o \ss … (no trailing letter)
     end

@@ -97,6 +97,18 @@ x = 1
         @test occursin("A reactive study", h)
     end
 
+    @testset "HTML export options: theme + code size + hide source" begin
+        nb = _mknb("#%% code id=c\nx = 1\n")
+        dark = NS.export_html(nb; theme = "dark")
+        light = NS.export_html(nb; theme = "light")
+        @test occursin("--bg:#0d1120", dark)                 # dark palette
+        @test occursin("--bg:#ffffff", light)                # light palette
+        @test occursin(".64rem", NS.export_html(nb; code = "tiny"))            # code size flows through
+        @test occursin("<pre class=\"exp-src\">", NS.export_html(nb; code = "normal"))         # source shown by default
+        @test !occursin("<pre class=\"exp-src\">", NS.export_html(nb; code = "hidden"))        # code=hidden ⇒ outputs only
+        @test !occursin("<pre class=\"exp-src\">", NS.export_html(nb; include_source = false)) # explicit hide
+    end
+
     @testset "bibliography — embedded BibTeX" begin
         src = "#%% md id=body\nSee [@knuth1984].\n\n#%% md id=refs bibliography\n@book{knuth1984, title={TeX}}\n"
         nb = _mknb(src)
@@ -150,6 +162,11 @@ x = 1
         @test NS._author_year_label(acc[1].author, acc[1].year) == "Koç et al., 1996"
         @test NS._delatex(raw"Erd\H{o}s, P\'al, {\o}, {\ss}") == "Erdős, Pál, ø, ß"
         @test NS._delatex("plain ASCII") == "plain ASCII"   # fast path unchanged
+        # A word command like `\cdot` must NOT be mis-decoded as `\c`+`d` (the cedilla accent); math
+        # spans decode operators + super/subscripts and drop the `$`.
+        @test NS._delatex(raw"The Pseudoprimes to $25 \cdot 10^9$") == "The Pseudoprimes to 25 · 10⁹"
+        @test NS._delatex(raw"$10^{27}$ and $\alpha_2$") == "10²⁷ and α₂"
+        @test NS._delatex(raw"snake_case stays") == "snake_case stays"   # `_` outside math untouched
         # state_json ships the key list for [@-autocomplete; the cell renders a card, not raw BibTeX
         nb = _mknb("#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}}\n")
         sj = NS.state_json(nb)
