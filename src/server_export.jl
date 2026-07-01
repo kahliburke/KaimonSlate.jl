@@ -269,6 +269,19 @@ function og_image(nb::LiveNotebook)
     return _title_card_png(nb)
 end
 
+# Materialise the site into `dir`: index.html (wired to the og-image sidecar) + og-image.png +
+# .nojekyll. Shared by `export_site` (tarball) and `publish_site` (git push).
+function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; kwargs...)
+    img = og_image(nb)
+    ogpath = ""
+    if img !== nothing
+        write(joinpath(dir, "og-image.png"), img); ogpath = "og-image.png"
+    end
+    write(joinpath(dir, "index.html"), export_html(nb; og_image = ogpath, kwargs...))
+    write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
+    return dir
+end
+
 """
     export_site(nb; kwargs...) -> Vector{UInt8}
 
@@ -280,21 +293,89 @@ gzip-compressed tarball. Unpack it into a `gh-pages` branch / any static host. H
 function export_site(nb::LiveNotebook; kwargs...)
     dir = mktempdir()
     try
-        img = og_image(nb)
-        ogpath = ""
-        if img !== nothing
-            write(joinpath(dir, "og-image.png"), img)
-            ogpath = "og-image.png"
-        end
-        html = export_html(nb; og_image = ogpath, kwargs...)
-        write(joinpath(dir, "index.html"), html)
-        write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
+        _build_site_dir!(dir, nb; kwargs...)
         tarball = Tar.create(dir)
         try
             return transcode(GzipCompressor, read(tarball))
         finally
             rm(tarball; force = true)
         end
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+# Run a git/gh command in `dir`, returning (ok, combined_output). Never throws.
+function _git_run(dir::AbstractString, args::Cmd)
+    out = IOBuffer()
+    ok = try
+        run(pipeline(setenv(args, dir = dir); stdout = out, stderr = out)); true
+    catch
+        false
+    end
+    return (ok, String(take!(out)))
+end
+
+_gh_ok(cmd::Cmd) = success(pipeline(ignorestatus(cmd); stdout = devnull, stderr = devnull))
+
+"""
+    publish_preflight(repo) -> NamedTuple
+
+Inspect (read-only, no mutation) what publishing to `repo` would do, so the UI can warn before
+acting: whether `gh` is available, the repo exists, its visibility, and whether it already has a
+`gh-pages` branch / live Pages site that a publish would overwrite.
+"""
+function publish_preflight(repo::AbstractString)
+    gh = Sys.which("gh")
+    gh === nothing && return (; gh = false, valid = false, exists = false)
+    occursin(r"^[\w.-]+/[\w.-]+$", repo) || return (; gh = true, valid = false, exists = false)
+    _gh_ok(`$gh repo view $repo`) || return (; gh = true, valid = true, exists = false)
+    vis = try; strip(read(pipeline(`$gh repo view $repo --json visibility -q .visibility`; stderr = devnull), String)); catch; ""; end
+    pageurl = try; strip(read(pipeline(`$gh api repos/$repo/pages -q .html_url`; stderr = devnull), String)); catch; ""; end
+    return (; gh = true, valid = true, exists = true, visibility = vis,
+            hasGhPages = _gh_ok(`$gh api repos/$repo/branches/gh-pages`), pagesUrl = pageurl)
+end
+
+"""
+    publish_site(nb, repo; private=true, kwargs...) -> (; url, repo, created)
+
+Publish the notebook as a GitHub Pages site to `repo` (`"owner/name"`), using the user's installed +
+authenticated `gh` CLI. Creates the repo (private by default) if it doesn't exist, force-pushes the
+built site to the `gh-pages` branch, enables Pages, and returns the public URL. Idempotent — re-runs
+just update the branch. Requires `gh` on PATH and `gh auth login` already done.
+"""
+function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = true, kwargs...)
+    gh = Sys.which("gh")
+    gh === nothing && error("`gh` CLI not found on PATH. Install it and run `gh auth login`, then retry.")
+    occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be \"owner/name\" (got \"$repo\")")
+    owner, name = split(repo, "/")
+    token = strip(read(`$gh auth token`, String))                 # push auth without touching git config
+    isempty(token) && error("`gh auth token` returned nothing — run `gh auth login` first.")
+
+    dir = mktempdir()
+    try
+        _build_site_dir!(dir, nb; kwargs...)
+        # Fresh single-commit history on gh-pages (the site is a build artifact, not tracked source).
+        for cmd in (`git init -q -b gh-pages`, `git add -A`,
+                    `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish notebook site"`)
+            ok, log = _git_run(dir, cmd); ok || error("git failed: $log")
+        end
+        # Ensure the repo exists (create private/public if missing).
+        created = false
+        if !success(`$gh repo view $repo`)
+            vis = private ? "--private" : "--public"
+            ok, log = _git_run(dir, `$gh repo create $repo $vis`)
+            ok || error("gh repo create failed: $log")
+            created = true
+        end
+        pushurl = "https://x-access-token:$token@github.com/$repo.git"
+        ok, log = _git_run(dir, `git push --force $pushurl gh-pages`)
+        ok || error("git push failed: $(replace(log, token => "***"))")
+        # Enable Pages from gh-pages/ (best-effort: 409 = already enabled). The `-f` values carry `[]`,
+        # which must reach gh as literal args, so interpolate them as variables (no shell parsing).
+        srcbranch = "source[branch]=gh-pages"; srcpath = "source[path]=/"; pagesep = "repos/$repo/pages"
+        _git_run(dir, `$gh api -X POST $pagesep -f $srcbranch -f $srcpath`)
+        return (; url = "https://$owner.github.io/$name/", repo = String(repo), created)
     finally
         rm(dir; recursive = true, force = true)
     end

@@ -141,6 +141,45 @@ async function exportSite() {
   } catch (e) { await alertDark('Site export failed: ' + e); }
   finally { hideLoading(); }
 }
+// Publish the site to GitHub Pages via the server's `gh` CLI. Prompts for the repo, pushes to
+// gh-pages, and reports the URL. Pages can take ~1 min to go live after the first publish.
+async function publishSite() {
+  const repo = ((document.getElementById('siterepo') || {}).value || '').trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter the target repo as owner/name.'); return; }
+  const isPrivate = !!(document.getElementById('siteprivate') || {}).checked;
+  const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
+  const outv = (document.getElementById('exoutputs') || {}).value || 'all';
+  // Preflight: tell the user exactly what will happen (new repo vs overwrite an existing site).
+  let pf;
+  try {
+    const pr = await fetch(_apipath('/api/publish-check'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: repo }) });
+    pf = pr.ok ? await pr.json() : {};
+  } catch (_) { pf = {}; }
+  if (pf.gh === false) { await alertDark('The `gh` CLI was not found on the server. Install it and run `gh auth login`, then retry.'); return; }
+  let msg;
+  if (!pf.exists) {
+    msg = 'Repo ' + repo + ' does not exist.\n\nA NEW ' + (isPrivate ? 'private' : 'public') +
+      ' repo will be created, and the site pushed to its gh-pages branch.';
+  } else {
+    msg = 'Repo ' + repo + ' exists (' + (pf.visibility || 'unknown') + ').\n\n' +
+      (pf.hasGhPages ? '⚠ Its gh-pages branch will be FORCE-PUSHED — any existing published site there is overwritten.\n'
+                     : 'A gh-pages branch will be created and Pages enabled.\n') +
+      (pf.pagesUrl ? '\nCurrently live at: ' + pf.pagesUrl : '');
+  }
+  if (!await confirmDark(msg, pf.exists && pf.hasGhPages ? 'Overwrite & publish' : 'Publish',
+      pf.exists && pf.hasGhPages ? 'danger' : 'primary')) return;
+  showLoading('Building + pushing to GitHub Pages…');
+  try {
+    const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo: repo, private: isPrivate, theme: theme, outputs: outv }) });
+    if (!r.ok) { await alertDark('Publish failed:\n' + (await r.text())); return; }
+    const j = await r.json();
+    localStorage.setItem('slate_siterepo', repo);
+    await alertDark('Published ✓\n\n' + j.url + '\n\n' + (j.created ? 'Repo created. ' : '') +
+      'GitHub Pages may take ~1 minute to go live on the first publish.');
+  } catch (e) { await alertDark('Publish failed: ' + e); }
+  finally { hideLoading(); }
+}
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
@@ -208,6 +247,7 @@ function openExport(preset) {
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
+  const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = localStorage.getItem('slate_siterepo') || '';
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
@@ -232,7 +272,10 @@ function closeExport(go) {
     const mi = document.getElementById('mdimg'); if (mi) localStorage.setItem('slate_mdimg', mi.value);
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
-  if (fmt === 'website') { const st = document.getElementById('sitetheme'); if (st) localStorage.setItem('slate_sitetheme', st.value); return exportSite(); }
+  if (fmt === 'website') {
+    const st = document.getElementById('sitetheme'); if (st) localStorage.setItem('slate_sitetheme', st.value);
+    return go === 'publish' ? publishSite() : exportSite();
+  }
   if (fmt === 'standalone') return exportStandalone();
   return _runPdfExport();
 }

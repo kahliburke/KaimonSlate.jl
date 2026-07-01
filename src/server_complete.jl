@@ -494,6 +494,25 @@ function _make_router(h::Hub)
         HTTP.Response(200, ["Content-Type" => "application/gzip",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], data)
     end))
+    # Preflight (read-only): what would publishing to this repo do? Body: {repo}. Drives the confirm UI.
+    HTTP.register!(router, "POST", "/api/{id}/publish-check", req -> _withnb(h, req, nb -> begin
+        repo = strip(get(_body(req), "repo", ""))
+        _json(Dict(pairs(publish_preflight(String(repo)))))
+    end))
+    # Publish the site to GitHub Pages via the user's `gh` CLI. Body: {repo:"owner/name", private, theme}.
+    # Creates the repo if missing, pushes the built site to gh-pages, enables Pages, returns the URL.
+    HTTP.register!(router, "POST", "/api/{id}/publish", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        repo = strip(get(b, "repo", ""))
+        isempty(repo) && return HTTP.Response(400, "missing \"repo\" (owner/name)")
+        try
+            r = publish_site(nb, String(repo); private = get(b, "private", true) === true,
+                             theme = get(b, "theme", "dark"))
+            return _json(Dict("url" => r.url, "repo" => r.repo, "created" => r.created))
+        catch e
+            return HTTP.Response(500, "Publish failed: " * sprint(showerror, e))
+        end
+    end))
     # Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a
     # shallow git bundle when the project is a repo). Reinflate with `KaimonSlate.expand`.
     HTTP.register!(router, "GET", "/api/{id}/export.standalone.jl", req -> _withnb(h, req, nb -> begin
