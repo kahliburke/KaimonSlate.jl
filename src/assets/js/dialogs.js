@@ -169,16 +169,18 @@ async function publishSite() {
   if (!await confirmDark(msg, pf.exists && pf.hasGhPages ? 'Overwrite & publish' : 'Publish',
       pf.exists && pf.hasGhPages ? 'danger' : 'primary')) return;
   showLoading('Building + pushing to GitHub Pages…');
+  let result = null, err = null;
   try {
     const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repo: repo, private: isPrivate, theme: theme, outputs: outv }) });
-    if (!r.ok) { await alertDark('Publish failed:\n' + (await r.text())); return; }
-    const j = await r.json();
-    localStorage.setItem('slate_siterepo', repo);
-    await alertDark('Published ✓\n\n' + j.url + '\n\n' + (j.created ? 'Repo created. ' : '') +
-      'GitHub Pages may take ~1 minute to go live on the first publish.');
-  } catch (e) { await alertDark('Publish failed: ' + e); }
-  finally { hideLoading(); }
+    result = r.ok ? await r.json() : { error: await r.text() };
+  } catch (e) { err = e; }
+  hideLoading();                                          // drop the spinner BEFORE the result dialog
+  if (err) { await alertDark('Publish failed: ' + err); return; }
+  if (result.error) { await alertDark('Publish failed:\n' + result.error); return; }
+  localStorage.setItem('slate_siterepo', repo);
+  await alertDark('Published ✓\n\n' + result.url + '\n\n' + (result.created ? 'Repo created. ' : '') +
+    'GitHub Pages may take ~1 minute to go live on the first publish.');
 }
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
