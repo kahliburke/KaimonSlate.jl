@@ -486,7 +486,7 @@ function _make_router(h::Hub)
         data = try
             export_site(nb; include_source = get(qp, "source", "1") != "0",
                         theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
-                        outputs = get(qp, "outputs", "all"))
+                        outputs = get(qp, "outputs", "all"), bundle = get(qp, "bundle", "0") == "1")
         catch e
             return HTTP.Response(500, "Site export failed: " * sprint(showerror, e))
         end
@@ -508,7 +508,8 @@ function _make_router(h::Hub)
         try
             r = publish_site(nb, String(repo); private = get(b, "private", false) === true,
                              create = get(b, "create", true) === true, theme = get(b, "theme", "dark"),
-                             outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0")
+                             outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0",
+                             bundle = get(b, "bundle", false) === true)
             return _json(Dict("url" => r.url, "repo" => r.repo, "created" => r.created,
                               "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError))
         catch e

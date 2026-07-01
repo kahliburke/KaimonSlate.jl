@@ -197,6 +197,12 @@ x = 1
         c.output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "(cloned = true)", nothing, nothing, 0.0)
         @test occursin("cloned = true", NS.export_html(nb; outputs = "all"))
         @test !occursin("cloned = true", NS.export_html(nb; outputs = "figures"))
+        # figures-only WITH a rich display chunk keeps the figure (exercises the _render_chunks path)
+        fig = _mknb("#%% code id=c\n1\n")
+        fc = fig.report.cells[findfirst(x -> x.id == "c", fig.report.cells)]
+        fc.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x89])], Any[], Any[], RE.BindSpec[], "42", nothing, nothing, 0.0)
+        fh = NS.export_html(fig; outputs = "figures")
+        @test occursin("disp img", fh) && !occursin(">42<", fh)   # image kept, scalar text dropped
         @test occursin("cloned = true", NS.export_markdown(nb; outputs = "all"))
         @test !occursin("cloned = true", NS.export_markdown(nb; outputs = "figures"))
         @test !occursin("cloned = true", NS.export_markdown(nb; outputs = "none"))
@@ -218,6 +224,14 @@ x = 1
         # the site tarball is a valid gzip stream (starts with the gzip magic)
         site = NS.export_site(fnb)
         @test length(site) > 20 && site[1] == 0x1f && site[2] == 0x8b
+        # runnable overlay + generated run.jl
+        rh = NS.export_html(fnb; runnable = true)
+        @test occursin("<button id=\"exp-run-btn\">", rh) && occursin("Run this notebook live", rh) && occursin("run.jl", rh)
+        @test !occursin("<button id=\"exp-run-btn\">", NS.export_html(fnb))   # only when runnable (CSS is always present)
+        rj = NS._run_script("https://x.github.io/y/notebook.standalone.jl"; agent = true)
+        @test occursin("Downloads.download(BUNDLE_URL", rj) && occursin("Kaimon.jl", rj) && occursin("KaimonSlate.jl", rj)
+        @test occursin("x.github.io/y/notebook.standalone.jl", rj)
+        @test !occursin("Kaimon.jl", NS._run_script("u"; agent = false))   # standalone bootstrap omits Kaimon
     end
 
     @testset "HTML export options: theme + code size + hide source" begin

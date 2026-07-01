@@ -138,6 +138,7 @@ async function exportSite() {
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
   const parts = ['theme=' + theme]; if (outv !== 'all') parts.push('outputs=' + outv);
   if (!(document.getElementById('sitesource') || { checked: true }).checked) parts.push('source=0');
+  if ((document.getElementById('siterunnable') || {}).checked) parts.push('bundle=1');
   showLoading('Building site + preview image…');
   try {
     const r = await fetch(_apipath('/api/export.site?' + parts.join('&')));
@@ -155,6 +156,7 @@ async function publishSite() {
   const create = !!(document.getElementById('sitecreate') || { checked: true }).checked;
   const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
   const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
+  const bundle = !!(document.getElementById('siterunnable') || {}).checked;
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
   // Preflight: tell the user exactly what will happen (create new vs overwrite an existing site).
   let pf;
@@ -181,7 +183,7 @@ async function publishSite() {
   let result = null, err = null;
   try {
     const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repo, private: isPrivate, create: create, theme: theme, outputs: outv, source: source }) });
+      body: JSON.stringify({ repo: repo, private: isPrivate, create: create, theme: theme, outputs: outv, source: source, bundle: bundle }) });
     result = r.ok ? await r.json() : { error: await r.text() };
   } catch (e) { err = e; }
   hideLoading();                                          // drop the spinner BEFORE the result dialog
@@ -269,6 +271,8 @@ function openExport(preset) {
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = localStorage.getItem('slate_siterepo') || '';
+  const ss = document.getElementById('sitesource'); if (ss) ss.checked = localStorage.getItem('slate_sitesource') !== '0';
+  const srn = document.getElementById('siterunnable'); if (srn) srn.checked = localStorage.getItem('slate_siterunnable') === '1';
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
@@ -295,6 +299,8 @@ function closeExport(go) {
   }
   if (fmt === 'website') {
     ['sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
+    const ss = document.getElementById('sitesource'); if (ss) localStorage.setItem('slate_sitesource', ss.checked ? '1' : '0');
+    const srn = document.getElementById('siterunnable'); if (srn) localStorage.setItem('slate_siterunnable', srn.checked ? '1' : '0');
     return go === 'publish' ? publishSite() : exportSite();
   }
   if (fmt === 'standalone') return exportStandalone();

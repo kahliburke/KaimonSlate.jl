@@ -39,6 +39,19 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
 .exp-chart{margin:14px 0;}
 .exp-refs{margin-top:28px;border-top:1px solid var(--border);padding-top:8px;font-size:.9rem;}
 .exp-refs h2{font-size:1.1rem;}
+.exp-run{text-align:center;margin:10px 0 4px;}
+#exp-run-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;
+  font-size:.92rem;cursor:pointer;font-family:inherit;}
+#exp-run-btn:hover{filter:brightness(1.1);}
+#exp-run-bg{display:none;position:fixed;inset:0;background:#000a;align-items:center;justify-content:center;z-index:50;}
+.exp-run-modal{background:var(--bg2);border:1px solid var(--border);border-radius:12px;max-width:640px;
+  width:92%;padding:22px 26px;color:var(--text);}
+.exp-run-modal h2{margin:0 0 8px;font-size:1.2rem;color:var(--titlefg);}
+.exp-run-modal a{color:var(--accent);}
+.exp-run-cmd{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px 12px;overflow-x:auto;}
+.exp-run-cmd code{font-family:'Cascadia Code','Fira Code',monospace;font-size:.8rem;white-space:pre-wrap;word-break:break-all;color:var(--text);}
+.exp-run-row{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;}
+.exp-run-row button{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 14px;cursor:pointer;font-family:inherit;}
 .exp-md table,.exp-table{border-collapse:collapse;margin:8px 0;font-size:.84rem;}
 .exp-md td,.exp-md th,.exp-table td,.exp-table th{border:1px solid var(--border);padding:4px 10px;text-align:left;}
 .exp-table th{background:var(--bg3);color:var(--dim);} .exp-table td{font-variant-numeric:tabular-nums;}
@@ -121,7 +134,7 @@ end
 
 function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", code::AbstractString = "normal",
-                     outputs::AbstractString = "all", og_image::AbstractString = "")
+                     outputs::AbstractString = "all", og_image::AbstractString = "", runnable::Bool = false)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
@@ -166,6 +179,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             print(io, "<div class=\"exp-abstract\"><span class=\"exp-abslabel\">Abstract</span>",
                   markdown_html(rw(fm.abstract), CellOutput[]), "</div>")
         end
+        runnable && print(io, "<div class=\"exp-run\"><button id=\"exp-run-btn\">▶ Run this notebook live</button></div>")
         print(io, "</header>")
         for c in nb.report.cells
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
@@ -194,7 +208,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                     if _outputs_text_ok(outputs)
                         print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
                     elseif o !== nothing && !isempty(o.display)
-                        print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">", _render_chunks(o.display), "</div></div>")
+                        print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">", ReportRender._render_chunks(o.display), "</div></div>")
                     end
                     for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
                         did = string("chart-", c.id, "-", si)
@@ -211,9 +225,25 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # References — rendered from the bibliography cells (the raw BibTeX cell itself is skipped above).
         refs = _md_references(citectx)
         isempty(strip(refs)) || print(io, "<section class=\"exp-md exp-refs\">", markdown_html(refs, CellOutput[]), "</section>")
+        print(io, "</article>")
+        # "Run this live" overlay: a one-liner (built from the page's own URL so it works wherever the
+        # site is hosted) + download links for the launch script and the reproducible bundle.
+        if runnable
+            print(io, "<div id=\"exp-run-bg\"><div class=\"exp-run-modal\">",
+                  "<h2>Run this notebook live</h2>",
+                  "<p>Get the full interactive notebook (with the AI agent) on your machine. Needs ",
+                  "<a href=\"https://julialang.org/downloads/\" target=\"_blank\" rel=\"noopener\">Julia 1.10+</a>. ",
+                  "The script installs Kaimon + KaimonSlate, downloads this notebook's reproducible bundle, and launches it.</p>",
+                  "<p><b>One-liner</b> — paste into a terminal:</p>",
+                  "<pre class=\"exp-run-cmd\"><code id=\"exp-run-oneliner\"></code></pre>",
+                  "<p><b>Or</b> <a id=\"exp-run-dl\" download=\"", _SITE_RUNJL, "\">download run.jl</a> to inspect first, then <code>julia run.jl</code>. ",
+                  "Just the env? <a id=\"exp-run-bundle\" download=\"", _SITE_BUNDLE, "\">download the bundle</a>.</p>",
+                  "<div class=\"exp-run-row\"><button id=\"exp-run-copy\">Copy one-liner</button><button id=\"exp-run-close\">Close</button></div>",
+                  "</div></div>")
+        end
         # ECharts: render each embedded spec client-side (real, interactive charts with data). The specs
         # are emitted as a JS array; a resize handler keeps them responsive.
-        print(io, "</article><script>")
+        print(io, "<script>")
         if !isempty(charts)
             echtheme = theme == "dark" ? "'dark'" : "null"   # echarts.init(el, theme) — dark palette or default
             print(io, "var _slateCharts=[", join(("['" * id * "'," * opt * "]" for (id, opt) in charts), ","), "];",
@@ -221,6 +251,21 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   "var el=document.getElementById(c[0]);if(!el)return;var ch=echarts.init(el,", echtheme, ");",
                   "ch.setOption(c[1]);window.addEventListener('resize',function(){ch.resize();});});}",
                   "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
+        end
+        if runnable
+            # Build the one-liner + download links from THIS page's URL, so it works on any host.
+            print(io, "(function(){var base=location.href.replace(/[^/]*(\\?.*)?(#.*)?\$/,'');",
+                  "var runjl=base+", JSON.json(_SITE_RUNJL), ";var bundle=base+", JSON.json(_SITE_BUNDLE), ";",
+                  "var cmd=\"julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
+                  "var q=function(id){return document.getElementById(id);};",
+                  "if(q('exp-run-oneliner'))q('exp-run-oneliner').textContent=cmd;",
+                  "if(q('exp-run-dl'))q('exp-run-dl').href=runjl;if(q('exp-run-bundle'))q('exp-run-bundle').href=bundle;",
+                  "var bg=q('exp-run-bg');var show=function(v){if(bg)bg.style.display=v?'flex':'none';};",
+                  "if(q('exp-run-btn'))q('exp-run-btn').onclick=function(){show(true);};",
+                  "if(q('exp-run-close'))q('exp-run-close').onclick=function(){show(false);};",
+                  "if(bg)bg.onclick=function(e){if(e.target===bg)show(false);};",
+                  "if(q('exp-run-copy'))q('exp-run-copy').onclick=function(){navigator.clipboard&&navigator.clipboard.writeText(cmd);this.textContent='Copied ✓';};",
+                  "})();")
         end
         print(io, "window.addEventListener('load',function(){",
               "if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[",
@@ -287,15 +332,95 @@ function og_image(nb::LiveNotebook)
     return _title_card_png(nb)
 end
 
+# A published site can carry a runnable bundle so a viewer can run the notebook LIVE on their machine.
+# These are the fixed filenames the site, `run.jl`, and the page overlay all agree on.
+const _SITE_BUNDLE = "notebook.standalone.jl"   # the reproducible env (export_standalone)
+const _SITE_RUNJL = "run.jl"                     # the generated bootstrap script
+
+# The `run.jl` bootstrap: install the packages, download the notebook's reproducible bundle from
+# `bundle_url`, expand it, and (agent=true) set up the full Kaimon/agent experience. Discrete step
+# functions so it can be extended (auto-launch, Julia bootstrap). Idempotent.
+function _run_script(bundle_url::AbstractString; agent::Bool = true)
+    KAIMON = "https://github.com/kahliburke/Kaimon.jl"
+    SLATE = "https://github.com/kahliburke/KaimonSlate.jl"
+    installs = agent ?
+        "    Pkg.add(url = \"$KAIMON\")   # gate workers + the AI agent\n    Pkg.add(url = \"$SLATE\")  # auto-registers as a Kaimon extension on load" :
+        "    Pkg.add(url = \"$SLATE\")"
+    launch = agent ? """
+        println(""\"
+        ✓ Installed. Notebook bundle saved to: \$nb
+
+        To run it with the FULL experience (per-notebook workers + AI agent):
+          1. Start Kaimon the way you normally do — it auto-starts the Slate server at
+             http://127.0.0.1:8765 and loads the `slate` tools.
+          2. Open that URL, then open the notebook file — or just ask the agent:
+                slate.open \$nb
+             Slate reconstructs the notebook's exact environment from the bundle on open.
+
+        For a quick look WITHOUT the agent, run instead:
+          julia -e 'using KaimonSlate; KaimonSlate.serve_notebook(raw"\$nb")'
+        ""\")""" : """
+        println("✓ Installed. Serving at http://127.0.0.1:8765 — the env reconstructs on open…")
+        @eval using KaimonSlate
+        Base.invokelatest(getfield(KaimonSlate, :serve_notebook), nb)"""
+    return """
+    #!/usr/bin/env julia
+    # ── Run this Kaimon Slate notebook live on your machine ──────────────────────────────────────
+    # Auto-generated. Installs the packages, downloads this notebook's reproducible bundle, and gets
+    # you running — Slate reconstructs the exact environment from the bundle when the notebook opens.
+    # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).$(agent ? " For the agent: a logged-in `claude` CLI and/or Ollama (optional)." : "")
+    #
+    # Steps are separate functions so this is easy to extend or audit.
+    using Pkg, Downloads
+
+    # The bundle lives next to this script on the published site; override to self-host.
+    const BUNDLE_URL = get(() -> "$bundle_url", ENV, "SLATE_BUNDLE_URL")
+
+    function ensure_julia()
+        VERSION >= v"1.10" || error("Julia 1.10+ required (found \$VERSION). See https://julialang.org/downloads")
+    end
+
+    function install_packages()
+        @info "Installing packages (first run compiles — this can take a few minutes)…"
+    $installs
+    end
+
+    function fetch_bundle()
+        @info "Downloading the notebook bundle" BUNDLE_URL
+        nb = joinpath(pwd(), $(JSON.json(_SITE_BUNDLE)))
+        Downloads.download(BUNDLE_URL, nb)
+        return nb
+    end
+
+    function main()
+        ensure_julia()
+        install_packages()
+        nb = fetch_bundle()
+    $launch
+    end
+
+    main()
+    """
+end
+
 # Materialise the site into `dir`: index.html (wired to the og-image sidecar) + og-image.png +
-# .nojekyll. Shared by `export_site` (tarball) and `publish_site` (git push).
-function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; kwargs...)
+# .nojekyll, and — when `bundle` — the reproducible `notebook.standalone.jl` + a `run.jl` bootstrap so
+# the page can offer "Run this live". `base_url` (the eventual site URL) is baked into run.jl so it can
+# fetch the bundle; `agent` picks the full-Kaimon vs standalone bootstrap. Shared by export_site +
+# publish_site.
+function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = false,
+                          base_url::AbstractString = "", agent::Bool = true, kwargs...)
     img = og_image(nb)
     ogpath = ""
     if img !== nothing
         write(joinpath(dir, "og-image.png"), img); ogpath = "og-image.png"
     end
-    write(joinpath(dir, "index.html"), export_html(nb; og_image = ogpath, kwargs...))
+    if bundle
+        write(joinpath(dir, _SITE_BUNDLE), export_standalone(nb))
+        burl = isempty(strip(base_url)) ? _SITE_BUNDLE : rstrip(String(base_url), '/') * "/" * _SITE_BUNDLE
+        write(joinpath(dir, _SITE_RUNJL), _run_script(burl; agent = agent))
+    end
+    write(joinpath(dir, "index.html"), export_html(nb; og_image = ogpath, runnable = bundle, kwargs...))
     write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
     return dir
 end
@@ -373,7 +498,8 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = fa
 
     dir = mktempdir()
     try
-        _build_site_dir!(dir, nb; kwargs...)
+        # Bake the eventual Pages URL into run.jl so its bundle fetch is self-contained.
+        _build_site_dir!(dir, nb; base_url = "https://$owner.github.io/$name/", kwargs...)
         # Fresh single-commit history on gh-pages (the site is a build artifact, not tracked source).
         for cmd in (`git init -q -b gh-pages`, `git add -A`,
                     `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish notebook site"`)
