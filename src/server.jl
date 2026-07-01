@@ -152,7 +152,6 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                       Dict{String,String}())
     _wire_callbacks!(nb)
-    register_celldone!(r.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     @async begin
         try
