@@ -163,6 +163,22 @@ mean(data)
         @test r2.cells[1].id == id1
     end
 
+    @testset "auto ids re-salt on a (forced) hash collision" begin
+        # _auto_id's 24-bit space makes a real collision astronomically unlikely in a small test —
+        # force one by pre-seeding `used` with the id _auto_id would otherwise return, and confirm
+        # _unique_auto_id re-salts to something else instead of returning a duplicate.
+        kind, src, idx = ReportEngine.CODE, "x = 1", 1
+        collided = ReportEngine._auto_id(kind, src, idx)
+        id2 = ReportEngine._unique_auto_id(kind, src, idx, Set([collided]))
+        @test id2 != collided
+        # parse_report itself never hands out a duplicate id, even across many same-content cells
+        # (kind+source alone collide every time; idx breaks the tie unless idx ALSO collides, which
+        # the salt loop now also guards against).
+        src_body = "#%% code\nz = 1\n" ^ 20
+        ids = [c.id for c in parse_report(src_body).cells]
+        @test length(ids) == length(unique(ids))
+    end
+
     @testset "ECharts DSL — clear ArgumentError on bad input" begin
         S = ReportEngine.series
         @test_throws ArgumentError S(:line, [1, 2, 3], [1, 2])       # mismatched x/y
@@ -172,6 +188,13 @@ mean(data)
         @test_throws ArgumentError S(:heatmap, [1, 2, 3])            # not a matrix
         @test_throws ArgumentError S(:heatmap, zeros(0, 0))          # empty matrix
         @test S(:line, [1, 2, 3], [4, 5, 6]) !== nothing             # valid still builds
+        # Wrong arity for a known ergonomic kind must raise too, not silently fall through to the
+        # generic 1-arg/2-vector branches (which would misinterpret the args as raw `data`).
+        @test_throws ArgumentError S(:line, [1, 2, 3])                # missing y
+        @test_throws ArgumentError S(:pie, ["a", "b", "c"])           # missing values
+        @test_throws ArgumentError S(:candlestick, ["10/1"])          # missing ohlc
+        @test_throws ArgumentError S(:radar, ["Sales" => 1])          # missing values
+        @test_throws ArgumentError S(:boxplot, ["a", "b"])            # missing data
     end
 
     @testset "progress-logging bridge → cell meter" begin

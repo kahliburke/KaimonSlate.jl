@@ -161,6 +161,7 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     #let valblock(s) = block(width: 100%, inset: 7pt, fill: $(p.valbg), radius: 3pt, text(size: 8.5pt, fill: $(p.valfg), raw(s)))
     #let errblock(s) = block(width: 100%, inset: 7pt, fill: $(p.errbg), radius: 3pt, text(size: 8.5pt, fill: $(p.errfg), raw(s)))
     #let figureimg(p) = align(center, image(p, width: 85%))
+    #let notefig(s) = block(width: 100%, inset: 7pt, text(size: 8.5pt, style: "italic", fill: $(p.parlabel), s))
     #let paramblock(items) = block(width: 100%, inset: (x: 8pt, y: 5pt), fill: $(p.parbg), radius: 3pt, stroke: 0.5pt + $(p.parborder),
       text(size: 8.5pt)[#text(fill: $(p.parlabel), weight: "bold")[parameters] #h(6pt) #items.map(it => [#raw(it.at(0)) = #text(weight: "bold", it.at(1))]).join([#h(10pt)])])
 
@@ -423,6 +424,10 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
         data, ext = fig
         write(joinpath(dir, base * "." * ext), data)
         print(io, "#figureimg(\"", base, ".", ext, "\")\n")
+    elseif !isempty(_echarts_specs(c))
+        # A client-rendered chart that no browser tab was open to snapshot (headless export) —
+        # don't silently drop it, note the gap (mirrors the HTML export path).
+        print(io, "#notefig(\"[chart not captured — open this notebook in a browser, then re-export]\")\n")
     end
     for spec in _table_specs(c)
         print(io, _typst_table(spec; theme = theme))

@@ -30,7 +30,8 @@ function _read_current(ctx)
         r = ctx.eval("(KaimonSlate.worker_threads(), Sys.CPU_THREADS)")
         m = match(r"\(\s*\"([^\"]*)\"\s*,\s*(\d+)", String(r.value_repr))
         m !== nothing && (cur = String(m.captures[1]); ncpu = parse(Int, m.captures[2]))
-    catch
+    catch e
+        @warn "slate_panel: failed to read worker thread state" exception = (e, catch_backtrace())
     end
     return (cur, ncpu)
 end

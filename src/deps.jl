@@ -102,6 +102,11 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # → recompute).
 const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
+# No per-cell eviction (a deleted cell / closed notebook never removes its entry), so on a
+# long-lived server this would otherwise grow forever. Entries are small, but cap it — once full,
+# clear and start over rather than track real LRU bookkeeping for a cache this cheap to repopulate
+# (a cleared entry just costs one more `_infer_bindings_uncached!` pass, same as a normal miss).
+const _BIND_CACHE_MAX = 5000
 function infer_bindings!(cell::Cell)
     h = hash(cell.source) ⊻ hash(cell.kind)
     hit = lock(_BIND_CACHE_LOCK) do; get(_BIND_CACHE, cell.id, nothing); end
@@ -113,6 +118,7 @@ function infer_bindings!(cell::Cell)
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
+        length(_BIND_CACHE) >= _BIND_CACHE_MAX && empty!(_BIND_CACHE)
         _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags)
     end
     return cell
@@ -128,7 +134,8 @@ function _infer_bindings_uncached!(cell::Cell)
             ast === nothing && continue
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, ast)).references)
-            catch
+            catch e
+                @debug "deps: markdown {{ }} reactive-node analysis failed" cell = cell.id exception = e
             end
         end
         return cell
@@ -166,7 +173,8 @@ function _infer_bindings_uncached!(cell::Cell)
             push!(cell.writes, bm[1])
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, bm[2])).references)
-            catch
+            catch e
+                @debug "deps: @bind widget-expr reactive-node analysis failed" cell = cell.id exception = e
             end
         elseif om !== nothing || cm !== nothing
             # `@onclick btn body` / `@onchange ctrl body` REGISTER a handler — they deliberately do
@@ -180,7 +188,8 @@ function _infer_bindings_uncached!(cell::Cell)
                 node = EE.compute_reactive_node(lam)
                 union!(cell.reads, node.references)
                 union!(cell.writes, node.definitions)
-            catch
+            catch e
+                @debug "deps: @onclick/@onchange handler reactive-node analysis failed" cell = cell.id exception = e
             end
             _collect_mutations!(cell.writes, cell.reads, body)
         else
@@ -194,7 +203,8 @@ function _infer_bindings_uncached!(cell::Cell)
             union!(cell.reads, node.references)
             union!(cell.writes, node.definitions)
             union!(cell.writes, node.funcdefs_without_signatures)
-        catch
+        catch e
+            @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell = cell.id exception = e
             push!(cell.flags, :opaque)
         end
         _collect_mutations!(cell.writes, cell.reads, blk)

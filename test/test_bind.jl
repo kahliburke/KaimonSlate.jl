@@ -53,6 +53,12 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         # multiselect drops now-invalid options
         @test RE._reconcile_bind(RE.MultiSelect(["x", "y", "z"]), ["x", "z"],
                                  RE.MultiSelect(["x", "y"])) == ["x"]
+        # `_do_set_bind`'s "?" placeholder (browser set a value before this bind cell's first run
+        # this session) isn't a real type change — the pending value survives, coerced against the
+        # real widget, instead of being discarded to the default.
+        placeholder = RE.Widget("?", Dict{String,Any}(), 7)
+        @test RE._reconcile_bind(placeholder, 7, RE.Slider(0:10)) == 7
+        @test RE._reconcile_bind(placeholder, 7.0, RE.Slider(0:10)) == 7   # coerced like a normal Int slider set
     end
 
     @testset "bind cell: control reported by eval; dependents react" begin
@@ -127,6 +133,35 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         eval_stale!(r)
         @test Base.invokelatest(getproperty, r.mod, :b) == 2.5 && Base.invokelatest(getproperty, r.mod, :m) == 3.5
         @test ctl.binds[findfirst(s -> s.name == :a, ctl.binds)].value == 1   # other unchanged
+    end
+
+    @testset "@onclick: a superseded handler is cancelled at its next Reactive write (no pause needed)" begin
+        tokens = Dict{Symbol,Any}()
+        log = Int[]
+        r = RE.Reactive(:level, 0, _ -> nothing)
+        done1, done2 = Ref(false), Ref(false)
+        handler1 = _ -> begin       # NO `pause()` calls — relies on the write itself being a checkpoint
+            for i in 1:5
+                r[] = i             # should throw _Cancelled here, before ever appending to log
+                push!(log, i)
+            end
+            done1[] = true
+        end
+        handler2 = _ -> begin
+            r[] = 99
+            push!(log, 99)
+            done2[] = true
+        end
+        RE.__on_fire!(tokens, :fill, handler1, nothing)
+        RE.__on_fire!(tokens, :fill, handler2, nothing)   # supersedes handler1 before it has run any code
+        for _ in 1:200   # both tasks are spawned async — wait for handler2 to finish
+            done2[] && break
+            sleep(0.01)
+        end
+        @test done2[]
+        @test !done1[]            # handler1 never completed — cancelled at (or before) its first write
+        @test 1 ∉ log             # handler1's loop body never executed, not even its first iteration
+        @test r[] == 99           # handler2's write landed cleanly; handler1 never raced it
     end
 
 end

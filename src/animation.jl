@@ -108,6 +108,7 @@ function _resolve_clim(frames, clim, transform)
         ranges = Tuple{Float64,Float64}[]
         for fr in frames
             lo, hi = _extrema_valid(fr, transform)
+            lo == hi && (hi = lo + 1.0)         # flat frame → avoid a zero-width range
             push!(ranges, (lo, hi))
         end
         return ("perframe", 0.0, 1.0, ranges)

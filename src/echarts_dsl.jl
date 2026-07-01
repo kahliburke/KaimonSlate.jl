@@ -138,6 +138,10 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
         opt["data"] = [length(d) == 5 ? collect(Float64, d) : _q5(d) for d in data]
         layout["xAxis"] = _cataxis(cats)
         layout["yAxis"] = Dict{String,Any}("type" => "value")
+    elseif k in ("line", "bar", "scatter", "pie", "candlestick", "radar", "boxplot")
+        # A known ergonomic kind matched on `k` above but not on arg count — don't silently fall
+        # through to the generic branches below (which would misinterpret the args as raw data).
+        throw(ArgumentError("echart(:$k, …) expects 2 positional args (see `series` docstring for the shape), got $(length(args))"))
     elseif length(args) == 1
         opt["data"] = _ec(only(args))
     elseif length(args) >= 2 && args[1] isa AbstractVector && args[2] isa AbstractVector

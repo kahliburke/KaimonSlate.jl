@@ -161,6 +161,9 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     if (cs) { cs.forEach(i => { try { i.dispose(); } catch (_) {} }); delete window.charts[c.id]; }
     const el = ref.current;   // inline `{{ echart }}` instances live on the nodes, not in window.charts
     if (el) el.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} } });
+    // Cancel any pending debounced snapshot (core.js _snapCell) — its closure holds a reference
+    // to the now-disposed chart instances and would otherwise fire against a removed cell.
+    if (window._cancelSnap) window._cancelSnap(c.id);
   }, []);
 
   // Fill/update the cell's content IMPERATIVELY via the vanilla helpers, so live widgets aren't

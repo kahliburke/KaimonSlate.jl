@@ -200,7 +200,8 @@ function _eval_one(source::String, filename::String, memo_key::String,
         return (stdout = "", mime = Tuple{String,Vector{UInt8}}[], echarts = Any[], tables = Any[],
                 binds = NamedTuple[], value_repr = "",
                 exception = "internal capture error: " * sprint(showerror, e),
-                backtrace = nothing, duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[])
+                backtrace = nothing, duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
+                animations = Any[])
     end
     if r.exception !== nothing
         @warn "slate eval: cell errored" cell = cid error = first(split(String(r.exception), '\n'))

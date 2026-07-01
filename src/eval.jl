@@ -39,7 +39,7 @@ unregister_progress!(report_id::AbstractString) = (delete!(_PROGRESS_REGISTRY, S
 function _emit_progress(report_id::AbstractString, cell)
     cb = get(_PROGRESS_REGISTRY, report_id, nothing)
     cb === nothing && return nothing
-    try; cb(cell); catch; end   # progress is best-effort — a push failure must never break eval
+    try; cb(cell); catch e; @debug "eval: progress callback failed" report_id exception = e; end   # best-effort — a push failure must never break eval
     return nothing
 end
 
@@ -52,7 +52,7 @@ unregister_runbatch!(report_id::AbstractString) = (delete!(_RUNBATCH_REGISTRY, S
 function _emit_run_batch(report_id::AbstractString, n::Integer)
     cb = get(_RUNBATCH_REGISTRY, report_id, nothing)
     cb === nothing && return nothing
-    try; cb(n); catch; end
+    try; cb(n); catch e; @debug "eval: run-batch callback failed" report_id exception = e; end
     return nothing
 end
 
@@ -66,7 +66,7 @@ function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = fals
     cb = get(_USERPROG_REGISTRY, String(report_id), nothing)
     cb === nothing && return nothing
     f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
-    try; cb(f, String(msg), String(id), done === true); catch; end
+    try; cb(f, String(msg), String(id), done === true); catch e; @debug "eval: user-progress callback failed" report_id exception = e; end
     return nothing
 end
 

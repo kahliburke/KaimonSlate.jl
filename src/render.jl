@@ -163,7 +163,10 @@ end
 # browser render it. Placeholders are bare alphanumerics so markdown leaves them
 # untouched; the restored span keeps its `$`/`$$` delimiters for KaTeX.
 const _MATH_DISPLAY = r"\$\$(.+?)\$\$"s
-const _MATH_INLINE = r"\$([^\$\n]+?)\$"
+# Pandoc-style heuristic: the content must not start/end with whitespace, so prose dollar
+# amounts ("it cost $5 and $10") don't get swallowed as a math span (the candidate "5 and "
+# would have to end right before the second $, but it ends in a space — rejected).
+const _MATH_INLINE = r"\$(?!\s)([^\$\n]+?)(?<!\s)\$"
 _math_token(i::Int) = "xslatemathx" * string(i; pad = 5) * "x"
 
 # A string value's text/plain repr is quoted (`"c"`), but inside `{{ }}` interpolation — a
