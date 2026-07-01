@@ -9,7 +9,7 @@
 
 import ExpressionExplorer as EE
 
-export infer_bindings!, build_dependencies!, dependents_of, update_source!, eval_stale!
+export infer_bindings!, build_dependencies!, dependents_of, update_source!, eval_stale!, refine_usings!
 
 # ── Binding inference ────────────────────────────────────────────────────────
 
@@ -58,6 +58,45 @@ function _import_names(ex)
         end
     end
     return names
+end
+
+# Dotted module paths a BARE `using` names (no `: names` list): `using A, B.C` → ["A", "B.C"].
+# Returns String[] for anything that isn't a bare using (so the `: names` form never lands here).
+function _using_module_paths(ex)
+    (ex isa Expr && ex.head === :using) || return String[]
+    paths = String[]
+    for a in ex.args
+        a isa Expr && a.head === :(:) && return String[]         # `using M: a` — not bare, handled elsewhere
+        a isa Expr && a.head === :. && push!(paths, join(string.(a.args), "."))
+    end
+    return paths
+end
+
+# ── Progressive `using` refinement (barrier → precise) ───────────────────────
+# A bare `using X` splats X's exports into scope — statically unknowable, so inference
+# conservatively treats the cell as an :opaque barrier (reads everything before it, everything
+# after depends on it). But once the cell has RUN, X is loaded and we CAN enumerate its exports.
+# `refine_usings!` (called post-eval) resolves them WHERE the cells run and records them here;
+# re-inference then turns the barrier into a precise import — downstream depends on the cell only
+# if it uses a name X actually brings in. Session-scoped (a package's exports don't change once
+# loaded); `_USING_TRIED` remembers paths we've already resolved OR failed to, so we attempt each
+# at most once (no ZMQ round-trip per drain for a module that's already settled).
+const _USING_EXPORTS = Dict{String,Vector{Symbol}}()   # dotted module path → its exported names
+const _USING_TRIED   = Set{String}()                   # paths already attempted (success or fail)
+const _USING_LOCK    = ReentrantLock()
+
+# The precise write-set for a bare `using` statement IF every module it names is already resolved;
+# `nothing` otherwise (⇒ inference keeps the conservative :opaque barrier). Empty paths (a malformed
+# using) also yield `nothing` so we never drop the barrier without a real export set to replace it.
+function _resolved_using_writes(stmt)
+    paths = _using_module_paths(stmt)
+    isempty(paths) && return nothing
+    lock(_USING_LOCK) do
+        all(p -> haskey(_USING_EXPORTS, p), paths) || return nothing
+        out = Symbol[]
+        for p in paths; append!(out, _USING_EXPORTS[p]); end
+        return out
+    end
 end
 
 # Base name of an assignment/index/field target (`data[i]` → :data, `a.b.c` → :a).
@@ -162,8 +201,12 @@ function _infer_bindings_uncached!(cell::Cell)
         s isa LineNumberNode && continue
         imp = _import_names(s)
         if imp !== :notimport                 # a top-level using/import
-            imp === nothing ? push!(cell.flags, :opaque) :    # plain `using X` → barrier
-                              union!(cell.writes, imp)        # binds known names → just writes
+            if imp === nothing                # plain `using X` → barrier UNLESS X's exports are resolved
+                w = _resolved_using_writes(s)
+                w === nothing ? push!(cell.flags, :opaque) : union!(cell.writes, w)
+            else
+                union!(cell.writes, imp)      # binds known names → just writes
+            end
             continue
         end
         bm = _bind_macrocall(s)
@@ -258,7 +301,12 @@ function build_dependencies!(report::Report)
             writer[w] = c.id
         end
         :opaque in c.flags && (barrier = c.id)
-        push!(seen, c.id)
+        # `seen` feeds ONLY the opaque-union above. A contentless cell (no reads, no writes, not a
+        # barrier) contributes nothing to the namespace, so no opaque cell truly depends on it —
+        # keeping it out means inserting a BLANK cell above an opaque cell doesn't perturb that
+        # cell's deps and needlessly restale the whole downstream tail (a real code cell with a
+        # bare side effect still `reads` its callees, so it stays in `seen` and keeps its order).
+        (isempty(c.reads) && isempty(c.writes) && !(:opaque in c.flags)) || push!(seen, c.id)
     end
     # Names defined by 2+ code cells — a shared-namespace collision (last writer wins), a silent
     # footgun (an edit to one looks like dead reactivity). Count DISTINCT cells per name (each
@@ -372,5 +420,67 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
             eval_cell!(report, c, kernel)
         end
     end
+    refine_usings!(report, kernel)   # barrier `using` cells just ran → resolve their exports, precise-ify deps
     return report
+end
+
+# Exported names of a module `path`, resolved WHERE the notebook's cells run (the gate worker for a
+# project notebook, in-process otherwise) — reusing `module_help`'s cross-kernel resolution. Empty on
+# any failure (module not loaded / not a Module) so the caller keeps the safe barrier.
+function _module_exports(kernel::Kernel, report::Report, path::AbstractString)
+    rec = try; module_help(kernel, report, path); catch; return Symbol[]; end
+    rec isa AbstractDict || return Symbol[]
+    # Over the gate the wire is deserialized with SYMBOL keys (in-process keeps String keys), so read
+    # both — `module_help`'s own gate wrapper re-keys only the OUTER dict, not the `exports` elements.
+    _k(d, k) = haskey(d, k) ? d[k] : get(d, Symbol(k), nothing)
+    String(something(_k(rec, "kind"), "")) == "module" || return Symbol[]
+    exps = _k(rec, "exports")
+    exps isa AbstractVector || return Symbol[]
+    out = Symbol[]
+    for e in exps
+        e isa AbstractDict || continue
+        nm = _k(e, "name"); nm === nothing || push!(out, Symbol(String(nm)))
+    end
+    return out
+end
+
+"""
+    refine_usings!(report, kernel=InProcessKernel()) -> Bool
+
+Post-eval progressive precision: for each code cell still an :opaque barrier because of a bare
+`using X` that has now SUCCESSFULLY run, resolve X's exports and cache them, then rebuild the
+dependency graph so the barrier becomes a precise import. No cell is restaled — this runs after a
+drain, and narrowing a cell's dependents can only shrink the blast radius (see
+[`build_dependencies!`]). Idempotent: each module path is attempted at most once per session.
+Returns `true` iff a module was newly resolved (and deps were rebuilt).
+"""
+function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
+    pending = String[]
+    for c in report.cells
+        # Only cells that ran cleanly — an errored `using` (package didn't load) can't be resolved,
+        # and leaving it un-tried lets a later successful run refine it.
+        (c.kind == CODE && c.state == FRESH && :opaque in c.flags) || continue
+        top = try; Meta.parseall(c.source); catch; continue; end
+        stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+        for s in stmts
+            s isa LineNumberNode && continue
+            _import_names(s) === nothing && append!(pending, _using_module_paths(s))
+        end
+    end
+    isempty(pending) && return false
+    newly = false
+    for p in unique!(pending)
+        skip = lock(_USING_LOCK) do; p in _USING_TRIED; end
+        skip && continue
+        syms = _module_exports(kernel, report, p)
+        lock(_USING_LOCK) do
+            push!(_USING_TRIED, p)
+            isempty(syms) || (_USING_EXPORTS[p] = syms; newly = true)   # cache only a real export set
+        end
+    end
+    if newly
+        lock(_BIND_CACHE_LOCK) do; empty!(_BIND_CACHE); end   # drop memoized :opaque verdicts → re-infer precise
+        build_dependencies!(report)
+    end
+    return newly
 end

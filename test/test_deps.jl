@@ -141,6 +141,48 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test "a" in findcell(r, "bad").deps         # barrier depends on everything before
     end
 
+    @testset "progressive `using` refinement: barrier becomes a precise import after it runs" begin
+        # A bare `using X` is an :opaque barrier for STATIC analysis (unknowable exports), but once the
+        # cell has run, X is loaded and `refine_usings!` (called at the end of eval_stale!) resolves the
+        # real export set and rebuilds deps precisely — downstream depends on it only if it uses a name
+        # X brings in. `Dates` is a project dep, so `using Dates` actually loads here.
+        empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED); empty!(ReportEngine._BIND_CACHE)
+        r = parse_report("#%% code id=u\nusing Dates\n" *
+                         "#%% code id=user\np = Day(3)\n" *
+                         "#%% code id=indep\nz = 1 + 1")
+        build_dependencies!(r)
+        @test :opaque in findcell(r, "u").flags            # bare using → barrier BEFORE it runs
+        @test "u" in findcell(r, "indep").deps             # conservative: even an unrelated cell depends on it
+
+        eval_stale!(r)                                     # runs all cells, then refines the `using` barrier
+        @test !(:opaque in findcell(r, "u").flags)         # refined → no longer a barrier
+        @test :Day in findcell(r, "u").writes              # exports recorded as precise writes
+        @test "u" in findcell(r, "user").deps              # a cell that USES `Day` depends on it
+        @test isempty(findcell(r, "indep").deps)           # an unrelated cell no longer does
+        @test !("indep" in dependents_of(r, Set(["u"])))   # editing the using won't restale it
+        empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
+    @testset "blank cell inserted above an opaque cell doesn't perturb its deps" begin
+        # Regression: an :opaque cell depends on every prior cell that DEFINES something. A
+        # contentless (blank) cell defines nothing, so inserting one above an opaque cell must not
+        # change that cell's deps — else `_commit_reorder!` restales the whole downstream tail and
+        # re-runs the notebook on a no-op insert.
+        r = parse_report("#%% code id=a\nx = 1\n#%% code id=op\nx = (\n#%% code id=d\ny = 2")
+        build_dependencies!(r)
+        deps_before = copy(findcell(r, "op").deps)
+        @test :opaque in findcell(r, "op").flags
+        @test "a" in deps_before
+
+        # insert an empty code cell at the very top (above `a`, well above the opaque cell)
+        insert!(r.cells, 1, Cell("blank", CODE, ""))
+        build_dependencies!(r)
+        @test isempty(findcell(r, "blank").writes)
+        @test findcell(r, "op").deps == deps_before          # unchanged → no spurious restale
+        @test !("blank" in findcell(r, "op").deps)
+        @test dependents_of(r, Set(["blank"])) == Set(["blank"])   # nothing downstream of a blank cell
+    end
+
     @testset "multidef: names defined in 2+ cells are flagged" begin
         r = parse_report("#%% code id=a\nx = 1\ng() = 1\n#%% code id=b\nx = 2\n#%% code id=c\nz = 3")
         build_dependencies!(r)
