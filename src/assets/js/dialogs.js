@@ -43,67 +43,44 @@ async function restartWorker(){
   try { renderAll(await api('POST', '/api/restart')); } finally { hideLoading(); }
 }
 async function reload()  { const s = await api('GET', '/api/state'); lastVersion = s.version; renderAll(s); window.reconcileBackup && window.reconcileBackup(s); }
-// ── Static export (HTML / print → PDF) ────────────────────────────────────────
-// Download a self-contained HTML document of the notebook (figures embedded, math via
-// KaTeX). PDF goes through the browser's own print dialog on that same static doc.
-function exportHtml() {
+// ── Export (one modal → HTML · PDF · Standalone) ──────────────────────────────
+// A single "Export" entry opens a modal with a format selector + per-format options; each
+// format's rows carry an `fmt-<format>` class so `_exSyncRows` shows only the active set. The
+// last format + option choices are remembered. Backends are the per-format routes (export.html /
+// export.pdf / export.typ / export.standalone.jl); this is the front-end consolidation.
+function _dlName(ext) { return (nbState && nbState.title || 'notebook') + ext; }
+function _saveBlob(blob, ext) {
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = _dlName(ext); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+// Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
+function exportHtml(dl) {
+  const src = document.getElementById('htmlsource');
+  const noSrc = src && !src.checked;
+  const q = noSrc ? '?source=0' : '';
+  if (dl === false) { window.open(_apipath('/api/export.html' + q), '_blank'); return; }
   const a = document.createElement('a');
-  a.href = _apipath('/api/export.html?dl=1'); a.download = (nbState && nbState.title || 'notebook') + '.html';
+  a.href = _apipath('/api/export.html' + (q ? q + '&dl=1' : '?dl=1')); a.download = _dlName('.html');
   document.body.appendChild(a); a.click(); a.remove();
 }
 function printNotebook() {
   const w = window.open(_apipath('/api/export.html'), '_blank');
   if (w) w.addEventListener('load', () => setTimeout(() => w.print(), 300));
 }
-// Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a git
-// bundle when the project is a repo). Can take a moment (tars the env + source).
+// Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
+// project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
   showLoading('Bundling environment + source…');
   try {
     const r = await fetch(_apipath('/api/export.standalone.jl'));
     if (!r.ok) { await alertDark('Standalone export failed:\n' + (await r.text())); return; }
-    const blob = await r.blob(), url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = (nbState && nbState.title || 'notebook') + '.standalone.jl';
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    _saveBlob(await r.blob(), '.standalone.jl');
   } catch (e) { await alertDark('Standalone export failed: ' + e); }
   finally { hideLoading(); }
 }
-// Publication-quality PDF, rendered server-side via Typst. Options (theme, layout, code
-// size) come from a small modal; the last choices are remembered. Can take a few seconds
-// (first run also fetches the Typst packages), so show the loading overlay + blob-download.
-// Figures embed as vector (CairoMakie PDF / ECharts SVG) when available.
-let _pdfResolve = null;
-function closePdfDialog(go) {
-  document.getElementById('pdfbg').classList.remove('show');
-  if (_pdfResolve) { const r = _pdfResolve; _pdfResolve = null; r(go); }
-}
-// Show the speaker-notes row only for the slides layout (it's meaningless for article/report).
-function _pdfSyncSlides() {
-  const slides = (document.getElementById('pdflayout').value || '').startsWith('slides');
-  const row = document.getElementById('pdfnotesrow'); if (row) row.style.display = slides ? '' : 'none';
-}
-function _pdfPick(preset) {
-  return new Promise(resolve => {
-    _pdfResolve = resolve;
-    ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
-      const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
-    });
-    document.getElementById('pdfparams').checked = localStorage.getItem('slate_pdfparams') === '1';  // default off
-    document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';    // default off
-    document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';    // default off
-    if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';                // deck shortcut
-    document.getElementById('pdflayout').onchange = _pdfSyncSlides;
-    _pdfSyncSlides();
-    document.getElementById('pdfbg').classList.add('show');
-  });
-}
-// Menu shortcut: open the export dialog with the slide-deck layout preselected.
-function exportSlidesPdf() { return exportPdf('slides'); }
-async function exportPdf(preset) {
-  const go = await _pdfPick(preset);
-  if (!go) return;
+// Publication-quality PDF via Typst, driven by the modal's pdf* controls. Can take a few seconds
+// (first run also fetches Typst packages) → loading overlay + blob-download. Figures embed as vector.
+async function _runPdfExport() {
   const theme = document.getElementById('pdftheme').value;
   const [style, columns] = document.getElementById('pdflayout').value.split('|');
   const slides = style === 'slides';
@@ -116,23 +93,63 @@ async function exportPdf(preset) {
   localStorage.setItem('slate_pdfparams', params ? '1' : '0');
   localStorage.setItem('slate_pdftypst', typst ? '1' : '0');
   localStorage.setItem('slate_pdfnotes', notes ? '1' : '0');
-  const _save = (blob, ext) => {                       // trigger a browser download of `blob` as <title>.<ext>
-    const url = URL.createObjectURL(blob), a = document.createElement('a');
-    a.href = url; a.download = (nbState && nbState.title || 'notebook') + ext;
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-  };
   showLoading('Rendering PDF with Typst…');
   try {
     const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code + (params ? '&params=1' : '')
       + (slides ? '&layout=slides' : '') + (notes ? '&notes=1' : '');
     const r = await fetch(_apipath('/api/export.pdf') + qs);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
-    _save(await r.blob(), '.pdf');
+    _saveBlob(await r.blob(), '.pdf');
     if (typst) {                                        // also fetch the editable Typst project bundle
       const tr = await fetch(_apipath('/api/export.typ') + qs);
-      tr.ok ? _save(await tr.blob(), '.typ.tar.gz') : await alertDark('Typst bundle failed:\n' + (await tr.text()));
+      tr.ok ? _saveBlob(await tr.blob(), '.typ.tar.gz') : await alertDark('Typst bundle failed:\n' + (await tr.text()));
     }
   } catch (e) { await alertDark('PDF export failed: ' + e); }
   finally { hideLoading(); }
 }
+// ── The unified modal ─────────────────────────────────────────────────────────
+function _exFormat() { return document.getElementById('exfmt').value; }
+function closeExportModal() { document.getElementById('exportbg').classList.remove('show'); }
+// Show the speaker-notes row only for the slides layout (PDF only).
+function _pdfSyncSlides() {
+  const slides = (document.getElementById('pdflayout').value || '').startsWith('slides');
+  const row = document.getElementById('pdfnotesrow');
+  if (row) row.style.display = (_exFormat() === 'pdf' && slides) ? '' : 'none';
+}
+// Show only the rows for the selected format.
+function _exSyncRows() {
+  const f = _exFormat();
+  document.querySelectorAll('#exportbg .exrow').forEach(el => { el.style.display = el.classList.contains('fmt-' + f) ? '' : 'none'; });
+  if (f === 'pdf') _pdfSyncSlides();
+}
+function openExport(preset) {
+  const fmt = preset === 'slides' ? 'pdf' : (localStorage.getItem('slate_exfmt') || 'html');
+  document.getElementById('exfmt').value = fmt;
+  ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
+    const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
+  });
+  document.getElementById('pdfparams').checked = localStorage.getItem('slate_pdfparams') === '1';
+  document.getElementById('pdftypst').checked = localStorage.getItem('slate_pdftypst') === '1';
+  document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';
+  const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
+  if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
+  document.getElementById('exfmt').onchange = _exSyncRows;
+  document.getElementById('pdflayout').onchange = _exSyncRows;
+  _exSyncRows();
+  document.getElementById('exportbg').classList.add('show');
+}
+function closeExport(go) {
+  if (!go) { closeExportModal(); return; }
+  const fmt = _exFormat(); localStorage.setItem('slate_exfmt', fmt);
+  closeExportModal();
+  if (fmt === 'html') {
+    const hs = document.getElementById('htmlsource'); localStorage.setItem('slate_htmlsource', hs && hs.checked ? '1' : '0');
+    return exportHtml(true);
+  }
+  if (fmt === 'standalone') return exportStandalone();
+  return _runPdfExport();
+}
+// Back-compat entry points (palette / keys): open the unified modal, PDF preselecting the deck.
+function exportPdf(preset) { return openExport(preset === 'slides' ? 'slides' : undefined); }
+function exportSlidesPdf() { return openExport('slides'); }
 

@@ -60,11 +60,8 @@
       <button id="redobtn" onclick="redoNb();closeTopMenu()">↷ Redo</button>
       <button onclick="openPalette();closeTopMenu()">⌘K Command palette</button>
       <hr>
-      <button onclick="exportHtml();closeTopMenu()">⬇ Export HTML</button>
-      <button onclick="exportPdf();closeTopMenu()">📄 Export PDF (publication)</button>
-      <button onclick="exportSlidesPdf();closeTopMenu()">🎞 Export PDF (slides)</button>
+      <button onclick="openExport();closeTopMenu()">⬆ Export…</button>
       <button onclick="printNotebook();closeTopMenu()">🖨 Print HTML</button>
-      <button onclick="exportStandalone();closeTopMenu()">📦 Export self-contained .jl</button>
       <hr>
       <button onclick="resetAll();closeTopMenu()">↻ Rebuild (fresh namespace)</button>
       <button onclick="restartWorker();closeTopMenu()">⟲ Restart worker</button>
@@ -209,11 +206,17 @@
   <div class="setrow sethint" id="setmodelhint" style="display:none"><span></span>↻ restarts the agent on your next message (chat history kept).</div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
 </div></div>
-<div class="modal-bg" id="pdfbg"><div class="modal setmodal">
-  <div class="msg"><strong>Export PDF</strong> <span style="color:var(--dim);font-weight:400">— publication-quality, rendered with Typst</span></div>
-  <div class="setrow"><label>Theme</label>
+<div class="modal-bg" id="exportbg"><div class="modal setmodal">
+  <div class="msg"><strong>Export</strong> <span style="color:var(--dim);font-weight:400">— render or package this notebook</span></div>
+  <div class="setrow"><label>Format</label>
+    <select id="exfmt">
+      <option value="html">HTML — self-contained page</option>
+      <option value="pdf">PDF — publication (Typst)</option>
+      <option value="standalone">Standalone .jl — reproducible bundle</option>
+    </select></div>
+  <div class="setrow exrow fmt-pdf"><label>Theme</label>
     <select id="pdftheme"><option value="light">Light (publication)</option><option value="dark">Dark (matches UI)</option></select></div>
-  <div class="setrow"><label>Layout</label>
+  <div class="setrow exrow fmt-pdf"><label>Layout</label>
     <select id="pdflayout">
       <option value="article|1">Article — single column</option>
       <option value="article|2">Article — two column</option>
@@ -221,10 +224,10 @@
       <option value="report|2">Report — two column</option>
       <option value="slides|1">🎞 Slides — presentation deck (16:9)</option>
     </select></div>
-  <div class="setrow" id="pdfnotesrow" style="display:none"><label title="Append a speaker-notes section (one page per slide that has `notes` cells)">Speaker notes</label>
+  <div class="setrow exrow fmt-pdf" id="pdfnotesrow" style="display:none"><label title="Append a speaker-notes section (one page per slide that has `notes` cells)">Speaker notes</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdfnotes"> Append speaker-notes pages to the deck</label></div>
-  <div class="setrow"><label>Body text</label>
+  <div class="setrow exrow fmt-pdf"><label>Body text</label>
     <select id="pdfbody">
       <option value="">Auto (compact for two-column)</option>
       <option value="large">Large</option>
@@ -232,7 +235,7 @@
       <option value="compact">Compact</option>
       <option value="small">Small</option>
     </select></div>
-  <div class="setrow"><label>Code listings</label>
+  <div class="setrow exrow fmt-pdf"><label>Code listings</label>
     <select id="pdfcode">
       <option value="normal">Normal</option>
       <option value="small">Small</option>
@@ -240,13 +243,18 @@
       <option value="tiny">Tiny</option>
       <option value="hidden">Hidden (outputs only)</option>
     </select></div>
-  <div class="setrow"><label>Parameters</label>
+  <div class="setrow exrow fmt-pdf"><label>Parameters</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdfparams"> Show <code>@bind</code> controls as a parameter strip</label></div>
-  <div class="setrow"><label>Typst source</label>
+  <div class="setrow exrow fmt-pdf"><label>Typst source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdftypst"> Also download the editable Typst project (<code>.tar.gz</code>)</label></div>
-  <div class="row"><button onclick="closePdfDialog(false)">Cancel</button><button class="primary" onclick="closePdfDialog(true)">Export</button></div>
+  <div class="setrow exrow fmt-html"><label>Source</label>
+    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="htmlsource" checked> Include cell source (uncheck for outputs only)</label></div>
+  <div class="setrow exrow fmt-html sethint"><span></span>A self-contained page — figures embedded, math via KaTeX. No server needed; print it to PDF from the browser.</div>
+  <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
+  <div class="row"><button onclick="closeExport(false)">Cancel</button><button class="primary" onclick="closeExport(true)">Export</button></div>
 </div></div>
 <div class="palette-bg" id="cmdbg"><div class="cmdpal">
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>

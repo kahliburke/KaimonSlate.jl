@@ -201,12 +201,12 @@ async function main() {
           await page.evaluate(() => window.minimizeDocs && window.minimizeDocs())
         } catch (e) { log('! help-docs skipped:', e.message.split('\n')[0]) }
 
-        // export dialog (the PDF export modal — shown without triggering a download)
+        // export dialog (the unified Export modal — shown without triggering a download)
         try {
-          await page.evaluate(() => document.getElementById('pdfbg')?.classList.add('show'))
+          await page.evaluate(() => window.openExport && window.openExport())
           await sleep(400)
-          await elShot(page, '#pdfbg .modal', 'export-dialog.png')
-          await page.evaluate(() => document.getElementById('pdfbg')?.classList.remove('show'))
+          await elShot(page, '#exportbg .modal', 'export-dialog.png')
+          await page.evaluate(() => document.getElementById('exportbg')?.classList.remove('show'))
         } catch (e) { log('! export-dialog skipped:', e.message.split('\n')[0]) }
 
         // packages panel (📦) — the standalone demo is detached (empty), so paint a representative
