@@ -488,6 +488,136 @@ end
 
 _gh_ok(cmd::Cmd) = success(pipeline(ignorestatus(cmd); stdout = devnull, stderr = devnull))
 
+# ── Multi-document site (blog) ────────────────────────────────────────────────────────────────────
+# A published repo is a SITE: many notebooks, each served from its own `/<slug>/`, with a generated
+# blog-style `index.html` at the root driven by `slate-site.json` (the doc manifest). Publishing a
+# notebook adds/updates just its slug dir + manifest entry and regenerates the index — the other docs
+# already in the repo are preserved (we build on top of the existing gh-pages, not a fresh history).
+const _SITE_MANIFEST = "slate-site.json"
+
+# URL-safe slug from a title: lowercased, runs of non-alphanumerics → single hyphens, trimmed.
+function _slugify(s::AbstractString)
+    slug = replace(lowercase(strip(String(s))), r"[^a-z0-9]+" => "-")
+    return String(strip(slug, '-'))
+end
+doc_slug(nb::LiveNotebook) = (s = _slugify(report_frontmatter(nb.report).title); isempty(s) ? _slugify(nb.id) : s)
+
+# Title + one-line description for a notebook's manifest entry / index card (matches the page's meta).
+function _doc_meta(nb::LiveNotebook)
+    fm = report_frontmatter(nb.report)
+    title = isempty(strip(fm.title)) ? nb.id : strip(fm.title)
+    desc = _first_words(isempty(strip(fm.abstract)) ? fm.byline : fm.abstract, 40)
+    return (; title = String(title), description = String(desc))
+end
+
+# Build ONE document's directory under `docdir` (index.html + og-image + optional runnable bundle),
+# returning its manifest entry. `base_url` is the doc's eventual URL (…/<slug>/) so run.jl's bundle
+# fetch is absolute. `date` seeds the entry (a re-publish keeps the original via `_upsert_doc!`).
+function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractString,
+                     base_url::AbstractString = "", bundle::Bool = false, agent::Bool = true, kwargs...)
+    mkpath(docdir)
+    img = og_image(nb)
+    ogpath = ""
+    if img !== nothing
+        write(joinpath(docdir, "og-image.png"), img); ogpath = "og-image.png"
+    end
+    if bundle
+        write(joinpath(docdir, _SITE_BUNDLE), export_standalone(nb))
+        burl = isempty(strip(base_url)) ? _SITE_BUNDLE : rstrip(String(base_url), '/') * "/" * _SITE_BUNDLE
+        write(joinpath(docdir, _SITE_RUNJL), _run_script(burl; agent = agent))
+    end
+    write(joinpath(docdir, "index.html"), export_html(nb; og_image = ogpath, runnable = bundle, kwargs...))
+    m = _doc_meta(nb)
+    return Dict{String,Any}("slug" => slug, "title" => m.title, "description" => m.description,
+                            "image" => isempty(ogpath) ? "" : "$slug/og-image.png",
+                            "runnable" => bundle, "date" => Dates.format(Dates.today(), "yyyy-mm-dd"))
+end
+
+_read_site_manifest(dir::AbstractString) =
+    (f = joinpath(dir, _SITE_MANIFEST); isfile(f) ?
+     (try; JSON.parsefile(f); catch; Dict{String,Any}("title" => "", "docs" => Any[]); end) :
+     Dict{String,Any}("title" => "", "docs" => Any[]))
+
+# Insert or update `entry` (keyed by slug) in the manifest, preserving the doc's original publish date.
+function _upsert_doc!(manifest, entry)
+    docs = get(manifest, "docs", Any[]); docs isa AbstractVector || (docs = Any[])
+    i = findfirst(d -> d isa AbstractDict && String(get(d, "slug", "")) == entry["slug"], docs)
+    if i === nothing
+        push!(docs, entry)
+    else
+        entry["date"] = get(docs[i], "date", entry["date"])     # keep first-published date on re-publish
+        docs[i] = entry
+    end
+    manifest["docs"] = docs
+    return manifest
+end
+
+# Self-contained dark CSS for the blog front page (no external deps).
+_site_index_css() = """
+:root{--bg:#0d1117;--bg2:#161b22;--bd:#30363d;--tx:#e6edf3;--dim:#8b949e;--ac:#58a6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);
+ font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.site-hd{max-width:960px;margin:0 auto;padding:56px 24px 20px}.site-hd h1{margin:0;font-size:2rem;letter-spacing:-.02em}
+.cards{max-width:960px;margin:0 auto;padding:12px 24px 40px;display:grid;gap:18px;
+ grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
+.card{display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;
+ overflow:hidden;text-decoration:none;color:inherit;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--ac);transform:translateY(-2px)}
+.thumb{aspect-ratio:16/9;background:#0b0e14;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.cardbody{padding:14px 16px 16px}.cardbody h2{margin:0 0 6px;font-size:1.12rem;line-height:1.3}
+.cardbody p{margin:0 0 10px;color:var(--dim);font-size:.9rem}
+.meta{color:var(--dim);font-size:.78rem;display:flex;align-items:center;gap:10px}
+.meta .run{color:var(--ac)}.empty{max-width:960px;margin:0 auto;padding:24px;color:var(--dim)}
+.site-ft{max-width:960px;margin:0 auto;padding:24px;color:var(--dim);font-size:.8rem;border-top:1px solid var(--bd)}
+.site-ft a{color:var(--ac);text-decoration:none}
+"""
+
+# Render the blog front page from the manifest — newest first, rich cards (thumbnail/title/desc/date).
+function _render_site_index(manifest)
+    site_title = isempty(strip(String(get(manifest, "title", "")))) ? "Notebooks" : String(manifest["title"])
+    docs = sort([d for d in get(manifest, "docs", Any[]) if d isa AbstractDict];
+                by = d -> String(get(d, "date", "")), rev = true)
+    io = IOBuffer()
+    print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
+          "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", _esc(site_title),
+          "</title><meta property=\"og:title\" content=\"", _esc(site_title), "\"/>",
+          "<meta name=\"generator\" content=\"Kaimon Slate\"/><style>", _site_index_css(),
+          "</style></head><body><header class=\"site-hd\"><h1>", _esc(site_title), "</h1></header><main class=\"cards\">")
+    for d in docs
+        slug = _esc(String(get(d, "slug", ""))); title = _esc(String(get(d, "title", get(d, "slug", ""))))
+        desc = _esc(String(get(d, "description", ""))); date = _esc(String(get(d, "date", "")))
+        image = String(get(d, "image", "")); runnable = get(d, "runnable", false) === true
+        print(io, "<a class=\"card\" href=\"", slug, "/\">")
+        isempty(image) || print(io, "<div class=\"thumb\"><img src=\"", _esc(image), "\" alt=\"\" loading=\"lazy\"/></div>")
+        print(io, "<div class=\"cardbody\"><h2>", title, "</h2>")
+        isempty(desc) || print(io, "<p>", desc, "</p>")
+        print(io, "<div class=\"meta\"><span>", date, "</span>")
+        runnable && print(io, "<span class=\"run\">▶ runnable</span>")
+        print(io, "</div></div></a>")
+    end
+    isempty(docs) && print(io, "<p class=\"empty\">No documents published yet.</p>")
+    print(io, "</main><footer class=\"site-ft\">Published with Kaimon Slate</footer></body></html>")
+    return String(take!(io))
+end
+
+# The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
+function _existing_site_docs(gh, repo::AbstractString)
+    # Interpolate the path + header as whole variables so the `?`/`:`/space reach gh literally
+    # (a backtick command won't shell-parse an interpolated string as separate tokens).
+    apipath = "repos/$repo/contents/$_SITE_MANIFEST?ref=gh-pages"
+    accept = "Accept: application/vnd.github.raw"
+    raw = try
+        read(pipeline(`$gh api $apipath -H $accept`; stderr = devnull), String)
+    catch
+        return Dict{String,Any}[]
+    end
+    m = try; JSON.parse(raw); catch; return Dict{String,Any}[]; end
+    return [Dict{String,Any}("slug" => String(get(d, "slug", "")),
+                             "title" => String(get(d, "title", get(d, "slug", ""))),
+                             "date" => String(get(d, "date", "")))
+            for d in get(m, "docs", Any[]) if d isa AbstractDict]
+end
+
 """
     publish_preflight(repo) -> NamedTuple
 
@@ -502,8 +632,10 @@ function publish_preflight(repo::AbstractString)
     _gh_ok(`$gh repo view $repo`) || return (; gh = true, valid = true, exists = false)
     vis = try; strip(read(pipeline(`$gh repo view $repo --json visibility -q .visibility`; stderr = devnull), String)); catch; ""; end
     pageurl = try; strip(read(pipeline(`$gh api repos/$repo/pages -q .html_url`; stderr = devnull), String)); catch; ""; end
+    hasGhPages = _gh_ok(`$gh api repos/$repo/branches/gh-pages`)
+    docs = hasGhPages ? _existing_site_docs(gh, repo) : Dict{String,Any}[]   # a Slate SITE's existing documents
     return (; gh = true, valid = true, exists = true, visibility = vis,
-            hasGhPages = _gh_ok(`$gh api repos/$repo/branches/gh-pages`), pagesUrl = pageurl)
+            hasGhPages, pagesUrl = pageurl, docs)
 end
 
 """
@@ -515,34 +647,52 @@ visibility (`private`); the built site is force-pushed to `gh-pages`, Pages is e
 returned. An EXISTING repo's visibility is left untouched. Idempotent — re-runs just update the branch.
 Requires `gh` on PATH and `gh auth login`. (Pages needs a PUBLIC repo on the free plan.)
 """
-function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = false, create::Bool = true, kwargs...)
+function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractString = "",
+                      site_title::AbstractString = "", private::Bool = false, create::Bool = true, kwargs...)
     gh = Sys.which("gh")
     gh === nothing && error("`gh` CLI not found on PATH. Install it and run `gh auth login`, then retry.")
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be \"owner/name\" (got \"$repo\")")
     owner, name = split(repo, "/")
     token = strip(read(`$gh auth token`, String))                 # push auth without touching git config
     isempty(token) && error("`gh auth token` returned nothing — run `gh auth login` first.")
+    slg = isempty(strip(slug)) ? doc_slug(nb) : _slugify(slug)
+    isempty(slg) && (slg = _slugify(nb.id))
+    pushurl = "https://x-access-token:$token@github.com/$repo.git"
 
-    dir = mktempdir()
+    work = mktempdir()
+    dir = joinpath(work, "site")
     try
-        # Bake the eventual Pages URL into run.jl so its bundle fetch is self-contained.
-        _build_site_dir!(dir, nb; base_url = "https://$owner.github.io/$name/", kwargs...)
-        # Fresh single-commit history on gh-pages (the site is a build artifact, not tracked source).
-        for cmd in (`git init -q -b gh-pages`, `git add -A`,
-                    `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish notebook site"`)
-            ok, log = _git_run(dir, cmd); ok || error("git failed: $log")
-        end
         # Create the repo only when missing AND `create` is set; never change an existing repo's visibility.
         created = false
         if !_gh_ok(`$gh repo view $repo`)
             create || error("Repo $repo doesn't exist. Enable “create repo if missing”, or create it first.")
             vis = private ? "--private" : "--public"
-            ok, log = _git_run(dir, `$gh repo create $repo $vis`)
+            ok, log = _git_run(work, `$gh repo create $repo $vis`)
             ok || error("gh repo create failed: $log")
             created = true
         end
-        pushurl = "https://x-access-token:$token@github.com/$repo.git"
-        ok, log = _git_run(dir, `git push --force $pushurl gh-pages`)
+        # Start from the EXISTING gh-pages so other documents survive; a fresh repo / no branch → init clean.
+        cloned = !created && _git_run(work, `git clone --depth 1 --branch gh-pages --single-branch $pushurl site`)[1]
+        cloned || (mkpath(dir); (ok = _git_run(dir, `git init -q -b gh-pages`)[1]) || error("git init failed"))
+
+        # Build/replace just this document's subdir, then upsert the manifest + regenerate the blog index.
+        base = "https://$owner.github.io/$name/$slg/"
+        docdir = joinpath(dir, slg)
+        rm(docdir; recursive = true, force = true)                # clean replace of this doc
+        entry = _build_doc!(docdir, nb; slug = slg, base_url = base, kwargs...)
+        manifest = _read_site_manifest(dir)
+        isempty(strip(site_title)) || (manifest["title"] = String(site_title))
+        _upsert_doc!(manifest, entry)
+        write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
+        write(joinpath(dir, "index.html"), _render_site_index(manifest))
+        write(joinpath(dir, ".nojekyll"), "")                     # serve verbatim (no Jekyll)
+
+        for cmd in (`git add -A`,
+                    `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish $(entry["title"])"`)
+            ok, log = _git_run(dir, cmd); ok || error("git failed: $log")
+        end
+        # Cloned → fast-forward push; fresh → force (creates/overwrites the empty-or-absent gh-pages).
+        ok, log = _git_run(dir, cloned ? `git push $pushurl gh-pages` : `git push --force $pushurl gh-pages`)
         ok || error("git push failed: $(replace(log, token => "***"))")
         # Enable Pages from gh-pages/. The `-f` values carry `[]`, which must reach gh as literal args,
         # so interpolate them as variables (no shell parsing). Already-enabled (409) counts as success;
@@ -555,10 +705,10 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; private::Bool = fa
         pagesError = pok ? "" : (occursin("does not support GitHub Pages", plog) ?
             "GitHub Pages isn't available for this repo — private Pages needs GitHub Pro/Team; on a free plan the repo must be PUBLIC." :
             strip(replace(plog, r"\s+" => " ")))
-        return (; url = "https://$owner.github.io/$name/", repo = String(repo), created,
-                pagesEnabled = pok, pagesError)
+        return (; url = "https://$owner.github.io/$name/", docUrl = base, repo = String(repo), slug = slg,
+                created, pagesEnabled = pok, pagesError, docCount = length(get(manifest, "docs", Any[])))
     finally
-        rm(dir; recursive = true, force = true)
+        rm(work; recursive = true, force = true)
     end
 end
 

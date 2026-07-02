@@ -248,6 +248,52 @@ x = 1
         @test !occursin("exp-run-oneliner", eh)                      # no URL one-liner in embed mode
     end
 
+    # Multi-document site (blog): each notebook lives under its own /<slug>/, a manifest tracks them,
+    # and the root index is regenerated from that manifest — so publishing a second doc keeps the first.
+    @testset "multi-document site (blog)" begin
+        @test NS._slugify("Predicting Foo from Bar!") == "predicting-foo-from-bar"
+        @test NS._slugify("  A / B  C ") == "a-b-c"
+        @test NS._slugify("___") == ""
+
+        nb = _mknb(ROLES_SRC)
+        @test NS.doc_slug(nb) == "predicting-foo-from-bar"           # slug from the first-H1 title
+        m = NS._doc_meta(nb)
+        @test m.title == "Predicting Foo from Bar"
+        @test occursin("foo", lowercase(m.description))              # description from the abstract
+
+        # Give the notebook a figure so og_image short-circuits (no title-card render in tests).
+        fc = nb.report.cells[findfirst(x -> x.id == "c1", nb.report.cells)]
+        fc.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+
+        d = mktempdir()
+        entry = NS._build_doc!(joinpath(d, "predicting-foo-from-bar"), nb; slug = "predicting-foo-from-bar")
+        @test isfile(joinpath(d, "predicting-foo-from-bar", "index.html"))
+        @test isfile(joinpath(d, "predicting-foo-from-bar", "og-image.png"))
+        @test entry["slug"] == "predicting-foo-from-bar" && entry["title"] == "Predicting Foo from Bar"
+        @test entry["image"] == "predicting-foo-from-bar/og-image.png" && haskey(entry, "date")
+
+        man = Dict{String,Any}("title" => "My Blog", "docs" => Any[])
+        NS._upsert_doc!(man, entry)
+        @test length(man["docs"]) == 1
+        e2 = copy(entry); e2["title"] = "Renamed"; e2["date"] = "2099-01-01"
+        NS._upsert_doc!(man, e2)                                     # same slug → update in place
+        @test length(man["docs"]) == 1
+        @test man["docs"][1]["title"] == "Renamed"
+        @test man["docs"][1]["date"] == entry["date"]               # original publish date preserved
+        NS._upsert_doc!(man, Dict{String,Any}("slug" => "other", "title" => "Other Doc",
+            "description" => "", "image" => "", "runnable" => false, "date" => "2026-01-01"))
+        @test length(man["docs"]) == 2                              # a different slug adds
+
+        idx = NS._render_site_index(man)
+        @test occursin("My Blog", idx)
+        @test occursin("href=\"predicting-foo-from-bar/\"", idx) && occursin("href=\"other/\"", idx)
+        @test occursin("Renamed", idx) && occursin("Other Doc", idx)
+
+        write(joinpath(d, NS._SITE_MANIFEST), "{\"title\":\"T\",\"docs\":[{\"slug\":\"x\",\"title\":\"X\"}]}")
+        @test NS._read_site_manifest(d)["docs"][1]["slug"] == "x"
+        @test NS._read_site_manifest(mktempdir())["docs"] == Any[]  # absent → empty manifest
+    end
+
     @testset "HTML export options: theme + code size + hide source" begin
         nb = _mknb("#%% code id=c\nx = 1\n")
         dark = NS.export_html(nb; theme = "dark")

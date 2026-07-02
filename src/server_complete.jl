@@ -507,11 +507,14 @@ function _make_router(h::Hub)
         repo = strip(get(b, "repo", ""))
         isempty(repo) && return HTTP.Response(400, "missing \"repo\" (owner/name)")
         try
-            r = publish_site(nb, String(repo); private = get(b, "private", false) === true,
+            r = publish_site(nb, String(repo); slug = String(get(b, "slug", "")),
+                             site_title = String(get(b, "siteTitle", "")),
+                             private = get(b, "private", false) === true,
                              create = get(b, "create", true) === true, theme = get(b, "theme", "dark"),
                              outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0",
                              bundle = get(b, "bundle", false) === true)
-            return _json(Dict("url" => r.url, "repo" => r.repo, "created" => r.created,
+            return _json(Dict("url" => r.url, "docUrl" => r.docUrl, "slug" => r.slug, "repo" => r.repo,
+                              "created" => r.created, "docCount" => r.docCount,
                               "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError))
         catch e
             return HTTP.Response(500, "Publish failed: " * sprint(showerror, e))

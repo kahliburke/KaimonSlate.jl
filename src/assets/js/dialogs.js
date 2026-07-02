@@ -150,6 +150,10 @@ async function exportSite() {
 }
 // Publish the site to GitHub Pages via the server's `gh` CLI. Prompts for the repo, pushes to
 // gh-pages, and reports the URL. Pages can take ~1 min to go live after the first publish.
+// A site hosts MANY documents: each notebook publishes to its own /<slug>/, and the repo's root
+// index.html is a generated blog page linking to all of them. Publishing is ADDITIVE — it adds/updates
+// just this doc and preserves the others already in the site.
+function _slug(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
 async function publishSite() {
   const repo = ((document.getElementById('siterepo') || {}).value || '').trim();
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter the target repo as owner/name.'); return; }
@@ -159,50 +163,62 @@ async function publishSite() {
   const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
   const bundle = !!(document.getElementById('siterunnable') || {}).checked;
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
-  // Preflight: tell the user exactly what will happen (create new vs overwrite an existing site).
+  const siteTitle = ((document.getElementById('sitetitle') || {}).value || '').trim();
+  const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim()) ||
+               _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
+  // Preflight: additive publish — say whether this adds a new doc or updates one, and list the others.
   let pf;
   try {
     const pr = await fetch(_apipath('/api/publish-check'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: repo }) });
     pf = pr.ok ? await pr.json() : {};
   } catch (_) { pf = {}; }
   if (pf.gh === false) { await alertDark('The `gh` CLI was not found on the server. Install it and run `gh auth login`, then retry.'); return; }
+  const docs = Array.isArray(pf.docs) ? pf.docs : [];
+  const already = docs.find(d => d && d.slug === slug);
   let msg, ok = 'Publish', cls = 'primary';
   if (!pf.exists) {
     if (!create) { await alertDark('Repo ' + repo + ' does not exist, and “Create the repo if it doesn’t exist” is off.\n\nEnable it, or create the repo first.'); return; }
-    msg = 'Create a NEW ' + (isPrivate ? 'private' : 'public') + ' repo ' + repo + ' and publish the site to its gh-pages branch.' +
+    msg = 'Create a NEW ' + (isPrivate ? 'private' : 'public') + ' repo ' + repo + ' as a site, and publish this notebook to /' + slug + '/.' +
       (isPrivate ? '\n\n⚠ GitHub Pages needs a PUBLIC repo on the free plan (private Pages requires GitHub Pro), so a private repo may not serve.' : '');
     ok = 'Create & publish';
   } else {
-    msg = 'Repo ' + repo + ' already exists (' + (pf.visibility || 'unknown') + '; its visibility is left unchanged).\n\n' +
-      (pf.hasGhPages ? '⚠ Its gh-pages branch will be FORCE-PUSHED — any existing published site there is overwritten.'
-                     : 'A gh-pages branch will be created and Pages enabled.') +
-      (pf.pagesUrl ? '\n\nCurrently live at: ' + pf.pagesUrl : '');
-    if (pf.hasGhPages) { ok = 'Overwrite & publish'; cls = 'danger'; }
+    const others = docs.filter(d => d && d.slug !== slug);
+    msg = 'Publish to the site ' + repo + ' (' + (pf.visibility || 'unknown') + '; visibility unchanged).\n\n' +
+      (already ? '↻ Updates the existing document “' + (already.title || slug) + '” at /' + slug + '/.'
+               : '＋ Adds a new document at /' + slug + '/.') +
+      (others.length ? '\n\n' + others.length + ' other document' + (others.length === 1 ? '' : 's') + ' in this site are preserved:\n· ' +
+        others.slice(0, 6).map(d => d.title || d.slug).join('\n· ') + (others.length > 6 ? '\n· …' : '')
+        : (pf.hasGhPages ? '' : '\n\nA gh-pages branch will be created and Pages enabled.'));
+    if (already) { ok = 'Update & publish'; }
   }
   if (!await confirmDark(msg, ok, cls)) return;
   showLoading('Building + pushing to GitHub Pages…');
   let result = null, err = null;
   try {
     const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repo, private: isPrivate, create: create, theme: theme, outputs: outv, source: source, bundle: bundle }) });
+      body: JSON.stringify({ repo: repo, slug: slug, siteTitle: siteTitle, private: isPrivate, create: create, theme: theme, outputs: outv, source: source, bundle: bundle }) });
     result = r.ok ? await r.json() : { error: await r.text() };
   } catch (e) { err = e; }
   hideLoading();                                          // drop the spinner BEFORE the result dialog
   if (err) { await alertDark('Publish failed: ' + err); return; }
   if (result.error) { await alertDark('Publish failed:\n' + result.error); return; }
   localStorage.setItem('slate_siterepo', repo);
-  const link = '<a href="' + _escHtml(result.url) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(result.url) + '</a>';
+  if (siteTitle) localStorage.setItem('slate_sitetitle', siteTitle);
+  const docUrl = result.docUrl || result.url;
+  const dlink = '<a href="' + _escHtml(docUrl) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(docUrl) + '</a>';
+  const slink = '<a href="' + _escHtml(result.url) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(result.url) + '</a>';
   if (result.pagesEnabled === false) {
     // The site was pushed, but GitHub Pages isn't serving it (usually: private repo on the free plan).
     await dlg('⚠ Pushed to <code>gh-pages</code>, but GitHub Pages could not be enabled:<br><br>' +
-      _escHtml(result.pagesError || 'unknown reason') + '<br><br>Once Pages is available it will serve at ' + link + '.',
+      _escHtml(result.pagesError || 'unknown reason') + '<br><br>Once Pages is available this document will serve at ' + dlink + '.',
       [{ label: 'OK', value: true, cls: 'primary' }], { html: true });
     return;
   }
-  const v = await dlg('Published ✓<br><br>' + link + '<br><br>' + (result.created ? 'Repo created. ' : '') +
-    'GitHub Pages may take ~1 minute to go live on the first publish.',
-    [{ label: 'Close', value: false }, { label: 'Open site', value: 'open', cls: 'primary' }], { html: true });
-  if (v === 'open') window.open(result.url, '_blank', 'noopener');
+  const count = result.docCount ? (result.docCount + ' document' + (result.docCount === 1 ? '' : 's') + ' in the site.') : '';
+  const v = await dlg('Published ✓<br><br>This document: ' + dlink + '<br>Site index: ' + slink + '<br><br>' +
+    (result.created ? 'Repo created. ' : '') + count + '<br>GitHub Pages may take ~1 minute to go live on the first publish.',
+    [{ label: 'Close', value: false }, { label: 'Open document', value: 'open', cls: 'primary' }], { html: true });
+  if (v === 'open') window.open(docUrl, '_blank', 'noopener');
 }
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
@@ -273,6 +289,10 @@ function openExport(preset) {
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = localStorage.getItem('slate_siterepo') || '';
+  const stt = document.getElementById('sitetitle'); if (stt && !stt.value) stt.value = localStorage.getItem('slate_sitetitle') || '';
+  // Auto-fill this document's slug from the notebook title (editable). Pre-filled so publishing "just works".
+  const ssl = document.getElementById('siteslug');
+  if (ssl && !ssl.value) ssl.value = _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
   const ss = document.getElementById('sitesource'); if (ss) ss.checked = localStorage.getItem('slate_sitesource') !== '0';
   const srn = document.getElementById('siterunnable'); if (srn) srn.checked = localStorage.getItem('slate_siterunnable') === '1';
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
