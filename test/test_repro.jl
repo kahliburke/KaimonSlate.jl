@@ -60,6 +60,27 @@ using .ReportEngine
     end
 end
 
+# Per-notebook durable settings (Slate.config footer) — incl. the new `agentmodel` override that
+# travels with the file. Typed round-trip through report.meta, idempotent serialize, no leakage.
+@testset "per-notebook config footer (Slate.config)" begin
+    src = "#%% code id=a\nx = 1\n\n" *
+          "# ╔═╡ Slate.config · per-notebook settings (Settings panel)\n" *
+          "#   agentmodel = opus\n#   parallel = false\n#   slidelevel = 3\n# ╚═╡\n"
+    r = parse_report(src)
+    @test length(r.cells) == 1                       # config footer is not a cell
+    @test r.meta["agentmodel"] == "opus"             # :string
+    @test r.meta["parallel"] === false               # :bool coerced
+    @test r.meta["slidelevel"] === 3                 # :int coerced
+
+    s1 = serialize_report(r)
+    @test occursin("agentmodel = opus", s1)
+    @test parse_report(s1).meta["agentmodel"] == "opus"      # idempotent
+
+    r2 = parse_report("#%% code id=a\nx=1\n")         # no config → no footer, no keys
+    @test !haskey(r2.meta, "agentmodel")
+    @test !occursin("Slate.config", serialize_report(r2))
+end
+
 # The `collapsed` header token (cell folded in the UI) round-trips through the .jl via the
 # cell's `flags`, and composes with `controls=`.
 @testset "collapsed header token round-trips" begin

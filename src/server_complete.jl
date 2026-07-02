@@ -697,6 +697,18 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/diag", req -> _withnb(h, req, nb -> begin
         set_diag!(nb.id, _body(req)); _json(Dict("ok" => true))
     end))
+    # Unified per-notebook config (the "Notebook config" panel). GET returns every durable setting
+    # with its effective value + source (override vs global/default); POST sets or clears one override
+    # ({key, value} — or {key, clear:true} / an empty value to follow the global). Registry-driven, so
+    # it stays in lockstep with the Slate.config footer whitelist.
+    HTTP.register!(router, "GET", "/api/{id}/config", req -> _withnb(h, req, nb ->
+        _json(notebook_config_payload(nb))))
+    HTTP.register!(router, "POST", "/api/{id}/config", req -> _withnb(h, req, nb -> begin
+        b = _body(req); key = String(get(b, "key", ""))
+        res = set_notebook_config!(nb, key, get(b, "value", ""); clear = get(b, "clear", false) === true)
+        get(res, "ok", false) === true || return _json(res)
+        j = state_json(nb); j["config"] = notebook_config_payload(nb); _json(j)
+    end))
     # Per-notebook toggle for parent /src hot-reload (Revise). Stored in report meta.
     HTTP.register!(router, "POST", "/api/{id}/hotreload", req -> _withnb(h, req, nb -> begin
         nb.report.meta["hotreload"] = get(_body(req), "enabled", true) === true

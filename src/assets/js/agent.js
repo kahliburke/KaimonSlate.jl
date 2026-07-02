@@ -233,7 +233,7 @@ async function agentSend() {
   const inp = document.getElementById('apin'), text = inp.value.trim(); if (!text) return;
   inp.value = ''; _stopArmed = false; agentMsgs.push({ role: 'user', text }); agentStatus('thinking…'); setWorking(true);
   try {
-    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: agentModel(), permission: agentPerm(), dark: _uiThemeDark() });
+    const r = await api('POST', '/api/chat', { text, target: _chatTarget || '', model: effectiveAgentModel(), permission: effectiveAgentPerm(), dark: _uiThemeDark() });
     if (r && r.ok === false) { agentMsgs.push({ role: 'err', text: r.error || 'agent unavailable' }); agentStatus(''); setWorking(false); }
   } catch (e) { agentMsgs.push({ role: 'err', text: 'agent service unavailable' }); agentStatus(''); setWorking(false); }
 }

@@ -100,6 +100,70 @@ function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractSt
     return res
 end
 
+# ── Durable per-notebook config registry (the "Notebook config" panel SSOT) ────────────────────────
+# One entry per Slate.config footer key the panel exposes: its UI group/label/type, its built-in
+# default, an optional server-global default (the slate.json tier — `nothing` means the only tiers
+# are notebook-override and built-in, e.g. a client-side global like the browser agent-model pref),
+# and whether changing it respawns the worker. Drives GET/POST /api/{id}/config. NOTE: agent
+# *permission* is deliberately NOT here — it must never travel in a file (a `bypass` preset riding a
+# shared notebook is a privilege-escalation footgun); the client remembers it locally per notebook.
+const _CONFIG_UI = (
+    (key = "agentmodel", group = "Agent", label = "Agent model", type = :string, default = "",
+     choices = String[], global_default = nothing, restart = false),
+    (key = "threads", group = "Execution", label = "Worker threads", type = :string, default = "",
+     choices = String[], global_default = () -> ReportEngine.WORKER_THREADS[], restart = true),
+    (key = "parallel", group = "Execution", label = "Parallel cells", type = :bool, default = true,
+     choices = String[], global_default = () -> PARALLEL_DEFAULT[], restart = false),
+    (key = "hotreload", group = "Execution", label = "Hot-reload /src edits", type = :bool, default = true,
+     choices = String[], global_default = nothing, restart = false),
+    (key = "slidelevel", group = "Slides", label = "Slide heading level", type = :int, default = 2,
+     choices = String[], global_default = nothing, restart = false),
+    (key = "slidetransition", group = "Slides", label = "Slide transition", type = :enum, default = "fade",
+     choices = ["none", "fade", "slide"], global_default = nothing, restart = false),
+    (key = "slideratio", group = "Slides", label = "PDF slide ratio", type = :enum, default = "16:9",
+     choices = ["16:9", "4:3"], global_default = nothing, restart = false),
+    (key = "bibstyle", group = "Slides", label = "Bibliography style", type = :string, default = "ieee",
+     choices = String[], global_default = nothing, restart = false),
+)
+
+_config_item(key) = (i = findfirst(x -> x.key == key, _CONFIG_UI); i === nothing ? nothing : _CONFIG_UI[i])
+
+# The config panel's view: each setting with its effective value, whether the notebook overrides it,
+# and the global/built-in it would fall back to. The client layers its own browser-global (agent
+# model) on top for keys whose `global` is null.
+function notebook_config_payload(nb::LiveNotebook)
+    meta = nb.report.meta
+    items = map(_CONFIG_UI) do it
+        gd = it.global_default === nothing ? nothing : it.global_default()
+        overridden = haskey(meta, it.key)
+        Dict{String,Any}("key" => it.key, "group" => it.group, "label" => it.label,
+                         "type" => String(it.type), "choices" => it.choices,
+                         "overridden" => overridden,
+                         "value" => overridden ? meta[it.key] : (gd === nothing ? it.default : gd),
+                         "default" => it.default, "global" => gd)
+    end
+    return Dict{String,Any}("items" => collect(items))
+end
+
+# Set (or clear) one per-notebook config override, persist the footer, and run its side effect.
+# `clear=true` or an empty string value removes the override so the setting follows the global/default.
+function set_notebook_config!(nb::LiveNotebook, key::AbstractString, value; clear::Bool = false)
+    it = _config_item(String(key))
+    it === nothing && return Dict{String,Any}("ok" => false, "message" => "unknown config key '$key'")
+    if clear || (value isa AbstractString && isempty(strip(String(value))))
+        delete!(nb.report.meta, it.key)
+    else
+        nb.report.meta[it.key] = it.type === :bool ? (value === true || value == "true") :
+                                 it.type === :int  ? something(tryparse(Int, string(value)), it.default) :
+                                 String(string(value))
+    end
+    it.key == "threads" && nb.kernel isa ReportEngine.GateKernel &&
+        (nb.kernel.threads = get(nb.report.meta, "threads", ""))
+    _persist!(nb)
+    it.restart && restart_kernel!(nb)
+    return Dict{String,Any}("ok" => true)
+end
+
 # Restore the notebook to a recorded state (by content hash). Append-only and
 # non-destructive: the current state goes onto the in-memory undo stack and the
 # restore is itself recorded as a new "restore" checkpoint — you can always come
@@ -542,6 +606,7 @@ function state_json(nb::LiveNotebook)
     meta["slideTheme"] = get(nb.report.meta, "slidetheme", "")               # "" = follow the editor theme
     meta["slideRatio"] = get(nb.report.meta, "slideratio", "16:9")           # PDF deck aspect ratio
     meta["bibStyle"] = get(nb.report.meta, "bibstyle", "ieee")               # CSL citation/reference style
+    meta["agentModel"] = get(nb.report.meta, "agentmodel", "")               # per-notebook agent-model override ("" = browser global)
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true

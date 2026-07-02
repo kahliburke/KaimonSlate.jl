@@ -37,51 +37,9 @@ function openSettings() {
     wrap.checked = document.body.classList.contains('wrap-output');
     wrap.onchange = () => { document.body.classList.toggle('wrap-output', wrap.checked); localStorage.setItem('slateWrapOutput', wrap.checked ? '1' : '0'); };
   }
-  // Per-notebook: pick up parent /src edits (Revise) and mark affected cells stale (default on).
-  const hr = document.getElementById('sethotreload');
-  hr.checked = !(nbState && nbState.hotreload === false);
-  // Apply the returned state so nbState stays in sync — else reopening Settings reads a stale value
-  // and the checkbox appears to "revert".
-  hr.onchange = () => api('POST', '/api/hotreload', { enabled: hr.checked }).then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
-  // Per-notebook: run independent cells concurrently in the worker (default off — the serial path).
-  const par = document.getElementById('setparallel');
-  if (par) {
-    par.checked = !!(nbState && nbState.parallel === true);
-    par.onchange = () => api('POST', '/api/parallel', { enabled: par.checked }).then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
-  }
-  // Per-notebook worker thread override. Blank = global. Apply POSTs /threads, which restarts the
-  // worker (warm namespace is lost), so it's a button, not live-on-change.
-  const thr = document.getElementById('setthreads'), thrApply = document.getElementById('setthreadsapply'),
-        thrEff = document.getElementById('setthreadseff');
-  if (thr) {
-    thr.value = (nbState && nbState.threads) || '';
-    if (thrEff) thrEff.textContent = nbState && nbState.threadsEffective ? `now: ${nbState.threadsEffective}` : '';
-    const applyThreads = async () => {
-      try { renderAll(await api('POST', '/api/threads', { threads: thr.value.trim() })); } catch (_) {}
-    };
-    thrApply && (thrApply.onclick = applyThreads);
-    thr.onkeydown = e => { if (e.key === 'Enter') applyThreads(); };
-  }
-  // Per-notebook slide-deck prefs (heading level / transition / PDF aspect). Persisted to the
-  // Slate.config footer via /slideconfig; the live deck (slides.js) reads them from nbState.
-  const slvl = document.getElementById('setslidelevel'), strn = document.getElementById('setslidetransition'),
-        srat = document.getElementById('setslideratio');
-  if (slvl) {
-    slvl.value = String((nbState && nbState.slideLevel) || 2);
-    strn.value = (nbState && nbState.slideTransition) || 'fade';
-    srat.value = (nbState && nbState.slideRatio) || '16:9';
-    const pushSlide = () => api('POST', '/api/slideconfig',
-      { level: parseInt(slvl.value, 10), transition: strn.value, ratio: srat.value })
-      .then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
-    slvl.onchange = pushSlide; strn.onchange = pushSlide; srat.onchange = pushSlide;
-  }
-  // Citation/reference style (Typst CSL) for bibliography export — persisted to the config footer.
-  const bst = document.getElementById('setbibstyle');
-  if (bst) {
-    bst.value = (nbState && nbState.bibStyle) || 'ieee';
-    bst.onchange = () => api('POST', '/api/slideconfig', { bibstyle: bst.value })
-      .then(s => { try { renderAll(s); } catch (_) {} }).catch(() => {});
-  }
+  // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)
+  // now live in the "🎚 Notebook config" panel (config.js) — a single view with effective value +
+  // source badge + clear-override, instead of being scattered here.
   // Overall Slate UI theme — applied by toggling html[data-slate-theme] (palette in notebook.css),
   // persisted as `slateTheme`, and re-applied at load by the inline head script (no flash).
   const th = document.getElementById('settheme');
@@ -105,17 +63,44 @@ function openSettings() {
   // Confirm if a turn is in flight (the reap interrupts it), persist, reap, and drop a
   // visible note in the chat. Reverts the <select> if the user backs out mid-turn.
   const _selText = sel => sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value;
-  const switchSetting = async (sel, key, verb, noun) => {
+  // Persist a setting `value` (labelled for the chat note), confirming/aborting if a turn is
+  // in flight, then reap so the next message respawns on it. `revert` restores the prior UI.
+  const commitSetting = async (key, value, label, verb, noun, revert) => {
     if (agentWorking && !await confirmDark('A turn is in progress — ' + verb + ' and stop it?', 'Switch & stop', 'danger')) {
-      sel.value = localStorage.getItem(key) || '';   // back out → restore the prior selection
+      revert && revert();
       return;
     }
-    localStorage.setItem(key, sel.value);
+    localStorage.setItem(key, value);
     await reapAgent();
-    _agentNote('⚙ ' + noun + ' → ' + _selText(sel) + ' · applies to your next message');
+    _agentNote('⚙ ' + noun + ' → ' + label + ' · applies to your next message');
   };
-  mdl.value = agentModel();
-  mdl.onchange = () => switchSetting(mdl, 'slateAgentModel', 'switch the model', 'model');
+  const switchSetting = (sel, key, verb, noun) =>
+    commitSetting(key, sel.value, _selText(sel), verb, noun, () => { sel.value = localStorage.getItem(key) || ''; });
+  // ── Agent model, with a free-text "Custom…" escape hatch ──────────────────────
+  // The stored model is the exact string sent per turn (server → `claude --model`). A preset
+  // (opus/haiku/local) is picked from the dropdown; anything else (an exact id/version like
+  // `claude-opus-4-8`) is a custom value: the dropdown shows "Custom…" and the text input holds it.
+  const crow = document.getElementById('setmodelcustomrow');
+  const cinp = document.getElementById('setmodelcustom');
+  const _isPreset = v => [...mdl.options].some(o => o.value === v && o.value !== '__custom__');
+  const reflectModel = () => {                 // point the UI at the saved model (preset vs custom)
+    const saved = agentModel();
+    if (saved && !_isPreset(saved)) { mdl.value = '__custom__'; cinp.value = saved; crow.style.display = ''; }
+    else { mdl.value = saved; crow.style.display = 'none'; }
+  };
+  const commitCustom = () => {
+    const v = cinp.value.trim();
+    if (!v || v === agentModel()) return;      // empty or unchanged → nothing to do
+    commitSetting('slateAgentModel', v, 'custom · ' + v, 'switch the model', 'model', reflectModel);
+  };
+  reflectModel();
+  mdl.onchange = () => {
+    if (mdl.value === '__custom__') { crow.style.display = ''; cinp.focus(); return; }  // commit on input blur/⏎
+    crow.style.display = 'none';
+    switchSetting(mdl, 'slateAgentModel', 'switch the model', 'model');
+  };
+  cinp.onchange = commitCustom;                // fires on Enter / blur
+  cinp.onkeydown = e => { if (e.key === 'Enter') cinp.blur(); };
   // Append locally-served models (Ollama, and vmlx — the MLX server for Apple Silicon).
   // Both need their server running + Kaimon's OllamaBackend, and are routed by prefix.
   // Rebuilt each open so the list stays fresh and never duplicates.
@@ -126,7 +111,7 @@ function openSettings() {
         const o = document.createElement('option');
         o.value = prefix + ':' + name; o.textContent = label + ' · ' + name + ' (local)'; mdl.appendChild(o);
       });
-      mdl.value = agentModel();   // re-apply: the saved choice may be one of these local models
+      reflectModel();   // re-apply: the saved choice may be one of these local models (else custom)
     }).catch(() => {});
   };
   addLocalModels('/api/ollama-models', 'ollama', 'Ollama');
@@ -136,10 +121,19 @@ function openSettings() {
   perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
   document.getElementById('setbg').classList.add('show');
 }
-// The chosen agent model ('' = server default = sonnet), sent with every chat turn.
+// Your GLOBAL agent-model default ('' = server default = sonnet).
 function agentModel() { return localStorage.getItem('slateAgentModel') || ''; }
-// The chosen permission preset ('' = lab default), sent with every chat turn.
+// Your GLOBAL permission preset ('' = lab default).
 function agentPerm() { return localStorage.getItem('slateAgentPerm') || ''; }
+// Per-notebook agent-permission memory. Kept LOCAL (localStorage keyed by notebook id) and never
+// written to the .jl — a `bypass` preset must never ride a shared notebook. Empty → follow global.
+function _nbId() { return (typeof nbState !== 'undefined' && nbState && nbState.id) || ''; }
+function nbAgentPermKey() { return 'slatePerm:' + _nbId(); }
+function nbAgentPerm() { return localStorage.getItem(nbAgentPermKey()) || ''; }
+// EFFECTIVE values sent with each chat turn: per-notebook override wins, else the global default.
+// Model override travels in the .jl (state_json → nbState.agentModel); permission is local-only.
+function effectiveAgentModel() { return (typeof nbState !== 'undefined' && nbState && nbState.agentModel) || agentModel(); }
+function effectiveAgentPerm() { return nbAgentPerm() || agentPerm(); }
 function closeSettings() { document.getElementById('setbg').classList.remove('show'); }
 document.getElementById('setbg').addEventListener('mousedown', e => { if (e.target.id === 'setbg') closeSettings(); });
 

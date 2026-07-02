@@ -409,9 +409,10 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # Whitelist of durable per-notebook settings, each with a value type so parsing coerces
 # correctly (`:bool` | `:string` | `:int`). Slide-deck prefs live here too so a notebook
 # carries its presentation style with it.
-const _CONFIG_KEYS = ("parallel", "threads", "hotreload",
+const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "agentmodel",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
+                           "agentmodel" => :string,
                            "slidelevel" => :int, "slidetransition" => :string,
                            "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string)
 

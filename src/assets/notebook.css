@@ -759,6 +759,29 @@ body.modkey .cm-content { cursor: pointer; }
   text-transform:uppercase; letter-spacing:.06em; margin:12px 4px 4px; padding-bottom:3px; border-bottom:1px solid var(--border); }
 .pkggrouphdr:first-child { margin-top:2px; }
 .pkgpath { color:var(--dim); font-weight:400; text-transform:none; letter-spacing:0; font-family:monospace; font-size:.72rem; }
+/* Notebook config panel */
+.confighint { padding:10px 14px; color:var(--dim); font-size:.76rem; line-height:1.4; border-bottom:1px solid var(--bg3); }
+.confighint code { background:var(--bg3); padding:0 4px; border-radius:4px; font-size:.9em; }
+.configlist { flex:1; overflow:auto; padding:6px 12px 16px; }
+.cfggroup { color:var(--accent); font-size:.7rem; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+  margin:14px 2px 4px; padding-bottom:3px; border-bottom:1px solid var(--border); }
+.cfggroup:first-child { margin-top:4px; }
+.cfgrow { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:8px 2px; border-bottom:1px solid var(--bg3); }
+.cfglabel { color:var(--text); font-size:.84rem; display:flex; align-items:center; flex-wrap:wrap; gap:7px; min-width:0; }
+.cfgsub { flex-basis:100%; color:var(--dim); font-size:.72rem; font-family:monospace; }
+.cfgbadge { font-size:.62rem; font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding:1px 6px; border-radius:9px;
+  border:1px solid var(--border); color:var(--dim); }
+.cfgbadge.override { color:var(--accent); border-color:var(--accent); }
+.cfgbadge.global { color:var(--text); }
+.cfgbadge.default { color:var(--dim); }
+.cfgctl { display:flex; align-items:center; gap:6px; flex-shrink:0; }
+.cfgctl select, .cfgctl input.cfgtext, .cfgctl input.cfgnum { background:var(--bg3); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:3px 7px; font-size:.82rem; }
+.cfgctl input.cfgtext { width:170px; font-family:'Cascadia Code',monospace; }
+.cfgctl input.cfgnum { width:56px; }
+.cfgctl select:focus, .cfgctl input:focus { outline:none; border-color:var(--accent); }
+.cfgclear { background:none; border:1px solid var(--bg3); color:var(--dim); border-radius:6px; padding:2px 7px; cursor:pointer; font-size:.78rem; }
+.cfgclear:hover { color:var(--text); border-color:var(--accent); }
 /* Topbar ☰ overflow menu */
 .menuwrap { position:relative; display:inline-block; }
 .topmenu { position:absolute; top:calc(100% + 5px); right:0; min-width:210px; background:var(--bg2);
@@ -830,6 +853,9 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .setmodal .rt { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.82rem; }
 .setmodal input[type=range] { accent-color:var(--accent); }
 .setmodal select { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-size:.84rem; }
+.setmodal input.settext { flex:1; min-width:0; max-width:60%; background:var(--bg3); color:var(--text); border:1px solid var(--border);
+                          border-radius:6px; padding:4px 8px; font-size:.84rem; font-family:'Cascadia Code',monospace; }
+.setmodal input.settext:focus { outline:none; border-color:var(--accent); }
 .setmodal .sethint { display:block; color:var(--dim); font-size:.76rem; margin:-6px 0 4px; }
 /* Command palette (⌘K) */
 .palette-bg { position:fixed; inset:0; background:rgba(5,8,16,.5); display:none; justify-content:center; align-items:flex-start; z-index:65; }
