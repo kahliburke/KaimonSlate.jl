@@ -1,4 +1,5 @@
 <!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Kaimon Slate</title>
+<script src="/assets/js/platform.js"></script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23569cd6'/><text x='50' y='73' font-size='62' text-anchor='middle' fill='%23ffffff' font-family='monospace'>S</text></svg>"/>
 <style>body{background:#0d1120;color:#d4d8e8;font-family:system-ui,sans-serif;margin:0;padding:40px;}
 h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
@@ -117,7 +118,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       modalRow=document.getElementById('modalrow'), loadEl=document.getElementById('loading'),
       loadMsg=document.getElementById('lmsg'), _resolve=null;
   var esc=function(s){return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
-  var isdir=function(p){return p.slice(-1)==='/';};
+  var isdir=function(p){return window.PLATFORM.isDirPath(p);};   // ends in / or \
   // Dark-themed modal (returns a Promise) replacing native confirm/alert.
   function _close(v){if(_resolve){var r=_resolve;_resolve=null;modalBg.classList.remove('show');r(v);}}
   function modal(message,buttons){return new Promise(function(resolve){_resolve=resolve;
@@ -132,7 +133,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function showLoading(m){loadMsg.textContent=m||'Working…';loadEl.classList.add('show');}
   function hideLoading(){loadEl.classList.remove('show');}
   function openPath(p){p=(p||'').trim();if(!p)return;
-    try{localStorage.setItem('slateLastDir', p.replace(/[^/]*$/,''));}catch(e){}   // remember the directory
+    try{localStorage.setItem('slateLastDir', window.PLATFORM.dirOf(p));}catch(e){}   // remember the directory
     showLoading('Opening “'+p+'” — starting the worker…');
     fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
@@ -143,9 +144,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       imStatus=document.getElementById('imstatus'),imRun=document.getElementById('imrun'),
       imImport=document.getElementById('imimport'),imCancel=document.getElementById('imcancel'),
       _imPath='',_imES=null,_imDone=false;
-  function _defTarget(p){var dir=p.replace(/[^/]*$/,'');                 // dir incl. trailing /
+  function _defTarget(p){var dir=window.PLATFORM.dirOf(p);               // dir incl. trailing sep
     var name=baseName(p).replace(/\.jl$/i,'').replace(/\.standalone$/i,'');
-    return dir+(name||'imported')+'/';}
+    return dir+(name||'imported')+window.PLATFORM.sep;}
   // Open a file — but if it's a self-contained bundle, launch the run/import helper instead.
   function openMaybeStandalone(p){
     fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();})
@@ -196,7 +197,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       openMaybeStandalone(pick);return;}       // file suggestion → open (or offer import)
     var p=inp.value.trim(); if(!p)return;
     var info=await fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();});
-    if(info.isdir){if(p.slice(-1)!=='/')inp.value=p+'/';fetchComp();return;}        // never open a directory
+    if(info.isdir){if(!isdir(p))inp.value=p+window.PLATFORM.sep;fetchComp();return;} // never open a directory
     if(info.isfile){info.standalone?openImport(p):openPath(p);return;}              // standalone → import helper
     if(!await confirmDark('Create new notebook “'+p+'”?','Create'))return;          // confirm new file
     if(p.slice(-3).toLowerCase()!=='.jl'){ if(await confirmDark('“'+p+'” has no .jl extension. Add it?','Add .jl'))p=p+'.jl'; }
@@ -213,7 +214,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       else if(items.length>1){var cp=commonPrefix(items);
         if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
         else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
-    else if(e.key==='/'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend
+    else if(e.key==='/'||e.key==='\\'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend
       if(idx>=0&&isdir(items[idx])){e.preventDefault();inp.value=items[idx];fetchComp();}}
     else if(e.key==='ArrowDown'){e.preventDefault();if(items.length){sel=(sel+1)%items.length;inp.value=items[sel];render();}}
     else if(e.key==='ArrowUp'){e.preventDefault();if(items.length){sel=(sel-1+items.length)%items.length;inp.value=items[sel];render();}}
@@ -237,7 +238,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pushRecent(p){if(!p)return;var a=getRecents().filter(function(x){return x!==p;});a.unshift(p);saveRecents(a);}
   function forgetRecent(p){saveRecents(getRecents().filter(function(x){return x!==p;}));renderRecents();}
   function openPaths(){var s={};document.querySelectorAll('.nb .p').forEach(function(e){s[e.textContent]=1;});return s;}
-  function baseName(p){var q=p.replace(/\/+$/,'');var i=q.lastIndexOf('/');return i<0?q:q.slice(i+1);}
+  function baseName(p){return window.PLATFORM.baseOf(p.replace(/[\/\\]+$/,''));}
   function renderRecents(){
     var box=document.getElementById('recent'),open=openPaths();
     var list=getRecents();   // show ALL recents — currently-open ones get an "open" dot, not hidden

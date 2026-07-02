@@ -7,6 +7,8 @@
 <!-- Diagnostics capture FIRST, so it catches the earliest errors; pushed to the server for
      the slate.diag MCP tool. -->
 <script src="/assets/js/diag.js"></script>
+<!-- Detect the host OS early so keyboard hints render in its convention (Ctrl vs ⌘). -->
+<script src="/assets/js/platform.js"></script>
 <!-- Apply the saved Slate UI theme BEFORE any CSS paints, so there's no dark→light flash. The
      palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default. -->
 <script>try{var _t=localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>

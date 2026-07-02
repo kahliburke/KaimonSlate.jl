@@ -185,14 +185,23 @@ end
 # rather than silently dropping entries. Directories sort first, then `.jl`, then the rest.
 function _path_completions(q::AbstractString; limit::Int = 500)
     s = String(q)
-    isempty(s) && (s = "~/")
-    s == "~" && return (items = ["~/"], truncated = false)
-    slash = findlast('/', s)
-    prefix = slash === nothing ? "" : s[1:slash]
-    leaf   = slash === nothing ? s : s[nextind(s, slash):end]
-    base   = isempty(prefix) ? pwd() : expanduser(prefix)
-    isdir(base) || return (items = String[], truncated = false)
+    # Separator conventions differ by OS: accept BOTH `/` and `\` on input (a pasted
+    # Windows path arrives with `\`), and echo back completions in whichever separator
+    # the user is already typing — falling back to the host's native one.
+    nativesep = Sys.iswindows() ? '\\' : '/'
+    isempty(s) && (s = "~" * nativesep)
+    (s == "~") && return (items = ["~" * nativesep], truncated = false)
+    sepi   = findlast(c -> c == '/' || c == '\\', s)
+    sep    = sepi === nothing ? nativesep : s[sepi]
+    prefix = sepi === nothing ? "" : s[1:sepi]
+    leaf   = sepi === nothing ? s : s[nextind(s, sepi):end]
+    # `expanduser`/`readdir` can throw on a malformed prefix (e.g. a `~user` that doesn't
+    # exist, or a foreign-separator path on this host) — treat any failure as "no matches"
+    # so a stray keystroke never 500s the open box.
+    base = pwd()
     entries = try
+        base = isempty(prefix) ? pwd() : expanduser(prefix)
+        isdir(base) || return (items = String[], truncated = false)
         readdir(base)
     catch
         return (items = String[], truncated = false)
@@ -202,9 +211,9 @@ function _path_completions(q::AbstractString; limit::Int = 500)
         startswith(e, leaf) || continue
         (startswith(e, ".") && !startswith(leaf, ".")) && continue
         full = joinpath(base, e)
-        push!(keep, isdir(full) ? prefix * e * "/" : prefix * e)
+        push!(keep, isdir(full) ? string(prefix, e, sep) : string(prefix, e))
     end
-    sort!(keep; by = p -> (endswith(p, "/") ? 0 : (endswith(p, ".jl") ? 1 : 2), lowercase(p)))
+    sort!(keep; by = p -> ((endswith(p, '/') || endswith(p, '\\')) ? 0 : (endswith(p, ".jl") ? 1 : 2), lowercase(p)))
     return (items = first(keep, limit), truncated = length(keep) > limit)
 end
 

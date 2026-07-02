@@ -161,7 +161,7 @@ function paletteCommands() {
     ...BIND_SNIPPETS.map(([name, snip]) => ({ tag: '@bind', label: 'Insert @bind: ' + name, run: () => insertBind(snip) })),
     ...RECIPES.map(([name, code]) => ({ tag: 'recipe', label: 'Recipe: ' + name, run: () => insertRecipe(code) })),
     { label: 'Open notebook in VS Code', run: () => { const p = nbState && nbState.path; if (p) location.href = 'vscode://file' + p; } },
-    { label: 'Open project in VS Code', run: () => { const d = nbState && (nbState.project || (nbState.path || '').replace(/\/[^\/]*$/, '')); if (d) location.href = 'vscode://file' + d; } },
+    { label: 'Open project in VS Code', run: () => { const d = nbState && (nbState.project || window.PLATFORM.dirOf(nbState.path || '').replace(/[\/\\]$/, '')); if (d) location.href = 'vscode://file' + d; } },
     { label: 'Settings…', run: openSettings },
     { label: 'All notebooks', run: () => { location.href = '/'; } },
   ];

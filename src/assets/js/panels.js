@@ -64,7 +64,7 @@ async function loadPackages() {
   html += `<div class="pkggrouphdr">Notebook${r.detached ? ' (detached — all deps)' : ' adds'}</div>`;
   html += nb.length ? nb.map(p => row(p, _pkgManageable)).join('') : '<div class="phint">No notebook-specific packages yet.</div>';
   if (parent.length) {
-    html += `<div class="pkggrouphdr">Parent project <span class="pkgpath">${_esc((r.parentPath || '').replace(/^.*\//, ''))}</span></div>`;
+    html += `<div class="pkggrouphdr">Parent project <span class="pkgpath">${_esc(window.PLATFORM.baseOf(r.parentPath || ''))}</span></div>`;
     html += parent.map(p => row(p, false)).join('');
   }
   document.getElementById('pkglist').innerHTML = html;
