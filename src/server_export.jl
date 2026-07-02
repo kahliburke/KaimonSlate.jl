@@ -132,28 +132,54 @@ function _highlight_julia(code::AbstractString)
     end
 end
 
+# Open Graph + Twitter Card meta tags, shared by every exported page (article docs AND the
+# site front page) so link unfurls are consistent. Once the page is HOSTED, a URL pasted into
+# Discourse / Slack / iMessage unfurls into a rich card (title + description + image). `image`
+# and `url` should be ABSOLUTE when known — Discourse's Onebox and most scrapers prefer absolute
+# URLs and often drop relative ones. All values are raw here; this function does the escaping.
+# Empty fields are omitted. Inert on a downloaded file (no URL to fetch) — lights up when hosted.
+function _og_tags(; title::AbstractString, desc::AbstractString = "", image::AbstractString = "",
+                  url::AbstractString = "", type::AbstractString = "article",
+                  site_name::AbstractString = "")
+    p = IOBuffer()
+    print(p, "<meta property=\"og:type\" content=\"$(_esc(type))\"/>",
+          "<meta property=\"og:title\" content=\"$(_esc(title))\"/>",
+          "<meta name=\"twitter:title\" content=\"$(_esc(title))\"/>")
+    isempty(strip(site_name)) || print(p, "<meta property=\"og:site_name\" content=\"$(_esc(site_name))\"/>")
+    if !isempty(strip(desc))
+        print(p, "<meta property=\"og:description\" content=\"$(_esc(desc))\"/>",
+              "<meta name=\"twitter:description\" content=\"$(_esc(desc))\"/>",
+              "<meta name=\"description\" content=\"$(_esc(desc))\"/>")
+    end
+    if !isempty(strip(url))
+        print(p, "<meta property=\"og:url\" content=\"$(_esc(url))\"/>",
+              "<link rel=\"canonical\" href=\"$(_esc(url))\"/>")
+    end
+    if !isempty(strip(image))
+        print(p, "<meta property=\"og:image\" content=\"$(_esc(image))\"/>",
+              "<meta name=\"twitter:image\" content=\"$(_esc(image))\"/>")
+    end
+    print(p, "<meta name=\"twitter:card\" content=\"", isempty(strip(image)) ? "summary" : "summary_large_image", "\"/>",
+          "<meta name=\"generator\" content=\"Kaimon Slate\"/>")
+    return String(take!(p))
+end
+
 function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", code::AbstractString = "normal",
                      outputs::AbstractString = "all", og_image::AbstractString = "",
+                     og_url::AbstractString = "", og_type::AbstractString = "article",
                      runnable::Bool = false, embed_bundle::Bool = false)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
         title = _esc(fm0.title)
-        # Open Graph / Twitter card metadata: once this page is HOSTED at a URL, a link pasted into
-        # Slack / Discourse / iMessage / etc. unfurls into a rich card (title + description + image). Inert
-        # on a downloaded file (no URL to fetch), harmless — lights up when published. `og_image` is a URL
-        # or a path relative to the page (the site builder writes an `og-image.png` next to index.html).
-        desc = _esc(_first_words(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract, 40))
-        img = isempty(strip(og_image)) ? "" :
-            "<meta property=\"og:image\" content=\"$(_esc(og_image))\"/><meta name=\"twitter:image\" content=\"$(_esc(og_image))\"/>"
+        # `og_image`/`og_url` are absolute URLs (or a path relative to the page) supplied by the site
+        # builder; the OG/Twitter tags let a hosted link unfurl into a rich card (see `_og_tags`).
+        rawdesc = _first_words(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract, 40)
         io = IOBuffer()
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
-              "<meta property=\"og:type\" content=\"article\"/><meta property=\"og:title\" content=\"", title, "\"/>",
-              (isempty(desc) ? "" : "<meta property=\"og:description\" content=\"$desc\"/><meta name=\"description\" content=\"$desc\"/>"),
-              img,
-              "<meta name=\"twitter:card\" content=\"", isempty(img) ? "summary" : "summary_large_image", "\"/><meta name=\"generator\" content=\"Kaimon Slate\"/>",
+              _og_tags(; title = fm0.title, desc = rawdesc, image = og_image, url = og_url, type = og_type),
               "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
@@ -529,14 +555,17 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     img = og_image(nb)
     ogpath = ""
     if img !== nothing
-        write(joinpath(docdir, "og-image.png"), img); ogpath = "og-image.png"
+        write(joinpath(docdir, "og-image.png"), img)
+        # Absolute when we know the doc's URL (scrapers prefer it), else page-relative.
+        ogpath = isempty(strip(base_url)) ? "og-image.png" : rstrip(String(base_url), '/') * "/og-image.png"
     end
     if bundle
         write(joinpath(docdir, _SITE_BUNDLE), export_standalone(nb))
         burl = isempty(strip(base_url)) ? _SITE_BUNDLE : rstrip(String(base_url), '/') * "/" * _SITE_BUNDLE
         write(joinpath(docdir, _SITE_RUNJL), _run_script(burl; agent = agent))
     end
-    write(joinpath(docdir, "index.html"), export_html(nb; og_image = ogpath, runnable = bundle, kwargs...))
+    write(joinpath(docdir, "index.html"),
+          export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, kwargs...))
     m = _doc_meta(nb)
     return Dict{String,Any}("slug" => slug, "title" => m.title, "description" => m.description,
                             "image" => isempty(ogpath) ? "" : "$slug/og-image.png",
@@ -607,20 +636,40 @@ end
 
 const _DOCINDEX_MARK = "<div id=\"slate-docindex\"></div>"
 
+# Newest doc's OG image as an ABSOLUTE URL (so the front-page card unfurls with an image), or "".
+# Manifest entries store `image` relative to the site root (e.g. "slug/og-image.png").
+function _newest_doc_image(docs, site_url::AbstractString)
+    isempty(strip(site_url)) && return ""
+    ds = sort([d for d in docs if d isa AbstractDict]; by = d -> String(get(d, "date", "")), rev = true)
+    for d in ds
+        rel = strip(String(get(d, "image", "")))
+        isempty(rel) || return rstrip(String(site_url), '/') * "/" * rel
+    end
+    return ""
+end
+
 # The DEFAULT blog front page (no custom home notebook): a site-title header + the card grid.
-function _render_site_index(manifest)
+# `site_url` is the canonical Pages URL, used for the OG `url` + (newest doc's) image so a link
+# to the site root unfurls nicely in Discourse/Slack.
+function _render_site_index(manifest; site_url::AbstractString = "")
     site_title = isempty(strip(String(get(manifest, "title", "")))) ? "Notebooks" : String(manifest["title"])
+    docs = get(manifest, "docs", Any[])
+    desc = strip(String(get(manifest, "description", "")))
+    isempty(desc) && (desc = "Interactive notebooks published with Kaimon Slate.")
+    ogimg = _newest_doc_image(docs, site_url)
     io = IOBuffer()
     print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
           "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", _esc(site_title),
-          "</title><meta property=\"og:title\" content=\"", _esc(site_title), "\"/>",
-          "<meta name=\"generator\" content=\"Kaimon Slate\"/><style>",
+          "</title>",
+          _og_tags(; title = site_title, desc = desc, image = ogimg, url = site_url,
+                   type = "website", site_name = site_title),
+          "<style>",
           "body{margin:0;background:#0d1117;color:#e6edf3;font:16px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}",
           ".site-hd{max-width:960px;margin:0 auto;padding:56px 24px 4px}.site-hd h1{margin:0;font-size:2rem;letter-spacing:-.02em}",
           ".site-wrap{max-width:960px;margin:0 auto;padding:12px 24px 40px}",
           ".site-ft{max-width:960px;margin:0 auto;padding:24px;color:#8b949e;font-size:.8rem;border-top:1px solid #30363d}",
           "</style></head><body><header class=\"site-hd\"><h1>", _esc(site_title), "</h1></header>",
-          "<main class=\"site-wrap\">", _doc_cards_html(get(manifest, "docs", Any[])), "</main>",
+          "<main class=\"site-wrap\">", _doc_cards_html(docs), "</main>",
           "<footer class=\"site-ft\">Published with Kaimon Slate</footer></body></html>")
     return String(take!(io))
 end
@@ -683,7 +732,8 @@ returned. An EXISTING repo's visibility is left untouched. Idempotent — re-run
 Requires `gh` on PATH and `gh auth login`. (Pages needs a PUBLIC repo on the free plan.)
 """
 function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractString = "",
-                      site_title::AbstractString = "", private::Bool = false, create::Bool = true,
+                      site_title::AbstractString = "", site_description::AbstractString = "",
+                      private::Bool = false, create::Bool = true,
                       bundle::Bool = false, kwargs...)
     gh = Sys.which("gh")
     gh === nothing && error("`gh` CLI not found on PATH. Install it and run `gh auth login`, then retry.")
@@ -715,15 +765,25 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
         # listing can be re-filled on later publishes); any other notebook builds its own /<slug>/ card.
         manifest = _read_site_manifest(dir)
         isempty(strip(site_title)) || (manifest["title"] = String(site_title))
+        isempty(strip(site_description)) || (manifest["description"] = String(site_description))
+        siteUrl = "https://$owner.github.io/$name/"
         home = _home_notebook(nb)
         htmpl = joinpath(dir, ".slate-home.html")
         local commit_title, docUrl
         if home
             fm = report_frontmatter(nb.report)
-            write(htmpl, export_html(nb; runnable = false, kwargs...))   # carries the `docindex` marker
+            # Give the front page its own OG image (its first figure), written at the site root and
+            # referenced absolutely so a link to the root unfurls with a card image in Discourse.
+            himg = og_image(nb)
+            hogpath = ""
+            if himg !== nothing
+                write(joinpath(dir, "og-image.png"), himg); hogpath = siteUrl * "og-image.png"
+            end
+            write(htmpl, export_html(nb; runnable = false, og_image = hogpath,
+                                     og_url = siteUrl, og_type = "website", kwargs...))   # carries `docindex`
             manifest["home"] = true
             commit_title = "front page — $(isempty(strip(fm.title)) ? nb.id : strip(fm.title))"
-            docUrl = "https://$owner.github.io/$name/"
+            docUrl = siteUrl
         else
             base = "https://$owner.github.io/$name/$slg/"
             docdir = joinpath(dir, slg)
@@ -737,7 +797,8 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
         # the default card page. Runs on EVERY publish, so adding a doc refreshes the front-page listing.
         docs = get(manifest, "docs", Any[])
         write(joinpath(dir, "index.html"),
-              isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+              isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) :
+              _render_site_index(manifest; site_url = siteUrl))
         write(joinpath(dir, ".nojekyll"), "")                     # serve verbatim (no Jekyll)
 
         for cmd in (`git add -A`,

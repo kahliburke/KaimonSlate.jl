@@ -509,6 +509,7 @@ function _make_router(h::Hub)
         try
             r = publish_site(nb, String(repo); slug = String(get(b, "slug", "")),
                              site_title = String(get(b, "siteTitle", "")),
+                             site_description = String(get(b, "siteDescription", "")),
                              private = get(b, "private", false) === true,
                              create = get(b, "create", true) === true, theme = get(b, "theme", "dark"),
                              outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0",
