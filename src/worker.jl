@@ -291,9 +291,13 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
     for c in cells
         id = String(_cell_get(c, "id", ""))
         isempty(id) && continue
+        writes = _as_symset(_cell_get(c, "writes", Symbol[]))
+        # Plotting cells share Makie's non-thread-safe globals (invisible to dataflow analysis): give
+        # them a synthetic shared write so par_blockers serialises graphics-vs-graphics. See parsched.jl.
+        _uses_shared_graphics(String(_cell_get(c, "source", ""))) && push!(writes, _GRAPHICS_SENTINEL)
         push!(specs, ParCell(id, _as_strset(_cell_get(c, "deps", String[])),
                              _as_symset(_cell_get(c, "reads", Symbol[])),
-                             _as_symset(_cell_get(c, "writes", Symbol[])),
+                             writes,
                              _cell_get(c, "opaque", false) === true))
         meta[id] = c
     end

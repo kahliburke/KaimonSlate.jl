@@ -13,6 +13,19 @@
 #     • `c` and `e` write the SAME global (write-write conflict → document order decides the winner).
 #   Otherwise `c` and `e` are independent and may run at the same time.
 
+# Makie (and most plotting) touches PROCESS-GLOBAL, non-thread-safe state — the theme observable, the
+# current scene/figure, the display stack — whose Observables listener vectors resize non-atomically.
+# The dataflow analysis can't see those shared globals (they're library internals, not notebook
+# bindings), so two independent plotting cells look co-runnable and race
+# (`ConcurrencyViolationError: Vector can not be resized concurrently`, deep in Observables). We give
+# every graphics cell a synthetic shared WRITE (`_GRAPHICS_SENTINEL`), so the existing write-write rule
+# serialises any two of them while pure-compute cells still run in parallel. Over-approximate on purpose:
+# a false positive costs a little overlap, a miss risks a crash. High-signal tokens — scene/figure/theme
+# constructors + display, and the `!` plotting verbs (rarely variable names) — each as a CALL `(`.
+const _GRAPHICS_SENTINEL = Symbol("##slate_graphics##")
+const _GRAPHICS_RE = r"\b(?:Figure|Axis3?|LScene|Scene|PolarAxis|Colorbar|Legend|set_theme!|update_theme!|with_theme|set_window_config!|record|current_figure|current_axis|display|(?:lines|scatter|scatterlines|heatmap|surface|contour|contourf|band|poly|mesh|meshscatter|image|barplot|hist|density|arrows|series|stairs|stem|errorbars|boxplot|violin|hlines|vlines|ablines|text|wireframe|streamplot|spy|volume|voronoiplot|rangebars|annotations)!)\s*\("
+_uses_shared_graphics(src::AbstractString) = occursin(_GRAPHICS_RE, src)
+
 "Minimal per-cell info the scheduler needs (built from a Cell's deps/reads/writes/flags)."
 struct ParCell
     id::String

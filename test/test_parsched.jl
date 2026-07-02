@@ -116,6 +116,25 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
         @test all(t -> t isa Task, values(spawned))
     end
 
+    @testset "graphics cells serialize against each other (Makie is not thread-safe)" begin
+        # Detection: Makie scene/plot/theme calls flagged; pure compute is not.
+        @test _uses_shared_graphics("fig = Figure(); ax = Axis(fig[1,1]); lines!(ax, x, y); fig")
+        @test _uses_shared_graphics("set_theme!(theme_dark())")
+        @test _uses_shared_graphics("scatter!(ax, pts)")
+        @test !_uses_shared_graphics("y = sqrt.(x) .+ mean(data)")
+        @test !_uses_shared_graphics("df = DataFrame(a = 1:3)")     # no false positive on data work
+
+        # Two INDEPENDENT graphics cells (no shared user global) still serialise via the sentinel write,
+        # while a pure cell stays co-runnable with a graphics cell.
+        g = _GRAPHICS_SENTINEL
+        cells = [pc("p1"; writes = [:a, g]), pc("p2"; writes = [:b, g]), pc("calc"; writes = [:c])]
+        bl = par_blockers(cells)
+        @test bl["p2"] == Set(["p1"])                              # graphics ↔ graphics serialised
+        @test !co_runnable(["p1", "p2"], bl)
+        @test co_runnable(["p1", "calc"], bl)                      # graphics ∥ pure compute is fine
+        @test co_runnable(["p2", "calc"], bl)
+    end
+
     @testset "mixed: independent pair after a shared dependency" begin
         # base → (left, right) independent → join
         cells = [pc("base"; writes = [:v]),
