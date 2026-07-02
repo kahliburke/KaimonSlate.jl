@@ -166,6 +166,9 @@ async function publishSite() {
   const siteTitle = ((document.getElementById('sitetitle') || {}).value || '').trim();
   const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim()) ||
                _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
+  // A notebook tagged `home` is the site's FRONT PAGE (publishes to the root, not a /<slug>/ card).
+  const isHome = Array.isArray(nbState && nbState.cells) &&
+    nbState.cells.some(c => c && Array.isArray(c.tags) && c.tags.includes('home'));
   // Preflight: additive publish — say whether this adds a new doc or updates one, and list the others.
   let pf;
   try {
@@ -181,6 +184,11 @@ async function publishSite() {
     msg = 'Create a NEW ' + (isPrivate ? 'private' : 'public') + ' repo ' + repo + ' as a site, and publish this notebook to /' + slug + '/.' +
       (isPrivate ? '\n\n⚠ GitHub Pages needs a PUBLIC repo on the free plan (private Pages requires GitHub Pro), so a private repo may not serve.' : '');
     ok = 'Create & publish';
+  } else if (isHome) {
+    msg = 'Publish the FRONT PAGE of the site ' + repo + ' (' + (pf.visibility || 'unknown') + '; visibility unchanged).\n\n' +
+      'This notebook is tagged `home` — it becomes the site root, and its `docindex` cell shows the document listing.' +
+      (docs.length ? '\n\n' + docs.length + ' document' + (docs.length === 1 ? '' : 's') + ' already in the site are preserved.' : '');
+    ok = 'Publish front page';
   } else {
     const others = docs.filter(d => d && d.slug !== slug);
     msg = 'Publish to the site ' + repo + ' (' + (pf.visibility || 'unknown') + '; visibility unchanged).\n\n' +
@@ -215,10 +223,12 @@ async function publishSite() {
     return;
   }
   const count = result.docCount ? (result.docCount + ' document' + (result.docCount === 1 ? '' : 's') + ' in the site.') : '';
-  const v = await dlg('Published ✓<br><br>This document: ' + dlink + '<br>Site index: ' + slink + '<br><br>' +
-    (result.created ? 'Repo created. ' : '') + count + '<br>GitHub Pages may take ~1 minute to go live on the first publish.',
-    [{ label: 'Close', value: false }, { label: 'Open document', value: 'open', cls: 'primary' }], { html: true });
-  if (v === 'open') window.open(docUrl, '_blank', 'noopener');
+  const headline = result.home ? 'Front page published ✓<br><br>Site: ' + slink
+                               : 'Published ✓<br><br>This document: ' + dlink + '<br>Site index: ' + slink;
+  const v = await dlg(headline + '<br><br>' + (result.created ? 'Repo created. ' : '') + count +
+    '<br>GitHub Pages may take ~1 minute to go live on the first publish.',
+    [{ label: 'Close', value: false }, { label: result.home ? 'Open site' : 'Open document', value: 'open', cls: 'primary' }], { html: true });
+  if (v === 'open') window.open(result.home ? result.url : docUrl, '_blank', 'noopener');
 }
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).

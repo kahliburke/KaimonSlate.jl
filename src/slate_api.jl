@@ -185,9 +185,20 @@ const SLATE_API = SlateApiEntry[
         editor, show output), `trace` (wrap in @trace — inspect every value), `nocache` (opt OUT of
         durable memoization — for impure / side-effecting cells). Presentation tags: `slide` (force a
         new slide), `notes` (speaker notes, presenter-only). Document-metadata ROLE tags: `title`,
-        `abstract`, `bibliography` (see "front matter"). Any other token is a free-form tag that
-        round-trips. Expensive cells (≥400 ms) are otherwise auto-cached to disk and RESTORED after a
-        restart instead of recomputing."""),
+        `abstract`, `bibliography` (see "front matter"). Site tags (see "site"): `home` (this notebook is
+        the published site's FRONT PAGE), `docindex` (marks where the document listing is injected). Any
+        other token is a free-form tag that round-trips. Expensive cells (≥400 ms) are otherwise
+        auto-cached to disk and RESTORED after a restart instead of recomputing."""),
+
+    # ── Publishing to a site (GitHub Pages) ──────────────────────────────────────────────────────────
+    SlateApiEntry("site", "Document", "Export → Publish · `home` + `docindex` tags",
+        """Publishing (Export → Publish to GitHub Pages) makes a repo a SITE hosting MANY documents: each
+        notebook lands at `/<slug>/` and the site root is a generated blog index (cards → every doc).
+        Publishing is additive — other docs are preserved. To author a CUSTOM front page instead of the
+        default cards, tag a notebook `home`: it renders to the site ROOT, and a cell tagged `docindex`
+        marks where the document listing is injected (re-filled on every publish, so it stays current).
+        A `home` notebook is the portfolio/blog landing page — write intro, bio, featured links around
+        the `docindex` cell."""),
 
     # ── Document metadata (front matter) ─────────────────────────────────────────────────────────────
     SlateApiEntry("front matter", "Document", "#%% md id=… title | abstract | bibliography",

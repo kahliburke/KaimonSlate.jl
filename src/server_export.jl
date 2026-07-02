@@ -186,6 +186,12 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
             # the export too (both code and output), for markdown and code alike.
             (:collapsed in c.flags) && continue
+            # `docindex` marks WHERE the site's document listing goes on a front-page (`home`) notebook.
+            # Emit an empty marker here; the publish generator replaces it with the current card grid.
+            if :docindex in c.flags
+                print(io, "<div id=\"slate-docindex\"></div>")
+                continue
+            end
             c.id in fm.skip && continue              # hoisted into the title block above
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
             if c.kind == MARKDOWN
@@ -502,6 +508,10 @@ function _slugify(s::AbstractString)
 end
 doc_slug(nb::LiveNotebook) = (s = _slugify(report_frontmatter(nb.report).title); isempty(s) ? _slugify(nb.id) : s)
 
+# A notebook tagged `home` (any cell) is the site's FRONT PAGE: it renders to the repo root as a
+# custom index (its `docindex` cell marks where the document listing is injected), instead of a card.
+_home_notebook(nb::LiveNotebook) = any(c -> :home in c.flags, nb.report.cells)
+
 # Title + one-line description for a notebook's manifest entry / index card (matches the page's meta).
 function _doc_meta(nb::LiveNotebook)
     fm = report_frontmatter(nb.report)
@@ -552,38 +562,34 @@ function _upsert_doc!(manifest, entry)
     return manifest
 end
 
-# Self-contained dark CSS for the blog front page (no external deps).
-_site_index_css() = """
-:root{--bg:#0d1117;--bg2:#161b22;--bd:#30363d;--tx:#e6edf3;--dim:#8b949e;--ac:#58a6ff}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);
- font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-.site-hd{max-width:960px;margin:0 auto;padding:56px 24px 20px}.site-hd h1{margin:0;font-size:2rem;letter-spacing:-.02em}
-.cards{max-width:960px;margin:0 auto;padding:12px 24px 40px;display:grid;gap:18px;
+# Card-grid styles, scoped under `.slate-cards` so the block can be dropped into ANY page (the default
+# index OR a custom front-page notebook's exported HTML) without clobbering its styles.
+_doc_cards_css() = """
+.slate-cards{max-width:960px;margin:0 auto;padding:12px 0 8px;display:grid;gap:18px;
  grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
-.card{display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--bd);border-radius:12px;
- overflow:hidden;text-decoration:none;color:inherit;transition:border-color .15s,transform .15s}
-.card:hover{border-color:var(--ac);transform:translateY(-2px)}
-.thumb{aspect-ratio:16/9;background:#0b0e14;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.cardbody{padding:14px 16px 16px}.cardbody h2{margin:0 0 6px;font-size:1.12rem;line-height:1.3}
-.cardbody p{margin:0 0 10px;color:var(--dim);font-size:.9rem}
-.meta{color:var(--dim);font-size:.78rem;display:flex;align-items:center;gap:10px}
-.meta .run{color:var(--ac)}.empty{max-width:960px;margin:0 auto;padding:24px;color:var(--dim)}
-.site-ft{max-width:960px;margin:0 auto;padding:24px;color:var(--dim);font-size:.8rem;border-top:1px solid var(--bd)}
-.site-ft a{color:var(--ac);text-decoration:none}
+.slate-cards .card{display:flex;flex-direction:column;background:#161b22;border:1px solid #30363d;border-radius:12px;
+ overflow:hidden;text-decoration:none;color:#e6edf3;transition:border-color .15s,transform .15s}
+.slate-cards .card:hover{border-color:#58a6ff;transform:translateY(-2px)}
+.slate-cards .thumb{aspect-ratio:16/9;background:#0b0e14;overflow:hidden}
+.slate-cards .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.slate-cards .cardbody{padding:14px 16px 16px}.slate-cards .cardbody h2{margin:0 0 6px;font-size:1.12rem;line-height:1.3}
+.slate-cards .cardbody p{margin:0 0 10px;color:#8b949e;font-size:.9rem}
+.slate-cards .meta{color:#8b949e;font-size:.78rem;display:flex;align-items:center;gap:10px}
+.slate-cards .meta .run{color:#58a6ff}.slate-cards-empty{color:#8b949e;padding:12px 0}
 """
 
-# Render the blog front page from the manifest — newest first, rich cards (thumbnail/title/desc/date).
-function _render_site_index(manifest)
-    site_title = isempty(strip(String(get(manifest, "title", "")))) ? "Notebooks" : String(manifest["title"])
-    docs = sort([d for d in get(manifest, "docs", Any[]) if d isa AbstractDict];
-                by = d -> String(get(d, "date", "")), rev = true)
+# The self-contained document listing (scoped `<style>` + card grid), newest first. Dropped verbatim
+# into the default index or a home notebook's `docindex` placeholder.
+function _doc_cards_html(docs)
+    ds = sort([d for d in docs if d isa AbstractDict]; by = d -> String(get(d, "date", "")), rev = true)
     io = IOBuffer()
-    print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
-          "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", _esc(site_title),
-          "</title><meta property=\"og:title\" content=\"", _esc(site_title), "\"/>",
-          "<meta name=\"generator\" content=\"Kaimon Slate\"/><style>", _site_index_css(),
-          "</style></head><body><header class=\"site-hd\"><h1>", _esc(site_title), "</h1></header><main class=\"cards\">")
-    for d in docs
+    print(io, "<style>", _doc_cards_css(), "</style>")
+    if isempty(ds)
+        print(io, "<div class=\"slate-cards-empty\">No documents published yet.</div>")
+        return String(take!(io))
+    end
+    print(io, "<div class=\"slate-cards\">")
+    for d in ds
         slug = _esc(String(get(d, "slug", ""))); title = _esc(String(get(d, "title", get(d, "slug", ""))))
         desc = _esc(String(get(d, "description", ""))); date = _esc(String(get(d, "date", "")))
         image = String(get(d, "image", "")); runnable = get(d, "runnable", false) === true
@@ -595,9 +601,38 @@ function _render_site_index(manifest)
         runnable && print(io, "<span class=\"run\">▶ runnable</span>")
         print(io, "</div></div></a>")
     end
-    isempty(docs) && print(io, "<p class=\"empty\">No documents published yet.</p>")
-    print(io, "</main><footer class=\"site-ft\">Published with Kaimon Slate</footer></body></html>")
+    print(io, "</div>")
     return String(take!(io))
+end
+
+const _DOCINDEX_MARK = "<div id=\"slate-docindex\"></div>"
+
+# The DEFAULT blog front page (no custom home notebook): a site-title header + the card grid.
+function _render_site_index(manifest)
+    site_title = isempty(strip(String(get(manifest, "title", "")))) ? "Notebooks" : String(manifest["title"])
+    io = IOBuffer()
+    print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
+          "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", _esc(site_title),
+          "</title><meta property=\"og:title\" content=\"", _esc(site_title), "\"/>",
+          "<meta name=\"generator\" content=\"Kaimon Slate\"/><style>",
+          "body{margin:0;background:#0d1117;color:#e6edf3;font:16px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}",
+          ".site-hd{max-width:960px;margin:0 auto;padding:56px 24px 4px}.site-hd h1{margin:0;font-size:2rem;letter-spacing:-.02em}",
+          ".site-wrap{max-width:960px;margin:0 auto;padding:12px 24px 40px}",
+          ".site-ft{max-width:960px;margin:0 auto;padding:24px;color:#8b949e;font-size:.8rem;border-top:1px solid #30363d}",
+          "</style></head><body><header class=\"site-hd\"><h1>", _esc(site_title), "</h1></header>",
+          "<main class=\"site-wrap\">", _doc_cards_html(get(manifest, "docs", Any[])), "</main>",
+          "<footer class=\"site-ft\">Published with Kaimon Slate</footer></body></html>")
+    return String(take!(io))
+end
+
+# A CUSTOM front page: a home notebook's exported HTML with its `docindex` placeholder filled by the
+# current card grid (appended before </body> if the author left no placeholder). Regenerated on every
+# publish, so the listing stays current even when the home notebook itself isn't being re-published.
+function _site_index_with_home(home_html::AbstractString, docs)
+    cards = _doc_cards_html(docs)
+    occursin(_DOCINDEX_MARK, home_html) && return replace(home_html, _DOCINDEX_MARK => cards)
+    occursin("</body>", home_html) && return replace(home_html, "</body>" => cards * "</body>"; count = 1)
+    return home_html * cards
 end
 
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
@@ -648,7 +683,8 @@ returned. An EXISTING repo's visibility is left untouched. Idempotent — re-run
 Requires `gh` on PATH and `gh auth login`. (Pages needs a PUBLIC repo on the free plan.)
 """
 function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractString = "",
-                      site_title::AbstractString = "", private::Bool = false, create::Bool = true, kwargs...)
+                      site_title::AbstractString = "", private::Bool = false, create::Bool = true,
+                      bundle::Bool = false, kwargs...)
     gh = Sys.which("gh")
     gh === nothing && error("`gh` CLI not found on PATH. Install it and run `gh auth login`, then retry.")
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be \"owner/name\" (got \"$repo\")")
@@ -675,20 +711,37 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
         cloned = !created && _git_run(work, `git clone --depth 1 --branch gh-pages --single-branch $pushurl site`)[1]
         cloned || (mkpath(dir); (ok = _git_run(dir, `git init -q -b gh-pages`)[1]) || error("git init failed"))
 
-        # Build/replace just this document's subdir, then upsert the manifest + regenerate the blog index.
-        base = "https://$owner.github.io/$name/$slg/"
-        docdir = joinpath(dir, slg)
-        rm(docdir; recursive = true, force = true)                # clean replace of this doc
-        entry = _build_doc!(docdir, nb; slug = slg, base_url = base, kwargs...)
+        # A `home` notebook renders to the site ROOT as a custom front page (stored as a template so the
+        # listing can be re-filled on later publishes); any other notebook builds its own /<slug>/ card.
         manifest = _read_site_manifest(dir)
         isempty(strip(site_title)) || (manifest["title"] = String(site_title))
-        _upsert_doc!(manifest, entry)
+        home = _home_notebook(nb)
+        htmpl = joinpath(dir, ".slate-home.html")
+        local commit_title, docUrl
+        if home
+            fm = report_frontmatter(nb.report)
+            write(htmpl, export_html(nb; runnable = false, kwargs...))   # carries the `docindex` marker
+            manifest["home"] = true
+            commit_title = "front page — $(isempty(strip(fm.title)) ? nb.id : strip(fm.title))"
+            docUrl = "https://$owner.github.io/$name/"
+        else
+            base = "https://$owner.github.io/$name/$slg/"
+            docdir = joinpath(dir, slg)
+            rm(docdir; recursive = true, force = true)                # clean replace of this doc
+            entry = _build_doc!(docdir, nb; slug = slg, base_url = base, bundle = bundle, kwargs...)
+            _upsert_doc!(manifest, entry)
+            commit_title = entry["title"]; docUrl = base
+        end
         write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
-        write(joinpath(dir, "index.html"), _render_site_index(manifest))
+        # Regenerate the root index: the custom home template with its listing re-filled if present, else
+        # the default card page. Runs on EVERY publish, so adding a doc refreshes the front-page listing.
+        docs = get(manifest, "docs", Any[])
+        write(joinpath(dir, "index.html"),
+              isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
         write(joinpath(dir, ".nojekyll"), "")                     # serve verbatim (no Jekyll)
 
         for cmd in (`git add -A`,
-                    `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish $(entry["title"])"`)
+                    `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish $commit_title"`)
             ok, log = _git_run(dir, cmd); ok || error("git failed: $log")
         end
         # Cloned → fast-forward push; fresh → force (creates/overwrites the empty-or-absent gh-pages).
@@ -705,7 +758,8 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
         pagesError = pok ? "" : (occursin("does not support GitHub Pages", plog) ?
             "GitHub Pages isn't available for this repo — private Pages needs GitHub Pro/Team; on a free plan the repo must be PUBLIC." :
             strip(replace(plog, r"\s+" => " ")))
-        return (; url = "https://$owner.github.io/$name/", docUrl = base, repo = String(repo), slug = slg,
+        return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
+                slug = home ? "" : slg, home,
                 created, pagesEnabled = pok, pagesError, docCount = length(get(manifest, "docs", Any[])))
     finally
         rm(work; recursive = true, force = true)

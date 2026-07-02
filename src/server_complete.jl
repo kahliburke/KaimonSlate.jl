@@ -514,7 +514,7 @@ function _make_router(h::Hub)
                              outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0",
                              bundle = get(b, "bundle", false) === true)
             return _json(Dict("url" => r.url, "docUrl" => r.docUrl, "slug" => r.slug, "repo" => r.repo,
-                              "created" => r.created, "docCount" => r.docCount,
+                              "created" => r.created, "docCount" => r.docCount, "home" => r.home,
                               "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError))
         catch e
             return HTTP.Response(500, "Publish failed: " * sprint(showerror, e))

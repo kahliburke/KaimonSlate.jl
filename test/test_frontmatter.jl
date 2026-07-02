@@ -294,6 +294,35 @@ x = 1
         @test NS._read_site_manifest(mktempdir())["docs"] == Any[]  # absent → empty manifest
     end
 
+    # Custom front page: a `home` notebook renders to the site root, with a `docindex` cell marking where
+    # the document listing is injected (re-filled on every publish, so it stays current).
+    @testset "front page (home tag + docindex placeholder)" begin
+        @test :home in RE._KNOWN_TAGS && :docindex in RE._KNOWN_TAGS       # round-trip as header tags
+        home = _mknb("#%% md id=hero home\n# Kahli's Notebooks\nWelcome to my work.\n\n#%% md id=list docindex\nPLACEHOLDER_BODY\n")
+        @test NS._home_notebook(home)
+        plain = _mknb("#%% md id=a\n# Not home\n")
+        @test !NS._home_notebook(plain)
+
+        html = NS.export_html(home)
+        @test occursin("id=\"slate-docindex\"", html)                     # the marker is emitted…
+        @test !occursin("PLACEHOLDER_BODY", html)                         # …instead of the cell's own body
+        @test occursin("Kahli's Notebooks", html)                         # the author's content stays
+
+        docs = [Dict{String,Any}("slug" => "post-one", "title" => "Post One", "description" => "First.",
+                                 "image" => "", "runnable" => false, "date" => "2026-07-01")]
+        cards = NS._doc_cards_html(docs)
+        @test occursin("href=\"post-one/\"", cards) && occursin("Post One", cards)
+        @test occursin("No documents", NS._doc_cards_html(Any[]))          # empty state
+
+        filled = NS._site_index_with_home(html, docs)
+        @test occursin("Kahli's Notebooks", filled)                       # custom content preserved
+        @test occursin("href=\"post-one/\"", filled)                      # listing injected at the marker
+        @test !occursin("id=\"slate-docindex\"></div>", filled)           # marker consumed
+        # No placeholder in the page → cards appended before </body> rather than dropped.
+        nomark = NS._site_index_with_home("<html><body><h1>Hi</h1></body></html>", docs)
+        @test occursin("href=\"post-one/\"", nomark) && occursin("<h1>Hi</h1>", nomark)
+    end
+
     @testset "HTML export options: theme + code size + hide source" begin
         nb = _mknb("#%% code id=c\nx = 1\n")
         dark = NS.export_html(nb; theme = "dark")
