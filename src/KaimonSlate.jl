@@ -131,19 +131,51 @@ function _hub()
     end
 end
 
+# Cross-platform: PIDs of processes whose command line contains `needle`. Unix uses
+# `pgrep -f` (which excludes its own PID); Windows queries Win32_Process via PowerShell,
+# restricted to `julia` processes so the query's own PowerShell host — whose argv also
+# contains `needle` — isn't matched. Never throws: a missing tool or no match ⇒ `Int[]`.
+function _pids_matching(needle::AbstractString)::Vector{Int}
+    pids = Int[]
+    try
+        toks = if Sys.iswindows()
+            q = "Get-CimInstance Win32_Process -Filter \"Name LIKE 'julia%' AND CommandLine LIKE '%$needle%'\" | " *
+                "ForEach-Object { \$_.ProcessId }"
+            split(readchomp(`powershell -NoProfile -NonInteractive -Command $q`))
+        else
+            split(readchomp(`pgrep -f $needle`))
+        end
+        for t in toks
+            p = tryparse(Int, strip(t))
+            p === nothing || push!(pids, p)
+        end
+    catch  # tool absent / no matches — nothing to report
+    end
+    return pids
+end
+
+# Best-effort hard-kill by raw PID, cross-platform (`taskkill /F` on Windows, `kill -9`
+# elsewhere). Never throws — a missing process or tool is ignored.
+function _kill_pid(pid::Integer)
+    try
+        if Sys.iswindows()
+            run(pipeline(`taskkill /F /PID $pid`; stdout = devnull, stderr = devnull); wait = false)
+        else
+            run(pipeline(`kill -9 $pid`; stderr = devnull); wait = false)
+        end
+    catch
+    end
+    return nothing
+end
+
 # Restart-reaping backstop: kill leftover worker subprocesses from a previous
 # extension instance that exited non-gracefully (crash / hard kill), since that
 # path skips `on_shutdown`. Each worker's boot script carries the `SlateWorker.start`
-# marker in its argv, so `pgrep -f` finds exactly ours. Called once at init, BEFORE
-# this instance spawns any worker, so it never targets our own children.
+# marker in its argv, so a command-line match finds exactly ours. Called once at init,
+# BEFORE this instance spawns any worker, so it never targets our own children.
 function _reap_orphan_workers!()
-    try
-        for line in split(readchomp(`pgrep -f SlateWorker.start`))
-            pid = tryparse(Int, strip(line))
-            pid === nothing && continue
-            try; run(`kill -9 $pid`); catch; end
-        end
-    catch  # pgrep absent / no matches — nothing to reap
+    for pid in _pids_matching("SlateWorker.start")
+        _kill_pid(pid)
     end
     return nothing
 end

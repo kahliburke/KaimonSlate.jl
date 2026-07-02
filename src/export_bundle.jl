@@ -88,6 +88,13 @@ end
 # back to `abspath` if the path can't be resolved.
 _safe_realpath(p::AbstractString) = try realpath(p) catch; abspath(p) end
 
+# A `file://` URL for a local path — needed so `git clone --depth` does a REAL shallow
+# clone (git ignores `--depth` for a bare local path, hardlinking the whole object store
+# instead). On Windows a native path is `C:\repo`, so we must emit `file:///C:/repo` with
+# forward slashes; elsewhere the leading `/` already yields the `file:///abs/path` form.
+_file_url(p::AbstractString) = Sys.iswindows() ?
+    "file:///" * replace(abspath(p), '\\' => '/') : "file://" * abspath(p)
+
 # The realpath of the git work-tree root containing `dir`, or `nothing` (no git / not a repo).
 function _git_toplevel(dir::AbstractString)
     Sys.which("git") === nothing && return nothing
@@ -108,7 +115,7 @@ end
 function _git_bundle!(stage::AbstractString, top::AbstractString)
     try
         sc = joinpath(mktempdir(), "s")
-        run(pipeline(`git clone -q --depth=1 file://$top $sc`; stdout = devnull, stderr = devnull))
+        run(pipeline(`git clone -q --depth=1 $(_file_url(top)) $sc`; stdout = devnull, stderr = devnull))
         run(pipeline(`git -C $sc bundle create $(joinpath(stage, "repo.gitbundle")) HEAD`; stdout = devnull, stderr = devnull))
         url = try; strip(read(pipeline(`git -C $top remote get-url origin`; stderr = devnull), String)); catch; ""; end
         isempty(url) || write(joinpath(stage, "git-remote.txt"), url)

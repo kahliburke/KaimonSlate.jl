@@ -12,13 +12,14 @@
   const isMac = /mac/i.test(plat) || (/iP(hone|ad|od)/.test(ua) && !/Windows/.test(ua));
   const isWin = /win/i.test(plat) || /Windows/.test(ua);
 
-  // ⌘ ⌥ ⇧ → platform names. ⌘ ⌘  ⌥ ⌥  ⇧ ⇧
-  const NAME = { '⌘': 'Ctrl', '⌥': 'Alt', '⇧': 'Shift' };
+  // ⌘ ⌥ ⇧ → platform names. ⇧ (U+21E7) is an ISO/IEC 9995-7 standard also used on
+  // Windows/Linux keyboards, so we KEEP that glyph; only ⌘/⌥ (Mac-only) are spelled out.
+  const NAME = { '⌘': 'Ctrl', '⌥': 'Alt', '⇧': '⇧' };
   const GLYPH = /[⌘⌥⇧]/;
 
-  // Rewrite a run of modifier glyphs (+ its trailing key char, if any) into
-  // "Ctrl+Shift+K" form. No-op on Mac, where the glyphs are the native convention.
-  //   ⌘K → Ctrl+K   ⌘⇧P → Ctrl+Shift+P   ⇧⏎ → Shift+⏎   (a lone "hold ⌘" → "hold Ctrl")
+  // Rewrite a run of modifier glyphs (+ its trailing key char, if any) into the host's
+  // convention: Ctrl/Alt spelled out, `+`-joined. No-op on Mac (glyphs are native there).
+  //   ⌘K → Ctrl+K   ⌘⇧P → Ctrl+⇧+P   ⇧⏎ → ⇧+⏎   (a lone "hold ⌘" → "hold Ctrl")
   function kbd(s) {
     if (isMac || !s) return s;
     return s.replace(/[⌘⌥⇧]+[^\s]?/g, chord => {
