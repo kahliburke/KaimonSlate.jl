@@ -571,17 +571,29 @@ end
 # so a redo re-announces the same action.
 const _UNDO_LBL = Dict{String,Vector{String}}()
 const _REDO_LBL = Dict{String,Vector{String}}()
-_lblstack(d, nb::LiveNotebook) = get!(() -> String[], d, nb.id)
-undo_label(nb::LiveNotebook) = (s = _lblstack(_UNDO_LBL, nb); isempty(s) ? "" : last(s))
-redo_label(nb::LiveNotebook) = (s = _lblstack(_REDO_LBL, nb); isempty(s) ? "" : last(s))
+# These label dicts are MODULE-GLOBAL and shared across every open notebook AND the SSE / `/state`
+# readers (`undo_label`/`redo_label`). Concurrent access is real: a `/state` read on one notebook can
+# race a `_snapshot!` write on another, and an unguarded `get!`/`push!` on the same Dict corrupts its
+# internal storage (UndefRefError → every `/state` 500s until restart). So ALL access goes through this
+# lock, held only for the O(1) stack op — never across an eval/restore.
+const _LBL_LOCK = ReentrantLock()
+_lblstack(d, nb::LiveNotebook) = get!(() -> String[], d, nb.id)   # ONLY call while holding _LBL_LOCK
+undo_label(nb::LiveNotebook) = lock(_LBL_LOCK) do
+    s = _lblstack(_UNDO_LBL, nb); isempty(s) ? "" : last(s)
+end
+redo_label(nb::LiveNotebook) = lock(_LBL_LOCK) do
+    s = _lblstack(_REDO_LBL, nb); isempty(s) ? "" : last(s)
+end
 
 function _snapshot!(nb::LiveNotebook; label::AbstractString = "change")
     push!(nb.undo, serialize_report(nb.report))
-    push!(_lblstack(_UNDO_LBL, nb), String(label))
-    if length(nb.undo) > 100
-        popfirst!(nb.undo); ul = _lblstack(_UNDO_LBL, nb); isempty(ul) || popfirst!(ul)
+    lock(_LBL_LOCK) do
+        push!(_lblstack(_UNDO_LBL, nb), String(label))
+        if length(nb.undo) > 100
+            popfirst!(nb.undo); ul = _lblstack(_UNDO_LBL, nb); isempty(ul) || popfirst!(ul)
+        end
+        empty!(nb.redo); empty!(_lblstack(_REDO_LBL, nb))
     end
-    empty!(nb.redo); empty!(_lblstack(_REDO_LBL, nb))
 end
 
 function _restore!(nb::LiveNotebook, src::AbstractString)
@@ -593,8 +605,11 @@ end
 # Returns the label of the action just undone (""/no-op when the stack is empty).
 function undo!(nb::LiveNotebook)
     isempty(nb.undo) && return ""
-    lbl = (ul = _lblstack(_UNDO_LBL, nb); isempty(ul) ? "change" : pop!(ul))
-    push!(nb.redo, serialize_report(nb.report)); push!(_lblstack(_REDO_LBL, nb), lbl)
+    lbl = lock(_LBL_LOCK) do
+        l = (ul = _lblstack(_UNDO_LBL, nb); isempty(ul) ? "change" : pop!(ul))
+        push!(nb.redo, serialize_report(nb.report)); push!(_lblstack(_REDO_LBL, nb), l)
+        l
+    end
     _restore!(nb, pop!(nb.undo))
     return lbl
 end
@@ -602,8 +617,11 @@ end
 # Returns the label of the action just redone (""/no-op when the stack is empty).
 function redo!(nb::LiveNotebook)
     isempty(nb.redo) && return ""
-    lbl = (rl = _lblstack(_REDO_LBL, nb); isempty(rl) ? "change" : pop!(rl))
-    push!(nb.undo, serialize_report(nb.report)); push!(_lblstack(_UNDO_LBL, nb), lbl)
+    lbl = lock(_LBL_LOCK) do
+        l = (rl = _lblstack(_REDO_LBL, nb); isempty(rl) ? "change" : pop!(rl))
+        push!(nb.undo, serialize_report(nb.report)); push!(_lblstack(_UNDO_LBL, nb), l)
+        l
+    end
     _restore!(nb, pop!(nb.redo))
     return lbl
 end

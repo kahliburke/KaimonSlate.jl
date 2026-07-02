@@ -24,7 +24,9 @@ const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
 # into the page — bloating /state and freezing the tab. We cap each text stream at the worker, before
 # any of it travels, with a clear truncation notice. The full value still lives in the namespace.
 const _MAX_OUT_CHARS = 100_000      # per text stream: stdout, stderr, value repr (RENDERED to page)
-const _MAX_HTML_BYTES = 400_000     # per text/html | text/latex output chunk (RENDERED to page)
+const _MAX_HTML_BYTES = 4_000_000   # per text/html | text/latex output chunk (RENDERED to page) —
+                                    # generous so rich HTML (dashboards, custom pages with inline images)
+                                    # renders inline; modern browsers handle a few MB fine.
 # Hard ceiling on the FULL result we keep on disk for "open the full output" (new tab / editor /
 # download). Configurable from the UI (server pushes the user's setting into this Ref). Beyond it,
 # even the saved file is clipped — guards against a pathological multi-GB repr eating the disk.
