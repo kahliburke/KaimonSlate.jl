@@ -53,8 +53,17 @@ export serve_notebook, LiveNotebook, expand, register_extension
 # THAT config, not the user's real `~/.config/kaimon`. A function (not a const) so it re-reads ENV.
 _kaimon_dir() = joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "kaimon")
 
+# Is `path` a KaimonSlate package checkout? Used to dedup extension entries by IDENTITY rather than
+# by exact path, so a second checkout / git worktree / packaged copy doesn't add a duplicate hub.
+function _is_slate_project(path::AbstractString)
+    isempty(path) && return false
+    f = joinpath(path, "Project.toml")
+    isfile(f) || return false
+    return occursin(r"(?m)^\s*name\s*=\s*\"KaimonSlate\"", read(f, String))
+end
+
 """
-    register_extension(; auto_start=true, enabled=true, project_path=pkgdir(KaimonSlate)) -> Bool
+    register_extension(; auto_start=true, enabled=true, force=false, project_path=pkgdir(KaimonSlate)) -> Bool
 
 Add this package to Kaimon's extension registry (`~/.config/kaimon/extensions.json`) so Kaimon
 loads the `slate.*` tools automatically — no hand-wiring. **Idempotent**: returns `false`
@@ -62,7 +71,7 @@ loads the `slate.*` tools automatically — no hand-wiring. **Idempotent**: retu
 entry is added. Runs automatically on load (see `__init__`); call it explicitly to (re)register a
 specific `project_path` or to flip `auto_start`.
 """
-function register_extension(; auto_start::Bool = true, enabled::Bool = true,
+function register_extension(; auto_start::Bool = true, enabled::Bool = true, force::Bool = false,
                             project_path = pkgdir(@__MODULE__))
     kdir = _kaimon_dir()
     isdir(kdir) || return false                              # Kaimon not installed / no config dir here
@@ -72,7 +81,15 @@ function register_extension(; auto_start::Bool = true, enabled::Bool = true,
     data = isfile(file) ? (try; JSON.parsefile(file); catch; Dict{String,Any}(); end) : Dict{String,Any}()
     exts = get(data, "extensions", nothing)
     exts isa AbstractVector || (exts = Any[])
-    any(e -> e isa AbstractDict && get(e, "project_path", nothing) == path, exts) && return false  # already there
+    # Dedup by IDENTITY, not exact path: if a KaimonSlate is already registered (from any checkout,
+    # git worktree, or the packaged install), don't add another — multiple entries spawn multiple
+    # hubs that fight over ports. Just working in a worktree must not pollute the config. `force=true`
+    # re-points to a specific checkout (drops other KaimonSlate entries first).
+    slate_idx = findall(e -> e isa AbstractDict && _is_slate_project(String(get(e, "project_path", ""))), exts)
+    if !isempty(slate_idx)
+        force || return false                                # already have one — leave it be
+        deleteat!(exts, slate_idx)                           # force: replace whatever was there
+    end
     push!(exts, Dict("project_path" => path, "enabled" => enabled, "auto_start" => auto_start))
     data["extensions"] = exts
     write(file, JSON.json(data, 2))
@@ -547,6 +564,44 @@ function create_tools(GateTool::Type)
         return "Wrote $(length(pdf)) bytes → $out\n(open it with Read to view the pages)"
     end
 
+    """
+        pkg(notebook; op="list", name="") -> String
+
+    View or manage THIS NOTEBOOK's own package dependencies — the packages it adds on top of its
+    parent project, kept in the notebook's forked env and recorded in the `.jl` `Slate.env` footer.
+    Use THIS, not `Pkg.add` or editing a `Project.toml`, to give a notebook a dependency:
+
+    - `op="list"` (default): the notebook's own added packages, plus the deps inherited from the
+      parent project (read-only).
+    - `op="add", name="VideoIO"`: install it into the notebook's env, re-run the code cells so a
+      `using VideoIO` lights up, and record it in the footer so the notebook stays reproducible.
+      Add SEVERAL at once — `name="VideoIO, ColorTypes, ImageMorphology"` (whitespace/comma
+      separated) — to resolve + precompile them together and re-run the notebook just once.
+    - `op="rm", name="VideoIO"`: remove it (also accepts several).
+
+    Adding may precompile (can take a while). The parent project's deps are never touched.
+    """
+    function pkg(notebook::String; op::String = "list", name::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        if op == "list"
+            e = NotebookServer._notebook_adds(nb)
+            adds = isempty(e.adds) ? "  (none yet)" :
+                   join(["  $(get(p, "name", "")) $(get(p, "version", ""))" for p in e.adds], "\n")
+            parent = isempty(e.parent) ? "" :
+                     "\nInherited from parent ($(basename(e.parentpath))) — read-only:\n  " *
+                     join([string(get(p, "name", "")) for p in e.parent], ", ")
+            head = e.detached ? "Notebook packages (detached — this env is everything):" :
+                                "Notebook packages (its own adds):"
+            return "$head\n$adds$parent"
+        end
+        (op in ("add", "rm")) || return "bad op '$op' — use op=list|add|rm."
+        isempty(strip(name)) && return "op=$op needs name=<package>."
+        res = NotebookServer.notebook_pkg_op!(nb, op, name)
+        get(res, "ok", false) === true ?
+            "✅ $(op == "add" ? "added" : "removed") $name — notebook env updated & Slate.env footer synced." :
+            "❌ $op $name failed: $(get(res, "message", "?"))"
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -582,6 +637,7 @@ function create_tools(GateTool::Type)
         GateTool("export_pdf", export_pdf_tool),
         GateTool("index_docs", index_docs),
         GateTool("search_docs", search_docs_tool),
+        GateTool("pkg", pkg),
     ]
 end
 

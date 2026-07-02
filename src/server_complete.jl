@@ -548,19 +548,8 @@ function _make_router(h::Hub)
                    "manageable" => !(nb.kernel isa InProcessKernel)))
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
-        b = _body(req); op = String(get(b, "op", "")); name = String(get(b, "name", ""))
-        (op in ("add", "rm")) || return _json(Dict("ok" => false, "message" => "bad op '$op'"))
-        res = lock(nb.lock) do
-            r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name)
-            if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
-                for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
-                _eval!(nb)
-                _refresh_env_meta!(nb)                   # update the .jl reproducibility footer
-            end
-            r
-        end
-        get(res, "ok", false) === true && (_autoindex!(nb); _agent_push!(nb))
-        _json(res)
+        b = _body(req)
+        _json(notebook_pkg_op!(nb, String(get(b, "op", "")), String(get(b, "name", ""))))
     end))
     # The worker's stdout/stderr log — what the kernel is doing when evaluating cells.
     HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb ->

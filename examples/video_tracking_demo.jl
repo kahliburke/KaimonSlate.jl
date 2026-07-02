@@ -24,6 +24,20 @@ using VideoIO, ColorTypes, FixedPointNumbers, ImageMorphology, Statistics, DataF
 CairoMakie.activate!(type = "png")
 set_theme!(theme_dark())              # dark plots to match the UI
 
+#%% code id=fetch_video
+# The demo clip: OpenCV's classic **vtest.avi** (people crossing a courtyard, 768×576 @ 10 fps).
+# Auto-downloaded next to the notebook env on first run, so the notebook is self-contained.
+import Downloads
+const VIDEO_URL = "https://github.com/opencv/opencv/raw/master/samples/data/vtest.avi"
+const VIDEO_PATH = joinpath(dirname(Base.active_project()), "assets", "vtest.avi")
+
+if !isfile(VIDEO_PATH)
+    mkpath(dirname(VIDEO_PATH))
+    @info "Downloading demo video (~2 MB)…" VIDEO_URL
+    Downloads.download(VIDEO_URL, VIDEO_PATH)
+end
+(video = VIDEO_PATH, size_mb = round(filesize(VIDEO_PATH) / 1e6, digits = 1))
+
 #%% md id=extract_md
 ## 1. Extract frames
 
@@ -56,7 +70,6 @@ end
 gray(c) = 0.299 * Float64(c.r) + 0.587 * Float64(c.g) + 0.114 * Float64(c.b)
 
 #%% code id=extract
-const VIDEO_PATH = joinpath(dirname(Base.active_project()), "assets", "vtest.avi")
 const STRIDE = 2            # every 2nd frame (native 10 fps → 5 fps preview)
 const DOWNSAMPLE = 4        # 576×768 → 144×192
 
@@ -362,3 +375,11 @@ tip = C_est .+ 3.0 .* view_dir
 lines!(ax3d, [C_est[1], tip[1]], [C_est[2], tip[2]], [C_est[3], tip[3]]; color = :gold, linewidth = 3)
 
 fig3d
+
+# ╔═╡ Slate.env · notebook packages (auto-maintained — manage via the package panel)
+#   ColorTypes 0.12.1 3da002f7-5984-5a60-b8a6-cbb66c0b333f
+#   Downloads 1.7.0 f43a241f-c20a-4ad4-852c-f6b1247861c6
+#   FixedPointNumbers 0.8.6 53c48c17-4a7d-5ca2-90c5-79b7896eea93
+#   ImageMorphology 0.4.7 787d08f9-d448-5407-9aad-5290dd7ab264
+#   VideoIO 1.8.0 d6d074c3-1acf-5d4c-9a43-ef38773959a2
+# ╚═╡

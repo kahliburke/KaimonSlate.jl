@@ -797,6 +797,11 @@ function _agent_system_prompt(nb::LiveNotebook)
     Change the notebook's CELLS through the slate tools (slate_add_cell / slate_edit_cell / slate_run /
     slate_delete_cell / slate_rename_cell), not by hand-editing the .jl — that fights the running engine.
 
+    DEPENDENCIES the notebook needs (a package a cell will `using`): add them with
+    `slate_pkg(notebook="$(nb.id)", op="add", name="…")` — this installs into the NOTEBOOK's own env and
+    records it in the reproducible footer. Do NOT edit the project's `Project.toml` or use `pkg_add` for
+    a notebook dependency (that pollutes the shared/parent project). `slate_pkg(op="list")` shows them.
+
     ITERATING ON THE PACKAGE'S OWN CODE: the notebook's worker is a LIVE Julia session in this project's
     env with Revise active — it IS your REPL and test harness, so you don't need a separate session.
       1. Edit the package's `src/` with your file tools (function bodies, struct changes, and new files

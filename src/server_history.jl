@@ -81,6 +81,25 @@ function _refresh_env_meta!(nb::LiveNotebook)
     return _persist!(nb; source = "packages")
 end
 
+# Add/remove a package in THIS NOTEBOOK's own forked env (not the parent project), then re-run the
+# code cells so a `using` lights up, sync the `.jl` Slate.env footer, and refresh docs/agent view.
+# The single source of truth for the browser package panel (`POST /api/{id}/package`) AND the
+# `slate.pkg` agent tool — so both paths behave identically. `op` is "add" or "rm".
+function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractString)
+    (op in ("add", "rm")) || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
+    res = lock(nb.lock) do
+        r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name)
+        if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
+            for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
+            _eval!(nb)
+            _refresh_env_meta!(nb)                   # update the .jl reproducibility footer
+        end
+        r
+    end
+    get(res, "ok", false) === true && (_autoindex!(nb); _agent_push!(nb))
+    return res
+end
+
 # Restore the notebook to a recorded state (by content hash). Append-only and
 # non-destructive: the current state goes onto the in-memory undo stack and the
 # restore is itself recorded as a new "restore" checkpoint — you can always come

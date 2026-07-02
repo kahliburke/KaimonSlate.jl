@@ -563,17 +563,19 @@ function __slate_bundle_info()
     return out
 end
 
-"Add or remove a package in the worker's OWN active project (the notebook's deps).
-`op` is \"add\" or \"rm\". Returns `{ok, message}`."
+"Add or remove package(s) in the worker's OWN active project (the notebook's deps).
+`op` is \"add\" or \"rm\". `name` is one package, or several separated by whitespace/commas —
+all applied in a single resolve (one precompile). Returns `{ok, message}`."
 function __slate_pkg(op, name)
-    nm = strip(String(name))
-    isempty(nm) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    names = filter(!isempty, split(String(name), r"[\s,]+"))
+    isempty(names) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
     try
         o = String(op)
-        o == "add" ? Pkg.add(nm) :
-        o == "rm"  ? Pkg.rm(nm) :
+        o == "add" ? Pkg.add(names) :
+        o == "rm"  ? Pkg.rm(names) :
         return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
-        return Dict{String,Any}("ok" => true, "message" => "$(o == "add" ? "added" : "removed") $nm")
+        return Dict{String,Any}("ok" => true,
+                                "message" => "$(o == "add" ? "added" : "removed") $(join(names, ", "))")
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
