@@ -230,6 +230,36 @@ async function publishSite() {
     [{ label: 'Close', value: false }, { label: result.home ? 'Open site' : 'Open document', value: 'open', cls: 'primary' }], { html: true });
   if (v === 'open') window.open(result.home ? result.url : docUrl, '_blank', 'noopener');
 }
+// Export this notebook into a PERSISTENT local site, served by the hub at /sites/<name>/ — the local
+// mirror of publishSite (no git/GitHub). Additive: export other notebooks into the same name to build
+// a multi-doc site, then publish it to GitHub when ready. Served over HTTP, so the card index refreshes.
+async function publishLocalSite() {
+  const name = ((document.getElementById('sitelocal') || {}).value || '').trim();
+  if (!name) { await alertDark('Enter a local site name (e.g. “portfolio”).'); return; }
+  const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
+  const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
+  const bundle = !!(document.getElementById('siterunnable') || {}).checked;
+  const outv = (document.getElementById('exoutputs') || {}).value || 'all';
+  const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim());
+  showLoading('Building the local site…');
+  let result = null, err = null;
+  try {
+    const r = await fetch(_apipath('/api/export-to-site'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, slug: slug, bundle: bundle, theme: theme, outputs: outv, source: source }) });
+    result = r.ok ? await r.json() : { error: await r.text() };
+  } catch (e) { err = e; }
+  hideLoading();
+  if (err) { await alertDark('Local site export failed: ' + err); return; }
+  if (result.error) { await alertDark('Local site export failed:\n' + result.error); return; }
+  localStorage.setItem('slate_sitelocal', name);
+  const url = result.url;                                 // hub-relative, e.g. /sites/<name>/<slug>/
+  const link = '<a href="' + _escHtml(url) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(url) + '</a>';
+  const count = result.docCount ? (result.docCount + ' document' + (result.docCount === 1 ? '' : 's') + ' in the site.') : '';
+  const headline = (result.home ? 'Front page saved to local site “' : 'Saved to local site “') + _escHtml(result.site) + '” ✓';
+  const v = await dlg(headline + '<br><br>' + link + '<br>' + count,
+    [{ label: 'Close', value: false }, { label: 'Open', value: 'open', cls: 'primary' }], { html: true });
+  if (v === 'open') window.open(url, '_blank', 'noopener');
+}
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
@@ -298,11 +328,14 @@ function openExport(preset) {
   const hr = document.getElementById('htmlrunnable'); if (hr) hr.checked = localStorage.getItem('slate_htmlrunnable') === '1';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
-  const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = localStorage.getItem('slate_siterepo') || '';
+  // Pre-fill the publish target from what this notebook last published to (state_json → publishRepo),
+  // falling back to the last-used repo. Same for the local-site name.
+  const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = (nbState && nbState.publishRepo) || localStorage.getItem('slate_siterepo') || '';
+  const sl = document.getElementById('sitelocal'); if (sl && !sl.value) sl.value = localStorage.getItem('slate_sitelocal') || '';
   const stt = document.getElementById('sitetitle'); if (stt && !stt.value) stt.value = localStorage.getItem('slate_sitetitle') || '';
   // Auto-fill this document's slug from the notebook title (editable). Pre-filled so publishing "just works".
   const ssl = document.getElementById('siteslug');
-  if (ssl && !ssl.value) ssl.value = _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
+  if (ssl && !ssl.value) ssl.value = (nbState && nbState.publishSlug) || _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
   const ss = document.getElementById('sitesource'); if (ss) ss.checked = localStorage.getItem('slate_sitesource') !== '0';
   const srn = document.getElementById('siterunnable'); if (srn) srn.checked = localStorage.getItem('slate_siterunnable') === '1';
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
@@ -334,7 +367,7 @@ function closeExport(go) {
     ['sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     const ss = document.getElementById('sitesource'); if (ss) localStorage.setItem('slate_sitesource', ss.checked ? '1' : '0');
     const srn = document.getElementById('siterunnable'); if (srn) localStorage.setItem('slate_siterunnable', srn.checked ? '1' : '0');
-    return go === 'publish' ? publishSite() : exportSite();
+    return go === 'publish' ? publishSite() : go === 'localsite' ? publishLocalSite() : exportSite();
   }
   if (fmt === 'standalone') return exportStandalone();
   return _runPdfExport();

@@ -297,10 +297,14 @@
   <div class="setrow exrow fmt-website"><label>If missing</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="sitecreate" checked> Create the repo if it doesn't exist</label></div>
-  <div class="setrow exrow fmt-website sethint"><span></span><b>Publish</b> adds this notebook to a <b>site</b> (a blog): it lands at <code>/&lt;path&gt;/</code> and a generated front-page index links to every document you've published to that repo — the others are preserved. Pushes to <code>gh-pages</code> via your <code>gh</code> CLI (must be installed + <code>gh auth login</code>). <b>Export</b> downloads this one page as a self-contained <code>.tar.gz</code>.</div>
+  <div class="setrow exrow fmt-website"><label title="Save this notebook into a PERSISTENT local site served by the hub at /sites/&lt;name&gt;/ — the local mirror of Publish, no GitHub needed. Export other notebooks into the same name to build up a multi-doc site.">Local site</label>
+    <input id="sitelocal" type="text" placeholder="e.g. portfolio" autocomplete="off" spellcheck="false"
+      style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
+  <div class="setrow exrow fmt-website sethint"><span></span><b>Publish</b> adds this notebook to a <b>site</b> (a blog): it lands at <code>/&lt;path&gt;/</code> and a generated front-page index links to every document you've published to that repo — the others are preserved. Pushes to <code>gh-pages</code> via your <code>gh</code> CLI (must be installed + <code>gh auth login</code>). <b>Save to local site</b> does the same on THIS machine, served at <code>/sites/&lt;name&gt;/</code> (no GitHub) — a staging area you can publish later. <b>Export</b> downloads this one page as a self-contained <code>.tar.gz</code>.</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
   <div class="row"><button onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
+    <button class="exrow fmt-website" onclick="closeExport('localsite')">Save to local site</button>
     <button class="exrow fmt-website" onclick="closeExport('publish')">Publish to GitHub Pages</button>
     <button class="primary" onclick="closeExport(true)">Export</button></div>
 </div></div>
