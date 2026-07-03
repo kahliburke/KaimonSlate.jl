@@ -86,6 +86,19 @@ end
 # the depot cache), so this only handles ordinary notebooks: base / forked / detached.
 function _select_kernel(path::AbstractString, report; threads::AbstractString = "")
     if ReportEngine.gate_available()
+        # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
+        # 127.0.0.1:<port> (e.g. on another machine, forwarded over an SSH tunnel). Set as
+        # meta["remoteworker"] = "port,stream_port". Machine-specific (the ports/tunnel are local),
+        # so it's RUNTIME-ONLY — never written to the `.jl` footer. `prepare!` attaches, doesn't spawn.
+        rw = strip(String(get(report.meta, "remoteworker", "")))
+        if !isempty(rw)
+            ps = split(rw, ','; limit = 2)
+            port = length(ps) == 2 ? tryparse(Int, strip(ps[1])) : nothing
+            sp   = length(ps) == 2 ? tryparse(Int, strip(ps[2])) : nothing
+            (port !== nothing && sp !== nothing) &&
+                return ReportEngine.attach_gate_kernel(port, sp)
+            @warn "slate: ignoring malformed remoteworker spec (want \"port,stream_port\")" spec = rw
+        end
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
         envdir = ReportEngine.notebook_env_dir(path)

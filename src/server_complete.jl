@@ -156,6 +156,34 @@ function restart_kernel!(nb::LiveNotebook)
     return nb
 end
 
+# Switch this notebook onto (or off) a remote worker. `spec` = "port,stream_port" reachable at
+# 127.0.0.1 (e.g. forwarded over an SSH tunnel; see attach_gate_kernel); "" ⇒ back to a local worker.
+# Tears down the current kernel, RE-PICKS the kernel type (remote attach vs local) via _select_kernel,
+# and re-runs — async, same "instant" pattern as restart_kernel!. Runtime-only (not written to the .jl).
+function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
+    lock(nb.lock) do
+        s = strip(String(spec))
+        isempty(s) ? delete!(nb.report.meta, "remoteworker") : (nb.report.meta["remoteworker"] = String(s))
+        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → just disconnected
+        nb.kernel = _select_kernel(nb.path, nb.report)         # remote attach vs local, per the meta
+        build_dependencies!(nb.report)
+        nb.report.meta["hydrating"] = true
+        nb.version += 1
+    end
+    _broadcast(nb, "restart")
+    @async begin
+        try
+            _drain!(nb)                                        # first eval → prepare! attaches to the worker
+        catch e
+            @warn "KaimonSlate: remote-worker switch re-run failed" exception = (e, catch_backtrace())
+        finally
+            lock(nb.lock) do; delete!(nb.report.meta, "hydrating"); nb.version += 1; end
+            try; _broadcast(nb, string(nb.version)); catch; end
+        end
+    end
+    return nb
+end
+
 # The gate worker's stdout/stderr log (eval output, prints, errors, package loads)
 # — the debugging surface for "what is the worker doing". In-process kernels have
 # no separate log (cells eval in the extension process).
@@ -621,6 +649,12 @@ function _make_router(h::Hub)
         _json(state_json(nb))
     end))
     HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> (restart_kernel!(nb); _json(state_json(nb)))))
+    # Run this notebook on a remote worker. Body {ports:"port,stream_port"} (127.0.0.1, e.g. an SSH
+    # tunnel) attaches; {ports:""} switches back to a local worker. Runtime-only (not saved to the .jl).
+    HTTP.register!(router, "POST", "/api/{id}/remote-worker", req -> _withnb(h, req, nb -> begin
+        set_remote_worker!(nb, String(get(_body(req), "ports", "")))
+        _json(state_json(nb))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/cancel", req -> _withnb(h, req, nb -> (cancel_run!(nb); _json(state_json(nb)))))
     # Agent chat: forward the turn to Kaimon's agent service (spawning a session
     # bound to this notebook on first use); the agent's `{kind,turn,data}` events

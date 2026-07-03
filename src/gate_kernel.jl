@@ -664,12 +664,15 @@ function reset!(k::GateKernel, report::Report)
     return nothing
 end
 
-"Kill the worker and close its gate connection."
+"Kill the worker (local) or just drop the connection (remote), and clear gate state."
 function shutdown!(k::GateKernel)
     K = _kaimon()
     lock(k.lock) do
-        k.conn === nothing || (try; K.send_shutdown!(k.conn); catch; end)   # ask it to exit cleanly first
-        _kill_worker!(k)                                                    # then ensure it's gone (SIGTERM→SIGKILL)
+        # A remote/attached worker isn't ours to kill — skip `send_shutdown!` (which tells the worker
+        # to EXIT) and just drop our connection so it stays alive for the next attach; the tunnel owner
+        # manages its lifecycle. A LOCAL worker gets the clean exit request + SIGTERM/SIGKILL backstop.
+        (k.remote || k.conn === nothing) || (try; K.send_shutdown!(k.conn); catch; end)
+        _kill_worker!(k)     # proc === nothing for remote → no process kill; just clears conn + routing
     end
     return nothing
 end

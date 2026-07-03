@@ -609,6 +609,7 @@ function state_json(nb::LiveNotebook)
     meta["agentModel"] = get(nb.report.meta, "agentmodel", "")               # per-notebook agent-model override ("" = browser global)
     meta["publishRepo"] = get(nb.report.meta, "publishrepo", "")             # last GitHub publish target (owner/name); pre-fills the dialog
     meta["publishSlug"] = get(nb.report.meta, "publishslug", "")             # last publish slug ("" = home / default)
+    meta["remoteWorker"] = get(nb.report.meta, "remoteworker", "")           # "port,stream" if running on a remote worker
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true
