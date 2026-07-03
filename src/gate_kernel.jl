@@ -85,9 +85,29 @@ mutable struct GateKernel <: Kernel
     logpath::String  # worker stdout/stderr log
     lock::ReentrantLock   # serializes prepare!/respawn so concurrent callers can't double-spawn
     threads::String  # per-notebook worker thread override ("<compute>,<interactive>"); "" = use the global
+    remote::Bool     # attached to a PRE-RUNNING worker (e.g. remote, forwarded to 127.0.0.1:port over
+                     # an SSH tunnel) — `prepare!` CONNECTS, never spawns/reconstructs locally.
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "") =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads))
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false)
+end
+
+"""
+    attach_gate_kernel(port, stream_port; project=".") -> GateKernel
+
+A kernel bound to an ALREADY-RUNNING `SlateWorker` reachable at `127.0.0.1:port` (+ `stream_port`) —
+e.g. a worker on another machine forwarded here over an SSH tunnel
+(`ssh -N -L port:localhost:port -L stream:localhost:stream host`). `prepare!` CONNECTS instead of
+spawning: no local process, no env reconstruction — the worker owns its process + environment. The
+transport is unchanged (the hub always connects to `127.0.0.1:port`), so the tunnel is transparent.
+Remote execution for a notebook is then: start the worker there, forward the two ports, hand the
+notebook this kernel.
+"""
+function attach_gate_kernel(port::Integer, stream_port::Integer; project::AbstractString = ".")
+    k = GateKernel(project)
+    k.remote = true
+    k.port = Int(port); k.stream_port = Int(stream_port)
+    return k
 end
 
 # True when the notebook is running directly in its parent (no own packages yet).
@@ -315,9 +335,18 @@ end
 
 function prepare!(k::GateKernel, report::Report)
     lock(k.lock) do                               # serialize: concurrent callers must not double-spawn
+        if k.remote
+            # Attached to a pre-running (e.g. tunneled remote) worker: connect ONCE, never spawn or
+            # reconstruct locally — the worker owns its process + environment. A dropped connection
+            # reconnects (we can't respawn someone else's worker), so gate on `conn === nothing`.
+            if k.conn === nothing
+                _connect!(k)
+                _GATE_SESSION[k.conn.name] = report.id
+                _ensure_poller!()
+            end
         # Spawn if never started, OR respawn if the worker died (OOM / segfault / user exit()) —
         # otherwise a crashed worker would no-op here forever and every eval would error.
-        if k.conn === nothing || (k.proc !== nothing && !process_running(k.proc))
+        elseif k.conn === nothing || (k.proc !== nothing && !process_running(k.proc))
             _kill_worker!(k)                      # tear down a dead/old proc before replacing (no leak/orphan)
             _spawn_worker!(k)
             _connect!(k)
