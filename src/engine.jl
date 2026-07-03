@@ -408,13 +408,17 @@ end
 const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # Whitelist of durable per-notebook settings, each with a value type so parsing coerces
 # correctly (`:bool` | `:string` | `:int`). Slide-deck prefs live here too so a notebook
-# carries its presentation style with it.
+# carries its presentation style with it. `publishrepo`/`publishslug` remember WHERE this notebook
+# was last published (owner/name + slug), so the dialog pre-fills and a CI action can read the
+# target — authored intent that travels with the file (see the git-noise/sidecar discussion).
 const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "agentmodel",
-                      "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle")
+                      "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
+                      "publishrepo", "publishslug")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            "agentmodel" => :string,
                            "slidelevel" => :int, "slidetransition" => :string,
-                           "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string)
+                           "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string,
+                           "publishrepo" => :string, "publishslug" => :string)
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]

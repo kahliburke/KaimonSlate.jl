@@ -543,6 +543,11 @@ function _make_router(h::Hub)
                              create = get(b, "create", true) === true, theme = get(b, "theme", "dark"),
                              outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0",
                              bundle = get(b, "bundle", false) === true)
+            # Remember WHERE this notebook publishes so the dialog pre-fills next time (and a CI
+            # action can read the target). Authored intent → travels in the Slate.config footer.
+            nb.report.meta["publishrepo"] = String(repo)
+            nb.report.meta["publishslug"] = r.home ? "" : String(r.slug)
+            _persist!(nb)
             return _json(Dict("url" => r.url, "docUrl" => r.docUrl, "slug" => r.slug, "repo" => r.repo,
                               "created" => r.created, "docCount" => r.docCount, "home" => r.home,
                               "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError))

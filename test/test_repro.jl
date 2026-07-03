@@ -65,16 +65,21 @@ end
 @testset "per-notebook config footer (Slate.config)" begin
     src = "#%% code id=a\nx = 1\n\n" *
           "# ╔═╡ Slate.config · per-notebook settings (Settings panel)\n" *
-          "#   agentmodel = opus\n#   parallel = false\n#   slidelevel = 3\n# ╚═╡\n"
+          "#   agentmodel = opus\n#   parallel = false\n#   slidelevel = 3\n" *
+          "#   publishrepo = kahli/site\n#   publishslug = my-doc\n# ╚═╡\n"
     r = parse_report(src)
     @test length(r.cells) == 1                       # config footer is not a cell
     @test r.meta["agentmodel"] == "opus"             # :string
     @test r.meta["parallel"] === false               # :bool coerced
     @test r.meta["slidelevel"] === 3                 # :int coerced
+    @test r.meta["publishrepo"] == "kahli/site"      # remembered publish target
+    @test r.meta["publishslug"] == "my-doc"
 
     s1 = serialize_report(r)
     @test occursin("agentmodel = opus", s1)
+    @test occursin("publishrepo = kahli/site", s1)
     @test parse_report(s1).meta["agentmodel"] == "opus"      # idempotent
+    @test parse_report(s1).meta["publishrepo"] == "kahli/site"
 
     r2 = parse_report("#%% code id=a\nx=1\n")         # no config → no footer, no keys
     @test !haskey(r2.meta, "agentmodel")

@@ -607,6 +607,8 @@ function state_json(nb::LiveNotebook)
     meta["slideRatio"] = get(nb.report.meta, "slideratio", "16:9")           # PDF deck aspect ratio
     meta["bibStyle"] = get(nb.report.meta, "bibstyle", "ieee")               # CSL citation/reference style
     meta["agentModel"] = get(nb.report.meta, "agentmodel", "")               # per-notebook agent-model override ("" = browser global)
+    meta["publishRepo"] = get(nb.report.meta, "publishrepo", "")             # last GitHub publish target (owner/name); pre-fills the dialog
+    meta["publishSlug"] = get(nb.report.meta, "publishslug", "")             # last publish slug ("" = home / default)
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true
