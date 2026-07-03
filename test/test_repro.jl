@@ -226,68 +226,78 @@ include(joinpath(@__DIR__, "..", "src", "export_bundle.jl"))
     end
 end
 
-# Git bundle + auto-attach (only when git is available).
+# Make `git` discoverable even under a minimal GUI-launched PATH (macOS apps often omit
+# /opt/homebrew/bin, so a gate/test subprocess can miss git), so these tests actually run
+# in the harness instead of silently skipping.
+let g = Sys.which("git")
+    if g === nothing
+        for c in ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git")
+            if isfile(c)
+                ENV["PATH"] = dirname(c) * (Sys.iswindows() ? ";" : ":") * get(ENV, "PATH", "")
+                break
+            end
+        end
+    end
+end
+
+# Git bundle + repo-rooted expand tests. A LOUD warning (never a silent skip) when git is absent.
 if Sys.which("git") !== nothing
-    @testset "git bundle: matching SHAs + auto-attach origin" begin
-        cells = "#%% code id=a\nx=1\n"
+    # Repo-rooted stays robust when a path-dep is `dev`'d from OUTSIDE the repo: the repo is still
+    # bundled as the root and the external dep is vendored into `local/` (Manifest rewritten) — an
+    # external dev-dep no longer forces the flat layout. And the checkout is CLEAN: a real branch,
+    # a working `git log` (full-history bundle, no broken shallow graft), no dangling `origin`, and
+    # Slate's `.slatebundle.json` locally ignored — no legacy `repo/` subdir.
+    @testset "repo-rooted: external dev-dep vendored + clean git checkout" begin
         repo = mktempdir()
-        write(joinpath(repo, "Project.toml"), "name=\"Demo\"\n[deps]\n")
-        write(joinpath(repo, "Manifest.toml"), "julia_version=\"1.12.0\"\n")
+        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
+        write(joinpath(repo, "Project.toml"),
+            "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d0\"\nversion=\"0.1.0\"\n[deps]\nFoo=\"00000000-0000-0000-0000-0000000000f0\"\n")
+        write(joinpath(repo, "src", "Demo.jl"), "module Demo\nend\n")
+        foo = mktempdir(); mkpath(joinpath(foo, "src"))              # Foo lives OUTSIDE the repo
+        write(joinpath(foo, "Project.toml"), "name=\"Foo\"\nuuid=\"00000000-0000-0000-0000-0000000000f0\"\nversion=\"0.1.0\"\n")
+        write(joinpath(foo, "src", "Foo.jl"), "module Foo\nend\n")
+        write(joinpath(repo, "Manifest.toml"),
+            "manifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"$(foo)\"\nuuid = \"00000000-0000-0000-0000-0000000000f0\"\nversion = \"0.1.0\"\n")
+        write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
+        run(pipeline(`git -C $repo init -q`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+
+        nbpath = joinpath(repo, "notebooks", "nb.jl")
+        deps = [(name = "Foo", source = foo)]
+        cells = "#%% code id=a\nx=2\n"
+        sj = joinpath(mktempdir(), "nb.standalone.jl")
+        write(sj, cells * "\n" * _bundle_footer(_make_bundle_b64(repo, deps, nbpath, cells)) * "\n")
+        tdir = expand(sj)
+
+        @test isdir(joinpath(tdir, ".git"))                                   # git checkout at the ROOT
+        @test !ispath(joinpath(tdir, "repo"))                                 # no legacy repo/ hybrid
+        @test isfile(joinpath(tdir, "local", "Foo", "src", "Foo.jl"))         # external dep vendored INTO the checkout
+        man = read(joinpath(tdir, "Manifest.toml"), String)
+        @test occursin("local/Foo", man) && !occursin(foo, man)              # rewritten, no abs-path leak
+        @test strip(read(`git -C $tdir rev-parse --abbrev-ref HEAD`, String)) != "HEAD"   # on a real branch
+        @test !isempty(strip(read(pipeline(`git -C $tdir log --oneline`; stderr = devnull), String)))   # log works
+        @test isempty(strip(read(`git -C $tdir remote`, String)))            # no dangling origin (no remote)
+        @test !occursin(".slatebundle.json", read(`git -C $tdir status --porcelain`, String))   # locally ignored
+    end
+
+    # When the repo HAS an origin remote, expand wires `origin` to it (matching SHAs → branch & PR).
+    @testset "repo-rooted: origin wired to the real remote" begin
+        repo = mktempdir()
+        mkpath(joinpath(repo, "notebooks"))
+        write(joinpath(repo, "Project.toml"), "name=\"Demo\"\nuuid=\"00000000-0000-0000-0000-0000000000d1\"\nversion=\"0.1.0\"\n[deps]\n")
+        write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+        write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
         run(pipeline(`git -C $repo init -q`; stderr = devnull))
         run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
         run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
         run(pipeline(`git -C $repo remote add origin https://example.com/demo.git`; stderr = devnull))
-
-        b64 = _make_bundle_b64(repo, NamedTuple[], "demo.jl", cells)
-        sj = joinpath(mktempdir(), "demo.standalone.jl")
-        write(sj, cells * "\n" * _bundle_footer(b64) * "\n")
+        nbpath = joinpath(repo, "notebooks", "nb.jl")
+        sj = joinpath(mktempdir(), "nb.standalone.jl")
+        write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(repo, NamedTuple[], nbpath, "#%% code id=a\nx=1\n")) * "\n")
         tdir = expand(sj)
-
-        @test isfile(joinpath(tdir, "repo.gitbundle"))
-        cloned = joinpath(tdir, "repo")
-        @test isdir(cloned)
-        orig_sha = strip(read(`git -C $repo rev-parse HEAD`, String))
-        clone_sha = strip(read(`git -C $cloned rev-parse HEAD`, String))
-        @test orig_sha == clone_sha                       # matching SHAs
-        @test strip(read(`git -C $cloned remote get-url origin`, String)) == "https://example.com/demo.git"
-    end
-
-    # A path-dep whose committed-clean source already lives inside the bundled repo is reused
-    # straight from the cloned repo/ (Manifest → repo/<rel>), with no redundant local/ copy.
-    # A dirty/uncommitted subtree stays conservative and ships its own local/ copy.
-    @testset "git-tracked path-dep dedups against repo/" begin
-        root = mktempdir()
-        mkpath(joinpath(root, "Foo", "src"))
-        write(joinpath(root, "Foo", "Project.toml"), "name=\"Foo\"\nuuid=\"00000000-0000-0000-0000-0000000000f0\"\nversion=\"0.1.0\"\n")
-        write(joinpath(root, "Foo", "src", "Foo.jl"), "module Foo\nend\n")
-        write(joinpath(root, "Project.toml"), "name=\"Demo\"\n[deps]\nFoo=\"00000000-0000-0000-0000-0000000000f0\"\n")
-        write(joinpath(root, "Manifest.toml"),
-            "manifest_format=\"2.0\"\n\n[[deps.Foo]]\npath = \"$(joinpath(root, "Foo"))\"\nuuid = \"00000000-0000-0000-0000-0000000000f0\"\nversion = \"0.1.0\"\n")
-        run(pipeline(`git -C $root init -q`; stderr = devnull))
-        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
-        run(pipeline(`git -C $root -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
-        deps = [(name = "Foo", source = joinpath(root, "Foo"))]
-
-        @testset "clean subtree → reuse repo/, no local copy" begin
-            sj = joinpath(mktempdir(), "c.standalone.jl")
-            write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(root, deps, "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
-            tdir = expand(sj)
-            man = read(joinpath(tdir, "Manifest.toml"), String)
-            @test occursin("path = \"repo/Foo\"", man)                    # points into the cloned repo
-            @test !ispath(joinpath(tdir, "local"))                        # no redundant copy
-            @test isfile(joinpath(tdir, "repo", "Foo", "src", "Foo.jl"))  # source rides the git bundle
-        end
-
-        @testset "dirty subtree → conservative local copy" begin
-            write(joinpath(root, "Foo", "src", "Foo.jl"), "module Foo\n# uncommitted\nend\n")
-            sj = joinpath(mktempdir(), "d.standalone.jl")
-            write(sj, "#%% code id=a\nx=1\n\n" * _bundle_footer(_make_bundle_b64(root, deps, "nb.jl", "#%% code id=a\nx=1\n")) * "\n")
-            tdir = expand(sj)
-            man = read(joinpath(tdir, "Manifest.toml"), String)
-            @test occursin("path = \"local/Foo\"", man)                   # falls back to a copy
-            src = read(joinpath(tdir, "local", "Foo", "src", "Foo.jl"), String)
-            @test occursin("uncommitted", src)                           # working-tree bytes, not HEAD
-        end
+        @test strip(read(`git -C $tdir remote get-url origin`, String)) == "https://example.com/demo.git"
+        @test strip(read(`git -C $repo rev-parse HEAD`, String)) == strip(read(`git -C $tdir rev-parse HEAD`, String))
     end
 
     # Repo-rooted: the notebook + its env live INSIDE a git repo (the WindowPrimes.jl/notebooks case),
@@ -335,6 +345,9 @@ if Sys.which("git") !== nothing
         @test strip(read(`git -C $tdir remote get-url origin`, String)) == "https://example.com/winp.git"
         # matching SHAs — ready to branch & PR
         @test strip(read(`git -C $repo rev-parse HEAD`, String)) == strip(read(`git -C $tdir rev-parse HEAD`, String))
+        @test !ispath(joinpath(tdir, "repo"))                        # no legacy repo/ hybrid
+        @test strip(read(`git -C $tdir rev-parse --abbrev-ref HEAD`, String)) != "HEAD"   # a real branch, not detached
+        @test !isempty(strip(read(pipeline(`git -C $tdir log --oneline`; stderr = devnull), String)))   # git log works
 
         # reconstruct coords point the kernel at the notebook env (nested), with the repo root as parent
         co = _read_coords(tdir)
@@ -361,9 +374,9 @@ if Sys.which("git") !== nothing
         @test isfile(joinpath(tdir, "Project.toml"))      # the project itself still travels
     end
 
-    # Package-as-project: the notebook runs in its OWN package's project (project root == repo
-    # root). The package's src/ must travel to the expanded project root so `using <Pkg>` resolves
-    # there, while repo/ still carries history for collaboration.
+    # Package-as-project via the FLAT layout (the notebook here is a bare filename, not inside the
+    # repo, so it doesn't qualify for repo-rooted): the package's src/ must still travel to the
+    # expanded project root so `using <Pkg>` resolves there. FLAT is git-free (no repo.gitbundle).
     @testset "package-as-project carries its own src to the root" begin
         root = mktempdir()
         mkpath(joinpath(root, "src"))
@@ -379,8 +392,12 @@ if Sys.which("git") !== nothing
         tdir = expand(sj)
         @test isfile(joinpath(tdir, "src", "Demo.jl"))                       # source at the project root
         @test occursin("module Demo", read(joinpath(tdir, "src", "Demo.jl"), String))
-        @test isfile(joinpath(tdir, "repo.gitbundle"))                       # repo still bundled too
+        @test !isfile(joinpath(tdir, "repo.gitbundle"))                      # FLAT is git-free
+        @test !ispath(joinpath(tdir, "repo"))                                # no repo/ subdir
     end
+else
+    @warn "test_repro: `git` not found on PATH — SKIPPING the git bundle + repo-rooted expand \
+           tests. They are NOT being covered; install git or fix PATH to run them."
 end
 
 # Content-addressed reconstruction into the depot cache (the "Run (temporary)" engine): same

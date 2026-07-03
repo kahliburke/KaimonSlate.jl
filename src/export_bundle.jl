@@ -88,13 +88,6 @@ end
 # back to `abspath` if the path can't be resolved.
 _safe_realpath(p::AbstractString) = try realpath(p) catch; abspath(p) end
 
-# A `file://` URL for a local path — needed so `git clone --depth` does a REAL shallow
-# clone (git ignores `--depth` for a bare local path, hardlinking the whole object store
-# instead). On Windows a native path is `C:\repo`, so we must emit `file:///C:/repo` with
-# forward slashes; elsewhere the leading `/` already yields the `file:///abs/path` form.
-_file_url(p::AbstractString) = Sys.iswindows() ?
-    "file:///" * replace(abspath(p), '\\' => '/') : "file://" * abspath(p)
-
 # The realpath of the git work-tree root containing `dir`, or `nothing` (no git / not a repo).
 function _git_toplevel(dir::AbstractString)
     Sys.which("git") === nothing && return nothing
@@ -107,16 +100,17 @@ function _git_toplevel(dir::AbstractString)
     return realpath(top)
 end
 
-# Add a shallow git bundle of `top` + its `origin` URL, so an expanded copy can `git clone`
-# it and attach to the original remote with MATCHING SHAs (branch & PR off the real history).
-# A self-contained shallow bundle can't be made with `bundle create --depth` (that needs the
-# parent as a prerequisite); the reliable recipe is a depth-1 working clone, then bundle from
-# THAT. Returns `true` on success (so the caller can point deduped path-deps at `repo/`).
+# Add a git bundle of `top` (+ its `origin` URL) so an expanded copy can `git clone` it and
+# attach to the original remote with MATCHING SHAs (branch & PR off the real history).
+# FULL history, straight from the repo — NOT a `--depth=1` clone: a bundle built from a shallow
+# clone can't be cloned back (no shallow boundary → "failed to traverse parents" / "remote did
+# not send all necessary objects"). `--branches HEAD` carries the branch refs so the expanded
+# clone lands on its real branch (e.g. `main`) instead of a detached HEAD. Returns `true` on
+# success. (The size cost of full history is the price of a checkout that actually works offline.)
 function _git_bundle!(stage::AbstractString, top::AbstractString)
     try
-        sc = joinpath(mktempdir(), "s")
-        run(pipeline(`git clone -q --depth=1 $(_file_url(top)) $sc`; stdout = devnull, stderr = devnull))
-        run(pipeline(`git -C $sc bundle create $(joinpath(stage, "repo.gitbundle")) HEAD`; stdout = devnull, stderr = devnull))
+        run(pipeline(`git -C $top bundle create $(joinpath(stage, "repo.gitbundle")) --branches HEAD`;
+                     stdout = devnull, stderr = devnull))
         url = try; strip(read(pipeline(`git -C $top remote get-url origin`; stderr = devnull), String)); catch; ""; end
         isempty(url) || write(joinpath(stage, "git-remote.txt"), url)
         return true
@@ -131,26 +125,11 @@ function _within(top::AbstractString, src::AbstractString)
     (rel == "." || !startswith(rel, "..")) ? replace(rel, '\\' => '/') : nothing
 end
 
-# True only if the subtree at `top/relpath` has no uncommitted OR untracked changes — i.e. the
-# bundled repo's HEAD checkout is byte-identical to the live source, so pointing the env at the
-# cloned `repo/` instead of a `local/` copy loses nothing. `--porcelain` lists `??` untracked
-# too, so a dirty/partly-untracked package stays conservative (gets its own local copy).
-function _subtree_clean(top::AbstractString, relpath::AbstractString)
-    spec = relpath == "." ? "." : relpath
-    out = try
-        read(pipeline(`git -C $top status --porcelain -- $spec`; stderr = devnull), String)
-    catch
-        return false
-    end
-    return isempty(strip(out))
-end
-
 # Rewrite the staged `Manifest.toml` so each bundled path-dependency points at its in-bundle
-# source (a path RELATIVE to the manifest's dir — `local/<name>` for a copied tree, or
-# `repo/<rel>` when it's reused straight from the cloned git repo) instead of the author's
-# original absolute path — otherwise an expanded copy fails to instantiate with "Missing
-# source file" on a machine where that absolute path doesn't exist. `targets` maps dep name →
-# relative path. Line-oriented so the generated manifest's formatting is preserved untouched.
+# source (a path RELATIVE to the manifest's dir — `local/<name>` for a copied tree) instead of
+# the author's original absolute path — otherwise an expanded copy fails to instantiate with
+# "Missing source file" on a machine where that absolute path doesn't exist. `targets` maps dep
+# name → relative path. Line-oriented so the generated manifest's formatting is preserved untouched.
 function _rewrite_manifest_paths!(manifest::AbstractString, targets::AbstractDict)
     isfile(manifest) || return
     lines = readlines(manifest)
@@ -206,62 +185,65 @@ _pd_name(pd) = String(pd isa NamedTuple ? pd.name : pd[1])
 # the active project (env) dir, its path deps `[(name, source)]`, and the notebook's absolute path.
 #
 # Two layouts:
-#  • REPO-ROOTED — the env, the notebook, and every path-dep source all live inside ONE git repo.
+#  • REPO-ROOTED — the env and notebook live inside ONE git repo that IS the notebook's project.
 #    Bundle the repo (a matching-SHA git bundle) plus an `overlay/` of the LIVE env files + notebook
 #    at their repo-relative paths. On expand the repo becomes the project ROOT with the notebook back
-#    in place (e.g. `WindowPrimes.jl/` with `src/` + `notebooks/presentation.jl`), so a `{path=".."}`
-#    / relative Manifest source resolves naturally — no `local/` vendoring, no path rewriting, and
-#    the result is a real git checkout wired to `origin` (branch & PR with matching SHAs).
-#  • FLAT (fallback) — no enclosing repo, or a path-dep lives outside it. Stage the env at the root,
-#    vendor path-dep sources under `local/<name>` (rewriting the Manifest), and drop the notebook at
-#    the root. Self-contained but structure-less.
+#    in place (e.g. `WindowPrimes.jl/` with `src/` + `notebooks/presentation.jl`). Path-deps INSIDE
+#    the repo resolve from the checkout; a path-dep `dev`'d from OUTSIDE it is vendored under
+#    `local/<name>` and the overlaid Manifest is rewritten to point at it — so an external dev-dep no
+#    longer forces the flat layout. The result is a real git checkout wired to `origin`.
+#  • FLAT (fallback) — no enclosing repo, the repo isn't the notebook's project, or the notebook lives
+#    outside it. Stage the env at the root, vendor every path-dep under `local/<name>` (rewriting the
+#    Manifest), drop the notebook at the root. Self-contained, structure-less, and git-free (git
+#    travels only via the repo-rooted layout — a half-git `repo/` subdir was more confusing than useful).
 function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString)
     stage = mktempdir()
     top = _git_toplevel(projectdir)
     if top !== nothing
         prel = _within(top, _safe_realpath(projectdir))                       # env dir relative to repo
         nrel = _within(top, _safe_realpath(nbpath))                           # notebook file relative to repo
-        allin = all(pd -> (s = _pd_source(pd); isdir(s) && _within(top, realpath(s)) !== nothing), pathdeps)
         # Only when this repo IS the notebook's project — the repo root is the env dir (package-as-
         # project) or the source of a path-dep the notebook develops. Otherwise a notebook merely
         # sitting inside a big unrelated checkout would drag the whole thing into the bundle.
         repo_is_project = _safe_realpath(projectdir) == top ||
             any(pd -> (s = _pd_source(pd); isdir(s) && _safe_realpath(s) == top), pathdeps)
-        if repo_is_project && prel !== nothing && nrel !== nothing && allin && _git_bundle!(stage, top)
-            write(joinpath(stage, "bundle.json"),
-                  JSON.json(Dict("mode" => "repo-rooted", "env" => prel, "notebook" => nrel, "parent" => ".")))
+        if repo_is_project && prel !== nothing && nrel !== nothing && _git_bundle!(stage, top)
             ov = joinpath(stage, "overlay")
             for f in ("Project.toml", "Manifest.toml")                        # live env files overlay the committed ones
                 s = joinpath(projectdir, f)
                 isfile(s) && (mkpath(joinpath(ov, prel)); cp(s, joinpath(ov, prel, f); force = true))
             end
+            # Vendor path-deps that live OUTSIDE the repo; those inside resolve from the checkout.
+            targets = Dict{String,String}()
+            for pd in pathdeps
+                s = _pd_source(pd); nm = _pd_name(pd)
+                isdir(s) || continue
+                _within(top, _safe_realpath(s)) === nothing || continue       # inside the repo → already bundled
+                _copy_tree!(joinpath(stage, "local", nm), s)                  # ship a copy at the root
+                # Manifest path is relative to the env dir (`prel`) → point it at the root `local/<name>`.
+                targets[nm] = replace(prel == "." ? "local/$nm" : relpath("local/$nm", prel), '\\' => '/')
+            end
+            ovman = joinpath(ov, prel, "Manifest.toml")
+            (isempty(targets) || !isfile(ovman)) || _rewrite_manifest_paths!(ovman, targets)
             mkpath(dirname(joinpath(ov, nrel)))
             write(joinpath(ov, nrel), cells)                                  # live notebook cells
+            write(joinpath(stage, "bundle.json"),
+                  JSON.json(Dict("mode" => "repo-rooted", "env" => prel, "notebook" => nrel, "parent" => ".")))
             return Base64.base64encode(_pack_tree(stage))
         end
-        # fall through to the flat layout (repo present but not self-contained, or bundle failed)
+        # fall through to the flat layout (repo present but not the notebook's project, or bundle failed)
     end
-    # ── Flat fallback ────────────────────────────────────────────────────────────────────────────
+    # ── Flat fallback: self-contained, structure-less, git-free ────────────────────────────────────
     for f in ("Project.toml", "Manifest.toml")
         s = joinpath(projectdir, f)
         isfile(s) && cp(s, joinpath(stage, f); force = true)
     end
-    # Bundle the git repo only when the project IS that repo's root (repo-as-project shared for
-    # collaboration); a project merely nested in a larger checkout would otherwise drag in the whole
-    # thing. A committed-clean path-dep inside that repo is reused from the cloned `repo/`.
-    rtop = (top !== nothing && top == _safe_realpath(projectdir)) ? top : nothing
-    gitok = rtop !== nothing && _git_bundle!(stage, rtop)
     targets = Dict{String,String}()                  # dep name → in-bundle relative source path
     for pd in pathdeps
         src = _pd_source(pd); nm = _pd_name(pd)
         isdir(src) || continue
-        rel = gitok ? _within(rtop, realpath(src)) : nothing
-        if rel !== nothing && _subtree_clean(rtop, rel)
-            targets[nm] = rel == "." ? "repo" : "repo/" * rel    # reuse the cloned repo source
-        else
-            _copy_tree!(joinpath(stage, "local", nm), src)       # ship our own copy
-            targets[nm] = "local/" * nm
-        end
+        _copy_tree!(joinpath(stage, "local", nm), src)       # ship our own copy
+        targets[nm] = "local/" * nm
     end
     _rewrite_manifest_paths!(joinpath(stage, "Manifest.toml"), targets)
     # Package-as-project: an active project carrying its OWN package source (`src/`, `ext/`) needs
@@ -378,11 +360,31 @@ function _move_contents!(src::AbstractString, dst::AbstractString)
     return dst
 end
 
+# After the embedded repo is cloned into place, make it a CLEAN working checkout: point `origin`
+# at the real remote (or DROP the dangling bundle-path remote when there is none), and locally
+# ignore Slate's `.slatebundle.json` coords file so `git status` stays clean. The bundle is
+# full-history + `--branches HEAD`, so the checkout is already on its real branch with a working
+# `git log` — no shallow graft to repair.
+function _tidy_git_checkout!(dir::AbstractString, remote_url::AbstractString)
+    if isempty(strip(remote_url))
+        try; run(pipeline(`git -C $dir remote remove origin`; stdout = devnull, stderr = devnull)); catch; end
+    else
+        try
+            run(pipeline(`git -C $dir remote set-url origin $remote_url`; stdout = devnull, stderr = devnull))
+        catch
+            try; run(pipeline(`git -C $dir remote add origin $remote_url`; stdout = devnull, stderr = devnull)); catch; end
+        end
+    end
+    excl = joinpath(dir, ".git", "info", "exclude")
+    try; isdir(dirname(excl)) && open(io -> println(io, ".slatebundle.json"), excl, "a"); catch; end
+    return dir
+end
+
 # Materialise a bundle payload into `dir` and return `(root, envdir, parent, notebook)` (absolute;
 # `parent=""` when detached). Shared by `expand` and `_reconstruct_bundle!`.
-#  • REPO-ROOTED — clone the embedded repo as the ROOT (wire `origin`), then overlay the LIVE env
+#  • REPO-ROOTED — clone the embedded repo as the ROOT (tidy `origin`), then overlay the LIVE env
 #    files + notebook so the checkout matches the author's tree with the current cells in place.
-#  • FLAT — unpack in place; clone the optional git repo into `repo/` (legacy self-contained layout).
+#  • FLAT — unpack in place (self-contained; no git — that travels only via the repo-rooted layout).
 function _extract_bundle!(b64::AbstractString, dir::AbstractString)
     _unpack_tree(Base64.base64decode(b64), dir)
     meta = _read_bundle_meta(dir)
@@ -391,14 +393,7 @@ function _extract_bundle!(b64::AbstractString, dir::AbstractString)
         clone = joinpath(mktempdir(), "r")
         run(pipeline(`git clone -q $(joinpath(dir, "repo.gitbundle")) $clone`; stdout = devnull, stderr = devnull))
         urlf = joinpath(dir, "git-remote.txt")
-        if isfile(urlf)
-            url = strip(read(urlf, String))
-            isempty(url) || try
-                run(pipeline(`git -C $clone remote set-url origin $url`; stdout = devnull, stderr = devnull))
-            catch
-                try; run(pipeline(`git -C $clone remote add origin $url`; stdout = devnull, stderr = devnull)); catch; end
-            end
-        end
+        remote_url = isfile(urlf) ? strip(read(urlf, String)) : ""
         ov = joinpath(dir, "overlay")
         for f in ("repo.gitbundle", "git-remote.txt", "bundle.json")   # drop the scaffolding
             rm(joinpath(dir, f); force = true)
@@ -408,12 +403,12 @@ function _extract_bundle!(b64::AbstractString, dir::AbstractString)
         rm(ov; recursive = true, force = true)
         _move_contents!(clone, dir)                                    # the repo IS the root (incl .git)
         isempty(ovkeep) || _copy_tree_overlay!(dir, ovkeep)           # live env + notebook overwrite committed
+        _tidy_git_checkout!(dir, remote_url)                          # clean origin + ignore the coords file
         env = String(get(meta, "env", ".")); nb = String(get(meta, "notebook", ""))
         _write_coords!(dir; mode = "repo-rooted", env = env, parent = ".", notebook = nb)
         return _read_coords(dir)
     end
-    # FLAT
-    repo = _attach_git_repo(dir)                     # clone repo.gitbundle + wire origin → dir/repo
+    # FLAT — self-contained vendored tree, no git.
     nb = _expanded_notebook(dir)
     _write_coords!(dir; mode = "flat", env = ".", parent = "",
                    notebook = isempty(nb) ? "" : replace(relpath(nb, dir), '\\' => '/'))
@@ -500,28 +495,3 @@ function expand(jl_path::AbstractString; target::AbstractString = "", force::Boo
     return tdir
 end
 
-# When an expanded tree carries `repo.gitbundle`, clone it into `target/repo` and point
-# `origin` at the recorded URL — handing back a real git repo whose tip SHA matches the
-# original, ready to branch and PR. Returns the repo path, or `nothing` (no bundle / no git
-# / already present / failure — the bundle file is left in place either way).
-function _attach_git_repo(tdir::AbstractString)
-    gb = joinpath(tdir, "repo.gitbundle")
-    (isfile(gb) && Sys.which("git") !== nothing) || return nothing
-    repo = joinpath(tdir, "repo")
-    ispath(repo) && return nothing
-    try
-        run(pipeline(`git clone -q $gb $repo`; stdout = devnull, stderr = devnull))
-        urlfile = joinpath(tdir, "git-remote.txt")
-        if isfile(urlfile)
-            url = strip(read(urlfile, String))
-            isempty(url) || try
-                run(pipeline(`git -C $repo remote set-url origin $url`; stdout = devnull, stderr = devnull))
-            catch
-                run(pipeline(`git -C $repo remote add origin $url`; stdout = devnull, stderr = devnull))
-            end
-        end
-        return repo
-    catch
-        return nothing
-    end
-end
