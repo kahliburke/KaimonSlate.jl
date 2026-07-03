@@ -288,10 +288,39 @@ x = 1
         @test occursin("My Blog", idx)
         @test occursin("href=\"predicting-foo-from-bar/\"", idx) && occursin("href=\"other/\"", idx)
         @test occursin("Renamed", idx) && occursin("Other Doc", idx)
+        # Progressive enhancement: cards are BAKED (above) for no-JS/scrapers, AND a client refresh
+        # re-renders them from slate-site.json so a cross-repo publish shows up without a rebuild.
+        @test occursin("id=\"slate-cards-root\"", idx) && occursin("fetch('slate-site.json'", idx)
 
         write(joinpath(d, NS._SITE_MANIFEST), "{\"title\":\"T\",\"docs\":[{\"slug\":\"x\",\"title\":\"X\"}]}")
         @test NS._read_site_manifest(d)["docs"][1]["slug"] == "x"
         @test NS._read_site_manifest(mktempdir())["docs"] == Any[]  # absent → empty manifest
+    end
+
+    # build_site!: two notebooks accreting into ONE dir with NO git — the deploy-only / cross-repo
+    # merge, minus the push. Each gets its slug dir; the manifest carries both; the index bakes both
+    # + carries the client refresh. Re-building a slug updates it in place.
+    @testset "build_site! merges multiple docs into one dir (no git)" begin
+        # a figure short-circuits og_image so it never reaches the Typst title-card render in tests
+        withfig(nb) = (nb.report.cells[end].output = RE.CellOutput("",
+            [RE.MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0); nb)
+        d = mktempdir()
+        a = withfig(_mknb("#%% md id=t\n# Alpha\nfirst doc\n\n#%% code id=fig\n1\n"))
+        b = withfig(_mknb("#%% md id=t\n# Beta\nsecond doc\n\n#%% code id=fig\n1\n"))
+        r1 = NS.build_site!(d, a; slug = "alpha", site_url = "https://u.github.io/s/")
+        r2 = NS.build_site!(d, b; slug = "beta", site_url = "https://u.github.io/s/")
+        @test r1.slug == "alpha" && r2.slug == "beta" && !r1.home
+        @test isfile(joinpath(d, "alpha", "index.html")) && isfile(joinpath(d, "beta", "index.html"))
+        slugs = sort([String(get(x, "slug", "")) for x in NS._read_site_manifest(d)["docs"]])
+        @test slugs == ["alpha", "beta"]                              # both merged, no clobber
+        idx = read(joinpath(d, "index.html"), String)
+        @test occursin("href=\"alpha/\"", idx) && occursin("href=\"beta/\"", idx)   # both baked
+        @test occursin("fetch('slate-site.json'", idx) && isfile(joinpath(d, ".nojekyll"))
+        # rebuilding the SAME slug updates in place (no duplicate manifest entry)
+        NS.build_site!(d, withfig(_mknb("#%% md id=t\n# Alpha v2\n\n#%% code id=fig\n1\n")); slug = "alpha")
+        docs2 = NS._read_site_manifest(d)["docs"]
+        @test count(x -> String(get(x, "slug", "")) == "alpha", docs2) == 1
+        @test occursin("Alpha v2", read(joinpath(d, "alpha", "index.html"), String))
     end
 
     # Custom front page: a `home` notebook renders to the site root, with a `docindex` cell marking where
@@ -318,6 +347,7 @@ x = 1
         @test occursin("Kahli's Notebooks", filled)                       # custom content preserved
         @test occursin("href=\"post-one/\"", filled)                      # listing injected at the marker
         @test !occursin("id=\"slate-docindex\"></div>", filled)           # marker consumed
+        @test occursin("id=\"slate-cards-root\"", filled) && occursin("fetch('slate-site.json'", filled)  # + client refresh
         # No placeholder in the page → cards appended before </body> rather than dropped.
         nomark = NS._site_index_with_home("<html><body><h1>Hi</h1></body></html>", docs)
         @test occursin("href=\"post-one/\"", nomark) && occursin("<h1>Hi</h1>", nomark)

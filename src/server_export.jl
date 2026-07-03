@@ -607,16 +607,13 @@ _doc_cards_css() = """
 .slate-cards .meta .run{color:#58a6ff}.slate-cards-empty{color:#8b949e;padding:12px 0}
 """
 
-# The self-contained document listing (scoped `<style>` + card grid), newest first. Dropped verbatim
-# into the default index or a home notebook's `docindex` placeholder.
-function _doc_cards_html(docs)
+# The card grid ONLY (no `<style>`), newest first — the part a client refresh re-renders. Its
+# markup is mirrored 1:1 by `_cards_refresh_script`'s JS, so a baked grid and a JS-rebuilt grid
+# are indistinguishable.
+function _cards_grid_html(docs)
     ds = sort([d for d in docs if d isa AbstractDict]; by = d -> String(get(d, "date", "")), rev = true)
+    isempty(ds) && return "<div class=\"slate-cards-empty\">No documents published yet.</div>"
     io = IOBuffer()
-    print(io, "<style>", _doc_cards_css(), "</style>")
-    if isempty(ds)
-        print(io, "<div class=\"slate-cards-empty\">No documents published yet.</div>")
-        return String(take!(io))
-    end
     print(io, "<div class=\"slate-cards\">")
     for d in ds
         slug = _esc(String(get(d, "slug", ""))); title = _esc(String(get(d, "title", get(d, "slug", ""))))
@@ -633,6 +630,47 @@ function _doc_cards_html(docs)
     print(io, "</div>")
     return String(take!(io))
 end
+
+# The self-contained document listing (scoped `<style>` + card grid), newest first. Dropped verbatim
+# into the default index or a home notebook's `docindex` placeholder.
+_doc_cards_html(docs) = "<style>" * _doc_cards_css() * "</style>" * _cards_grid_html(docs)
+
+# Progressive-enhancement refresh: on load, re-render the card grid from the live `slate-site.json`
+# so a doc published from ANOTHER repo (which pushed its slug-dir + jq-merged its manifest entry but
+# did NOT regenerate this index) shows up without a rebuild. The baked grid is the no-JS/scraper
+# fallback; this just replaces `#slate-cards-root` if the manifest fetch succeeds. Markup mirrors
+# `_cards_grid_html` exactly.
+function _cards_refresh_script()
+    return """
+    <script>
+    (function(){
+      var root=document.getElementById('slate-cards-root'); if(!root) return;
+      var esc=function(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
+      fetch('slate-site.json',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(m){
+        if(!m||!m.docs) return;
+        var ds=m.docs.filter(function(d){return d&&d.slug;}).sort(function(a,b){return String(b.date||'').localeCompare(String(a.date||''));});
+        if(!ds.length){root.innerHTML='<div class="slate-cards-empty">No documents published yet.</div>';return;}
+        var h='<div class="slate-cards">';
+        ds.forEach(function(d){
+          h+='<a class="card" href="'+esc(d.slug)+'/">';
+          if(d.image) h+='<div class="thumb"><img src="'+esc(d.image)+'" alt="" loading="lazy"/></div>';
+          h+='<div class="cardbody"><h2>'+esc(d.title||d.slug)+'</h2>';
+          if(d.description) h+='<p>'+esc(d.description)+'</p>';
+          h+='<div class="meta"><span>'+esc(d.date||'')+'</span>';
+          if(d.runnable===true) h+='<span class="run">▶ runnable</span>';
+          h+='</div></div></a>';
+        });
+        h+='</div>'; root.innerHTML=h;
+      }).catch(function(){});
+    })();
+    </script>"""
+end
+
+# The manifest-driven listing block: scoped CSS + a baked grid inside `#slate-cards-root` (the JS
+# mount point) + the refresh script. Baked = instant paint & fallback; JS = always-fresh from the
+# manifest (the cross-repo keystone). Used by both index variants.
+_manifest_cards_block(docs) = string("<style>", _doc_cards_css(), "</style>",
+    "<div id=\"slate-cards-root\">", _cards_grid_html(docs), "</div>", _cards_refresh_script())
 
 const _DOCINDEX_MARK = "<div id=\"slate-docindex\"></div>"
 
@@ -669,19 +707,81 @@ function _render_site_index(manifest; site_url::AbstractString = "")
           ".site-wrap{max-width:960px;margin:0 auto;padding:12px 24px 40px}",
           ".site-ft{max-width:960px;margin:0 auto;padding:24px;color:#8b949e;font-size:.8rem;border-top:1px solid #30363d}",
           "</style></head><body><header class=\"site-hd\"><h1>", _esc(site_title), "</h1></header>",
-          "<main class=\"site-wrap\">", _doc_cards_html(docs), "</main>",
+          "<main class=\"site-wrap\">", _manifest_cards_block(docs), "</main>",
           "<footer class=\"site-ft\">Published with Kaimon Slate</footer></body></html>")
     return String(take!(io))
 end
 
 # A CUSTOM front page: a home notebook's exported HTML with its `docindex` placeholder filled by the
-# current card grid (appended before </body> if the author left no placeholder). Regenerated on every
-# publish, so the listing stays current even when the home notebook itself isn't being re-published.
+# manifest-driven listing (appended before </body> if the author left no placeholder). The baked grid
+# stays current on the home notebook's own publishes; the refresh script keeps it fresh when OTHER
+# repos publish docs into the site without re-rendering this page.
 function _site_index_with_home(home_html::AbstractString, docs)
-    cards = _doc_cards_html(docs)
+    cards = _manifest_cards_block(docs)
     occursin(_DOCINDEX_MARK, home_html) && return replace(home_html, _DOCINDEX_MARK => cards)
     occursin("</body>", home_html) && return replace(home_html, "</body>" => cards * "</body>"; count = 1)
     return home_html * cards
+end
+
+# Assemble/merge `nb` into the static site rooted at `dir` — NO git. A `home` notebook becomes the
+# front-page template (`.slate-home.html`); any other notebook builds its own `<slug>/`. Either way
+# we upsert `slate-site.json` and (re)write the client-side index, then return the bits the caller
+# (publish or a local/CI build) needs. `site_url` is the eventual base URL for absolute OG tags +
+# bundle fetch; "" ⇒ page-relative (fine for a purely local preview). Shared by `publish_site` and
+# `build_site!` so both layouts stay in lockstep.
+function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::AbstractString,
+                         slug::AbstractString, site_title::AbstractString = "",
+                         site_description::AbstractString = "", bundle::Bool = false, kwargs...)
+    manifest = _read_site_manifest(dir)
+    isempty(strip(site_title)) || (manifest["title"] = String(site_title))
+    isempty(strip(site_description)) || (manifest["description"] = String(site_description))
+    su = isempty(strip(site_url)) ? "" : rstrip(String(site_url), '/') * "/"     # normalized, trailing /
+    htmpl = joinpath(dir, ".slate-home.html")
+    local commit_title, docUrl
+    if _home_notebook(nb)
+        fm = report_frontmatter(nb.report)
+        himg = og_image(nb); hogpath = ""
+        if himg !== nothing
+            write(joinpath(dir, "og-image.png"), himg)
+            hogpath = isempty(su) ? "og-image.png" : su * "og-image.png"       # absolute when hosted
+        end
+        write(htmpl, export_html(nb; runnable = false, og_image = hogpath,
+                                 og_url = su, og_type = "website", kwargs...))  # carries `docindex`
+        manifest["home"] = true
+        commit_title = "front page — $(isempty(strip(fm.title)) ? nb.id : strip(fm.title))"
+        docUrl = su
+    else
+        base = isempty(su) ? "" : su * slug * "/"
+        docdir = joinpath(dir, slug)
+        rm(docdir; recursive = true, force = true)                             # clean replace of this doc
+        entry = _build_doc!(docdir, nb; slug = slug, base_url = base, bundle = bundle, kwargs...)
+        _upsert_doc!(manifest, entry)
+        commit_title = entry["title"]; docUrl = base
+    end
+    write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
+    docs = get(manifest, "docs", Any[])
+    write(joinpath(dir, "index.html"),
+          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) :
+          _render_site_index(manifest; site_url = su))
+    write(joinpath(dir, ".nojekyll"), "")                                      # serve verbatim (no Jekyll)
+    return (; home = _home_notebook(nb), slug, docUrl, commit_title, docCount = length(docs))
+end
+
+"""
+    build_site!(dir, nb; site_url="", slug="", bundle=false, kwargs...) -> NamedTuple
+
+Assemble/merge `nb` into the static site at `dir` (created if absent) WITHOUT any git — build the
+doc's `<slug>/` (or the `home` front page), upsert `slate-site.json`, and (re)write the client-side
+index. The deploy-only building block: render locally, commit `dir`, let CI just push it. Point
+several notebooks at the SAME `dir` to accrete a multi-doc site. `site_url` is the eventual base URL
+(for absolute OG tags / bundle fetch); "" ⇒ page-relative. Returns `(; home, slug, docUrl, ...)`.
+"""
+function build_site!(dir::AbstractString, nb::LiveNotebook; site_url::AbstractString = "",
+                     slug::AbstractString = "", bundle::Bool = false, kwargs...)
+    mkpath(dir)
+    slg = isempty(strip(slug)) ? doc_slug(nb) : _slugify(slug)
+    isempty(slg) && (slg = _slugify(nb.id))
+    return _assemble_site!(dir, nb; site_url = site_url, slug = slg, bundle = bundle, kwargs...)
 end
 
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
@@ -761,45 +861,12 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
         cloned = !created && _git_run(work, `git clone --depth 1 --branch gh-pages --single-branch $pushurl site`)[1]
         cloned || (mkpath(dir); (ok = _git_run(dir, `git init -q -b gh-pages`)[1]) || error("git init failed"))
 
-        # A `home` notebook renders to the site ROOT as a custom front page (stored as a template so the
-        # listing can be re-filled on later publishes); any other notebook builds its own /<slug>/ card.
-        manifest = _read_site_manifest(dir)
-        isempty(strip(site_title)) || (manifest["title"] = String(site_title))
-        isempty(strip(site_description)) || (manifest["description"] = String(site_description))
+        # A `home` notebook renders to the site ROOT as a custom front page; any other notebook builds
+        # its own /<slug>/. Shared git-free assembler (also used by the non-pushing `build_site!`).
         siteUrl = "https://$owner.github.io/$name/"
-        home = _home_notebook(nb)
-        htmpl = joinpath(dir, ".slate-home.html")
-        local commit_title, docUrl
-        if home
-            fm = report_frontmatter(nb.report)
-            # Give the front page its own OG image (its first figure), written at the site root and
-            # referenced absolutely so a link to the root unfurls with a card image in Discourse.
-            himg = og_image(nb)
-            hogpath = ""
-            if himg !== nothing
-                write(joinpath(dir, "og-image.png"), himg); hogpath = siteUrl * "og-image.png"
-            end
-            write(htmpl, export_html(nb; runnable = false, og_image = hogpath,
-                                     og_url = siteUrl, og_type = "website", kwargs...))   # carries `docindex`
-            manifest["home"] = true
-            commit_title = "front page — $(isempty(strip(fm.title)) ? nb.id : strip(fm.title))"
-            docUrl = siteUrl
-        else
-            base = "https://$owner.github.io/$name/$slg/"
-            docdir = joinpath(dir, slg)
-            rm(docdir; recursive = true, force = true)                # clean replace of this doc
-            entry = _build_doc!(docdir, nb; slug = slg, base_url = base, bundle = bundle, kwargs...)
-            _upsert_doc!(manifest, entry)
-            commit_title = entry["title"]; docUrl = base
-        end
-        write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
-        # Regenerate the root index: the custom home template with its listing re-filled if present, else
-        # the default card page. Runs on EVERY publish, so adding a doc refreshes the front-page listing.
-        docs = get(manifest, "docs", Any[])
-        write(joinpath(dir, "index.html"),
-              isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) :
-              _render_site_index(manifest; site_url = siteUrl))
-        write(joinpath(dir, ".nojekyll"), "")                     # serve verbatim (no Jekyll)
+        built = _assemble_site!(dir, nb; site_url = siteUrl, slug = slg, site_title = site_title,
+                                site_description = site_description, bundle = bundle, kwargs...)
+        home = built.home; commit_title = built.commit_title; docUrl = built.docUrl
 
         for cmd in (`git add -A`,
                     `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish $commit_title"`)
@@ -821,7 +888,7 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
             strip(replace(plog, r"\s+" => " ")))
         return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
                 slug = home ? "" : slg, home,
-                created, pagesEnabled = pok, pagesError, docCount = length(get(manifest, "docs", Any[])))
+                created, pagesEnabled = pok, pagesError, docCount = built.docCount)
     finally
         rm(work; recursive = true, force = true)
     end
