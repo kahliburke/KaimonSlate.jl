@@ -784,6 +784,73 @@ function build_site!(dir::AbstractString, nb::LiveNotebook; site_url::AbstractSt
     return _assemble_site!(dir, nb; site_url = site_url, slug = slg, bundle = bundle, kwargs...)
 end
 
+# ── Local site host: depot-backed named sites, served by the hub over HTTP ─────────────────────────
+# The local mirror of the GitHub publish flow: build a `home`/portfolio front page and export OTHER
+# notebooks into it, served at /sites/<name>/ so the client-side index's `fetch('slate-site.json')`
+# works (it can't over file://). Persistent (depot-backed) — a site is a staging area you accrete over
+# time, then push to GitHub when ready. Same `build_site!` primitive, a different destination — the
+# seed of a hosted "Slate cloud". Relocatable via KAIMONSLATE_SITES_DIR (also lets tests use a temp).
+_sites_dir() = get(ENV, "KAIMONSLATE_SITES_DIR",
+                   joinpath(first(Base.DEPOT_PATH), "scratchspaces", "kaimonslate", "sites"))
+
+# The build dir for a named site (name → URL/filesystem-safe slug). `nothing` for an empty name.
+function _site_dir(name::AbstractString)
+    s = _slugify(name)
+    isempty(s) && return nothing
+    return joinpath(_sites_dir(), s)
+end
+
+# Existing local sites (slugified names), newest-content first isn't meaningful here → sorted.
+list_local_sites() = (d = _sites_dir(); isdir(d) ? sort(filter(n -> isdir(joinpath(d, n)), readdir(d))) : String[])
+
+_site_ctype(p) = (e = lowercase(splitext(p)[2]);
+    e == ".html" ? "text/html; charset=utf-8" :
+    e in (".js", ".mjs") ? "application/javascript; charset=utf-8" :
+    e == ".css" ? "text/css; charset=utf-8" :
+    e == ".json" ? "application/json; charset=utf-8" :
+    e == ".png" ? "image/png" :
+    e in (".jpg", ".jpeg") ? "image/jpeg" :
+    e == ".svg" ? "image/svg+xml" :
+    e == ".gif" ? "image/gif" :
+    e == ".ico" ? "image/x-icon" :
+    e == ".woff2" ? "font/woff2" :
+    e == ".woff" ? "font/woff" :
+    e == ".ttf" ? "font/ttf" :
+    e in (".txt", ".jl", ".map") ? "text/plain; charset=utf-8" :
+    "application/octet-stream")
+
+# Resolve `<name>/<sub>` to a servable file under the site dir, with a `..`-traversal guard: the
+# resolved path must stay inside the site. A directory (or empty `sub`) serves its `index.html`.
+# Returns the absolute path, or `nothing`.
+function _site_file(name::AbstractString, sub::AbstractString)
+    root = _site_dir(name)
+    (root === nothing || !isdir(root)) && return nothing
+    rootn = normpath(root)
+    p = normpath(joinpath(rootn, strip(sub, '/')))
+    (p == rootn || startswith(p, rootn * "/")) || return nothing      # never escape the site dir
+    isdir(p) && (p = joinpath(p, "index.html"))
+    isfile(p) ? p : nothing
+end
+
+"""
+    export_to_site(nb, name; slug="", bundle=false, base_url="", kwargs...) -> NamedTuple
+
+Export `nb` into the persistent LOCAL site `name` (created if new), served by the hub at
+`/sites/<name>/`. A `home` notebook becomes the front page; any other notebook gets its `<slug>/`.
+The local mirror of [`publish_site`] — same `build_site!`, no git/GitHub. Returns `(; url, site,
+slug, home, docCount, dir)` where `url` is the hub-relative path to open. `base_url` (the site's
+hub URL) is baked into absolute OG/bundle links when given; "" ⇒ page-relative (fine for local).
+"""
+function export_to_site(nb::LiveNotebook, name::AbstractString; slug::AbstractString = "",
+                        bundle::Bool = false, base_url::AbstractString = "", kwargs...)
+    dir = _site_dir(name)
+    dir === nothing && error("export_to_site: empty/invalid site name")
+    built = build_site!(dir, nb; site_url = base_url, slug = slug, bundle = bundle, kwargs...)
+    sroot = "/sites/" * _slugify(name) * "/"
+    return (; url = built.home ? sroot : sroot * built.slug * "/", site = _slugify(name),
+            slug = built.slug, home = built.home, docCount = built.docCount, dir)
+end
+
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
 function _existing_site_docs(gh, repo::AbstractString)
     # Interpolate the path + header as whole variables so the `?`/`:`/space reach gh literally

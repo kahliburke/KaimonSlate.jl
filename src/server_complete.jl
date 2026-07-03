@@ -231,6 +231,17 @@ function _make_router(h::Hub)
         p = joinpath(_JS_DIR, f)
         isfile(p) ? _asset(read(p, String), "application/javascript; charset=utf-8") : HTTP.Response(404)
     end)
+    # Local site host: serve a persistent named site (export_to_site) over HTTP so its client-side
+    # index — which `fetch`es slate-site.json (blocked on file://) — works. Greedy `**` for nested
+    # slug dirs; `_site_file` resolves + guards against `..` traversal outside the site dir.
+    HTTP.register!(router, "GET", "/sites/**", req -> begin
+        rel = replace(HTTP.URI(req.target).path, r"^/sites/" => "")
+        parts = split(rel, '/'; limit = 2)
+        (isempty(parts) || isempty(parts[1])) && return HTTP.Response(404)
+        f = _site_file(String(parts[1]), length(parts) == 2 ? String(parts[2]) : "")
+        f === nothing && return HTTP.Response(404, "no such site file")
+        HTTP.Response(200, ["Content-Type" => _site_ctype(f)], read(f))
+    end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
@@ -495,6 +506,24 @@ function _make_router(h::Hub)
         HTTP.Response(200, ["Content-Type" => "application/gzip",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], data)
     end))
+    # Export a notebook INTO a persistent local site (the local mirror of publish). Body:
+    # {name, slug?, bundle?, theme?, outputs?, source?}. Returns the hub-relative URL to open.
+    HTTP.register!(router, "POST", "/api/{id}/export-to-site", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        name = strip(String(get(b, "name", "")))
+        isempty(name) && return HTTP.Response(400, "missing site \"name\"")
+        try
+            r = export_to_site(nb, String(name); slug = String(get(b, "slug", "")),
+                               bundle = get(b, "bundle", false) === true, theme = get(b, "theme", "dark"),
+                               outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0")
+            return _json(Dict("url" => r.url, "site" => r.site, "slug" => r.slug,
+                              "home" => r.home, "docCount" => r.docCount))
+        catch e
+            return HTTP.Response(500, "Export to site failed: " * sprint(showerror, e))
+        end
+    end))
+    # Existing local sites (names), for the export dialog's picker.
+    HTTP.register!(router, "GET", "/api/sites", _ -> _json(Dict("sites" => list_local_sites())))
     # Preflight (read-only): what would publishing to this repo do? Body: {repo}. Drives the confirm UI.
     HTTP.register!(router, "POST", "/api/{id}/publish-check", req -> _withnb(h, req, nb -> begin
         repo = strip(get(_body(req), "repo", ""))

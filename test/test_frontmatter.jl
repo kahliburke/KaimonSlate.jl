@@ -323,6 +323,27 @@ x = 1
         @test occursin("Alpha v2", read(joinpath(d, "alpha", "index.html"), String))
     end
 
+    # Local site host: export into a persistent named site (served under /sites/<name>/), and the
+    # `_site_file` resolver — directory → index.html, and a hard `..`-traversal guard.
+    @testset "export_to_site + _site_file traversal guard" begin
+        withfig(nb) = (nb.report.cells[end].output = RE.CellOutput("",
+            [RE.MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0); nb)
+        tmp = mktempdir()
+        withenv("KAIMONSLATE_SITES_DIR" => tmp) do
+            a = withfig(_mknb("#%% md id=t\n# Alpha\n\n#%% code id=fig\n1\n"))
+            r = NS.export_to_site(a, "My Portfolio"; slug = "alpha")
+            @test r.site == "my-portfolio" && r.slug == "alpha" && !r.home
+            @test r.url == "/sites/my-portfolio/alpha/"
+            @test isdir(joinpath(tmp, "my-portfolio", "alpha")) && "my-portfolio" in NS.list_local_sites()
+            @test NS._site_file("my-portfolio", "") == joinpath(tmp, "my-portfolio", "index.html")  # dir → index
+            @test NS._site_file("My Portfolio", "slate-site.json") !== nothing        # raw name re-slugs
+            @test NS._site_file("my-portfolio", "alpha") == joinpath(tmp, "my-portfolio", "alpha", "index.html")
+            @test NS._site_file("my-portfolio", "../../../etc/passwd") === nothing    # never escape the site
+            @test NS._site_file("my-portfolio", "..") === nothing
+            @test NS._site_file("nope", "index.html") === nothing                     # unknown site
+        end
+    end
+
     # Custom front page: a `home` notebook renders to the site root, with a `docindex` cell marking where
     # the document listing is injected (re-filled on every publish, so it stays current).
     @testset "front page (home tag + docindex placeholder)" begin
