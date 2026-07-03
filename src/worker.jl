@@ -79,19 +79,60 @@ function _memo_dir()
     return _MEMO_DIR[]
 end
 
-# Digest of the Revise-tracked source (def-name → body-hash maps) — folds `src/` edits into the key.
-# Seed synchronously first so the digest reflects currently-loaded packages NOW (the async watcher
-# may not have seeded yet on a cold start) — otherwise store-time and restore-time digests diverge
-# and every restart misses the cache.
-function _src_digest()
-    h = UInt(0x53726300)
-    try; _seed_new_src_defs!(); catch; end
+# The DEVELOPED source dirs whose edits should invalidate a memo entry: the parent project's `src/`
+# plus any dev'd path-dependency's `src/` (from `path = "…"` lines in the active Manifest). Derived
+# deterministically from disk + the Manifest — NOT Revise's `pkgdatas`.
+function _memo_src_dirs()
+    dirs = String[]
+    p = PARENT_PROJECT[]
+    isempty(p) || (d = joinpath(p, "src"); isdir(d) && push!(dirs, d))
     try
-        for path in sort!(collect(keys(_SRC_DEFS)))
-            h = hash(path, h); defs = _SRC_DEFS[path]
+        proj = Base.active_project()
+        if proj !== nothing
+            base = dirname(proj); man = joinpath(base, "Manifest.toml")
+            if isfile(man)
+                for m in eachmatch(r"(?m)^\s*path\s*=\s*\"([^\"]+)\"", read(man, String))
+                    pd = String(m.captures[1])
+                    isabspath(pd) || (pd = normpath(joinpath(base, pd)))
+                    d = joinpath(pd, "src"); isdir(d) && push!(dirs, d)
+                end
+            end
+        end
+    catch
+    end
+    return unique!(dirs)
+end
+
+# The deterministic, sorted `.jl` file set under those dirs.
+function _memo_src_files()
+    files = String[]
+    for dir in _memo_src_dirs(), (root, _, fs) in walkdir(dir), f in fs
+        endswith(f, ".jl") && push!(files, joinpath(root, f))
+    end
+    return sort!(unique!(files))
+end
+
+# Digest of the developed `src/` (def-name → body-hash) so an edit to a function a cell calls
+# invalidates its memo entry. Read deterministically FROM DISK (fixed file set + def-body hashes) —
+# NOT Revise's async `pkgdatas`, whose membership varied with load timing, so store-time and
+# restore-time digests diverged and nearly every restart MISSED the cache (recompute, not restore).
+# Cached by the newest src mtime so it costs one `stat` sweep per eval, not a full re-parse.
+const _SRC_DIGEST_CACHE = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
+function _src_digest()
+    try; _seed_new_src_defs!(); catch; end          # keep seeding the hot-reload watcher's baseline
+    files = _memo_src_files()
+    isempty(files) && return UInt(0x53726300)        # nothing developed → a constant (deterministic)
+    mt = try; maximum(mtime, files; init = 0.0); catch; 0.0; end
+    _SRC_DIGEST_CACHE[][1] == mt && return _SRC_DIGEST_CACHE[][2]
+    h = UInt(0x53726300)
+    try
+        for path in files
+            h = hash(path, h); defs = _file_defs(path)
             for k in sort!(collect(keys(defs))); h = hash((k, defs[k]), h); end
         end
-    catch; end
+    catch
+    end
+    _SRC_DIGEST_CACHE[] = (mt, h)
     return h
 end
 
@@ -107,8 +148,14 @@ function _manifest_digest()
     catch; return UInt(0); end
 end
 
-_memo_file(cellkey::AbstractString) =
-    joinpath(_memo_dir(), string(hash((String(cellkey), _src_digest(), _manifest_digest())); base = 16))
+function _memo_file(cellkey::AbstractString)
+    sd = _src_digest(); md = _manifest_digest()
+    # Opt-in diagnostic: log the two digests that complete the cache key, so a store-run vs a
+    # restore-run can be compared to see which one drifts (→ near-total cache misses). KAIMONSLATE_MEMO_DEBUG=1.
+    get(ENV, "KAIMONSLATE_MEMO_DEBUG", "") == "1" &&
+        @info "slate memo key" cell = String(cellkey) src_digest = string(sd; base = 16) manifest_digest = string(md; base = 16)
+    return joinpath(_memo_dir(), string(hash((String(cellkey), sd, md)); base = 16))
+end
 
 # Bounded LRU: if the store exceeds the cap, delete oldest files until under it.
 function _memo_gc()
@@ -149,27 +196,35 @@ end
 # If a DECLARED write isn't actually defined in the namespace (e.g. the value never became visible),
 # skip caching entirely rather than writing a partial entry that would restore output without state.
 function _memo_store(cellkey::String, names::Vector{String}, wire)
-    _MEMO_OK || return nothing
+    _MEMO_OK || return false
     m = _NS[]
     binds = Dict{String,Any}()
+    # Read each declared write at the LATEST world age. A global the cell defines for the FIRST
+    # time this run lives in a binding partition NEWER than this method's captured (older) world
+    # age, so a naive `isdefined`/`getglobal` here would not observe it — and we'd wrongly skip
+    # caching on every fresh-namespace run (a cold reopen defines all its globals anew), which is
+    # exactly why the durable cache almost never populated. `invokelatest` re-dispatches the read
+    # at the current world so the just-created binding is visible. (A later cell that reads the
+    # global runs in its own newer world, which is why it saw the value while this guard didn't.)
     for nm in names
         s = Symbol(nm)
-        if !isdefined(m, s)
+        if !Base.invokelatest(isdefined, m, s)
             @info "slate memo: not cached (a declared global is undefined post-run)" cell = cellkey name = nm
-            return nothing
+            return false
         end
-        binds[nm] = getfield(m, s)
+        binds[nm] = Base.invokelatest(getglobal, m, s)
     end
     f = _memo_file(cellkey); tmp = f * ".tmp"
     try
         Serialization.serialize(tmp, (bindings = binds, wire = wire))   # throws on an unserializable value
         mv(tmp, f; force = true)
         _memo_gc()
+        return true
     catch e
         @info "slate memo: not cached" cell = cellkey reason = first(split(sprint(showerror, e), '\n'))
         try; isfile(tmp) && rm(tmp; force = true); catch; end
+        return false
     end
-    return nothing
 end
 
 # Evaluate ONE cell's source in the warm namespace, returning its wire-form capture — the shared core
@@ -212,8 +267,8 @@ function _eval_one(source::String, filename::String, memo_key::String,
         @info "slate eval: output truncated for display — full result saved" cell = cid items = [(String(e.kind), Int(e.bytes)) for e in r.overflow]
     # Cache only expensive, error-free runs (cheap cells never pay the serialize cost).
     if !isempty(memo_key) && r.exception === nothing && memo_threshold > 0 && r.duration_ms >= memo_threshold
-        _memo_store(memo_key, memo_names, r)
-        @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
+        _memo_store(memo_key, memo_names, r) &&
+            @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
     end
     return r
 end
