@@ -20,7 +20,7 @@ jobs:
       contents: write
       statuses: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: julia-actions/setup-julia@v2
         with:
@@ -35,12 +35,12 @@ jobs:
             Pkg.develop(PackageSpec(path=pwd()))
             Pkg.instantiate()'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
       - name: Cache npm dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: docs/node_modules
           key: npm-${{ hashFiles('docs/package-lock.json', 'docs/package.json') }}
@@ -56,7 +56,7 @@ jobs:
       # Release (keeping binaries out of the repo). Guarded so CI stays green until the
       # generator (docs/generate_assets.mjs) is added.
       - name: Cache generated doc assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             docs/src/assets/*.gif

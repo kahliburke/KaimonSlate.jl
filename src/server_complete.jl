@@ -578,7 +578,8 @@ function _make_router(h::Hub)
             _persist!(nb)
             return _json(Dict("url" => r.url, "docUrl" => r.docUrl, "slug" => r.slug, "repo" => r.repo,
                               "created" => r.created, "docCount" => r.docCount, "home" => r.home,
-                              "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError))
+                              "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError,
+                              "deployStatus" => get(r, :deployStatus, "")))
         catch e
             return HTTP.Response(500, "Publish failed: " * sprint(showerror, e))
         end

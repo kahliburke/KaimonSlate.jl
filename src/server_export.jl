@@ -889,6 +889,89 @@ function publish_preflight(repo::AbstractString)
             hasGhPages, pagesUrl = pageurl, docs)
 end
 
+# ── Modern (GitHub Actions) Pages deployment ────────────────────────────────────────────────────────
+# Published sites deploy via a Slate-generated Actions workflow instead of GitHub's auto-generated
+# LEGACY "pages-build-deployment". Legacy pins Node-20 actions (a standing deprecation warning) and
+# serialises poorly — two publishes close together collide into a stuck build + "Deployment failed,
+# try again later", leaving the CDN on a stale deploy while the branch is already current. This
+# workflow pins current (Node-24) actions and a `concurrency: pages` guard so overlapping publishes
+# QUEUE instead of colliding. It lives on `gh-pages` and triggers on push there — self-contained,
+# never touching the repo's default branch.
+const _PAGES_WF_FILE = ".github/workflows/deploy-pages.yml"
+const _PAGES_WF_YAML = """
+name: Deploy Slate site to GitHub Pages
+on:
+  push:
+    branches: [gh-pages]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: \${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prune VCS metadata from the published artifact
+        run: rm -rf .git
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: '.'
+      - id: deployment
+        uses: actions/deploy-pages@v5
+"""
+
+# gh/git command → (ok, combined output). Like `_git_run` but needs no working dir. Never throws.
+function _cmd_out(args::Cmd)
+    out = IOBuffer()
+    p = run(pipeline(ignorestatus(args); stdout = out, stderr = out))
+    return (p.exitcode == 0, String(take!(out)))
+end
+
+# Put the repo's Pages into WORKFLOW build mode (deployed by our Actions workflow, not the legacy
+# branch builder) BEFORE the push, so the push triggers OUR workflow and legacy never fires. POST
+# creates Pages (works even before any branch exists); PUT switches an existing/legacy config.
+function _ensure_pages_workflow!(gh, repo)
+    ep = "repos/$repo/pages"
+    _gh_ok(`$gh api $ep`) && return _cmd_out(`$gh api -X PUT $ep -f build_type=workflow`)
+    return _cmd_out(`$gh api -X POST $ep -f build_type=workflow`)
+end
+
+# After the push, watch our Pages deploy workflow run for commit `sha` until it completes; return
+# `(; done, ok, conclusion, url)` for honest reporting. Graceful on timeout — the deploy keeps going
+# server-side; we just stop waiting (so the publish call can't hang the UI indefinitely).
+function _await_pages_deploy(gh, repo, sha; timeout = 120.0)
+    path = "repos/$repo/actions/workflows/$(basename(_PAGES_WF_FILE))/runs?head_sha=$sha&event=push"
+    jq = ".workflow_runs[0]"                          # interpolate as a var: literal []/? aren't Cmd-safe
+    deadline = time() + timeout
+    last = "queued"
+    while time() < deadline
+        ok, out = _cmd_out(`$gh api $path -q $jq`)
+        s = strip(out)
+        if ok && !isempty(s) && s != "null"
+            wr = try; JSON.parse(s); catch; nothing; end
+            if wr isa AbstractDict
+                last = String(get(wr, "status", last))
+                if last == "completed"
+                    concl = String(get(wr, "conclusion", ""))
+                    return (; done = true, ok = concl == "success", conclusion = concl,
+                            url = String(get(wr, "html_url", "")))
+                end
+            end
+        end
+        sleep(4)
+    end
+    return (; done = false, ok = false, conclusion = last, url = "")
+end
+
 """
     publish_site(nb, repo; private=false, create=true, kwargs...) -> (; url, repo, created, pagesEnabled, pagesError)
 
@@ -935,27 +1018,47 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
                                 site_description = site_description, bundle = bundle, kwargs...)
         home = built.home; commit_title = built.commit_title; docUrl = built.docUrl
 
-        for cmd in (`git add -A`,
-                    `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish $commit_title"`)
-            ok, log = _git_run(dir, cmd); ok || error("git failed: $log")
+        # Ship the modern Actions deploy workflow on the branch (see `_PAGES_WF_YAML`) so GitHub deploys
+        # via it, not the legacy Node-20 branch builder.
+        mkpath(joinpath(dir, dirname(_PAGES_WF_FILE)))
+        write(joinpath(dir, _PAGES_WF_FILE), _PAGES_WF_YAML)
+        # Switch Pages to workflow build mode BEFORE the push, so the push triggers our workflow and the
+        # legacy builder never fires (a 422 here — e.g. a private repo on the free plan — is surfaced below).
+        pok, plog = _ensure_pages_workflow!(gh, repo)
+        oka, loga = _git_run(dir, `git add -A`); oka || error("git add failed: $loga")
+        okc, logc = _git_run(dir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish $commit_title"`)
+        if !okc
+            # `git commit` fails with "nothing to commit" when the freshly-built site is byte-identical to
+            # what's already published — the confusing "publish says no changes" case. Don't error out:
+            # the branch is already current; just RE-TRIGGER the deploy (best effort) so a previously stuck
+            # or failed GitHub Pages deploy can be recovered by re-publishing, then report cleanly.
+            if occursin("nothing to commit", logc) || occursin("working tree clean", logc)
+                _cmd_out(`$gh workflow run $(basename(_PAGES_WF_FILE)) --repo $repo --ref gh-pages`)
+                return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
+                        slug = home ? "" : slg, home, created,
+                        pagesEnabled = pok, pagesError = pok ? "" : strip(replace(plog, r"\s+" => " ")),
+                        deployStatus = "unchanged", docCount = built.docCount)
+            end
+            error("git commit failed: $logc")
         end
+        sha = strip(_git_run(dir, `git rev-parse HEAD`)[2])
         # Cloned → fast-forward push; fresh → force (creates/overwrites the empty-or-absent gh-pages).
         ok, log = _git_run(dir, cloned ? `git push $pushurl gh-pages` : `git push --force $pushurl gh-pages`)
         ok || error("git push failed: $(replace(log, token => "***"))")
-        # Enable Pages from gh-pages/. The `-f` values carry `[]`, which must reach gh as literal args,
-        # so interpolate them as variables (no shell parsing). Already-enabled (409) counts as success;
-        # a plan/visibility rejection (422 — Pages needs a PUBLIC repo on the free plan) is surfaced.
-        srcbranch = "source[branch]=gh-pages"; srcpath = "source[path]=/"; pagesep = "repos/$repo/pages"
-        already = _gh_ok(`$gh api $pagesep`)
-        pok, plog = already ? (true, "") : _git_run(dir, `$gh api -X POST $pagesep -f $srcbranch -f $srcpath`)
-        already_enabled = occursin("already enabled", plog)      # 409 — Pages was set up already; that's success
-        pok = pok || already_enabled
-        pagesError = pok ? "" : (occursin("does not support GitHub Pages", plog) ?
-            "GitHub Pages isn't available for this repo — private Pages needs GitHub Pro/Team; on a free plan the repo must be PUBLIC." :
-            strip(replace(plog, r"\s+" => " ")))
+        # The push triggered the deploy workflow — WAIT for it and report the REAL result, so a stuck or
+        # failed GitHub deploy is no longer mistaken for a successful publish (the whole point of this).
+        dep = _await_pages_deploy(gh, repo, sha)
+        pagesEnabled = pok && dep.ok
+        pagesError =
+            !pok ? (occursin("does not support GitHub Pages", plog) ?
+                "GitHub Pages isn't available for this repo — private Pages needs GitHub Pro/Team; on a free plan the repo must be PUBLIC." :
+                strip(replace(plog, r"\s+" => " "))) :
+            dep.ok ? "" :
+            dep.done ? "GitHub Pages deploy failed (workflow: $(dep.conclusion))" * (isempty(dep.url) ? "" : " — see $(dep.url)") :
+            "GitHub Pages deploy still $(dep.conclusion) after $(round(Int, 120))s — the live site may lag; check the repo's Actions tab."
         return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
                 slug = home ? "" : slg, home,
-                created, pagesEnabled = pok, pagesError, docCount = built.docCount)
+                created, pagesEnabled, pagesError, deployStatus = dep.conclusion, docCount = built.docCount)
     finally
         rm(work; recursive = true, force = true)
     end
