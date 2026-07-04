@@ -148,7 +148,11 @@ function renderTables(c) {
   });
 }
 // Build the persistent shell once per column-signature; refresh fills the body.
-function drawTable(wrap, spec, st) {
+// `sel` (optional) turns on ROW SELECTION (TableSelect @bind): {value, onSelect(origIdx1)} — rows
+// become clickable and the row at 1-based ORIGINAL index `value()` is highlighted. Sorting/filtering
+// reorder the view, so each row carries its original index (into spec.rows), which is what's bound.
+function drawTable(wrap, spec, st, sel) {
+  wrap._sel = sel || null;
   const cols = spec.columns || [];
   const sig = (spec.paged ? 'p:' : 'e:') + cols.map(_colName).join('');
   if (wrap._sig !== sig) { _buildShell(wrap, cols, spec, st); wrap._sig = sig; }
@@ -192,17 +196,20 @@ function _refreshTable(wrap, spec, st) {
   if (spec.paged) return _refreshPaged(wrap, spec, st);
   const allRows = spec.rows || [];
   const f = st.filter.trim().toLowerCase();
-  let rows = !f ? allRows
-    : allRows.filter(r => r.some(v => v != null && String(v).toLowerCase().includes(f)));
+  // Carry each row's ORIGINAL index [row, i] through filter+sort so a selected row still maps back to
+  // its position in spec.rows (the bound value) after the view is reordered.
+  let idxd = allRows.map((r, i) => [r, i]);
+  if (f) idxd = idxd.filter(([r]) => r.some(v => v != null && String(v).toLowerCase().includes(f)));
   if (st.sort) {
     const col = st.sort.col, mul = st.sort.dir === 'desc' ? -1 : 1;
-    rows = rows.slice().sort((a, b) => _cmp(a[col], b[col]) * mul);
+    idxd = idxd.slice().sort((a, b) => _cmp(a[0][col], b[0][col]) * mul);
   }
-  const total = rows.length;
+  const total = idxd.length;
   const pages = Math.max(1, Math.ceil(total / st.pageSize));
   st.page = Math.min(Math.max(0, st.page), pages - 1);
   const start = st.page * st.pageSize;
-  _fillTable(wrap, spec, st, rows.slice(start, start + st.pageSize), total, allRows.length);
+  const page = idxd.slice(start, start + st.pageSize);
+  _fillTable(wrap, spec, st, page.map(x => x[0]), total, allRows.length, page.map(x => x[1]));
 }
 // Server-paged: POST the request; a request token discards superseded responses.
 function _refreshPaged(wrap, spec, st) {
@@ -222,13 +229,16 @@ function _refreshPaged(wrap, spec, st) {
     _fillTable(wrap, spec, st, res.rows || [], total, spec.opts ? spec.opts.nrows : total);
   }).catch(() => {});
 }
-// Shared render of one page into the shell (body rows, info line, pagination).
-function _fillTable(wrap, spec, st, pageRows, total, baseCount) {
+// Shared render of one page into the shell (body rows, info line, pagination). `pageIdx` (optional,
+// eager tables) is each page row's ORIGINAL index — used only in selection mode.
+function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
   const { info, tbody, pag } = wrap._refs;
   _drawArrows(wrap, st);
   const start = st.page * st.pageSize;
+  const sel = wrap._sel;                                 // selection mode (TableSelect), else null
+  const curSel = sel ? (sel.value() || 0) : 0;           // 1-based original index currently bound
   tbody.innerHTML = '';
-  pageRows.forEach(r => {
+  pageRows.forEach((r, k) => {
     const tr = document.createElement('tr');
     r.forEach(v => {
       const td = document.createElement('td');
@@ -237,6 +247,13 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount) {
       td.title = td.textContent;
       tr.appendChild(td);
     });
+    if (sel && pageIdx) {                                // clickable, highlightable selection row
+      const oi = pageIdx[k] + 1;                         // 1-based original index = the bound value
+      tr.dataset.row = oi;
+      tr.classList.add('selrow');
+      if (oi === curSel) tr.classList.add('on');
+      tr.onclick = () => sel.onSelect(oi);
+    }
     tbody.appendChild(tr);
   });
   let txt = `${total ? start + 1 : 0}–${start + pageRows.length} of ${total}`;

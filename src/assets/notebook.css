@@ -544,20 +544,12 @@ body.cdnd .controls.empty::before { content:'drop a control here'; color:var(--d
 .msopt { padding:4px 9px; border-radius:4px; cursor:pointer; user-select:none; display:flex; align-items:center; }
 .msopt:hover { background:var(--bg3); }
 .msopt.on, .msopt.on:hover { background:var(--purple); color:#160d18; }
-/* TableSelect: a clickable table whose clicked row binds as a NamedTuple. The widget stacks
-   (name above the table) instead of the usual inline row. */
+/* TableSelect reuses the shared interactive table (.slatetable — sort/filter/paginate) with row
+   selection layered on. The widget stacks (name above the table) instead of the usual inline row. */
 .widget:has(.tablesel), .control:has(.tablesel) { flex-direction:column; align-items:stretch; }
-.tablesel { max-height:240px; overflow:auto; width:100%; min-width:0;
-            background:var(--bg); border:1px solid var(--border); border-radius:6px; }
-.tablesel:focus { outline:none; border-color:var(--accent); }
-.tablesel table { border-collapse:collapse; width:100%; font-size:.8rem; font-family:'Cascadia Code',monospace; }
-.tablesel th, .tablesel td { padding:3px 9px; text-align:left; white-space:nowrap;
-            border-bottom:1px solid color-mix(in srgb, var(--border) 55%, transparent); }
-.tablesel thead th { position:sticky; top:0; z-index:1; background:var(--bg3); color:var(--dim); }
-.tablesel tbody tr { cursor:pointer; }
-.tablesel tbody tr:hover { background:var(--bg3); }
-.tablesel tbody tr.on, .tablesel tbody tr.on:hover { background:color-mix(in srgb, var(--purple) 30%, transparent); }
-.tstrunc { padding:4px 9px; font-size:.72rem; color:var(--dim); border-top:1px solid var(--border); }
+.tablesel { width:100%; min-width:0; overflow:auto; max-height:360px; }
+.slatetable.selectable tbody tr { cursor:pointer; }
+.slatetable tbody tr.on, .slatetable tbody tr.on:hover { background:color-mix(in srgb, var(--purple) 32%, transparent); }
 .actionbtn { background:linear-gradient(var(--accent), color-mix(in srgb, var(--accent) 86%, #000));
              color:#fff; border:none; border-radius:8px; padding:9px 20px; font-size:.9rem; font-weight:600;
              letter-spacing:.01em; cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.15);
