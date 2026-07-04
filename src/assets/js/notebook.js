@@ -101,7 +101,11 @@ function Editor({ cell }) {
       let primed = false;
       view = window.mkEditor(host, {
         doc: cell.source, cellId: cell.id,
-        onDoc: () => { if (primed && window.edText(cell.id) !== cell.source) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); } },
+        // Compare against the LIVE server source (srcMap), NOT the mount-time `cell.source` closure —
+        // else applying an agent/external edit via edSetText (which fires this) would look like a USER
+        // edit, falsely marking the cell `edited` + backing it up, which later pops phantom reconcile
+        // popups for cells you never touched. (Mirrors the editSource editor.)
+        onDoc: () => { if (primed && window.edText(cell.id) !== (window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); } },
         onFocus: () => window.setEditing(cell.id, true),
         onBlur: () => window.setEditing(cell.id, false),
         keys: [
