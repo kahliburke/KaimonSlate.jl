@@ -137,8 +137,8 @@ function slateLiveConflict(id, mine, server) {
   if (!open) { _rcQueue = []; _rcIdx = 0; }
   const now = Math.floor(Date.now() / 1000);   // a live conflict = an external edit that just landed
   const cur = _rcQueue.find((c, i) => i >= _rcIdx && c.id === id);
-  if (cur) { cur.mine = mine; cur.server = server; cur.conflict = true; cur.serverTs = now; }   // refresh to the latest
-  else _rcQueue.push({ id, mine, server, conflict: true, ts: now, serverTs: now });
+  if (cur) { cur.mine = mine; cur.server = server; cur.conflict = true; cur.serverTs = now; cur.live = true; }   // refresh to the latest
+  else _rcQueue.push({ id, mine, server, conflict: true, ts: now, serverTs: now, live: true });
   if (!open) _rcRender();
 }
 window.slateLiveConflict = slateLiveConflict;
@@ -168,17 +168,19 @@ function _rcRender() {
   const diff = (typeof _lineDiff === 'function' ? _lineDiff(c.server, c.mine) : [])
     .map(d => `<span class="dl ${d.t}">${d.t === 'add' ? '+' : d.t === 'del' ? '-' : ' '} ${_esc(d.s)}</span>`).join('');
   m.innerHTML = `<div class="rc-card">
-    <div class="rc-head"><span class="rc-title">♻️ Unsaved edits from your last session</span>
+    <div class="rc-head"><span class="rc-title">${c.live ? '🤖 A change just landed while you were editing' : '♻️ Unsaved edits from your last session'}</span>
       <span class="rc-prog">cell ‘${_esc(c.id)}’ · ${_rcIdx + 1} of ${n}</span></div>
-    ${c.conflict
+    ${c.live
+      ? `<div class="rc-warn">⚠ An <b>external edit</b> (an agent, the file on disk, or another tab) just changed this cell while you had unsaved edits here. Keep the incoming change, or your edit.</div>`
+      : c.conflict
       ? `<div class="rc-warn">⚠ This cell <b>also changed on the server</b> since your edit — review carefully.</div>`
       : `<div class="rc-note">The saved version is unchanged; your edit is newer.</div>`}
-    <div class="rc-legend"><span class="dl del">− saved version</span><span class="dl add">+ your edit</span></div>
-    ${(c.ts || c.serverTs) && typeof _reltime === 'function'
+    <div class="rc-legend"><span class="dl del">− ${c.live ? 'incoming change' : 'saved version'}</span><span class="dl add">+ your unsaved edit</span></div>
+    ${!c.live && (c.ts || c.serverTs) && typeof _reltime === 'function'
       ? `<div class="rc-times">saved on disk ${c.serverTs ? _reltime(c.serverTs) : 'unknown'} · your edit ${c.ts ? _reltime(c.ts) : 'unknown'}</div>` : ''}
     <div class="rc-diff">${diff || '<span class="hint">(no line differences)</span>'}</div>
     <div class="rc-acts">
-      <button class="rc-server">Use saved</button>
+      <button class="rc-server">${c.live ? 'Use the incoming change' : 'Use saved'}</button>
       <button class="rc-mine primary">Use my edit</button>
     </div>
     <div class="rc-foot">
