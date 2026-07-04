@@ -150,9 +150,40 @@ function playhead(anim; label = nothing)
     return Widget("playhead", p, 1)
 end
 
+# A CLICKABLE table: renders `data` (a DataFrame / any Tables.jl source / columns+rows — anything
+# `slate_table` accepts) and binds the CLICKED ROW as a NamedTuple with a field per column, so
+# `@bind sel TableSelect(df)` gives `sel.colname` downstream. The wire/registry value is the 1-based
+# row index (0 = nothing selected); the user-facing variable is the row NamedTuple, built in
+# `_wrap_choice` (mirrors how a labeled Select stores the bare value but hands the user a `Choice`).
+# `maxrows` caps the rendered/selectable rows so a huge frame stays snappy (truncation is flagged);
+# `default` is an optional 1-based initial row.
+function TableSelect(data; default = nothing, label = nothing, maxrows::Integer = 200)
+    st = slate_table(data)   # accepts anything slate_table does (Tables.jl source, Vector{NamedTuple}, …)
+    n = min(length(st.rows), Int(maxrows))
+    p = _wparams(label)
+    p["columns"] = st.columns
+    p["rows"] = st.rows[1:n]
+    o = Dict{String,Any}("nrows" => get(st.opts, "nrows", length(st.rows)), "ncols" => length(st.columns))
+    length(st.rows) > n && (o["truncated"] = true)
+    p["opts"] = o
+    return Widget("tableselect", p, default === nothing ? 0 : clamp(Int(default), 0, n))
+end
+# The clicked row of a TableSelect as a NamedTuple (field per column). `idx` is 1-based; 0 or
+# out-of-range → `nothing` (no selection). Column names become the field Symbols (dot access works
+# for identifier-like names); values are the JSON-safe cell values captured at construction.
+function _row_namedtuple(w::Widget, idx::Integer)
+    rows = get(w.params, "rows", Vector{Any}[])
+    (idx < 1 || idx > length(rows)) && return nothing
+    cols = get(w.params, "columns", String[])
+    row = rows[idx]
+    names = Tuple(Symbol(c) for c in cols)
+    vals = Tuple(i <= length(row) ? row[i] : nothing for i in eachindex(cols))
+    return NamedTuple{names}(vals)
+end
+
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
-                       :TimeField, :Button, :playhead)
+                       :TimeField, :Button, :playhead, :TableSelect)
 
 # ── Value reconcile (the persistence policy) ──────────────────────────────────
 # Re-running a bind cell updates the SPEC (range/params) but KEEPS the user's value
@@ -167,6 +198,9 @@ function _reconcile_bind(oldw::Widget, oldv, neww::Widget)
     if neww.kind == "slider" || neww.kind == "number"
         lo = get(neww.params, "min", -Inf); hi = get(neww.params, "max", Inf)
         return (oldv isa Number && lo <= oldv <= hi) ? oldv : neww.default
+    elseif neww.kind == "tableselect"                      # keep the selected row index if still valid
+        n = length(get(neww.params, "rows", ()))
+        return (oldv isa Integer && 1 <= oldv <= n) ? oldv : neww.default
     elseif haskey(neww.params, "options")
         vals = _opt_values(neww.params["options"])
         if _is_multi(neww.kind)
@@ -187,6 +221,11 @@ function coerce_bind(w::Widget, v)
         return v === true || v == 1
     elseif w.kind == "button" || w.kind == "playhead"
         return v isa Number ? Int(round(v)) : v
+    elseif w.kind == "tableselect"
+        # The browser sends the clicked row's 1-based index; clamp to the known rows (0 = none).
+        n = length(get(w.params, "rows", ()))
+        i = v isa Number ? Int(round(v)) : 0
+        return (1 <= i <= n) ? i : 0
     elseif w.kind == "select" || w.kind == "radio"
         # The browser sends the option's stringified value attribute; map it back to the real value.
         for v0 in _opt_values(get(w.params, "options", ()))
@@ -223,6 +262,7 @@ _choice(w::Widget, v) = (li = _lookup_option(w, v); Choice(v, li[1], li[2]))
 # `Selection` (multi). The registry, wire and frontend keep the bare value(s); non-labeled
 # widgets pass through unchanged.
 function _wrap_choice(w::Widget, val)
+    w.kind == "tableselect" && return _row_namedtuple(w, val isa Integer ? val : 0)   # index → row NamedTuple
     get(w.params, "labeled", false) === true || return val
     _is_multi(w.kind) && return Selection(Choice[_choice(w, v) for v in val])
     (w.kind == "select" || w.kind == "radio") && return _choice(w, val)

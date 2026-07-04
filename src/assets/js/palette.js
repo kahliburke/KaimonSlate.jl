@@ -17,6 +17,7 @@ const BIND_SNIPPETS = [
   ['DateField',   '@bind d DateField()'],
   ['TimeField',   '@bind t TimeField()'],
   ['Button',      '@bind go Button("Run")'],
+  ['TableSelect', '@bind sel TableSelect(df)   # click a row → sel is a NamedTuple (sel.col)'],
 ];
 async function insertBind(snippet) {
   if (selectedId && editors[selectedId]) { const cur = edText(selectedId); edInsert(selectedId, (cur.trim() ? '\n' : '') + snippet); return; }

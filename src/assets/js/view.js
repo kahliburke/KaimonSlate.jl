@@ -71,6 +71,19 @@ function controlMarkup(bindId, b) {
     return `<button type="button" class="actionbtn" data-count="${b.value}" ${a}>${_esc(p.label || 'Click')}</button>`;
   else if (w === 'playhead')                          // driven by the animation player — read-only frame readout
     ctrl = `<span class="playhead-ro" ${a} title="driven by the animation player">▶ frame</span>`;
+  else if (w === 'tableselect') {                     // clickable table → binds the clicked row (a NamedTuple)
+    const cols = p.columns || [], rows = p.rows || [], sel = parseInt(b.value, 10) || 0;   // 1-based; 0 = none
+    const head = '<tr>' + cols.map(c => `<th>${_esc(c)}</th>`).join('') + '</tr>';
+    const body = rows.map((r, i) => {
+      const tds = cols.map((_, j) => `<td>${_esc(_showVal(r[j] == null ? '' : r[j]))}</td>`).join('');
+      return `<tr class="tsrow${i + 1 === sel ? ' on' : ''}" data-row="${i + 1}">${tds}</tr>`;
+    }).join('');
+    const o = p.opts || {};
+    const trunc = o.truncated ? `<div class="tstrunc">showing ${rows.length} of ${o.nrows} rows</div>` : '';
+    ctrl = `<div class="tablesel" ${a} tabindex="0" role="listbox">` +
+           `<table><thead>${head}</thead><tbody>${body}</tbody></table>${trunc}</div>`;
+    wval = '';                                        // the highlighted row IS the value indicator
+  }
   const nm = p.label != null ? p.label : b.name;   // a widget's `label=` overrides the displayed var name
   return `<span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
 }
@@ -207,8 +220,20 @@ function wireControl(el) {
     if (widget === 'multiselect') return [...el.querySelectorAll('.msopt.on')].map(o => o.dataset.value);
     if (widget === 'multicheck') return [...el.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
     if (widget === 'radio') { const c = el.querySelector('input:checked'); return c ? c.value : null; }
+    if (widget === 'tableselect') { const on = el.querySelector('tr.tsrow.on'); return on ? (parseInt(on.dataset.row, 10) || 0) : 0; }
     return el.value;
   };
+  if (widget === 'tableselect') {                    // click a row → bind it (posts the 1-based row index)
+    el.addEventListener('click', e => {
+      const tr = e.target.closest('tr.tsrow'); if (!tr || !el.contains(tr)) return;
+      touch();
+      el.querySelectorAll('tr.tsrow.on').forEach(r => r.classList.remove('on'));
+      tr.classList.add('on');
+      const idx = parseInt(tr.dataset.row, 10) || 0;
+      el._dirty = _valKey(idx); flush(idx);
+    });
+    return;                                          // no input/change events on a table
+  }
   if (widget === 'multiselect') {                    // custom listbox: click a row to toggle; Shift-click a range
     el.addEventListener('mousedown', e => { if (e.shiftKey) e.preventDefault(); });   // don't start a text selection
     const setOpt = (o, on) => { o.classList.toggle('on', on); o.setAttribute('aria-selected', on); };
@@ -547,6 +572,7 @@ function syncControlValues(state) {
     else if (w === 'multiselect') { const sv = (Array.isArray(v) ? v : []).map(String); el.querySelectorAll('.msopt').forEach(o => { const on = sv.includes(o.dataset.value); o.classList.toggle('on', on); o.setAttribute('aria-selected', on); }); }
     else if (w === 'multicheck') { const sv = (Array.isArray(v) ? v : []).map(String); el.querySelectorAll('input[type=checkbox]').forEach(i => { i.checked = sv.includes(i.value); }); }
     else if (w === 'radio') { const c = el.querySelector('input[value="' + _q(String(v)) + '"]'); if (c) c.checked = true; }
+    else if (w === 'tableselect') { const sel = parseInt(v, 10) || 0; el.querySelectorAll('tr.tsrow').forEach(tr => tr.classList.toggle('on', (parseInt(tr.dataset.row, 10) || 0) === sel)); }
     else if (w === 'button') el.dataset.count = v;
     else el.value = String(v);
     const wrap = el.closest('.widget, .control'); const m = wrap && wrap.querySelector('.wval');

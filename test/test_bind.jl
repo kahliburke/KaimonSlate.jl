@@ -44,6 +44,25 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test RE.coerce_bind(RE.ColorPicker(), "#123456") == "#123456"
     end
 
+    @testset "TableSelect binds the clicked row as a NamedTuple" begin
+        ts = RE.TableSelect([(sym = "AAPL", px = 42.0), (sym = "MSFT", px = 13.5)])
+        @test ts.kind == "tableselect"
+        @test ts.params["columns"] == ["sym", "px"]
+        @test ts.default == 0                                   # nothing selected initially
+        # No selection → nothing; a valid 1-based index → the row as a NamedTuple (field per column)
+        @test RE._wrap_choice(ts, 0) === nothing
+        row = RE._wrap_choice(ts, 1)
+        @test row === (sym = "AAPL", px = 42.0)
+        @test row.px == 42.0 && row.sym == "AAPL"               # struct-like field access
+        # coerce clamps the browser's row index to the known rows (out of range → 0 = none)
+        @test RE.coerce_bind(ts, 2.0) === 2
+        @test RE.coerce_bind(ts, 99) === 0 && RE.coerce_bind(ts, 0) === 0
+        # reconcile keeps the selected index across a re-run while it stays in range
+        @test RE._reconcile_bind(ts, 2, ts) == 2
+        ts1 = RE.TableSelect([(sym = "AAPL", px = 42.0)])       # a re-run that now has only 1 row
+        @test RE._reconcile_bind(ts, 2, ts1) == 0               # index 2 no longer valid → default
+    end
+
     @testset "reconcile: keep value unless type-changed or out of domain" begin
         @test RE._reconcile_bind(RE.Slider(0:10), 5, RE.Slider(0:10)) == 5        # in range → keep
         @test RE._reconcile_bind(RE.Slider(0:10), 8, RE.Slider(0:5)) == 0         # out of range → default

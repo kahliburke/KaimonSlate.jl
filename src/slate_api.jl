@@ -112,7 +112,7 @@ const SLATE_API = SlateApiEntry[
         """Declare a reactive input control: `name` holds the live value, and any cell that READS
         `name` recomputes when the control changes. Widgets: Slider, NumberField, Checkbox, Toggle,
         TextField, TextArea, Select, Radio, MultiSelect, MultiCheckBox, ColorPicker, DateField,
-        TimeField, Button, playhead. `@bind n Slider(1:100; label=\"n\")`."""),
+        TimeField, Button, TableSelect, playhead. `@bind n Slider(1:100; label=\"n\")`."""),
     SlateApiEntry("Slider", "Widgets", "Slider(range; default, label) | Slider(lo, hi, default; step, label)",
         """A range slider. `@bind n Slider(1:100; label=\"n\")` or `@bind x Slider(0.0, 1.0, 0.5; step=0.01)`."""),
     SlateApiEntry("NumberField", "Widgets", "NumberField(default=0; min, max, label)",
@@ -141,6 +141,10 @@ const SLATE_API = SlateApiEntry[
     SlateApiEntry("Button", "Widgets", "Button(label=\"Click\")",
         """An action button; value is the click count (Int, 0,1,2,…). Drive an action with `@onclick`.
         `@bind go Button(\"Run\")`."""),
+    SlateApiEntry("TableSelect", "Widgets", "TableSelect(data; default, label, maxrows=200)",
+        """A clickable table: renders `data` (a DataFrame / Tables.jl source / Vector of NamedTuples —
+        anything `slate_table` takes) and binds the CLICKED ROW as a NamedTuple with a field per column.
+        No selection → `nothing`. `@bind sel TableSelect(df)` then `sel.price` / `sel.name` downstream."""),
     SlateApiEntry("playhead", "Widgets", "playhead(anim; label) -> driven control",
         """A DRIVEN control: an animation player pushes its current 1-based frame index here (no input
         of its own). `@bind t playhead(anim)` lets another cell react to playback —
@@ -309,6 +313,7 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
     @bind n Slider(1:100; label="n");  @bind on Toggle(true);  @bind which Radio(["sin"=>"sine"])
     Select/MultiSelect/MultiCheckBox/Checkbox/NumberField/TextField/TextArea/ColorPicker/DateField/TimeField
     @bind go Button("Run")                                  # value = click count
+@bind sel TableSelect(df)                               # click a row → sel is a NamedTuple (sel.col)
 
 ## Animation — `animate(frames; …)`  (precompute once, play in the browser)
     anim = animate([field(t) for t in times]; kind=:heatmap, clim=:symmetric, x=r, y=r)
