@@ -409,7 +409,8 @@ return id + result. One file write (build the cell with its source up front) so 
 async file-watcher can't race the intermediate empty-cell state."
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
-                         id::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1)
+                         id::AbstractString = "", tags::AbstractString = "",
+                         caller::AbstractString = "", expected_version::Int = -1)
     rej = nothing; errmsg = nothing
     cid = lock(nb.lock) do
         rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
@@ -426,6 +427,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         end
         i = isempty(after) ? length(cells) : something(_index_of(cells, after), length(cells))
         cell = Cell(nid, kind == "md" ? MARKDOWN : CODE, String(source))
+        union!(cell.flags, _parse_tag_symbols(tags))   # optional user tags on the fresh cell
         _snapshot!(nb)
         insert!(cells, i + 1, cell)
         # announce=true → push the new cell to the browser BEFORE eval, so a long-running
@@ -443,12 +445,15 @@ end
 
 "Replace a cell's source, run it, return its result."
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
-                          caller::AbstractString = "", expected_version::Int = -1)
+                          tags::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
         edit_cell!(nb, id, source; announce = true)   # show the edited source before its eval finishes
+        # Replace the cell's user tags when a spec is given; empty = leave existing tags untouched
+        # (so an ordinary source edit never silently wipes tags).
+        isempty(strip(String(tags))) || set_cell_tags!(nb, id, tags)
         return nothing
     end
     rej === nothing || return rej
@@ -698,6 +703,19 @@ function set_trace!(nb::LiveNotebook, id::AbstractString, trace::Bool)
     return nb
 end
 
+# Parse a user tag spec into sanitized, header-safe tag Symbols. Accepts either a collection of
+# strings (the editor UI) or a single comma/space-separated string (the add/edit tools). Empties are
+# dropped; punctuation folds to underscores (mirrors id sanitization).
+function _parse_tag_symbols(tags)
+    items = tags isa AbstractString ? split(tags, r"[,\s]+") : tags
+    want = Set{Symbol}()
+    for t in items
+        s = strip(String(t)); isempty(s) && continue
+        push!(want, Symbol(replace(s, r"[^A-Za-z0-9_]+" => "_")))
+    end
+    return want
+end
+
 # Replace a cell's user TAGS from the editor UI — the known behaviour tags (collapsed / hidecode /
 # trace / nocache) plus any free-form metadata. The only internal flag, `:opaque`, is re-derived by
 # dependency inference each eval, so it's preserved here. Toggling `trace` changes the eval result, so
@@ -707,11 +725,7 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         i = _index_of(nb.report.cells, id); i === nothing && return nb
         c = nb.report.cells[i]
         had_trace = :trace in c.flags
-        want = Set{Symbol}()
-        for t in tags
-            s = strip(String(t)); isempty(s) && continue
-            push!(want, Symbol(replace(s, r"[^A-Za-z0-9_]+" => "_")))
-        end
+        want = _parse_tag_symbols(tags)
         keep = Set(f for f in c.flags if f === :opaque)        # re-derived each eval — keep it
         empty!(c.flags); union!(c.flags, keep); union!(c.flags, want)
         (had_trace != (:trace in c.flags)) && (c.state = STALE)

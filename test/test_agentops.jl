@@ -136,6 +136,19 @@ const NS = KaimonSlate.NotebookServer
             out = NS.notebook_digest(nb)
             @test occursin("{nocache wip}", out) || occursin("{wip nocache}", out)
         end
+
+        @testset "add_cell / edit_cell manage tags" begin
+            _flags(id) = nb.report.cells[NS._index_of(nb.report.cells, id)].flags
+            # add_cell applies tags (comma/space-separated) to the fresh cell
+            cid = match(r"id=(\w+)", NS.agent_add_cell!(nb, "2 + 2"; tags = "hidecode, wip"))[1]
+            @test :hidecode in _flags(cid) && :wip in _flags(cid)
+            # edit_cell with tags REPLACES them
+            NS.agent_edit_cell!(nb, cid, "2 + 3"; tags = "reviewed")
+            @test :reviewed in _flags(cid) && !(:wip in _flags(cid)) && !(:hidecode in _flags(cid))
+            # edit_cell WITHOUT tags leaves the existing tags untouched (no silent wipe)
+            NS.agent_edit_cell!(nb, cid, "2 + 4")
+            @test :reviewed in _flags(cid)
+        end
     finally
         NS.stop_hub(hub)
     end

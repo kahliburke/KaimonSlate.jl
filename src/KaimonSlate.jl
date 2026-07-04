@@ -357,17 +357,19 @@ function create_tools(GateTool::Type)
     or the error to fix). `after` = the id to insert after ("" = end of notebook).
     `kind` = "code" or "md". `id` = an optional explicit cell id (a meaningful label like
     "ground_state"); must be UNIQUE — errors if already in use — and is folded to header-safe
-    characters (letters/digits/underscore). Omit it to auto-generate. Add ONE cell at a time and
-    read its result before the next — do not compose the whole notebook up front.
+    characters (letters/digits/underscore). Omit it to auto-generate. `tags` = optional cell tags
+    (comma/space-separated), both behaviour tags (`hidecode`, `collapsed`, `trace`, `nocache`, …)
+    and free-form metadata. Add ONE cell at a time and read its result before the next — do not
+    compose the whole notebook up front.
 
     Cells run in a REACTIVE notebook with Slate helpers injected (charts via `echart`, widgets
     via `@bind`, live updates via `reactive`/`@onclick`, tables via `slate_table`) — call
     `slate.api` for the reference before plotting or adding interactivity; their names are not in
     package docs.
     """
-    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "")::String
+    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_add_cell!(nb, source; after = after, kind = kind, id = id, caller = _caller())
+        return agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, caller = _caller())
     end
 
     """
@@ -383,14 +385,16 @@ function create_tools(GateTool::Type)
     end
 
     """
-        edit_cell(notebook, cell, source, token, expected_version) -> String
+        edit_cell(notebook, cell, source, tags) -> String
 
     Replace cell `cell`'s source, run it, and return its result. Use to fix a cell
-    that errored, or to revise one in place.
+    that errored, or to revise one in place. `tags` (optional, comma/space-separated) REPLACES the
+    cell's tags — behaviour tags (`hidecode`, `collapsed`, `trace`, `nocache`, …) and free-form
+    metadata; omit it to leave the existing tags unchanged.
     """
-    function edit_cell(notebook::String, cell::String, source::String)::String
+    function edit_cell(notebook::String, cell::String, source::String; tags::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_edit_cell!(nb, cell, source; caller = _caller())
+        return agent_edit_cell!(nb, cell, source; tags = tags, caller = _caller())
     end
 
     """
