@@ -112,7 +112,9 @@ const SLATE_API = SlateApiEntry[
         """Declare a reactive input control: `name` holds the live value, and any cell that READS
         `name` recomputes when the control changes. Widgets: Slider, NumberField, Checkbox, Toggle,
         TextField, TextArea, Select, Radio, MultiSelect, MultiCheckBox, ColorPicker, DateField,
-        TimeField, Button, TableSelect, playhead. `@bind n Slider(1:100; label=\"n\")`."""),
+        TimeField, Button, TableSelect, playhead. `@bind n Slider(1:100; label=\"n\")`. Group several
+        related controls in ONE cell (multiple `@bind` lines → a single combined control strip)
+        rather than a cell per control."""),
     SlateApiEntry("Slider", "Widgets", "Slider(range; default, label) | Slider(lo, hi, default; step, label)",
         """A range slider. `@bind n Slider(1:100; label=\"n\")` or `@bind x Slider(0.0, 1.0, 0.5; step=0.01)`."""),
     SlateApiEntry("NumberField", "Widgets", "NumberField(default=0; min, max, label)",
@@ -314,6 +316,8 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
     Select/MultiSelect/MultiCheckBox/Checkbox/NumberField/TextField/TextArea/ColorPicker/DateField/TimeField
     @bind go Button("Run")                                  # value = click count
 @bind sel TableSelect(df)                               # click a row → sel is a NamedTuple (sel.col)
+    # Group several related controls in ONE cell (multiple @bind lines) — they render a single
+    # combined control strip. Prefer that to a separate cell per control.
 
 ## Animation — `animate(frames; …)`  (precompute once, play in the browser)
     anim = animate([field(t) for t in times]; kind=:heatmap, clim=:symmetric, x=r, y=r)
