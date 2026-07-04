@@ -587,9 +587,23 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     write(joinpath(docdir, "index.html"),
           export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, kwargs...))
     m = _doc_meta(nb)
+    cs = nb.report.cells
+    md = count(c -> c.kind == MARKDOWN, cs)
+    # Packages come from the notebook's reproducibility footer (report.meta["env"] — a sorted
+    # Vector of {name, version, uuid}); readily available, no extra I/O.
+    env = get(nb.report.meta, "env", nothing)
+    pkgs = env isa AbstractVector ?
+        String[String(get(e, "name", "")) for e in env if e isa AbstractDict && !isempty(String(get(e, "name", "")))] :
+        String[]
+    today = Dates.format(Dates.today(), "yyyy-mm-dd")
+    # Rich, readily-available metadata for portfolio / front-page consumers. `date` is the FIRST
+    # publish (preserved by _upsert_doc!); `updated` is this publish.
     return Dict{String,Any}("slug" => slug, "title" => m.title, "description" => m.description,
                             "image" => isempty(ogpath) ? "" : "$slug/og-image.png",
-                            "runnable" => bundle, "date" => Dates.format(Dates.today(), "yyyy-mm-dd"))
+                            "runnable" => bundle, "date" => today, "updated" => today,
+                            "cells" => length(cs), "code" => length(cs) - md, "md" => md,
+                            "binds" => sum(c -> length(c.binds), cs; init = 0),
+                            "packages" => pkgs)
 end
 
 _read_site_manifest(dir::AbstractString) =
@@ -644,6 +658,7 @@ function _cards_grid_html(docs)
         print(io, "<div class=\"cardbody\"><h2>", title, "</h2>")
         isempty(desc) || print(io, "<p>", desc, "</p>")
         print(io, "<div class=\"meta\"><span>", date, "</span>")
+        cells = get(d, "cells", 0); (cells isa Number && cells > 0) && print(io, "<span>", Int(cells), " cells</span>")
         runnable && print(io, "<span class=\"run\">▶ runnable</span>")
         print(io, "</div></div></a>")
     end
@@ -677,6 +692,7 @@ function _cards_refresh_script()
           h+='<div class="cardbody"><h2>'+esc(d.title||d.slug)+'</h2>';
           if(d.description) h+='<p>'+esc(d.description)+'</p>';
           h+='<div class="meta"><span>'+esc(d.date||'')+'</span>';
+          if(d.cells) h+='<span>'+d.cells+' cells</span>';
           if(d.runnable===true) h+='<span class="run">▶ runnable</span>';
           h+='</div></div></a>';
         });

@@ -281,6 +281,9 @@ x = 1
         @test isfile(joinpath(d, "predicting-foo-from-bar", "og-image.png"))
         @test entry["slug"] == "predicting-foo-from-bar" && entry["title"] == "Predicting Foo from Bar"
         @test entry["image"] == "predicting-foo-from-bar/og-image.png" && haskey(entry, "date")
+        # Richer metadata for portfolio/front-page consumers: counts, packages, an `updated` date.
+        @test entry["cells"] == length(nb.report.cells) && entry["code"] + entry["md"] == entry["cells"]
+        @test haskey(entry, "updated") && haskey(entry, "binds") && entry["packages"] isa AbstractVector
 
         man = Dict{String,Any}("title" => "My Blog", "docs" => Any[])
         NS._upsert_doc!(man, entry)
