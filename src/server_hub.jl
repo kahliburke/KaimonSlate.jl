@@ -27,7 +27,7 @@ function _unique_id(h::Hub, path::AbstractString)
 end
 
 _notebooks_json(h::Hub) = lock(h.lock) do
-    [begin
+    nbs = [begin
         cs = nb.report.cells
         Dict("id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
              "cells" => length(cs),
@@ -41,6 +41,8 @@ _notebooks_json(h::Hub) = lock(h.lock) do
              "mtime" => _file_mtime(nb.path),
              "worker" => _worker_label(nb), "port" => _worker_port(nb))
      end for nb in values(h.notebooks)]
+    # Most-recently-edited first (the dict's iteration order is otherwise arbitrary).
+    sort!(nbs; by = d -> d["mtime"], rev = true)
 end
 
 # A short "worker :port" tag for the index, when a notebook runs on a gate worker.
