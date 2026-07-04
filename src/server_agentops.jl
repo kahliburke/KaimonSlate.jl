@@ -191,9 +191,46 @@ end
 # compact TEXT result so the agent works in a tight read→add→run→observe loop —
 # the cure for "compose everything in the head, then dump one big Edit."
 
+# A compact fixed-width TEXT rendering of a captured interactive table (its wire dict form —
+# "columns"/"rows"/"opts"), so an agent that VIEWS a table cell sees the actual data instead of a
+# bare "[rendered: table]". The browser still gets the full sortable table; this caps the rows/cols
+# it prints and notes what was elided (never a silent cap).
+function _table_text(t; maxrows::Int = 20, maxcols::Int = 20, maxcolw::Int = 28)
+    t isa AbstractDict || return "[rendered: table]"
+    cols = String[string(c) for c in get(t, "columns", String[])]
+    rows = get(t, "rows", Any[])
+    opts = get(t, "opts", Dict{String,Any}())
+    (isempty(cols) && isempty(rows)) && return "(empty table)"
+    nrows_total = Int(get(opts, "nrows", length(rows)))
+    ncols_total = Int(get(opts, "ncols", length(cols)))
+    showcols = length(cols) > maxcols ? cols[1:maxcols] : cols
+    elidedcols = length(cols) - length(showcols)
+    trunc1(x) = (s = x === nothing ? "" : string(x); textwidth(s) > maxcolw ? first(s, maxcolw - 1) * "…" : s)
+    header = String[showcols...]; elidedcols > 0 && push!(header, "…")
+    grid = Vector{Vector{String}}([header])
+    for r in rows[1:min(maxrows, length(rows))]
+        vals = String[trunc1(i <= length(r) ? r[i] : nothing) for i in 1:length(showcols)]
+        elidedcols > 0 && push!(vals, "…")
+        push!(grid, vals)
+    end
+    ncol = length(header)
+    w = Int[maximum(row -> textwidth(row[j]), grid) for j in 1:ncol]
+    line(row) = rstrip(join((rpad(row[j], w[j]) for j in 1:ncol), "  "))
+    io = IOBuffer()
+    println(io, line(grid[1]))
+    println(io, join(("─"^w[j] for j in 1:ncol), "  "))
+    for i in 2:length(grid); println(io, line(grid[i])); end
+    shown = length(grid) - 1
+    notes = String[]
+    shown < nrows_total  && push!(notes, "$(shown) of $(nrows_total) rows")
+    elidedcols > 0       && push!(notes, "$(length(showcols)) of $(ncols_total) cols")
+    isempty(notes) || println(io, "… showing ", join(notes, ", "))
+    return rstrip(String(take!(io)))
+end
+
 # Compact text of a cell's result for the agent: the value/stdout, or the error,
-# plus a note that rich output (image/chart/table) rendered (the agent can't see
-# the pixels here, but knows it worked).
+# plus a note that rich output (image/chart) rendered (the agent can't see the
+# pixels here, but knows it worked); tables are rendered as text so their data IS visible.
 function _cell_result_text(c::Cell)
     o = c.output
     o === nothing && return "(not run)"
@@ -205,8 +242,10 @@ function _cell_result_text(c::Cell)
     rich = String[]
     isempty(o.display) || push!(rich, join(unique(ch.mime for ch in o.display), "+"))
     isempty(o.echarts) || push!(rich, "echart")
-    isempty(o.tables)  || push!(rich, "table")
     isempty(rich) || push!(parts, "[rendered: " * join(rich, ", ") * "]")
+    for t in o.tables      # a table's DATA is text-renderable — show it (the agent can't see the widget)
+        push!(parts, _table_text(t))
+    end
     txt = rstrip(join(parts, "\n"))
     return isempty(txt) ? "(ok — no value)" : txt
 end

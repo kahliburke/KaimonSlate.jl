@@ -137,6 +137,13 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("{nocache wip}", out) || occursin("{wip nocache}", out)
         end
 
+        @testset "table cells render as text for agents" begin
+            r = NS.agent_add_cell!(nb, "slate_table([(sym=\"AAPL\", px=42.0), (sym=\"MSFT\", px=13.5)])")
+            @test occursin("sym", r) && occursin("px", r)         # header
+            @test occursin("AAPL", r) && occursin("42.0", r)      # data cells, not just "[rendered: table]"
+            @test !occursin("[rendered: table]", r)
+        end
+
         @testset "add_cell / edit_cell manage tags" begin
             _flags(id) = nb.report.cells[NS._index_of(nb.report.cells, id)].flags
             # add_cell applies tags (comma/space-separated) to the fresh cell
