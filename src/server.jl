@@ -101,6 +101,10 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
         end
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
+        # Base dir for `@asset "rel/path"` resolution + memo hashing — the notebook's project dir,
+        # matching the worker's PARENT_PROJECT. Runtime-derived (absolute, machine-specific), so it
+        # lives in meta (never the `.jl` footer, which only persists _CONFIG_KEYS).
+        report.meta["assetbase"] = parent
         envdir = ReportEngine.notebook_env_dir(path)
         env_exists = isfile(joinpath(envdir, "Project.toml"))   # the fork is materialised on first add
         delta = get(report.meta, "env", Dict{String,Any}[])     # footer-recorded notebook packages

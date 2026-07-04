@@ -268,7 +268,8 @@ end
 # the SET of names, the widget constructors, and the `@bind` macro are defined here
 # once. The per-eval `@bind` sink is task-local (run_capture seeds it); returns the populated module.
 function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
-                                slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing)
+                                slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing,
+                                assetbase = () -> "")
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
     Core.eval(m, :(const series = $series))       # ECharts DSL series builder (echarts_dsl.jl)
@@ -339,6 +340,28 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # value (a handler parameter, so the cell doesn't read the global → no recompute on change).
     Core.eval(m, :(macro onchange(ctrl, body)
         esc(Expr(:call, :__on_register, QuoteNode(ctrl), Expr(:(->), Expr(:tuple, ctrl), body)))
+    end))
+    # ── Asset inclusion (`@asset` / `readfile`) ───────────────────────────────────
+    # `@asset "portfolio.js"` reads a file (resolved relative to the notebook's PROJECT dir via
+    # `assetbase`, or an absolute path) and returns its contents. Because the path is a source
+    # LITERAL, the dependency analyzer records it statically (deps.jl `_collect_asset_paths!`), so
+    # editing the file invalidates the cell's memo entry (and, with the watcher, re-runs the cell).
+    # `@asset bytes "logo.png"` → `Vector{UInt8}`. `readfile(path)` is the runtime escape hatch for a
+    # COMPUTED path — not statically tracked (the documented dynamic caveat).
+    Core.eval(m, :(const __slate_assetbase = $assetbase))
+    Core.eval(m, :(function __slate_readfile(p::AbstractString; bytes::Bool = false)
+        base = __slate_assetbase()
+        ap = isabspath(p) ? String(p) : joinpath(isempty(base) ? pwd() : base, String(p))
+        return bytes ? read(ap) : read(ap, String)
+    end))
+    Core.eval(m, :(const readfile = __slate_readfile))
+    Core.eval(m, :(macro asset(args...)
+        bytes = false; path = nothing
+        for a in args
+            a === :bytes ? (bytes = true) : (path = a)
+        end
+        path === nothing && error("@asset needs a path, e.g. @asset \"file.js\" (or @asset bytes \"logo.png\")")
+        return esc(:(__slate_readfile($(path); bytes = $(bytes))))
     end))
     return m
 end

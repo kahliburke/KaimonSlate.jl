@@ -52,7 +52,12 @@ function _new_ns()
         slate_refresh = (vars...) -> KaimonGate._publish_stream("slate_refresh", join(string.(vars), ",")),
         # wire: "id|frac|done|msg" (id/frac/done are |-free; msg is the rest — split limit=4)
         slate_progress = (frac; msg = "", id = "", done = false) ->
-            KaimonGate._publish_stream("slate_progress", string(id, "|", Float64(frac), "|", done === true ? 1 : 0, "|", msg)))
+            KaimonGate._publish_stream("slate_progress", string(id, "|", Float64(frac), "|", done === true ? 1 : 0, "|", msg)),
+        # `@asset`/`readfile` resolve relative paths against the notebook's project dir (what
+        # `pkgdir(...)` gives, and where a package notebook's assets live). Read at call time so a
+        # provenance change is picked up; falls back to the active project when PARENT_PROJECT is unset.
+        assetbase = () -> (p = PARENT_PROJECT[]; !isempty(p) ? p :
+                           (ap = Base.active_project(); ap === nothing ? "" : dirname(ap))))
     return m
 end
 const _NS = Ref{Module}(_new_ns())

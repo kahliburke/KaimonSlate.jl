@@ -226,6 +226,49 @@ end
         @test :nocache in parse_report(serialize_report(nc)).cells[1].flags
     end
 
+    @testset "@asset file deps: static extraction + memo invalidation" begin
+        # `@asset "path"` is a source literal, so the analyzer records it as a file input (cell.inputs)
+        # WITHOUT running the cell; the memo key folds the file's content hash, so editing the asset
+        # invalidates the entry.
+        dir = mktempdir()
+        f = joinpath(dir, "a.js"); write(f, "console.log(1)")
+        r = parse_report("#%% code id=a\nhtml = @asset \"a.js\"")
+        build_dependencies!(r)
+        c = r.cells[1]
+        @test c.inputs == ["a.js"]                        # statically extracted literal path
+        @test !(:opaque in c.flags)                       # an @asset cell stays memoizable
+        r.meta["assetbase"] = dir
+        k0 = ReportEngine._memo_key(r, c)
+        @test !isempty(k0)
+        @test ReportEngine._memo_key(r, c) == k0          # stable while the file is unchanged
+        write(f, "console.log(2)")
+        @test ReportEngine._memo_key(r, c) != k0          # editing the asset invalidates the key
+        write(f, "console.log(1)")
+        @test ReportEngine._memo_key(r, c) == k0          # reverting the content restores it
+        # `@asset bytes "x"` and non-literal paths: bytes form still extracts; a plain code cell has none.
+        rb = parse_report("#%% code id=b\nlogo = @asset bytes \"logo.png\"")
+        build_dependencies!(rb)
+        @test rb.cells[1].inputs == ["logo.png"]
+        rp = parse_report("#%% code id=c\nx = 1 + 1")
+        build_dependencies!(rp)
+        @test isempty(rp.cells[1].inputs)                 # no @asset → no file inputs (key unchanged vs before)
+    end
+
+    @testset "@asset macro reads the file at runtime" begin
+        dir = mktempdir()
+        write(joinpath(dir, "x.js"), "HELLO")
+        write(joinpath(dir, "logo.bin"), UInt8[1, 2, 3])
+        r = parse_report("#%% code id=a\nx = 1")
+        r.meta["assetbase"] = dir                         # base for relative @asset resolution
+        m = ReportEngine.report_module(r)                 # populates the namespace (incl. @asset) w/ assetbase
+        @test Base.invokelatest(Core.eval, m, :(@asset "x.js")) == "HELLO"
+        @test Base.invokelatest(Core.eval, m, :(@asset bytes "logo.bin")) == UInt8[1, 2, 3]
+        @test Base.invokelatest(Core.eval, m, :(readfile("x.js"))) == "HELLO"   # runtime form
+        # absolute paths bypass the base
+        abspath_js = joinpath(dir, "x.js")
+        @test Base.invokelatest(Core.eval, m, :(@asset $abspath_js)) == "HELLO"
+    end
+
     @testset "run_capture wire form" begin
         # The wire form is the contract the gate worker returns and the server
         # deserializes — primitives only, no MimeChunk/CellOutput struct identity.

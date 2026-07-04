@@ -114,7 +114,8 @@ function _new_module(report::Report)
     _populate_notebook_ns!(m;
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars),
-        slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, frac, msg, id, done))
+        slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, frac, msg, id, done),
+        assetbase = () -> String(get(report.meta, "assetbase", "")))   # `@asset` base (notebook project dir)
     return m
 end
 
@@ -315,7 +316,21 @@ function _memo_key(report::Report, cell::Cell)
         b.name in readnames && push!(bvals, (string(b.name), b.value))
     end
     sort!(bvals; by = first)
-    return string(hash((cell.source, (:trace in cell.flags), depsrc, bvals)); base = 16)
+    # `@asset` file deps (this cell + its transitive upstream, mirroring `depsrc`): fold each
+    # referenced file's CURRENT content hash into the key so editing an asset invalidates the memo
+    # entry (no stale restore on cold start). Paths resolve against `assetbase` (the notebook's
+    # project dir, set at kernel selection) — the same base the worker's `@asset` reads from.
+    base = String(get(report.meta, "assetbase", ""))
+    relpaths = String[]; append!(relpaths, cell.inputs)
+    for id in closure; append!(relpaths, byid[id].inputs); end
+    assets = Tuple{String,UInt}[]
+    for rel in sort!(unique!(relpaths))
+        ap = isabspath(rel) ? rel : (isempty(base) ? rel : joinpath(base, rel))
+        h = try; isfile(ap) ? hash(read(ap)) : UInt(0); catch; UInt(0); end
+        push!(assets, (rel, h))
+    end
+    core = (cell.source, (:trace in cell.flags), depsrc, bvals)
+    return string(hash(isempty(assets) ? core : (core..., assets)); base = 16)   # asset-free cells keep their old key
 end
 
 function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel())

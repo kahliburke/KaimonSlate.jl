@@ -128,6 +128,25 @@ function _collect_mutations!(writes::Set{Symbol}, reads::Set{Symbol}, ex)
     return nothing
 end
 
+# Statically collect the file paths a cell references via `@asset "path"` (or `@asset bytes
+# "path"`) — a STRING-LITERAL arg to an `@asset` macrocall, anywhere in the AST. Because the
+# path is a literal in the source, this is known WITHOUT running the cell, so the file becomes
+# a first-class reactive/memo input (the watcher arms on open; the memo key folds its hash).
+# A computed path (`readfile(x)`) is invisible here — that's the documented dynamic caveat.
+function _collect_asset_paths!(paths::Vector{String}, ex)
+    if ex isa Expr
+        if ex.head === :macrocall && !isempty(ex.args) && ex.args[1] === Symbol("@asset")
+            for a in ex.args[2:end]
+                a isa AbstractString && push!(paths, String(a))
+            end
+        end
+        for a in ex.args
+            _collect_asset_paths!(paths, a)
+        end
+    end
+    return paths
+end
+
 """
     infer_bindings!(cell) -> cell
 
@@ -139,7 +158,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # No per-cell eviction (a deleted cell / closed notebook never removes its entry), so on a
 # long-lived server this would otherwise grow forever. Entries are small, but cap it — once full,
@@ -153,17 +172,18 @@ function infer_bindings!(cell::Cell)
         empty!(cell.reads);  union!(cell.reads,  hit[2])
         empty!(cell.writes); union!(cell.writes, hit[3])
         hit[4] ? push!(cell.flags, :opaque) : delete!(cell.flags, :opaque)
+        empty!(cell.inputs); append!(cell.inputs, hit[5])   # `@asset` file deps (statically extracted)
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && empty!(_BIND_CACHE)
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags)
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs))
     end
     return cell
 end
 function _infer_bindings_uncached!(cell::Cell)
-    empty!(cell.reads); empty!(cell.writes)
+    empty!(cell.reads); empty!(cell.writes); empty!(cell.inputs)
     delete!(cell.flags, :opaque)
     if cell.kind == MARKDOWN
         # A markdown cell "reads" the free variables of its `{{ expr }}` blocks, so
@@ -188,6 +208,10 @@ function _infer_bindings_uncached!(cell::Cell)
     end
     if _has_parse_error(top)
         push!(cell.flags, :opaque); return cell
+    end
+    # `@asset "path"` file deps — literal paths anywhere in the cell (sorted+unique for a stable key).
+    let ap = _collect_asset_paths!(String[], top)
+        isempty(ap) || append!(cell.inputs, sort!(unique!(ap)))
     end
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
 
