@@ -310,6 +310,22 @@ function _make_router(h::Hub)
         id = open_notebook!(h, path)
         _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
     end)
+    # Upload a `.jl` from the browser (the viewing machine) → save it under a persistent uploads dir and
+    # return its server path; the front end then opens it via the normal open/import flow. Body: {name, content}.
+    HTTP.register!(router, "POST", "/api/upload", req -> begin
+        b = _body(req)
+        content = String(get(b, "content", ""))
+        isempty(strip(content)) && return HTTP.Response(400, "empty upload")
+        name = basename(replace(String(get(b, "name", "notebook.jl")), r"[^\w.\-]" => "_"))
+        isempty(name) && (name = "notebook.jl")
+        endswith(lowercase(name), ".jl") || (name *= ".jl")
+        dir = joinpath(homedir(), "KaimonSlate", "uploads"); mkpath(dir)
+        stem = replace(name, r"\.jl$"i => "")
+        path = joinpath(dir, name); i = 1
+        while ispath(path); i += 1; path = joinpath(dir, "$(stem)-$(i).jl"); end   # never overwrite an existing file
+        write(path, content)
+        _json(Dict("path" => abspath(path)))
+    end)
     HTTP.register!(router, "POST", "/api/close", req -> begin
         file = abspath(expanduser(strip(String(get(_body(req), "path", "")))))
         id = lock(h.lock) do

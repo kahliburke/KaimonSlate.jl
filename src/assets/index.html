@@ -97,6 +97,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       <ul id="comp" class="comp"></ul>
     </div>
     <button id="openbtn">Open</button>
+    <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
+    <input type="file" id="uploadin" accept=".jl" style="display:none"/>
   </div>
   <div id="recent" class="recent"></div>
   <div id="localsites" class="recent"></div>
@@ -228,6 +230,22 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var pick=items[+li.dataset.i];inp.value=pick;inp.focus();
     isdir(pick)?fetchComp():openMaybeStandalone(pick);});   // click dir = descend, click file = open/import
   document.getElementById('openbtn').onclick=function(){submit();};
+  // Upload a local .jl from the browser (this machine) → the server saves it and we open it via the
+  // normal open/import flow (so a self-contained bundle still routes through the import helper).
+  document.getElementById('uploadbtn').onclick=function(){document.getElementById('uploadin').click();};
+  document.getElementById('uploadin').onchange=function(e){
+    var f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f)return;   // reset so the same file re-fires
+    var rd=new FileReader();
+    rd.onload=function(){
+      showLoading('Uploading “'+f.name+'”…');
+      fetch('/api/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:f.name,content:String(rd.result)})})
+        .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+        .then(function(d){hideLoading();openMaybeStandalone(d.path);})
+        .catch(function(err){hideLoading();alertDark('Upload failed: '+err);});
+    };
+    rd.onerror=function(){alertDark('Could not read “'+f.name+'”.');};
+    rd.readAsText(f);
+  };
   // Per-session shutdown buttons (event-delegated over the rows).
   document.addEventListener('click',async function(e){var b=e.target.closest('.kill');if(!b)return;
     var id=b.dataset.id;
