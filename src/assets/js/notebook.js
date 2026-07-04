@@ -182,15 +182,20 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // the user has no unsaved local edits (editor still matches the prior server source), so we
     // never clobber in-flight work; a true divergence stays `edited` for the reconcile flow.
     const _prevSrc = window.srcMap[c.id];
+    const _prevHash = (window.srcHash || (window.srcHash = {}))[c.id];
     window.srcMap[c.id] = c.source;
+    window.srcHash[c.id] = c.hash;
     // Compare trailing-whitespace-insensitively: a lone trailing newline (which CM6 and the server
     // can disagree on) is not a real edit and must NOT pop the conflict modal.
     const _eq = (a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, '');
-    if (window.editors[c.id] && !_eq(c.source, _prevSrc)) {
+    // The server's per-cell content hash is the authoritative "did THIS cell change" signal — immune to
+    // browser-side srcMap drift. Fall back to a string compare only if an older state carries no hash.
+    const _serverMoved = (c.hash != null && _prevHash != null) ? c.hash !== _prevHash : !_eq(c.source, _prevSrc);
+    if (window.editors[c.id] && _serverMoved) {
       const _mine = window.edText(c.id);
       if (_eq(_mine, _prevSrc)) window.edSetText(c.id, c.source);                       // no local edits → fast-forward to the new source
       else if (!_eq(_mine, c.source) && window.slateLiveConflict) window.slateLiveConflict(c.id, _mine, c.source);   // both changed → reconcile modal
-    } else if (!window.editors[c.id] && !_eq(c.source, _prevSrc)) {
+    } else if (!window.editors[c.id] && _serverMoved) {
       const ph = el.querySelector('.cm-placeholder'); if (ph) ph.textContent = c.source || '';   // not yet hydrated → keep placeholder current
     }
     const badge = el.querySelector('.badge');     // header renders c.state; reflect the live state

@@ -468,6 +468,9 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "id"      => c.id,
         "kind"    => c.kind == MARKDOWN ? "md" : "code",
         "source"  => c.source,
+        # Canonical per-cell content hash (the SAME SHA the history uses) — a version token the browser
+        # keys reconcile off, instead of a fuzzy string comparison that can drift.
+        "hash"    => SlateHistory._sha(c.source),
         "state"   => lowercase(string(c.state)),
         "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) : output_html(c)),
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
