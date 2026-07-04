@@ -38,7 +38,12 @@ function backupEdits() {
   for (const id of Object.keys(window.editors)) {
     if (!window.editors[id]) continue;
     const mine = window.edText(id), base = window.srcMap[id] || '';
-    if (mine !== base) { b[id] = { mine, base }; _pendingIds.delete(id); }      // live edit → capture; no longer just pending
+    if (mine !== base) {
+      // `ts` = when THIS text was captured (browser-snapshot time). Keep it stable while the text is
+      // unchanged so the backup dedup still short-circuits (a fresh ts every sweep would rewrite it).
+      const p = prev[id], ts = (p && p.mine === mine && p.ts) ? p.ts : Math.floor(Date.now() / 1000);
+      b[id] = { mine, base, ts }; _pendingIds.delete(id);                        // live edit → capture; no longer just pending
+    }
   }
   for (const id of _pendingIds) if (!b[id] && prev[id]) b[id] = prev[id];       // preserve un-restored pending entries
   _writeBackup(b);
@@ -100,7 +105,8 @@ function reconcileBackup(state) {
     const server = cell.source != null ? cell.source : '';
     if (server === mine) continue;                               // already saved — drop
     if (_isEmpty(server) && !_isEmpty(mine)) { _applyRestore(id, mine); keep[id] = b[id]; autoFilled++; continue; }  // empty cell ← content: silent auto-accept
-    cands.push({ id, mine, server, conflict: server !== base });
+    // ts = when the browser snapshot was captured; serverTs = the notebook file's on-disk mtime.
+    cands.push({ id, mine, server, conflict: server !== base, ts: (b[id] || {}).ts, serverTs: state.savedAt || 0 });
     keep[id] = b[id];
   }
   _writeBackup(keep);
@@ -129,9 +135,10 @@ function _startReconcile(cands) { _rcQueue = cands; _rcIdx = 0; _rcRender(); }
 function slateLiveConflict(id, mine, server) {
   const m = document.getElementById('reconcilemodal'), open = m && m.style.display !== 'none';
   if (!open) { _rcQueue = []; _rcIdx = 0; }
+  const now = Math.floor(Date.now() / 1000);   // a live conflict = an external edit that just landed
   const cur = _rcQueue.find((c, i) => i >= _rcIdx && c.id === id);
-  if (cur) { cur.mine = mine; cur.server = server; cur.conflict = true; }   // refresh to the latest
-  else _rcQueue.push({ id, mine, server, conflict: true });
+  if (cur) { cur.mine = mine; cur.server = server; cur.conflict = true; cur.serverTs = now; }   // refresh to the latest
+  else _rcQueue.push({ id, mine, server, conflict: true, ts: now, serverTs: now });
   if (!open) _rcRender();
 }
 window.slateLiveConflict = slateLiveConflict;
@@ -167,6 +174,8 @@ function _rcRender() {
       ? `<div class="rc-warn">⚠ This cell <b>also changed on the server</b> since your edit — review carefully.</div>`
       : `<div class="rc-note">The saved version is unchanged; your edit is newer.</div>`}
     <div class="rc-legend"><span class="dl del">− saved version</span><span class="dl add">+ your edit</span></div>
+    ${(c.ts || c.serverTs) && typeof _reltime === 'function'
+      ? `<div class="rc-times">saved on disk ${c.serverTs ? _reltime(c.serverTs) : 'unknown'} · your edit ${c.ts ? _reltime(c.ts) : 'unknown'}</div>` : ''}
     <div class="rc-diff">${diff || '<span class="hint">(no line differences)</span>'}</div>
     <div class="rc-acts">
       <button class="rc-server">Use saved</button>

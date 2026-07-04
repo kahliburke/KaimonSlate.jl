@@ -589,7 +589,9 @@ _kernel_status(::Kernel) = Dict{String,Any}("kind" => "inproc", "port" => 0, "co
 function state_json(nb::LiveNotebook)
     meta = Dict{String,Any}(
         "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
-        "version" => nb.version, "worker" => _kernel_status(nb.kernel))
+        "version" => nb.version, "worker" => _kernel_status(nb.kernel),
+        # On-disk mtime (unix seconds) — lets the reconcile modal say when the saved version was written.
+        "savedAt" => (try; round(Int, mtime(abspath(nb.path))); catch; 0; end))
     # The project ROOT (dir holding the nearest Project.toml above the notebook) — so "open
     # project in VS Code" opens the project, not the notebooks/ subdir. Omitted when detached.
     let proj = Base.current_project(dirname(abspath(nb.path)))
