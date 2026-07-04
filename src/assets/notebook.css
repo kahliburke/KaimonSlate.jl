@@ -463,6 +463,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
            border-radius:7px; padding:7px 10px; margin-bottom:10px; }
 .rc-note { font-size:.82rem; color:var(--dim); margin-bottom:10px; }
 .rc-legend { display:flex; gap:16px; font-size:.74rem; margin-bottom:6px; font-family:ui-monospace,Menlo,monospace; }
+.rc-times { font-size:.72rem; color:var(--dim); margin-bottom:8px; }
 .rc-legend .dl.del { color:var(--red); } .rc-legend .dl.add { color:var(--green); }
 .rc-diff { font-family:ui-monospace,Menlo,monospace; font-size:.78rem; line-height:1.45; padding:8px 10px; margin-bottom:14px;
            max-height:42vh; overflow:auto; white-space:pre; background:var(--bg); border:1px solid var(--border); border-radius:8px; }
@@ -718,6 +719,7 @@ body.modkey .cm-content { cursor: pointer; }
 .histprev .dl.add { background:#11351c; color:#9fe6b0; }
 .histprev .dl.del { background:#3a1414; color:#e6a0a0; }
 .histprev .dl.ctx { color:var(--dim); }
+.histprev .dl.gap { color:var(--dim); text-align:center; font-style:italic; opacity:.7; padding:2px 4px; }
 /* Worker log panel */
 .logpanel { position:fixed; top:0; right:0; height:100vh; width:480px; max-width:96vw; background:var(--bg2);
   border-left:1px solid var(--bg3); transform:translateX(100%);

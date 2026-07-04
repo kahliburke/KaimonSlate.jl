@@ -176,14 +176,34 @@ function _lineDiff(a, b) {
   while (j < m) out.push({ t: 'add', s: B[j++] });
   return out;
 }
+// Collapse long runs of unchanged (ctx) lines to `n` lines of context around each change, so the
+// diff shows the CHANGES — not the whole notebook. Dropped runs become a `{t:'gap', n}` marker.
+function _collapseDiff(diff, n = 3) {
+  const keep = new Array(diff.length).fill(false);
+  diff.forEach((d, i) => {
+    if (d.t !== 'ctx') for (let k = Math.max(0, i - n); k <= Math.min(diff.length - 1, i + n); k++) keep[k] = true;
+  });
+  const out = []; let gap = 0;
+  for (let i = 0; i < diff.length; i++) {
+    if (keep[i]) { if (gap) { out.push({ t: 'gap', n: gap }); gap = 0; } out.push(diff[i]); }
+    else gap++;
+  }
+  if (gap) out.push({ t: 'gap', n: gap });
+  return out;
+}
 async function histSelect(hash) {
   histSel = hash; renderHistList();
   const idx = histEntries.findIndex(e => e.hash === hash);
   const e = histEntries[idx]; if (!e) return;
   const cur = await _histSrc(hash);
   const parent = idx > 0 ? await _histSrc(histEntries[idx - 1].hash) : '';
-  const diff = _lineDiff(parent, cur).map(d =>
-    `<span class="dl ${d.t === 'add' ? 'add' : d.t === 'del' ? 'del' : 'ctx'}">${d.t === 'add' ? '+' : d.t === 'del' ? '-' : ' '} ${_esc(d.s)}</span>`).join('');
+  const raw = _lineDiff(parent, cur);
+  const changed = raw.some(d => d.t !== 'ctx');
+  const diff = !changed ? '<span class="dl gap">no textual change</span>'
+    : _collapseDiff(raw).map(d =>
+        d.t === 'gap'
+          ? `<span class="dl gap">⋯ ${d.n} unchanged line${d.n === 1 ? '' : 's'} ⋯</span>`
+          : `<span class="dl ${d.t}">${d.t === 'add' ? '+' : d.t === 'del' ? '-' : ' '} ${_esc(d.s)}</span>`).join('');
   const isCur = hash === histCurrent;
   document.getElementById('histprev').innerHTML =
     `<div class="pvhead"><span>${_histIcon[e.source] || '•'} ${_esc(e.label)}</span>
