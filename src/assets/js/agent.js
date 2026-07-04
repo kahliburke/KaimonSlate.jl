@@ -69,6 +69,11 @@ function _crewBadge(crew) {
   const h = _crewHue(crew);
   return `<span class="crewbadge" style="--ch:${h}">${_esca(crew)}</span>`;
 }
+// Marks a tool call driven into this notebook from OUTSIDE its chat — an external MCP agent
+// (or one Kaimon spawned for another notebook) reaching the slate.* tools directly.
+function _extBadge(on) {
+  return on ? `<span class="extbadge" title="a tool call from an external agent, outside this notebook's chat">⚡ external</span>` : '';
+}
 // Turn a raw tool identifier (e.g. "mcp__kaimon__slate_add_cell") into a friendly,
 // icon-prefixed label for the chat. Known tools get a hand-picked icon + name; any
 // other tool falls back to its prefix-stripped, de-underscored form.
@@ -144,13 +149,13 @@ function _agentMsgHtml(m) {
       (argsStr ? `<div class="tdlabel">args</div><pre class="toolargs">${_esca(argsStr)}</pre>` : '') +
       (resStr ? `<div class="tdlabel">result</div><pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(resStr)}</pre>` : '') +
       `</div>` : '';
-    return `<div class="apmsg tool${lane}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}` +
+    return `<div class="apmsg tool${lane}${m.external ? ' ext' : ''}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}` +
       `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
   }
   return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
-    :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
+    :                     `<div class="apmsg ${m.role}${lane}${m.external ? ' ext' : ''}" ${tag}>${_crewBadge(m.crew)}${_extBadge(m.external)}${_esca(m.text)}</div>`);
 }
 const _nodeFromHtml = h => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstChild; };
 function renderAgentMsgs() {
@@ -317,6 +322,7 @@ function agentEvent(env) {
     const c = d.call || {};
     let tm = agentMsgs.find(m => m.role === 'tool' && m.id === c.toolCallId);
     if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
+    if (env.external) tm.external = true;   // a tool call from OUTSIDE this notebook's chat (an external agent)
     tm.title = _prettyTool(c.title || c.kind || tm.title || 'tool');
     tm.text = tm.title;
     if (c.rawInput) { tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code; tm.args = c.rawInput; const cc = _argCid(c.rawInput); cc && (tm.cid = cc); }
@@ -332,7 +338,7 @@ function agentEvent(env) {
     // above). So finalize the call and surface any image blocks.
     const u = d.update || {};
     const tm = agentMsgs.find(m => m.role === 'tool' && m.id === u.toolCallId && !m.done);
-    if (tm) { tm.done = true; if (u.status === 'failed') tm.role = 'err'; }
+    if (tm) { tm.done = true; if (env.external) tm.external = true; if (u.status === 'failed') tm.role = 'err'; }
     for (const b of (u.content || [])) {
       const inner = b && b.content;
       if (inner && inner.type === 'image' && inner.data)

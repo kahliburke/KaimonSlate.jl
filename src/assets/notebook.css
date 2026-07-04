@@ -654,6 +654,11 @@ body.modkey .cm-content { cursor: pointer; }
 .crewbadge { display:inline-block; margin-right:6px; padding:0 6px; border-radius:5px;
   font-size:.66rem; font-weight:600; letter-spacing:.02em; vertical-align:1px;
   color:hsl(var(--ch,210) 70% 82%); background:hsl(var(--ch,210) 55% 22%); }
+/* An external agent's tool call — driven into this notebook from outside its own chat. */
+.extbadge { display:inline-block; margin-right:6px; padding:0 6px; border-radius:5px;
+  font-size:.66rem; font-weight:600; letter-spacing:.02em; vertical-align:1px;
+  color:#f0b866; background:#4a3410; border:1px solid #6b4a15; }
+.apmsg.ext { border-left:2px solid #b9812e; }
 .apworking { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.8rem; padding:6px 2px; }
 .apworking .dots { display:inline-flex; }
 .apworking .dots i { width:6px; height:6px; border-radius:50%; background:var(--accent); margin:0 2px; animation:breathe 1.2s ease-in-out infinite; }

@@ -156,6 +156,41 @@ const NS = KaimonSlate.NotebookServer
             NS.agent_edit_cell!(nb, cid, "2 + 4")
             @test :reviewed in _flags(cid)
         end
+
+        @testset "external tool calls surface in the chat panel" begin
+            # Pure envelope shape — exactly what the browser's `agentEvent` consumes.
+            use, res = NS._external_tool_envelopes("ext-1", "edit_cell",
+                Dict{String,Any}("cell" => "intro", "source" => "x = 1"), "edited id=intro"; ok = true)
+            ue = NS.JSON.parse(use); re = NS.JSON.parse(res)
+            @test ue["kind"] == "tool_use" && ue["external"] === true
+            @test ue["data"]["call"]["toolCallId"] == "ext-1"
+            @test ue["data"]["call"]["title"] == "slate_edit_cell"          # → _prettyTool → "✏️ edit cell"
+            @test ue["data"]["call"]["rawInput"]["source"] == "x = 1"       # → code preview + navigate chip
+            @test re["kind"] == "tool_result" && re["external"] === true
+            @test re["data"]["update"]["toolCallId"] == "ext-1"             # pairs with the tool_use
+            @test re["data"]["update"]["status"] == "completed"
+            @test re["data"]["update"]["content"][1]["content"]["text"] == "edited id=intro"
+            # ok=false → a failed (error) row
+            _, rf = NS._external_tool_envelopes("ext-2", "run", Dict{String,Any}("cell" => "x"), "⛔ nope"; ok = false)
+            @test NS.JSON.parse(rf)["data"]["update"]["status"] == "failed"
+
+            loglen() = lock(NS._AGENT_LOCK) do; length(get(NS._AGENT_LOG, nb.id, String[])); end
+
+            # An external MCP client (agent_id "") → surfaced as a tool_use + tool_result pair.
+            empty!(nb.agents)
+            n0 = loglen()
+            NS.note_external_tool!(nb, "", "add_cell", Dict{String,Any}("source" => "1+1"), "added id=z1")
+            @test loglen() == n0 + 2
+            # A crew agent (its id is in nb.agents) → NOT surfaced (already relayed over the agent bus).
+            nb.agents["default"] = "slate-crew-1"
+            n1 = loglen()
+            NS.note_external_tool!(nb, "slate-crew-1", "add_cell", Dict{String,Any}("source" => "2"), "added id=z2")
+            @test loglen() == n1
+            # A foreign Kaimon agent (spawned for another notebook; not our crew) → surfaced.
+            NS.note_external_tool!(nb, "slate-other-nb", "add_cell", Dict{String,Any}("source" => "3"), "added id=z3")
+            @test loglen() == n1 + 2
+            empty!(nb.agents)
+        end
     finally
         NS.stop_hub(hub)
     end

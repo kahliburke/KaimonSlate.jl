@@ -1600,17 +1600,7 @@ function relay_agent_event(channel::AbstractString, data)
     _broadcast(nb, "agent:" * s)
     is_delta = kind == "tool_input_delta" ||
         (env !== nothing && (d = get(env, "data", nothing); d isa AbstractDict && get(d, "delta", false) === true))
-    if !is_delta
-        compact = false; bufcopy = String[]
-        lock(_AGENT_LOCK) do
-            buf = get!(_AGENT_LOG, nb.id, String[])
-            push!(buf, s)
-            length(buf) > _AGENT_LOG_CAP && (popfirst!(buf); compact = true; bufcopy = copy(buf))
-        end
-        # Mirror to disk (outside the lock): append the new line, or compact the file to
-        # the capped buffer once we start dropping the oldest (bounds the file to the cap).
-        compact ? _rewrite_chat_log(nb, bufcopy) : _append_chat_log(nb, s)
-    end
+    is_delta || _buffer_agent_log!(nb, s)   # persist non-delta envelopes for reload-replay
     return nothing
 end
 

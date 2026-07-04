@@ -256,6 +256,19 @@ function create_tools(GateTool::Type)
     # Keys the build-floor implicitly, so the model never threads a token (and can't self-lock).
     _caller() = (c = parentmodule(GateTool).current_caller(); c === nothing ? "" : String(c))
 
+    # The owning Kaimon agent's id for this call ("" for an external MCP client), via the
+    # X-Kaimon-Agent-Id correlation Kaimon sets on a spawned agent's session. Companion to
+    # `_caller()`: `_caller()` is the raw session id; this is which agent (if any) owns it.
+    _agent_id() = (a = parentmodule(GateTool).current_agent_id(); a === nothing ? "" : String(a))
+
+    # Run a mutating tool, then surface it in the chat panel IF an outside driver made the
+    # call (crew calls already stream in over the agent bus). Returns the tool's result so a
+    # wrapper can `return _surfaced(...)`. A ⛔-prefixed result (e.g. a rejected floor commit)
+    # renders as a failed row.
+    _surfaced(nb, tool, args, res) =
+        (NotebookServer.note_external_tool!(nb, _agent_id(), tool, args, res;
+            ok = !startswith(lstrip(res), "⛔")); res)
+
     """
         open(path::String; threads::String="") -> String
 
@@ -369,7 +382,9 @@ function create_tools(GateTool::Type)
     """
     function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, caller = _caller())
+        res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, caller = _caller())
+        return _surfaced(nb, "add_cell",
+            Dict{String,Any}("source" => source, "after" => after, "kind" => kind, "id" => id, "tags" => tags), res)
     end
 
     """
@@ -381,7 +396,8 @@ function create_tools(GateTool::Type)
     """
     function rename_cell(notebook::String, cell::String, newid::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_rename_cell!(nb, cell, newid; caller = _caller())
+        res = agent_rename_cell!(nb, cell, newid; caller = _caller())
+        return _surfaced(nb, "rename_cell", Dict{String,Any}("cell" => cell, "newid" => newid), res)
     end
 
     """
@@ -394,7 +410,9 @@ function create_tools(GateTool::Type)
     """
     function edit_cell(notebook::String, cell::String, source::String; tags::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_edit_cell!(nb, cell, source; tags = tags, caller = _caller())
+        res = agent_edit_cell!(nb, cell, source; tags = tags, caller = _caller())
+        return _surfaced(nb, "edit_cell",
+            Dict{String,Any}("cell" => cell, "source" => source, "tags" => tags), res)
     end
 
     """
@@ -404,7 +422,8 @@ function create_tools(GateTool::Type)
     """
     function run_cell(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_run!(nb, cell; caller = _caller())
+        res = agent_run!(nb, cell; caller = _caller())
+        return _surfaced(nb, "run", Dict{String,Any}("cell" => cell), res)
     end
 
     """
@@ -414,7 +433,8 @@ function create_tools(GateTool::Type)
     """
     function delete_cell(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        return agent_delete_cell!(nb, cell; caller = _caller())
+        res = agent_delete_cell!(nb, cell; caller = _caller())
+        return _surfaced(nb, "delete_cell", Dict{String,Any}("cell" => cell), res)
     end
 
     # ── Multi-agent write safety (MULTIAGENT.md §3) ───────────────────────────
