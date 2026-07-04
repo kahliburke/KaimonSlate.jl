@@ -125,12 +125,30 @@ function mdLite(src) {
   return html.replace(/(\d+)/g, (_, i) => stash[+i]);   // restore spans that landed inline
 }
 let _suppressAgentRender = false;   // set during bulk replay (loadAgentLog) → render once at the end
+// Pretty-print a tool call's args for the expandable detail (capped so a giant source doesn't bloat the pane).
+function _argsPretty(a) {
+  let s; try { s = JSON.stringify(a, null, 1); } catch (_) { s = String(a); }
+  return s.length > 2000 ? s.slice(0, 1999) + '…' : s;
+}
 function _agentMsgHtml(m) {
   const lane = m.crew ? ` lane` : '';
   const tag = m.crew ? `style="--ch:${_crewHue(m.crew)}"` : '';
+  if (m.role === 'tool') {
+    const cidChip = m.cid ? ` <span class="toolnav" data-cid="${_esca(m.cid)}" title="go to cell ${_esca(m.cid)}">→ ${_esca(m.cid)}</span>` : '';
+    const codePre = m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : '';
+    // Terse rows (e.g. "ToolSearch") show only a name; stash the full args + result behind a click.
+    const argsStr = m.args != null ? _argsPretty(m.args) : '';
+    const resStr = m.resultText || m.result || '';
+    const hasDetail = !!(argsStr || resStr);
+    const detail = hasDetail ? `<div class="tooldetail">` +
+      (argsStr ? `<div class="tdlabel">args</div><pre class="toolargs">${_esca(argsStr)}</pre>` : '') +
+      (resStr ? `<div class="tdlabel">result</div><pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(resStr)}</pre>` : '') +
+      `</div>` : '';
+    return `<div class="apmsg tool${lane}${hasDetail ? ' expandable' : ''}" ${tag}>${_crewBadge(m.crew)}` +
+      `${hasDetail ? '<span class="toolcaret">▸</span>' : ''}${_esca(m.text)}${cidChip}${codePre}${detail}</div>`;
+  }
   return (
       m.role === 'img'  ? `<div class="apmsg img${lane}" ${tag}>${_crewBadge(m.crew)}<img src="${m.src}" alt="agent image"></div>`
-    : m.role === 'tool' ? `<div class="apmsg tool${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}${m.cid ? ` <span class="toolnav" data-cid="${_esca(m.cid)}" title="go to cell ${_esca(m.cid)}">→ ${_esca(m.cid)}</span>` : ''}${m.code ? `<pre class="toolcode">${_esca(m.code)}</pre>` : ''}${m.result ? `<pre class="toolresult${m.resultErr ? ' err' : ''}">${_esca(m.result)}</pre>` : ''}</div>`
     : m.role === 'assistant' ? `<div class="apmsg assistant apmd${lane}" ${tag}>${_crewBadge(m.crew)}${mdLite(m.text)}</div>`
     :                     `<div class="apmsg ${m.role}${lane}" ${tag}>${_crewBadge(m.crew)}${_esca(m.text)}</div>`);
 }
@@ -168,8 +186,9 @@ function renderAgentMsgs() {
 // Click the "→ id" chip on an agent tool message → jump to the cell it added/edited/ran.
 (() => { const el = document.getElementById('apmsgs'); if (!el) return;
   el.addEventListener('click', e => {
-    const t = e.target.closest('.toolnav'); if (!t || !t.dataset.cid) return;
-    try { window.selectCell && window.selectCell(t.dataset.cid, true); } catch (_) {}
+    const nav = e.target.closest('.toolnav');
+    if (nav && nav.dataset.cid) { try { window.selectCell && window.selectCell(nav.dataset.cid, true); } catch (_) {} return; }
+    const tool = e.target.closest('.apmsg.tool.expandable'); if (tool) tool.classList.toggle('expanded');   // reveal full args/result
   });
 })();
 // Replay the buffered conversation after a page reload (in-memory agentMsgs is
@@ -300,7 +319,7 @@ function agentEvent(env) {
     if (!tm) { tm = { role: 'tool', id: c.toolCallId, title: '', inputBuf: '', code: '', done: false, crew }; agentMsgs.push(tm); }
     tm.title = _prettyTool(c.title || c.kind || tm.title || 'tool');
     tm.text = tm.title;
-    if (c.rawInput) { tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code; const cc = _argCid(c.rawInput); cc && (tm.cid = cc); }
+    if (c.rawInput) { tm.code = _extractCode(JSON.stringify(c.rawInput)) || tm.code; tm.args = c.rawInput; const cc = _argCid(c.rawInput); cc && (tm.cid = cc); }
   } else if (k === 'tool_input_delta') {
     // The call's arguments stream as raw JSON fragments — concatenate, then
     // tolerant-extract the field being written (source/code/new_string/…) so the
@@ -319,6 +338,7 @@ function agentEvent(env) {
       if (inner && inner.type === 'image' && inner.data)
         agentMsgs.push({ role: 'img', src: `data:${inner.mimeType || 'image/png'};base64,${inner.data}`, crew });
       else if (tm && inner && inner.type === 'text' && inner.text) {
+        tm.resultText = (tm.resultText ? tm.resultText + '\n' : '') + String(inner.text);   // full result → expand
         // The cell tools return "added id=X" / "edited id=X" / "renamed a → b" — the authoritative
         // affected/created cell id; prefer it over the args guess for the navigate-to-cell chip.
         const m2 = String(inner.text).match(/\bid=(\w+)|renamed \w+ → (\w+)/);

@@ -609,6 +609,14 @@ input.toggle:checked::after { left:18px; }
 .apmsg.tool .toolcode { margin:4px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#cdd3e6; }
 .apmsg.tool .toolresult { margin:2px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-left:2px solid var(--accent); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:200px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:var(--green,#56d364); }
 .apmsg.tool .toolresult.err { border-left-color:var(--red,#e57575); color:var(--red,#e57575); }
+/* Click a tool row to reveal its full args + result (terse rows like "ToolSearch" otherwise show only a name). */
+.apmsg.tool.expandable { cursor:pointer; }
+.apmsg.tool .toolcaret { display:inline-block; color:var(--dim); font-size:.7em; margin-right:3px; transition:transform .12s; }
+.apmsg.tool.expanded .toolcaret { transform:rotate(90deg); }
+.apmsg.tool .tooldetail { display:none; }
+.apmsg.tool.expanded .tooldetail { display:block; }
+.apmsg.tool .tdlabel { font-size:.62rem; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; margin:4px 0 1px; }
+.apmsg.tool .toolargs { margin:1px 0 2px; padding:6px 8px; background:#0d1120; border:1px solid var(--bg3); border-radius:5px; font-size:.72rem; line-height:1.45; max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-word; color:#cdd3e6; }
 /* Click-to-navigate chip on an agent tool message (the cell it added/edited/ran). */
 .apmsg.tool .toolnav { cursor:pointer; color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   border-radius:5px; padding:0 5px; font-family:'Cascadia Code',monospace; font-size:.7rem; white-space:nowrap; }
