@@ -194,6 +194,16 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         r2 = parse_report("#%% code id=a\nx = 1\ny = 2")
         build_dependencies!(r2)
         @test isempty(r2.meta["multidef"])
+        # LOCALS mutated in place (let-block / comprehension / loop locals) must NOT count as global
+        # writes — two cells each mutating their OWN same-named local is not a collision.
+        r3 = parse_report("#%% code id=a\nlet\n  acc = zeros(3)\n  acc[1] = 1\n  push!(acc, 0.0)\n  sum(acc)\nend\n" *
+                          "#%% code id=b\nlet\n  acc = zeros(2)\n  acc[2] = 9\n  sum(acc)\nend")
+        build_dependencies!(r3)
+        @test isempty(r3.meta["multidef"])          # `acc` is local to each cell — no real collision
+        # …but two cells mutating the SAME GLOBAL in place IS still a real multi-writer collision.
+        r4 = parse_report("#%% code id=a\nbuf[1] = 1\n#%% code id=b\npush!(buf, 2)")
+        build_dependencies!(r4)
+        @test "buf" in r4.meta["multidef"]
     end
 
 end

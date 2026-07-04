@@ -128,6 +128,22 @@ function _collect_mutations!(writes::Set{Symbol}, reads::Set{Symbol}, ex)
     return nothing
 end
 
+# In-place mutations, recorded as writes — but ONLY of GLOBAL names. `_collect_mutations!` is
+# scope-blind (it walks the whole AST), so a mutated LOCAL — a `let`-block, comprehension, or loop
+# local like `acc[i] = …` / `push!(acc, …)` — would masquerade as a global write. That produced
+# phantom write-write conflicts in the scheduler AND false "defined in more than one cell" warnings
+# when two cells each mutate their own same-named local. `globals` is EE's `references` set — exactly
+# the block's free (global) variables — so we keep only mutations whose base name is genuinely global.
+# (A name the cell itself defines is already a write via `node.definitions`, so dropping its mutation
+# entry here loses nothing.)
+function _record_global_mutations!(cell::Cell, ex, globals)
+    mw = Set{Symbol}(); mr = Set{Symbol}()
+    _collect_mutations!(mw, mr, ex)
+    for s in mw; s in globals && push!(cell.writes, s); end
+    for s in mr; s in globals && push!(cell.reads,  s); end
+    return nothing
+end
+
 # Statically collect the file paths a cell references via `@asset "path"` (or `@asset bytes
 # "path"`) — a STRING-LITERAL arg to an `@asset` macrocall, anywhere in the AST. Because the
 # path is a literal in the source, this is known WITHOUT running the cell, so the file becomes
@@ -292,10 +308,10 @@ function _infer_bindings_uncached!(cell::Cell)
                 node = EE.compute_reactive_node(lam)
                 union!(cell.reads, node.references)
                 union!(cell.writes, node.definitions)
+                _record_global_mutations!(cell, body, node.references)
             catch e
                 @debug "deps: @onclick/@onchange handler reactive-node analysis failed" cell = cell.id exception = e
             end
-            _collect_mutations!(cell.writes, cell.reads, body)
         else
             push!(nonbind, s)
         end
@@ -307,11 +323,11 @@ function _infer_bindings_uncached!(cell::Cell)
             union!(cell.reads, node.references)
             union!(cell.writes, node.definitions)
             union!(cell.writes, node.funcdefs_without_signatures)
+            _record_global_mutations!(cell, blk, node.references)
         catch e
             @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell = cell.id exception = e
             push!(cell.flags, :opaque)
         end
-        _collect_mutations!(cell.writes, cell.reads, blk)
     end
     _is_barrier_expr(top) && push!(cell.flags, :opaque)
     return cell
