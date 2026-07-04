@@ -544,4 +544,21 @@ x = 1
         @test occursin("bibliography", out)          # cell keeps its role tag
         rm(d; recursive = true, force = true)
     end
+
+    # Regression: the SERVER parallel batch must tag plotting cells with the graphics sentinel so two
+    # Makie cells never run concurrently (ConcurrencyViolationError deep in Observables). The sentinel
+    # was on the worker path but missing here, so plots raced on a reload/re-run.
+    @testset "parallel batch serialises graphics cells (Makie thread-safety)" begin
+        r = RE.parse_report("#%% code id=p1\nfig = Figure(); ax = Axis(fig[1,1]); lines!(ax, 1:3, 1:3); fig\n" *
+                            "#%% code id=p2\nscatter!(1:3, 1:3)\n" *
+                            "#%% code id=calc\ny = sum(1:10)")
+        RE.build_dependencies!(r)
+        specs = NS._batch_specs([c for c in r.cells if c.kind == RE.CODE])
+        bym = Dict(s.id => s for s in specs)
+        @test NS._GRAPHICS_SENTINEL in bym["p1"].writes && NS._GRAPHICS_SENTINEL in bym["p2"].writes
+        @test !(NS._GRAPHICS_SENTINEL in bym["calc"].writes)   # pure compute is untagged
+        bl = NS.par_blockers(specs)
+        @test "p1" in bl["p2"]                                  # graphics ↔ graphics serialised
+        @test NS.co_runnable(["p1", "calc"], bl)                # graphics ∥ pure compute is fine
+    end
 end

@@ -423,6 +423,21 @@ end
 # yet (in-flight cells are interrupted via the worker's __slate_cancel). Keyed by nb.id.
 const _PARALLEL_CANCEL = Dict{String,Bool}()
 
+# Build the parallel-batch scheduler specs for `code` cells (document order). Plotting cells share
+# Makie's non-thread-safe globals (theme / current-figure / display stack), invisible to dataflow
+# analysis — so they get a synthetic shared write (`_GRAPHICS_SENTINEL`), making par_blockers serialise
+# graphics-vs-graphics (else two plots run concurrently → `ConcurrencyViolationError` deep in
+# Observables). Mirrors the worker's `__slate_eval_batch`; extracted so it's unit-testable.
+function _batch_specs(code)
+    specs = ParCell[]
+    for c in code
+        w = copy(c.writes)
+        _uses_shared_graphics(c.source) && push!(w, _GRAPHICS_SENTINEL)
+        push!(specs, ParCell(c.id, copy(c.deps), copy(c.reads), w, (:opaque in c.flags) || _cell_defines(c)))
+    end
+    return specs
+end
+
 # Run every stale CODE cell as a PARALLEL dataflow batch. Independent cells evaluate CONCURRENTLY —
 # each on its own task making its own gate `__slate_eval` call (the request channel muxes them by
 # correlation id; each runs on its own worker task with task-local DemuxCapture) — while par_blockers
@@ -434,8 +449,7 @@ function _run_code_batch!(nb::LiveNotebook)
     specs, npending = lock(nb.lock) do
         code = [c for c in nb.report.cells if c.kind == CODE && c.state == STALE]
         length(code) < 2 && return (nothing, 0)
-        ss = [ParCell(c.id, copy(c.deps), copy(c.reads), copy(c.writes),
-                      (:opaque in c.flags) || _cell_defines(c)) for c in code]
+        ss = _batch_specs(code)
         (ss, count(c -> c.state in (STALE, RUNNING), nb.report.cells))
     end
     specs === nothing && return false
