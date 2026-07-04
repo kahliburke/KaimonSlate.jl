@@ -147,6 +147,43 @@ function _collect_asset_paths!(paths::Vector{String}, ex)
     return paths
 end
 
+# Statically collect notebook-level ES-module import-map entries declared via
+# `@use "name" => "url"` (or `@use "name" "url"`) — literal pairs anywhere in the AST, so they're
+# known WITHOUT running the cell (mirrors `@asset`). The engine merges these into the page's single
+# `<script type="importmap">` (shell head live + export head) so front-end JS can `import` them.
+function _collect_use_imports!(dict::AbstractDict, ex)
+    if ex isa Expr
+        if ex.head === :macrocall && !isempty(ex.args) && ex.args[1] === Symbol("@use")
+            args = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
+            if length(args) == 1 && args[1] isa Expr && args[1].head === :call && length(args[1].args) == 3 &&
+               args[1].args[1] === :(=>) && args[1].args[2] isa AbstractString && args[1].args[3] isa AbstractString
+                dict[String(args[1].args[2])] = String(args[1].args[3])         # @use "name" => "url"
+            elseif length(args) == 2 && args[1] isa AbstractString && args[2] isa AbstractString
+                dict[String(args[1])] = String(args[2])                          # @use "name" "url"
+            end
+        end
+        for a in ex.args
+            _collect_use_imports!(dict, a)
+        end
+    end
+    return dict
+end
+
+# Notebook-level import map: scan every code cell's source for `@use` declarations → an ordered
+# name→url map on `report.meta["imports"]`. Refreshed on each structural pass (build_dependencies!),
+# so adding/removing a `@use` updates what the shell/export head injects (a live change still needs a
+# page reload — the browser fixes the import map at load).
+function _scan_imports!(report::Report)
+    d = Dict{String,String}()
+    for c in report.cells
+        c.kind == CODE || continue
+        top = try; Meta.parseall(c.source); catch; continue; end
+        _collect_use_imports!(d, top)
+    end
+    report.meta["imports"] = d
+    return d
+end
+
 """
     infer_bindings!(cell) -> cell
 
@@ -294,6 +331,7 @@ function build_dependencies!(report::Report)
         infer_bindings!(c)
         empty!(c.deps)
     end
+    _scan_imports!(report)                 # notebook-level `@use` import-map declarations → report.meta
     writer = Dict{Symbol,String}()        # name → id of most-recent prior writer
     barrier::Union{String,Nothing} = nothing
     seen = String[]

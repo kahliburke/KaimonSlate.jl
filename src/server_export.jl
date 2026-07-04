@@ -164,6 +164,15 @@ function _og_tags(; title::AbstractString, desc::AbstractString = "", image::Abs
     return String(take!(p))
 end
 
+# The `<script type="importmap">` for a notebook's `@use` module declarations (JSON-encoded), or ""
+# when there are none — injected into the exported page's <head> so its front-end JS resolves the
+# same bare specifiers it did live.
+function _export_importmap(imports)
+    (imports === nothing || isempty(imports)) && return ""
+    m = Dict("imports" => Dict{String,String}(String(k) => String(v) for (k, v) in imports))
+    return string("<script type=\"importmap\">", JSON.json(m), "</script>")
+end
+
 function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", code::AbstractString = "normal",
                      outputs::AbstractString = "all", og_image::AbstractString = "",
@@ -179,6 +188,9 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         io = IOBuffer()
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
+              # The notebook's `@use` import map (if any) → so an exported page's front-end JS can
+              # `import` the same CDN modules it used live. Emitted in <head> before any body module runs.
+              _export_importmap(get(nb.report.meta, "imports", nothing)),
               _og_tags(; title = fm0.title, desc = rawdesc, image = og_image, url = og_url, type = og_type),
               "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",

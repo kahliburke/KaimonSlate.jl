@@ -237,6 +237,16 @@ _vmlx_models()   = _tags_models(get(ENV, "VMLX_HOST", "http://127.0.0.1:8000"))
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
 
+# Splice a notebook's `@use` entries into the shell's single `<script type="importmap">` (right
+# after `"imports": {`), so front-end JS can `import` them. Values are JSON-encoded (safe for URLs /
+# quotes). No-op when empty. One import map per document → we MERGE, never add a second (the base
+# preact/htm/signals entries follow the injected ones).
+function _inject_imports(html::AbstractString, imports)
+    (imports === nothing || isempty(imports)) && return String(html)
+    entries = join(("  " * JSON.json(String(k)) * ": " * JSON.json(String(v)) * "," for (k, v) in imports), "\n  ")
+    return replace(String(html), "\"imports\": {" => "\"imports\": {\n  " * entries; count = 1)
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
@@ -331,8 +341,11 @@ function _make_router(h::Hub)
     end)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin
         id = HTTP.getparam(req, "id")
-        present = lock(h.lock) do; haskey(h.notebooks, id); end
-        present ? _html(read(_ASSET, String)) : HTTP.Response(302, ["Location" => "/"])   # not open → home
+        nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+        nb === nothing && return HTTP.Response(302, ["Location" => "/"])          # not open → home
+        # Merge the notebook's `@use` import-map entries into the shell's single importmap (so
+        # front-end JS can `import` them); verbatim shell when there are none.
+        _html(_inject_imports(read(_ASSET, String), get(nb.report.meta, "imports", nothing)))
     end)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
     # Content-addressed output image (see server_history.jl `_externalize_blobs`): immutable, so the

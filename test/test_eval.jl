@@ -284,6 +284,19 @@ end
         @test !occursin("SECRET_TOKEN", h3) && occursin("atob(", h3)   # source is behind the curtain
     end
 
+    @testset "@use import-map declarations" begin
+        # `@use "name" => "url"` (or `@use "name" "url"`) is statically extracted into report.meta.
+        r = parse_report("#%% code id=a\n@use \"d3\" => \"https://esm.sh/d3@7\"\n\n#%% code id=b\n@use \"three\" \"https://esm.sh/three\"\nx = 1")
+        build_dependencies!(r)
+        imps = r.meta["imports"]
+        @test imps["d3"] == "https://esm.sh/d3@7"
+        @test imps["three"] == "https://esm.sh/three"
+        # a notebook with no @use → empty map (no importmap injected)
+        r2 = parse_report("#%% code id=c\nx = 1")
+        build_dependencies!(r2)
+        @test isempty(r2.meta["imports"])
+    end
+
     @testset "run_capture wire form" begin
         # The wire form is the contract the gate worker returns and the server
         # deserializes — primitives only, no MimeChunk/CellOutput struct identity.

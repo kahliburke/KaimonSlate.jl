@@ -402,6 +402,15 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         path === nothing && error("@asset needs a path, e.g. @asset \"file.js\" (or @asset bytes \"logo.png\")")
         return esc(:(__slate_readfile($(path); bytes = $(bytes))))
     end))
+    # `@use "d3" => "https://esm.sh/d3@7"` — DECLARE a browser ES-module import at the NOTEBOOK level.
+    # A runtime no-op: it's a declaration, statically extracted by the engine (deps.jl `_scan_imports!`)
+    # and merged into the page's `<script type="importmap">` in the shell `<head>` (live) and the export
+    # `<head>` — so notebook front-end JS can `import * as d3 from "d3"`. The import map is fixed at
+    # document load, so adding/changing a `@use` needs a page reload to take effect (editing JS content
+    # stays instant). Literal string args so the declaration is visible without running the cell.
+    Core.eval(m, :(macro use(args...)
+        return :(nothing)
+    end))
     return m
 end
 
