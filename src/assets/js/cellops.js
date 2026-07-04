@@ -65,11 +65,14 @@ async function splitCell(id, view) {
   renderAll(await api('POST', '/api/cell-split/' + id, { before: val.slice(0, idx), after: val.slice(idx) }));
 }
 // Merge a cell with the one below it (same kind only); sends current editor text.
+// @bind cells ARE mergeable: a cell may hold several @bind statements (they render a combined
+// control strip), so consolidating side-by-side control cells into one is exactly the point.
+// The server re-analyzes the merged source, so multiple binds are picked up automatically.
 async function mergeBelow(id) {
   const ids = cellIds(), i = ids.indexOf(id);
   if (i < 0 || i >= ids.length - 1) return;
   const a = _cellById(id), b = _cellById(ids[i + 1]);
-  if (!a || !b || a.kind !== b.kind || hasBinds(a) || hasBinds(b)) return;
+  if (!a || !b || a.kind !== b.kind) return;
   const sa = editors[id] ? edText(id) : (srcMap[id] || '');
   const sb = editors[ids[i + 1]] ? edText(ids[i + 1]) : (srcMap[ids[i + 1]] || '');
   renderAll(await api('POST', '/api/cell-merge/' + id, { source: sa.replace(/\s+$/, '') + '\n' + sb.replace(/^\s+/, '') }));

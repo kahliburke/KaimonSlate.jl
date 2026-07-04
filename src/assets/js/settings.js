@@ -136,4 +136,8 @@ function effectiveAgentModel() { return (typeof nbState !== 'undefined' && nbSta
 function effectiveAgentPerm() { return nbAgentPerm() || agentPerm(); }
 function closeSettings() { document.getElementById('setbg').classList.remove('show'); }
 document.getElementById('setbg').addEventListener('mousedown', e => { if (e.target.id === 'setbg') closeSettings(); });
+// Esc dismisses the settings modal (capture phase + stopPropagation so command-mode keys don't also fire).
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('setbg').classList.contains('show')) { e.stopPropagation(); closeSettings(); }
+}, true);
 

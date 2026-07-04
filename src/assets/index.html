@@ -211,8 +211,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   inp.addEventListener('blur',function(){setTimeout(function(){comp.style.display='none';},120);});
   inp.addEventListener('keydown',function(e){
     if(e.key==='Tab'){e.preventDefault();
+      if(!items.length)return;
+      if(e.shiftKey){sel=sel<=0?items.length-1:sel-1;inp.value=items[sel];render();return;}   // ⇧Tab cycles backwards
       if(items.length===1){inp.value=items[0];fetchComp();}
-      else if(items.length>1){var cp=commonPrefix(items);
+      else{var cp=commonPrefix(items);
         if(cp.length>inp.value.length){inp.value=cp;fetchComp();}
         else{sel=(sel+1)%items.length;inp.value=items[sel];render();}}}
     else if(e.key==='/'||e.key==='\\'){var idx=sel>=0?sel:(items.length?0:-1);   // commit a dir + descend

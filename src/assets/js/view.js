@@ -408,15 +408,20 @@ function updateChrome(state) {
   document.title = (state.title ? state.title + ' · ' : '') + 'Kaimon Slate';   // browser tab
   const w = state.worker || {}, dot = document.getElementById('wdot');
   if (dot) {
-    // Worker dot semantics: green = connected (incl. while a run streams — we ARE connected),
-    // blue = in-process kernel OR the gate worker still BOOTING (hydrating), red = a genuine
-    // disconnect of a live notebook only. So a not-yet-connected gate worker shows a "starting"
-    // blue pulse during hydration, never the alarming red.
+    // Worker dot semantics: green = healthy (worker connected — incl. while a run streams — OR a
+    // markdown-only notebook, which has nothing to run and so is trivially healthy), blue = in-process
+    // kernel OR the gate worker still BOOTING (hydrating), red = a genuine disconnect of a RUNNABLE
+    // notebook only. So a not-yet-connected gate worker shows a "starting" blue pulse during hydration,
+    // and an md-only notebook shows green (not the alarming red) — the tooltip says there's no worker.
+    const hasCode = (state.cells || []).some(c => c.kind === 'code');
     const cls = w.kind === 'inproc' ? 'inproc'
               : w.connected ? 'up'
-              : (state.hydrating ? 'inproc busy' : 'down');
+              : state.hydrating ? 'inproc busy'
+              : hasCode ? 'down'          // a genuine disconnect of a runnable notebook
+              : 'up';                     // md-only: nothing to run → healthy (green), never red
     dot.className = 'wdot ' + cls + (_busy > 0 ? ' busy' : '');
-    dot.title = w.kind === 'gate'
+    dot.title = !hasCode && !w.connected ? 'markdown only — nothing to run'
+              : w.kind === 'gate'
               ? ('worker :' + w.port + (w.connected ? ' · connected' : (state.hydrating ? ' · starting…' : ' · disconnected')))
               : 'in-process kernel';
   }

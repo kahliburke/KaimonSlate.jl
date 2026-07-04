@@ -375,4 +375,10 @@ function closeExport(go) {
 // Back-compat entry points (palette / keys): open the unified modal, PDF preselecting the deck.
 function exportPdf(preset) { return openExport(preset === 'slides' ? 'slides' : undefined); }
 function exportSlidesPdf() { return openExport('slides'); }
+// Dismiss the export modal on backdrop-click and Esc (parity with the settings/confirm modals).
+// closeExport(false) = cancel: hide without persisting any option choices.
+document.getElementById('exportbg').addEventListener('mousedown', e => { if (e.target.id === 'exportbg') closeExport(false); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('exportbg').classList.contains('show')) { e.stopPropagation(); closeExport(false); }
+}, true);
 

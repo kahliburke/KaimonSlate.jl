@@ -523,7 +523,8 @@ document.addEventListener('keydown', e => {
       openDocsAtCursor();
     } else {
       e.preventDefault();
-      openPalette();
+      // ⌘K toggles: a second press dismisses the palette rather than reopening it.
+      document.getElementById('cmdbg').classList.contains('show') ? closePalette() : openPalette();
     }
   }
   else if (mod && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAll(); }         // ⌘↵  run stale (⌘⇧↵ is run+add-below, handled elsewhere)
