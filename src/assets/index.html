@@ -99,6 +99,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <button id="openbtn">Open</button>
   </div>
   <div id="recent" class="recent"></div>
+  <div id="localsites" class="recent"></div>
 </div>
 <div class="colR"><div id="sessions"></div></div>
 </div>
@@ -293,12 +294,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       renderRecents();   // recents marks (not hides) notebooks already open (reads .nb .p)
     }).catch(function(){});
   }
-  loadSessions();
+  // Local export sites (Export → Save to local site), served by the hub at /sites/<name>/ — link each.
+  function loadLocalSites(){
+    return fetch('/api/sites').then(function(r){return r.json();}).then(function(d){
+      var box=document.getElementById('localsites'); if(!box) return;
+      var sites=(d&&d.sites)||[];
+      box.innerHTML = sites.length ? '<h2 class="sect">Local sites</h2>'+sites.map(function(s){
+        var url='/sites/'+encodeURIComponent(s)+'/';
+        return '<a class="ritem" href="'+esc(url)+'" style="text-decoration:none;color:inherit"><div class="rt"><span class="rb">'+
+          esc(s)+'</span><span class="rp">'+esc(url)+'</span></div></a>';
+      }).join('') : '';
+    }).catch(function(){});
+  }
+  loadSessions(); loadLocalSites();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
   // from other tabs, agents, or MCP tools), and refresh immediately when the tab regains focus.
-  setInterval(function(){ if(!document.hidden) loadSessions(); }, 4000);
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden) loadSessions(); });
-  window.addEventListener('pageshow',function(){ loadSessions(); });   // back/forward cache restore
+  setInterval(function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); } }, 4000);
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); } });
+  window.addEventListener('pageshow',function(){ loadSessions(); loadLocalSites(); });   // back/forward cache restore
   // Prefill the last directory we opened from (but DON'T open the completion
   // dropdown on load — it would cover the open-sessions list; it opens when the
   // user types or Tabs).
