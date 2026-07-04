@@ -11,7 +11,8 @@
 # value against a per-notebook registry (preserve across re-runs unless the widget
 # or its domain changed) and records the spec so the host can render the control.
 #
-# Dependency-light (Base only) so it loads cleanly into the standalone worker.
+# Dependency-light (Base + stdlib only) so it loads cleanly into the standalone worker.
+import Base64   # stdlib — for WebPage(obscure=true) base64 packaging
 
 # A widget spec: its kind (UI tag), display params, and default value. Built by the
 # constructors below at runtime — no syntactic parsing, no `Slider`-name matching.
@@ -262,6 +263,43 @@ function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLoc
     end
 end
 
+# ── WebPage: compose a self-contained HTML page from CSS/HTML/JS ──────────────
+# A first-class replacement for the ad-hoc `HTMLDoc` + base64 `<img onload>` boot pattern (see the
+# Portfolio front page). Pass the pieces as strings — typically via `@asset` so the source files are
+# TRACKED (edit → the cell re-runs; the memo won't serve stale): `WebPage(css=@asset("app.css"),
+# js=@asset("app.js"), html=@asset("app.html"))`. Renders to ONE `text/html` output — `<style>` +
+# body + `<script>` — that works both in the live notebook (its `<script>` is revived by the
+# frontend's `runScripts`) and in a static export/publish (self-contained, no external requests, no
+# `<img onload>` smuggling needed since a static page runs `<script>` natively).
+#
+# `obscure=true` base64-encodes the JS behind a tiny decode-and-run bootstrap ("curtains" — trivial
+# to peel, but it doesn't spill the source to a casual View-Source), for when a published page should
+# keep the magic behind the curtain. The source files on disk stay plain and debuggable regardless.
+struct WebPage
+    html::String
+    css::String
+    js::String
+    obscure::Bool
+end
+WebPage(; html::AbstractString = "", css::AbstractString = "", js::AbstractString = "", obscure::Bool = false) =
+    WebPage(String(html), String(css), String(js), obscure)
+function Base.show(io::IO, ::MIME"text/html", w::WebPage)
+    isempty(w.css) || print(io, "<style>", replace(w.css, "</style>" => "<\\/style>"), "</style>")
+    print(io, w.html)
+    if !isempty(w.js)
+        if w.obscure
+            # Decode the base64'd UTF-8 (atob → latin-1 bytes; TextDecoder reassembles multi-byte
+            # chars) and run it. A plain `<script>` (no image hack) — revived live by runScripts,
+            # native in a static export.
+            print(io, "<script>Function(new TextDecoder().decode(Uint8Array.from(atob('",
+                  Base64.base64encode(w.js), "'),c=>c.charCodeAt(0))))()</script>")
+        else
+            print(io, "<script>", replace(w.js, "</script>" => "<\\/script>"), "</script>")
+        end
+    end
+    return nothing
+end
+
 # ── The namespace contract ────────────────────────────────────────────────────
 # Inject the COMPLETE, identical set of notebook-namespace names into module `m`.
 # Context-specific helper *implementations* (echart/tables/refresh) are passed in;
@@ -272,6 +310,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
                                 assetbase = () -> "")
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
+    Core.eval(m, :(const WebPage = $WebPage))     # compose a self-contained HTML page (CSS/HTML/JS)
     Core.eval(m, :(const series = $series))       # ECharts DSL series builder (echarts_dsl.jl)
     Core.eval(m, :(const animate = $animate))     # animate(frames;…) → Animation (animation.jl)
     Core.eval(m, :(const slate_table = $slate_table))

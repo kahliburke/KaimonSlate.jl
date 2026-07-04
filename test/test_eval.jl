@@ -269,6 +269,21 @@ end
         @test Base.invokelatest(Core.eval, m, :(@asset $abspath_js)) == "HELLO"
     end
 
+    @testset "WebPage renders self-contained HTML" begin
+        w = ReportEngine.WebPage(css = "body{color:red}", html = "<h1>hi</h1>", js = "console.log(1)")
+        h = sprint(show, MIME"text/html"(), w)
+        @test h == "<style>body{color:red}</style><h1>hi</h1><script>console.log(1)</script>"
+        # `</script>` / `</style>` in content are escaped so they can't close the tag early
+        w2 = ReportEngine.WebPage(js = "a='</script>'", css = "x</style>")
+        h2 = sprint(show, MIME"text/html"(), w2)
+        @test occursin("<\\/script>", h2) && !occursin("'</script>'", h2)
+        @test occursin("<\\/style>", h2)
+        # obscure=true base64-wraps the JS behind a decode-and-run bootstrap (no raw source)
+        w3 = ReportEngine.WebPage(js = "SECRET_TOKEN()", obscure = true)
+        h3 = sprint(show, MIME"text/html"(), w3)
+        @test !occursin("SECRET_TOKEN", h3) && occursin("atob(", h3)   # source is behind the curtain
+    end
+
     @testset "run_capture wire form" begin
         # The wire form is the contract the gate worker returns and the server
         # deserializes — primitives only, no MimeChunk/CellOutput struct identity.

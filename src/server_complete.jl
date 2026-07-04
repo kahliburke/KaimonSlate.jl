@@ -270,6 +270,25 @@ function _make_router(h::Hub)
         f === nothing && return HTTP.Response(404, "no such site file")
         HTTP.Response(200, ["Content-Type" => _site_ctype(f)], read(f))
     end)
+    # Serve a notebook's sibling assets (the files it reads via `@asset`) by real URL, so the live
+    # page can reference `<script src="asset/portfolio.js">` (cacheable, debuggable, source-mapped)
+    # instead of inlining. Rooted at the notebook's project dir (`assetbase`), with a `..`-traversal
+    # guard that keeps every request inside it. `no-store` so an edit shows on the next fetch.
+    HTTP.register!(router, "GET", "/n/{id}/asset/**", req -> begin
+        id = HTTP.getparam(req, "id")
+        m = match(r"^/n/[^/]+/asset/(.*)$", HTTP.URI(req.target).path)
+        sub = m === nothing ? "" : String(m.captures[1])
+        nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+        nb === nothing && return HTTP.Response(404, "no such notebook")
+        base = String(get(nb.report.meta, "assetbase", ""))
+        isempty(base) && return HTTP.Response(404, "notebook has no asset root")
+        rootn = normpath(base)
+        p = normpath(joinpath(rootn, strip(sub, '/')))
+        # stay inside the project dir (accept either separator so the guard holds on Windows too)
+        (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) || return HTTP.Response(404)
+        isfile(p) || return HTTP.Response(404, "no such asset")
+        HTTP.Response(200, ["Content-Type" => _site_ctype(p), "Cache-Control" => "no-store"], read(p))
+    end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
