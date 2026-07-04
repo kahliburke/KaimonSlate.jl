@@ -887,6 +887,46 @@ function export_to_site(nb::LiveNotebook, name::AbstractString; slug::AbstractSt
             slug = built.slug, home = built.home, docCount = built.docCount, dir)
 end
 
+# Drop the doc `slug` from `manifest["docs"]`; returns whether an entry was removed (mirror of _upsert_doc!).
+function _remove_doc!(manifest, slug::AbstractString)
+    docs = get(manifest, "docs", Any[]); docs isa AbstractVector || return false
+    n = length(docs)
+    filter!(d -> !(d isa AbstractDict && String(get(d, "slug", "")) == String(slug)), docs)
+    manifest["docs"] = docs
+    return length(docs) < n
+end
+
+# The docs currently in the local site `name` (its manifest entries) — for the export dialog's
+# "remove a page" picker. `[]` when the site doesn't exist.
+function site_docs(name::AbstractString)
+    dir = _site_dir(name)
+    (dir === nothing || !isdir(dir)) && return Any[]
+    docs = get(_read_site_manifest(dir), "docs", Any[])
+    return docs isa AbstractVector ? docs : Any[]
+end
+
+"""
+    unexport_from_site(name, slug) -> (; removed, docCount)
+
+Remove doc `slug` from the persistent local site `name`: delete its `<slug>/` directory, drop its
+`slate-site.json` entry, and regenerate the index (home template preserved). Idempotent — an unknown
+site or slug just reports `removed=false`.
+"""
+function unexport_from_site(name::AbstractString, slug::AbstractString)
+    dir = _site_dir(name)
+    (dir === nothing || !isdir(dir)) && return (; removed = false, docCount = 0)
+    slg = _slugify(slug)
+    manifest = _read_site_manifest(dir)
+    removed = _remove_doc!(manifest, slg)
+    isempty(slg) || rm(joinpath(dir, slg); recursive = true, force = true)   # _slugify → no `..` traversal
+    write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
+    docs = get(manifest, "docs", Any[])
+    htmpl = joinpath(dir, ".slate-home.html")
+    write(joinpath(dir, "index.html"),
+          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+    return (; removed, docCount = length(docs))
+end
+
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
 function _existing_site_docs(gh, repo::AbstractString)
     # Interpolate the path + header as whole variables so the `?`/`:`/space reach gh literally

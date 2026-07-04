@@ -354,6 +354,16 @@ x = 1
             @test NS._site_file("my-portfolio", "../../../etc/passwd") === nothing    # never escape the site
             @test NS._site_file("my-portfolio", "..") === nothing
             @test NS._site_file("nope", "index.html") === nothing                     # unknown site
+            # Unexport: add a second doc, then remove "alpha" — its dir + manifest entry go, the other stays.
+            b = withfig(_mknb("#%% md id=t\n# Beta\n\n#%% code id=fig\n2\n"))
+            NS.export_to_site(b, "My Portfolio"; slug = "beta")
+            @test Set(String(get(d, "slug", "")) for d in NS.site_docs("My Portfolio")) == Set(["alpha", "beta"])
+            u = NS.unexport_from_site("My Portfolio", "alpha")
+            @test u.removed && u.docCount == 1
+            @test !isdir(joinpath(tmp, "my-portfolio", "alpha"))                      # doc dir deleted
+            @test [String(get(d, "slug", "")) for d in NS.site_docs("My Portfolio")] == ["beta"]
+            @test !NS.unexport_from_site("My Portfolio", "alpha").removed             # idempotent (already gone)
+            @test !NS.unexport_from_site("nope", "x").removed                         # unknown site
         end
     end
 

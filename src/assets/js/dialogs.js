@@ -260,6 +260,37 @@ async function publishLocalSite() {
     [{ label: 'Close', value: false }, { label: 'Open', value: 'open', cls: 'primary' }], { html: true });
   if (v === 'open') window.open(url, '_blank', 'noopener');
 }
+// ── Local-site page management (unexport) ─────────────────────────────────────
+// List the pages already saved to the local site named in #sitelocal, each a chip with a ✕ that
+// removes it (deletes its folder + manifest entry, regenerates the index). Hidden when the site is
+// empty/absent — so it only appears once you've saved pages to that name.
+async function refreshSiteDocs() {
+  const row = document.getElementById('siteunexrow'), list = document.getElementById('siteunexlist');
+  if (!row || !list) return;
+  const name = ((document.getElementById('sitelocal') || {}).value || '').trim();
+  let docs = [];
+  if (name) { try { const r = await api('GET', '/api/site-docs?name=' + encodeURIComponent(name)); docs = (r && r.docs) || []; } catch (_) {} }
+  if (!docs.length) { row.style.display = 'none'; list.innerHTML = ''; return; }
+  row.style.display = '';
+  list.innerHTML = docs.map(d => {
+    const slug = String(d.slug || ''), title = String(d.title || slug);
+    return `<span class="sitepage" data-slug="${_escHtml(slug)}" data-title="${_escHtml(title)}"` +
+      ` style="display:inline-flex;align-items:center;gap:5px;background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:2px 4px 2px 10px;font-size:.78rem">` +
+      `${_escHtml(title)}<button class="sitepagex" title="remove this page" style="border:none;background:transparent;color:var(--dim);cursor:pointer;padding:0 4px;line-height:1">✕</button></span>`;
+  }).join('');
+}
+document.getElementById('siteunexlist') && document.getElementById('siteunexlist').addEventListener('click', async e => {
+  const b = e.target.closest('.sitepagex'); if (!b) return;
+  const chip = b.closest('.sitepage'); if (!chip) return;
+  const name = ((document.getElementById('sitelocal') || {}).value || '').trim();
+  const slug = chip.dataset.slug, title = chip.dataset.title || slug;
+  if (!await confirmDark('Remove “' + title + '” from the local site “' + name + '”?\nIts page folder is deleted and the site index updated.', 'Remove', 'danger')) return;
+  try {
+    const r = await fetch(_apipath('/api/site-unexport'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, slug }) });
+    if (!r.ok) { await alertDark('Remove failed:\n' + (await r.text())); return; }
+  } catch (err) { await alertDark('Remove failed: ' + err); return; }
+  refreshSiteDocs();
+});
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
@@ -342,6 +373,10 @@ function openExport(preset) {
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
+  // Local-site pages (unexport UI): wire the input once, then list the named site's current pages.
+  const _sl = document.getElementById('sitelocal');
+  if (_sl && !_sl._unexWired) { _sl._unexWired = true; _sl.addEventListener('input', () => { clearTimeout(_sl._unexT); _sl._unexT = setTimeout(refreshSiteDocs, 300); }); }
+  refreshSiteDocs();
   _exSyncRows();
   document.getElementById('exportbg').classList.add('show');
 }

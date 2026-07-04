@@ -584,6 +584,20 @@ function _make_router(h::Hub)
     end))
     # Existing local sites (names), for the export dialog's picker.
     HTTP.register!(router, "GET", "/api/sites", _ -> _json(Dict("sites" => list_local_sites())))
+    # The docs in one local site (?name=…), for the export dialog's "remove a page" picker.
+    HTTP.register!(router, "GET", "/api/site-docs", req -> begin
+        name = get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")
+        _json(Dict("docs" => site_docs(String(name))))
+    end)
+    # Unexport (remove) a subpage from a local site. Body: {name, slug}. Deletes its dir + manifest
+    # entry and regenerates the index.
+    HTTP.register!(router, "POST", "/api/site-unexport", req -> begin
+        b = _body(req)
+        name = strip(String(get(b, "name", ""))); slug = strip(String(get(b, "slug", "")))
+        (isempty(name) || isempty(slug)) && return HTTP.Response(400, "missing site \"name\" or \"slug\"")
+        r = unexport_from_site(String(name), String(slug))
+        _json(Dict("removed" => r.removed, "docCount" => r.docCount))
+    end)
     # Preflight (read-only): what would publishing to this repo do? Body: {repo}. Drives the confirm UI.
     HTTP.register!(router, "POST", "/api/{id}/publish-check", req -> _withnb(h, req, nb -> begin
         repo = strip(get(_body(req), "repo", ""))
