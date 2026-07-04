@@ -319,6 +319,12 @@ end
 function _kill_worker!(k::GateKernel)
     if k.conn !== nothing
         try; delete!(_GATE_SESSION, k.conn.name); catch; end
+        # Tear the client connection DOWN, not just drop the reference: `disconnect!` closes the
+        # DEALER, stops its background reader task, and parks/closes the ZMQ context. Without it the
+        # reader keeps `recv`-ing on the now-dead worker port — throwing every iteration (an
+        # exception-driven busy-poll) — and each respawn leaks another context. That accumulation is
+        # what pegged the extension at ~70% CPU across a handful of leaked reader loops.
+        try; _kaimon().disconnect!(k.conn); catch; end
     end
     p = k.proc
     if p !== nothing
