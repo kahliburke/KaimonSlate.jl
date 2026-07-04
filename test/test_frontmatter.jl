@@ -112,6 +112,16 @@ x = 1
         @test occursin("[1, p. 7]", h)                       # citation rendered (ieee default), not raw
         @test !occursin("[@knuth1984", h)                    # no raw citation marker
         @test occursin("exp-refs", h) && occursin("References", h) && occursin("TeX", h)
+        # The inline citation LINKS to its References entry, and that entry carries the matching anchor.
+        @test occursin("<a class=\"cite\" href=\"#ref-knuth1984\">", h)
+        @test occursin("id=\"ref-knuth1984\"", h)
+        # OG/meta description must render citations too — never a raw [@key] in the meta content.
+        # (_first_words strips markdown brackets for the meta text, so the numeric [1] reads as "1".)
+        dnb = _mknb("#%% md id=abs abstract\nBuilding on [@knuth1984].\n\n" *
+                    "#%% md id=refs bibliography\n@book{knuth1984, author={Knuth}, title={TeX}, year={1984}}\n")
+        dh = NS.export_html(dnb)
+        m = match(r"<meta name=\"description\" content=\"([^\"]*)\"", dh)
+        @test m !== nothing && occursin("Building on 1", m.captures[1]) && !occursin("knuth", m.captures[1])
         # ECharts embed as a client-rendered spec, not a frozen snapshot
         enb = _mknb("#%% code id=ch\n1\n")
         ec = enb.report.cells[findfirst(x -> x.id == "ch", enb.report.cells)]

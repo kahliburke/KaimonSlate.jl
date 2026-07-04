@@ -39,6 +39,10 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
 .exp-chart{margin:14px 0;}
 .exp-refs{margin-top:28px;border-top:1px solid var(--border);padding-top:8px;font-size:.9rem;}
 .exp-refs h2{font-size:1.1rem;}
+.exp-reflist{margin:6px 0 0;padding-left:1.6em;}.exp-reflist li{margin:3px 0;}
+.exp-reflist li:target{background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:4px;}
+a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:underline;}
+:target{scroll-margin-top:12px;}
 .exp-run{text-align:center;margin:10px 0 4px;}
 #exp-run-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;
   font-size:.92rem;cursor:pointer;font-family:inherit;}
@@ -182,9 +186,19 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
         title = _esc(fm0.title)
+        # Citation/figure context, computed once. The BODY rewriter `rw` emits HTML citations that LINK
+        # to the References section (`emit_html` → `#ref-<key>`); the plain-text `rwtext` is for places
+        # that can't take HTML — the OG/meta description below — so neither ever shows a raw `[@key]`.
+        figidx = figure_index(nb.report)
+        citectx = _md_cite_ctx(nb)
+        citekeys = citectx === nothing ? Set{String}() : citectx.citekeys
+        rw(s)     = _rewrite_citations(s, citekeys; emit = citectx === nothing ? _cite_literal : citectx.emit_html,
+                                       figrefs = figidx.labels, figemit = _fig_text)
+        rwtext(s) = _rewrite_citations(s, citekeys; emit = citectx === nothing ? _cite_literal : citectx.emit,
+                                       figrefs = figidx.labels, figemit = _fig_text)
         # `og_image`/`og_url` are absolute URLs (or a path relative to the page) supplied by the site
         # builder; the OG/Twitter tags let a hosted link unfurl into a rich card (see `_og_tags`).
-        rawdesc = _first_words(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract, 40)
+        rawdesc = _first_words(rwtext(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract), 40)
         io = IOBuffer()
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
@@ -202,14 +216,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
-        fm = fm0
-        figidx = figure_index(nb.report)
-        # Rewrite `[@cite]` → its in-text form (per bibstyle) and `[@fig:label]` → "Figure N" so the
-        # static page reads like the live view / PDF instead of showing raw markers.
-        citectx = _md_cite_ctx(nb)
-        citekeys = citectx === nothing ? Set{String}() : citectx.citekeys
-        citemit = citectx === nothing ? _cite_literal : citectx.emit
-        rw(s) = _rewrite_citations(s, citekeys; emit = citemit, figrefs = figidx.labels, figemit = _fig_text)
+        fm = fm0   # citation/figure context + the `rw` body rewriter were set up above (used for the OG desc too)
         print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
               _esc(fm.title), "</h1>")
         isempty(strip(fm.subtitle)) || print(io, "<div class=\"exp-subtitle\">", _esc(fm.subtitle), "</div>")
@@ -267,9 +274,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 print(io, "</section>")
             end
         end
-        # References — rendered from the bibliography cells (the raw BibTeX cell itself is skipped above).
-        refs = _md_references(citectx)
-        isempty(strip(refs)) || print(io, "<section class=\"exp-md exp-refs\">", markdown_html(refs, CellOutput[]), "</section>")
+        # References — as HTML with per-entry `id="ref-<key>"` anchors, so the inline citation links
+        # (emit_html) jump to them. (The raw BibTeX cell itself is skipped above.)
+        refs = _html_references(citectx)
+        isempty(refs) || print(io, "<section class=\"exp-md exp-refs\">", refs, "</section>")
         print(io, "</article>")
         # "Run this live" overlay. Two modes: SITE (sidecar run.jl + bundle next to index.html → a
         # copy-paste one-liner) and EMBED (single-file HTML → the bundle + run.jl ride inside the page and
@@ -1110,12 +1118,48 @@ function _md_cite_ctx(nb::LiveNotebook)
     citekeys = Set(e.key for e in bi)
     numbers = citation_numbers(nb.report, citekeys)         # first-citation order (numeric labels + ordering)
     label = Dict{String,String}(e.key => (numeric ? string(get(numbers, e.key, 0)) : _author_year_label(e.author, e.year)) for e in bi)
-    emit = (key, sup, _form) -> begin
+    intext = (key, sup) -> begin
         lab = get(label, String(key), String(key))
         inner = isempty(strip(sup)) ? lab : string(lab, ", ", strip(sup))
         numeric ? string("[", inner, "]") : string("(", inner, ")")
     end
-    return (; citekeys, emit, bi, numeric, numbers, cited = cited_citation_keys(nb.report))
+    emit = (key, sup, _form) -> intext(key, sup)                       # plain text (markdown / meta desc)
+    # HTML in-text citation that LINKS to its References entry (`#ref-<key>`) — used by the HTML export
+    # so a rendered `[N]` / `(Author, Year)` jumps to the bibliography, matching the live view.
+    emit_html = (key, sup, _form) ->
+        string("<a class=\"cite\" href=\"#ref-", _cite_anchor(String(key)), "\">", _esc(intext(key, sup)), "</a>")
+    return (; citekeys, emit, emit_html, bi, numeric, numbers, cited = cited_citation_keys(nb.report))
+end
+# Fold a BibTeX key to an HTML-id-safe anchor (shared by the inline `#ref-…` link and the
+# References entry it targets), so a key with punctuation still yields a matching pair.
+_cite_anchor(key::AbstractString) = replace(String(key), r"[^A-Za-z0-9_-]+" => "_")
+
+# The References section as HTML with a per-entry `id="ref-<key>"` anchor (the target of the inline
+# citation links). Numeric styles list cited entries in citation order inside an `<ol>` (its native
+# numbering matches the `[N]` labels); author-date lists all entries alphabetically in a `<ul>`.
+function _html_references(ctx)
+    ctx === nothing && return ""
+    io = IOBuffer(); print(io, "<h2>References</h2>")
+    if ctx.numeric
+        cited = [e for e in ctx.bi if haskey(ctx.numbers, e.key)]
+        sort!(cited; by = e -> ctx.numbers[e.key])
+        isempty(cited) && return ""
+        print(io, "<ol class=\"exp-reflist\">")
+        for e in cited
+            parts = filter(!isempty, [strip(e.author), strip(e.title), strip(e.year)])
+            print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">", _esc(join(parts, ". ")), ".</li>")
+        end
+        print(io, "</ol>")
+    else
+        print(io, "<ul class=\"exp-reflist\">")
+        for e in sort(ctx.bi; by = e -> lowercase(_author_year_label(e.author, e.year)))
+            yr = isempty(strip(e.year)) ? "" : string(" (", strip(e.year), ")")
+            head = isempty(strip(e.author)) ? strip(e.title) : string(strip(e.author), yr, ". ", strip(e.title))
+            print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">", _esc(head), ".</li>")
+        end
+        print(io, "</ul>")
+    end
+    return String(take!(io))
 end
 
 # The "## References" section for markdown export. Numeric styles list cited entries in citation order
