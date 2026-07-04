@@ -231,9 +231,9 @@ end
 # Compact text of a cell's result for the agent: the value/stdout, or the error,
 # plus a note that rich output (image/chart) rendered (the agent can't see the
 # pixels here, but knows it worked); tables are rendered as text so their data IS visible.
-function _cell_result_text(c::Cell)
-    o = c.output
-    o === nothing && return "(not run)"
+_cell_result_text(c::Cell) = (o = c.output; o === nothing ? "(not run)" : _output_result_text(o))
+# The agent-facing text for a captured eval result — shared by cells and out-of-band (scratch) evals.
+function _output_result_text(o)
     o.exception === nothing ||
         return "ERROR: " * o.exception * (o.backtrace === nothing ? "" : "\n" * first(o.backtrace, 800))
     parts = String[]
@@ -441,6 +441,29 @@ end
 function _result_of(nb, id)
     i = _index_of(nb.report.cells, id)
     i === nothing ? "(cell $id not found)" : _cell_result_text(nb.report.cells[i])
+end
+
+"""
+    agent_scratch_eval!(nb, source; ephemeral=false, memo_key="", memo_names=(), memo_threshold=0)
+
+Run `source` in the notebook's LIVE kernel and return its captured output as agent text —
+WITHOUT creating a cell or writing the `.jl`. A throwaway diagnostic scratchpad: one-off checks
+against the notebook's state that would only litter the notebook as cells. It shares the kernel
+namespace (a bare `x = …` leaks, like a REPL), so `ephemeral=true` wraps the code in a `let`
+(a child scope whose bindings are discarded) for pure read-only pokes. Serialised with cell runs
+via the notebook's eval mutex, so it never races a parallel batch. `memo_*` mirror the cell memo
+options for parity with the low-level worker eval.
+"""
+function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
+                             ephemeral::Bool = false, memo_key::AbstractString = "",
+                             memo_names = String[], memo_threshold::Real = 0.0)
+    src = ephemeral ? "let\n" * String(source) * "\nend" : String(source)
+    memo = isempty(memo_key) ? nothing :
+        (; key = String(memo_key), names = collect(String, memo_names), threshold = Float64(memo_threshold))
+    out = lock(_eval_mutex(nb)) do
+        ReportEngine.eval_capture(nb.kernel, nb.report, src, "scratch", memo)
+    end
+    return _output_result_text(out)
 end
 
 "Add a cell (default code) after `after` (end if empty) WITH `source`, run it,

@@ -35,7 +35,7 @@ using .ReportRender
 using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
                       find_live, notebook_digest,
-                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!,
+                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!, agent_scratch_eval!,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand
@@ -565,6 +565,29 @@ function create_tools(GateTool::Type)
     if none answers in time. NOTE: this CANNOT capture a browser download (e.g. the PDF blob from
     `exportPdf()`); to inspect generated artifacts use the server-side tool (`slate.export_pdf`).
     """
+    """
+        eval(notebook, source; ephemeral="0", memo_key="", memo_threshold="0") -> String
+
+    Run `source` as Julia in the notebook's LIVE kernel and return its captured output — a
+    throwaway diagnostic scratchpad that does NOT create a cell or touch the `.jl`. Use it for
+    one-off checks against the notebook's state (inspect a variable, a quick parameter scan, a
+    sanity plot you save to a file with `Read`) WITHOUT littering the notebook with diagnostic
+    cells. Persistent work still goes through `add_cell`/`edit_cell` — this is for diagnostics.
+
+    It shares the notebook's kernel namespace: a bare `x = …` LEAKS (handy for setting up
+    diagnostic state across calls), while wrapping in `let … end` — or passing `ephemeral="1"`,
+    which wraps your code in a child scope — keeps bindings local (a pure read-only poke). Runs
+    ON the notebook's eval queue (serialised with cell runs), so it never races a parallel batch.
+    """
+    function scratch_eval(notebook::String, source::String; ephemeral::String = "0",
+                          memo_key::String = "", memo_threshold::String = "0")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        res = agent_scratch_eval!(nb, source;
+            ephemeral = lowercase(ephemeral) in ("1", "true", "yes", "on"),
+            memo_key = memo_key, memo_threshold = something(tryparse(Float64, memo_threshold), 0.0))
+        return _surfaced(nb, "eval", Dict{String,Any}("source" => source, "ephemeral" => ephemeral), res)
+    end
+
     function eval_js(notebook::String, code::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         res = request_live_eval(nb, code)
@@ -689,6 +712,7 @@ function create_tools(GateTool::Type)
         GateTool("view", view_cell),
         GateTool("inspect", inspect_cell),
         GateTool("diag", notebook_diag),
+        GateTool("eval", scratch_eval),
         GateTool("eval_js", eval_js),
         GateTool("export_pdf", export_pdf_tool),
         GateTool("index_docs", index_docs),

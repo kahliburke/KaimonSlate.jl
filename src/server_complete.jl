@@ -971,6 +971,7 @@ function close_notebook!(h::Hub, id::AbstractString)
         _close_agent!(nb)
         _unwire_callbacks!(nb)
         try; shutdown!(nb.kernel); catch; end
+        lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
         delete!(h.notebooks, id)
         return true
     end

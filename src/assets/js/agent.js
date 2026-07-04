@@ -82,7 +82,7 @@ const _TOOL_LABEL = {
   slate_run:'▶ run cell', slate_delete_cell:'🗑 delete cell', slate_view:'🖼 view figure',
   slate_search_docs:'🔎 search docs', slate_index_docs:'📇 index docs',
   slate_acquire_floor:'🔒 acquire floor', slate_release_floor:'🔓 release floor',
-  slate_inspect:'🔬 inspect cell', slate_diag:'🩺 diagnostics', slate_eval_js:'🧩 eval JS', slate_export_pdf:'📄 export PDF',
+  slate_inspect:'🔬 inspect cell', slate_diag:'🩺 diagnostics', slate_eval:'λ scratch eval', slate_eval_js:'🧩 eval JS', slate_export_pdf:'📄 export PDF',
   slate_list:'📚 list notebooks', slate_open:'📂 open notebook', slate_close:'📕 close notebook',
   ex:'λ eval', qdrant_search_code:'🔎 search code', goto_definition:'↪ goto def',
   search_methods:'🔎 search methods', format_code:'✨ format', run_tests:'✅ run tests',

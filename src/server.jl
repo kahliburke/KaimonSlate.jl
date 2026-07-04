@@ -23,7 +23,7 @@ include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the paralle
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
-export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!
+export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!, agent_scratch_eval!
 export cell_image, set_snapshot!
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
@@ -329,6 +329,15 @@ end
 const _RUNNERS = Dict{String,Bool}()          # nb.id → a runner task is active
 const _RUNNER_LOCK = ReentrantLock()
 
+# Per-notebook mutex serialising WORKER EVALUATION: the runner's per-cell / per-batch steps take
+# it, and so does any out-of-band eval (slate.eval scratch pokes). Without it a scratch eval can
+# land on the worker CONCURRENTLY with a parallel cell batch and trip a `ConcurrencyViolationError`
+# deep in shared non-thread-safe state (CairoMakie buffers, etc.). Uncontended on the common path
+# (one runner, no scratch), so it adds only an atomic acquire per eval step.
+const _EVAL_MUTEX = Dict{String,ReentrantLock}()
+const _EVAL_MUTEX_LOCK = ReentrantLock()
+_eval_mutex(nb::LiveNotebook) = lock(_EVAL_MUTEX_LOCK) do; get!(() -> ReentrantLock(), _EVAL_MUTEX, nb.id); end
+
 # Next stale cell to run, in eval_stale!'s order: static markdown (no reads) first, then doc order.
 function _next_stale_cell(report)
     for c in report.cells
@@ -513,8 +522,9 @@ function _run_loop!(nb::LiveNotebook)
     try
         while true
             # Parallel fast-path: hand all stale code cells to the worker at once (opt-in). Falls through
-            # to the serial step for markdown, reactive restales, and the 0/1-code-cell case.
-            if _parallel_enabled(nb) && _run_code_batch!(nb)
+            # to the serial step for markdown, reactive restales, and the 0/1-code-cell case. Held under
+            # the eval mutex so a concurrent slate.eval scratch poke can't race the batch.
+            if _parallel_enabled(nb) && lock(_eval_mutex(nb)) do; _run_code_batch!(nb); end
                 continue
             end
             target, pending = lock(nb.lock) do
@@ -523,7 +533,7 @@ function _run_loop!(nb::LiveNotebook)
             end
             target === nothing && break
             _emit_pending(nb, pending)          # k/N pill: PENDING (stale+running); frontend adds done
-            _eval_one!(nb, target)
+            lock(_eval_mutex(nb)) do; _eval_one!(nb, target); end
         end
         # Drained: any bare-`using` barrier cells have now run, so resolve their exports and rebuild
         # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the

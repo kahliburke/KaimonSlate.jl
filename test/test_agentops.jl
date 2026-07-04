@@ -157,6 +157,21 @@ const NS = KaimonSlate.NotebookServer
             @test :reviewed in _flags(cid)
         end
 
+        @testset "scratch eval — diagnostics without a cell" begin
+            n0 = length(nb.report.cells)
+            @test occursin("7", NS.agent_scratch_eval!(nb, "3 + 4"))
+            @test length(nb.report.cells) == n0                              # no cell created
+            # a bare assignment LEAKS into the kernel namespace (diagnostic state across calls)
+            NS.agent_scratch_eval!(nb, "scratch_probe = 123")
+            @test occursin("123", NS.agent_scratch_eval!(nb, "scratch_probe"))
+            # ephemeral wraps in a `let` child scope → the binding is discarded
+            NS.agent_scratch_eval!(nb, "ephemeral_probe = 999"; ephemeral = true)
+            @test occursin("UndefVarError", NS.agent_scratch_eval!(nb, "ephemeral_probe"))
+            # errors are CAPTURED, not thrown; still no cells added
+            @test occursin("ERROR", NS.agent_scratch_eval!(nb, "sqrt(-1.0)"))
+            @test length(nb.report.cells) == n0
+        end
+
         @testset "external tool calls surface in the chat panel" begin
             # Pure envelope shape — exactly what the browser's `agentEvent` consumes.
             use, res = NS._external_tool_envelopes("ext-1", "edit_cell",
