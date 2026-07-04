@@ -263,6 +263,40 @@ function server_refresh(nb::LiveNotebook, vars)
     return nothing
 end
 
+# Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset`
+# files a cell READS changed on disk → restale those cells + their dependents, recompute, and push
+# the same lightweight `refresh:` patch as a `@bind` change. `changed` are absolute paths; a cell's
+# `inputs` are notebook-relative (or absolute), resolved against `assetbase` (its project dir).
+function server_asset_changed(nb::LiveNotebook, changed::Vector{String})
+    base = String(get(nb.report.meta, "assetbase", ""))
+    chset = Set{String}(changed)
+    _resolve(rel) = isabspath(rel) ? String(rel) : (isempty(base) ? String(rel) : joinpath(base, rel))
+    _inputs_changed(c) = any(rel -> _resolve(rel) in chset, c.inputs)
+    msg = ""
+    lock(nb.lock) do
+        seed = String[]
+        for c in nb.report.cells
+            _inputs_changed(c) || continue
+            c.state = STALE; push!(seed, c.id)
+        end
+        isempty(seed) && return
+        changedids = Set(seed)
+        for id in dependents_of(nb.report, Set(seed))
+            i = _index_of(nb.report.cells, id)
+            i === nothing || (nb.report.cells[i].state = STALE; push!(changedids, id))
+        end
+        _eval!(nb)
+        bindref, hostednames = _bind_index(nb.report)
+        bibctx = _bib_link_ctx(nb)
+        figidx = figure_index(nb.report)
+        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx)
+                 for c in nb.report.cells if c.id in changedids]
+        msg = "refresh:" * JSON.json(Dict("cells" => cells))
+    end
+    isempty(msg) || _broadcast(nb, msg)
+    return nothing
+end
+
 # Live per-cell run status (registered via `register_progress!` per notebook): `eval_cell!` calls
 # this as each cell STARTS and FINISHES running. A start pushes a lightweight `cellrun:<id>` so the
 # UI marks that cell live (spinner + ticking timer + the topbar run pill); a finish pushes the single

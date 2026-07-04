@@ -147,6 +147,26 @@ function _sse_import(stream::HTTP.Stream, h)
     return nothing
 end
 
+# Resolved absolute paths of the notebook's `@asset` file deps (existing files only). `cell.inputs`
+# holds the statically-extracted literal paths; resolve each against `assetbase` (the project dir).
+function _asset_files(nb::LiveNotebook)
+    base = String(get(nb.report.meta, "assetbase", ""))
+    out = String[]
+    lock(nb.lock) do
+        for c in nb.report.cells, rel in c.inputs
+            ap = isabspath(rel) ? String(rel) : (isempty(base) ? String(rel) : joinpath(base, rel))
+            isfile(ap) && push!(out, ap)
+        end
+    end
+    return unique!(out)
+end
+
+# Change signal for an asset file: its mtime via `stat` (NOT a content read). Reading the file to
+# hash it would bump the file's ATIME, which `watch_file` reports as a change (NOTE_ATTRIB) — and
+# since the recompute itself reads the asset via `@asset`, a hash-based watcher would wake itself in
+# a tight loop. `stat`/mtime touches nothing, so an atime-only event leaves the signal unchanged.
+_asset_mtime(f) = try; mtime(f); catch; 0.0; end
+
 # Watch the file for external edits (VS Code / agent) → sync → push instantly.
 # `watch_file` returns on change (instant) or after a 2s safety timeout (covers
 # editors that save via atomic rename). Server's own writes match canonically in
@@ -156,6 +176,34 @@ function _start_watcher!(nb::LiveNotebook)
         try
             FileWatching.watch_file(nb.path, 2.0)
             sync_from_file!(nb) && _broadcast(nb, string(nb.version))
+        catch
+            sleep(0.5)
+        end
+    end
+    # `@asset` reactivity: watch the files cells read via `@asset` → on a content change, recompute
+    # the readers (server_asset_changed). Event-driven (one short `watch_file` per file, first-wins)
+    # with a 2 s ceiling that re-derives the set (picks up newly-added deps) and covers atomic-rename
+    # saves a single-file watch can miss — the same idiom as the notebook-file watcher above. A
+    # content-hash diff means a metadata-only touch (or our own read) never triggers a recompute.
+    @async while true
+        try
+            files = _asset_files(nb)
+            if isempty(files)
+                sleep(2); continue                    # no @asset deps yet — cheap periodic recheck
+            end
+            prev = Dict(f => _asset_mtime(f) for f in files)
+            ch = Channel{Nothing}(length(files) + 1)  # buffer ≥ putters → none blocks, no leaked tasks
+            for f in files
+                @async begin
+                    try; FileWatching.watch_file(f, 2.0); catch; end
+                    try; put!(ch, nothing); catch; end
+                end
+            end
+            take!(ch)                                 # wake on the first event (or the 2 s ceiling)
+            changed = String[f for f in files if _asset_mtime(f) != get(prev, f, 0.0)]
+            isempty(changed) || server_asset_changed(nb, changed)
+            sleep(0.2)                                # floor: bound any event storm (e.g. an editor's
+                                                      # multi-write save) to ≤5 Hz regardless of wakes
         catch
             sleep(0.5)
         end
