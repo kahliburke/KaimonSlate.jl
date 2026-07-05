@@ -217,6 +217,24 @@ end
 _pd_source(pd) = pd isa NamedTuple ? pd.source : pd[2]
 _pd_name(pd) = String(pd isa NamedTuple ? pd.name : pd[1])
 
+# The git repo to root a bundle on: the worktree that is the notebook's PROJECT — either the active
+# env itself (package-as-project / base mode) or a package the notebook develops (a `dev`'d path-dep,
+# e.g. the parent package a Slate *forked-env* notebook lives inside). Prefer the repo CONTAINING THE
+# NOTEBOOK (the common `MyPkg/notebooks/nb.jl` case — its env is a depot fork OUTSIDE the repo, so the
+# env's own toplevel is `nothing`); fall back to the env's repo. The "is the env OR a `dev`'d path-dep"
+# guard is what stops a notebook merely sitting inside a big UNRELATED checkout from dragging that whole
+# repo into the bundle. Returns the worktree root, or `nothing` (no qualifying repo → flat layout).
+function _root_repo(projectdir::AbstractString, pathdeps, nbpath::AbstractString)
+    proj = _safe_realpath(projectdir)
+    is_project(top) = proj == top ||
+        any(pd -> (s = _pd_source(pd); isdir(s) && _safe_realpath(s) == top), pathdeps)
+    for cand in (dirname(_safe_realpath(nbpath)), projectdir)
+        top = _git_toplevel(cand)
+        top !== nothing && is_project(top) && return top
+    end
+    return nothing
+end
+
 # Build the base64 archive from explicit coordinates (kernel-independent, so it's unit testable):
 # the active project (env) dir, its path deps `[(name, source)]`, and the notebook's absolute path.
 #
@@ -234,40 +252,43 @@ _pd_name(pd) = String(pd isa NamedTuple ? pd.name : pd[1])
 #    travels only via the repo-rooted layout — a half-git `repo/` subdir was more confusing than useful).
 function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString)
     stage = mktempdir()
-    top = _git_toplevel(projectdir)
+    top = _root_repo(projectdir, pathdeps, nbpath)
     if top !== nothing
-        prel = _within(top, _safe_realpath(projectdir))                       # env dir relative to repo
         nrel = _within(top, _safe_realpath(nbpath))                           # notebook file relative to repo
-        # Only when this repo IS the notebook's project — the repo root is the env dir (package-as-
-        # project) or the source of a path-dep the notebook develops. Otherwise a notebook merely
-        # sitting inside a big unrelated checkout would drag the whole thing into the bundle.
-        repo_is_project = _safe_realpath(projectdir) == top ||
-            any(pd -> (s = _pd_source(pd); isdir(s) && _safe_realpath(s) == top), pathdeps)
-        if repo_is_project && prel !== nothing && nrel !== nothing && _git_bundle!(stage, top)
+        prel = _within(top, _safe_realpath(projectdir))                       # env dir relative to repo, or `nothing`
+        # Where the env's Project/Manifest land in the reconstructed tree. `prel` when the env lives
+        # INSIDE the repo (package-as-project / a committed `notebooks/` env); a dedicated `_slate_env/`
+        # when it's a depot FORK outside the repo (the common Slate case — a per-notebook env that
+        # `dev`s the parent package). Either way the kernel activates this dir with the repo as parent.
+        envrel = prel === nothing ? "_slate_env" : prel
+        if nrel !== nothing && _git_bundle!(stage, top)
             ov = joinpath(stage, "overlay")
             for f in ("Project.toml", "Manifest.toml")                        # live env files overlay the committed ones
                 s = joinpath(projectdir, f)
-                isfile(s) && (mkpath(joinpath(ov, prel)); cp(s, joinpath(ov, prel, f); force = true))
+                isfile(s) && (mkpath(joinpath(ov, envrel)); cp(s, joinpath(ov, envrel, f); force = true))
             end
-            # Vendor path-deps that live OUTSIDE the repo; those inside resolve from the checkout.
+            # Rewrite EVERY path-dep in the (live) Manifest to an in-bundle path relative to the env dir:
+            # a dep INSIDE the repo resolves from the checkout at its repo-relative location; one OUTSIDE
+            # is vendored (source only) under `local/<name>`. Uniform rewrite so no author-absolute path
+            # can leak — including the parent package a forked env `dev`s at the repo root.
             targets = Dict{String,String}()
             for pd in pathdeps
                 s = _pd_source(pd); nm = _pd_name(pd)
                 isdir(s) || continue
-                _within(top, _safe_realpath(s)) === nothing || continue       # inside the repo → already bundled
-                _copy_dep_source!(joinpath(stage, "local", nm), s)            # ship source only (no data/computed bloat)
-                # Manifest path is relative to the env dir (`prel`) → point it at the root `local/<name>`.
-                targets[nm] = replace(prel == "." ? "local/$nm" : relpath("local/$nm", prel), '\\' => '/')
+                inside = _within(top, _safe_realpath(s))                      # dep's path within the repo, or `nothing`
+                intree = inside === nothing ? "local/$nm" : inside
+                inside === nothing && _copy_dep_source!(joinpath(stage, "local", nm), s)
+                targets[nm] = replace(envrel == "." ? intree : relpath(intree, envrel), '\\' => '/')
             end
-            ovman = joinpath(ov, prel, "Manifest.toml")
+            ovman = joinpath(ov, envrel, "Manifest.toml")
             (isempty(targets) || !isfile(ovman)) || _rewrite_manifest_paths!(ovman, targets)
             mkpath(dirname(joinpath(ov, nrel)))
             write(joinpath(ov, nrel), cells)                                  # live notebook cells
             write(joinpath(stage, "bundle.json"),
-                  JSON.json(Dict("mode" => "repo-rooted", "env" => prel, "notebook" => nrel, "parent" => ".")))
+                  JSON.json(Dict("mode" => "repo-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
             return Base64.base64encode(_pack_tree(stage))
         end
-        # fall through to the flat layout (repo present but not the notebook's project, or bundle failed)
+        # fall through to the flat layout (repo present but notebook outside it, or bundle failed)
     end
     # ── Flat fallback: self-contained, structure-less, git-free ────────────────────────────────────
     for f in ("Project.toml", "Manifest.toml")
@@ -411,8 +432,11 @@ function _tidy_git_checkout!(dir::AbstractString, remote_url::AbstractString)
             try; run(pipeline(`git -C $dir remote add origin $remote_url`; stdout = devnull, stderr = devnull)); catch; end
         end
     end
+    # Locally ignore Slate's reconstruction artifacts so `git status` stays clean (ready to branch &
+    # PR): the coords file, the forked-env dir, and any vendored external deps that landed in-tree.
     excl = joinpath(dir, ".git", "info", "exclude")
-    try; isdir(dirname(excl)) && open(io -> println(io, ".slatebundle.json"), excl, "a"); catch; end
+    try; isdir(dirname(excl)) &&
+        open(io -> foreach(l -> println(io, l), (".slatebundle.json", "/_slate_env/", "/local/")), excl, "a"); catch; end
     return dir
 end
 

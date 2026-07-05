@@ -360,6 +360,67 @@ if Sys.which("git") !== nothing
         @test co.notebook == joinpath(tdir, "notebooks", "presentation.jl")
     end
 
+    # Forked-env repo-rooted (the MicrocavitySeries.jl case): the notebook lives inside a git package
+    # repo (`MyPkg/notebooks/nb.jl`) but its active env is a depot FORK *outside* the repo that `dev`s
+    # the package (path-dep at the repo root) plus an EXTERNAL dep. The env's own git-toplevel is
+    # `nothing`, so this used to fall to the flat layout (losing src/ and the git structure). Now expand
+    # must clone the package as the ROOT (src/, notebooks/), stage the forked env under `_slate_env/`
+    # with the parent `dev`'d at `..` and the external dep vendored to `local/`.
+    @testset "repo-rooted: forked depot env dev'ing the parent package" begin
+        repo = mktempdir()
+        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
+        write(joinpath(repo, "Project.toml"),
+            "name=\"MyPkg\"\nuuid=\"00000000-0000-0000-0000-0000000000b1\"\nversion=\"0.1.0\"\n[deps]\n")
+        write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+        write(joinpath(repo, "src", "MyPkg.jl"), "module MyPkg\ngo() = 7\nend\n")
+        write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
+        run(pipeline(`git -C $repo init -q`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+
+        ext = mktempdir(); mkpath(joinpath(ext, "src"))              # an EXTERNAL dep, outside the repo
+        write(joinpath(ext, "Project.toml"), "name=\"Ext\"\nuuid=\"00000000-0000-0000-0000-0000000000e1\"\nversion=\"0.1.0\"\n")
+        write(joinpath(ext, "src", "Ext.jl"), "module Ext\nend\n")
+        write(joinpath(ext, "junk.dat"), "x"^2048)                   # data bloat: must NOT ride along
+
+        env = mktempdir()                                            # the depot FORK — OUTSIDE the repo
+        write(joinpath(env, "Project.toml"),
+            "[deps]\nMyPkg = \"00000000-0000-0000-0000-0000000000b1\"\nExt = \"00000000-0000-0000-0000-0000000000e1\"\n")
+        write(joinpath(env, "Manifest.toml"),
+            "manifest_format=\"2.0\"\n\n[[deps.MyPkg]]\npath = \"$(repo)\"\nuuid = \"00000000-0000-0000-0000-0000000000b1\"\nversion = \"0.1.0\"\n" *
+            "\n[[deps.Ext]]\npath = \"$(ext)\"\nuuid = \"00000000-0000-0000-0000-0000000000e1\"\nversion = \"0.1.0\"\n")
+
+        nbpath = joinpath(repo, "notebooks", "nb.jl")
+        deps = [(name = "MyPkg", source = repo), (name = "Ext", source = ext)]
+        cells = "#%% code id=a\nx=2\n"                               # LIVE cells differ from committed
+        b64 = _make_bundle_b64(env, deps, nbpath, cells)
+        sj = joinpath(mktempdir(), "nb.standalone.jl")
+        write(sj, cells * "\n" * _bundle_footer(b64) * "\n")
+        tdir = expand(sj)
+
+        @test isdir(joinpath(tdir, ".git"))                          # the package cloned as the ROOT
+        @test isfile(joinpath(tdir, "src", "MyPkg.jl"))              # src/ travels (was lost in flat)
+        @test isfile(joinpath(tdir, "notebooks", "nb.jl"))          # notebook back in its subdir
+        @test !isfile(joinpath(tdir, "nb.jl"))                       # NOT flattened to the root
+        @test isfile(joinpath(tdir, "_slate_env", "Manifest.toml"))  # forked env staged in its own dir
+        @test occursin("x=2", read(joinpath(tdir, "notebooks", "nb.jl"), String))   # live cells win
+        man = read(joinpath(tdir, "_slate_env", "Manifest.toml"), String)
+        @test occursin("path = \"..\"", man)                         # parent dev'd at the repo root
+        @test occursin("../local/Ext", man)                          # external dep, relative to the env dir
+        @test !occursin(repo, man) && !occursin(ext, man)            # no author-absolute path leak
+        @test isfile(joinpath(tdir, "local", "Ext", "src", "Ext.jl")) # external source vendored
+        @test !isfile(joinpath(tdir, "local", "Ext", "junk.dat"))    # …source only, no data bloat
+        # coords: kernel activates the forked env, parent is the repo root, notebook in its subdir
+        co = _read_coords(tdir)
+        @test co.envdir == joinpath(tdir, "_slate_env") && co.parent == tdir
+        @test co.notebook == joinpath(tdir, "notebooks", "nb.jl")
+        # the reconstruction scaffolding is locally ignored (the notebook itself legitimately shows
+        # modified — it carries the LIVE cells — so `git status` is not empty, just free of our dirs)
+        status = read(pipeline(`git -C $tdir status --porcelain`; stderr = devnull), String)
+        @test !occursin("_slate_env", status) && !occursin("local/", status) && !occursin(".slatebundle", status)
+        @test occursin("notebooks/nb.jl", status)                    # the live-cell edit is the only change
+    end
+
     # The git bundle is gated to project-IS-repo-root: a project merely NESTED inside a larger
     # repo must not drag that whole repo into the bundle (only the project itself travels).
     @testset "nested project does not bundle the enclosing repo" begin
