@@ -269,7 +269,11 @@ async function refreshSiteDocs() {
   if (!row || !list) return;
   const name = ((document.getElementById('sitelocal') || {}).value || '').trim();
   let docs = [];
-  if (name) { try { const r = await api('GET', '/api/site-docs?name=' + encodeURIComponent(name)); docs = (r && r.docs) || []; } catch (_) {} }
+  // Only the Website format has this "remove a page" picker — skip the fetch (and stay hidden) for
+  // any other format, else it forces itself visible under e.g. Standalone. `/api/site-docs` is a
+  // GLOBAL endpoint (not notebook-scoped) — fetch it directly, NOT via api(), which would rewrite it
+  // to `/api/<id>/site-docs` and 404. (Mirrors the front page's /api/sites.)
+  if (name && _exFormat() === 'website') { try { const r = await (await fetch('/api/site-docs?name=' + encodeURIComponent(name), { cache: 'no-store' })).json(); docs = (r && r.docs) || []; } catch (_) {} }
   if (!docs.length) { row.style.display = 'none'; list.innerHTML = ''; return; }
   row.style.display = '';
   list.innerHTML = docs.map(d => {
