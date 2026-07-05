@@ -69,7 +69,10 @@ function exportHtml(dl) {
   if (theme !== 'dark') parts.push('theme=' + theme);
   if (code !== 'normal') parts.push('code=' + code);
   const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
-  if ((document.getElementById('htmlrunnable') || {}).checked) parts.push('bundle=1');
+  if ((document.getElementById('htmlrunnable') || {}).checked) {
+    parts.push('bundle=1');
+    if ((document.getElementById('htmlhistory') || {}).checked) parts.push('history=1');   // ship full git history
+  }
   const q = parts.length ? '?' + parts.join('&') : '';
   if (dl === false) { window.open(_apipath('/api/export.html' + q), '_blank'); return; }
   const a = document.createElement('a');
@@ -139,7 +142,10 @@ async function exportSite() {
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
   const parts = ['theme=' + theme]; if (outv !== 'all') parts.push('outputs=' + outv);
   if (!(document.getElementById('sitesource') || { checked: true }).checked) parts.push('source=0');
-  if ((document.getElementById('siterunnable') || {}).checked) parts.push('bundle=1');
+  if ((document.getElementById('siterunnable') || {}).checked) {
+    parts.push('bundle=1');
+    if ((document.getElementById('sitehistory') || {}).checked) parts.push('history=1');   // ship full git history
+  }
   showLoading('Building site + preview image…');
   try {
     const r = await fetch(_apipath('/api/export.site?' + parts.join('&')));
@@ -162,6 +168,7 @@ async function publishSite() {
   const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
   const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
   const bundle = !!(document.getElementById('siterunnable') || {}).checked;
+  const history = bundle && !!(document.getElementById('sitehistory') || {}).checked;   // ship full git history
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
   const siteTitle = ((document.getElementById('sitetitle') || {}).value || '').trim();
   const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim()) ||
@@ -204,7 +211,7 @@ async function publishSite() {
   let result = null, err = null;
   try {
     const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repo, slug: slug, siteTitle: siteTitle, private: isPrivate, create: create, theme: theme, outputs: outv, source: source, bundle: bundle }) });
+      body: JSON.stringify({ repo: repo, slug: slug, siteTitle: siteTitle, private: isPrivate, create: create, theme: theme, outputs: outv, source: source, bundle: bundle, history: history }) });
     result = r.ok ? await r.json() : { error: await r.text() };
   } catch (e) { err = e; }
   hideLoading();                                          // drop the spinner BEFORE the result dialog
@@ -239,13 +246,14 @@ async function publishLocalSite() {
   const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
   const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
   const bundle = !!(document.getElementById('siterunnable') || {}).checked;
+  const history = bundle && !!(document.getElementById('sitehistory') || {}).checked;   // ship full git history
   const outv = (document.getElementById('exoutputs') || {}).value || 'all';
   const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim());
   showLoading('Building the local site…');
   let result = null, err = null;
   try {
     const r = await fetch(_apipath('/api/export-to-site'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, slug: slug, bundle: bundle, theme: theme, outputs: outv, source: source }) });
+      body: JSON.stringify({ name: name, slug: slug, bundle: bundle, theme: theme, outputs: outv, source: source, history: history }) });
     result = r.ok ? await r.json() : { error: await r.text() };
   } catch (e) { err = e; }
   hideLoading();
@@ -361,6 +369,7 @@ function openExport(preset) {
   document.getElementById('pdfnotes').checked = localStorage.getItem('slate_pdfnotes') === '1';
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
   const hr = document.getElementById('htmlrunnable'); if (hr) hr.checked = localStorage.getItem('slate_htmlrunnable') === '1';
+  const hh = document.getElementById('htmlhistory'); if (hh) hh.checked = localStorage.getItem('slate_htmlhistory') === '1';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   // Pre-fill the publish target from what this notebook last published to (state_json → publishRepo),
@@ -373,6 +382,7 @@ function openExport(preset) {
   if (ssl && !ssl.value) ssl.value = (nbState && nbState.publishSlug) || _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
   const ss = document.getElementById('sitesource'); if (ss) ss.checked = localStorage.getItem('slate_sitesource') !== '0';
   const srn = document.getElementById('siterunnable'); if (srn) srn.checked = localStorage.getItem('slate_siterunnable') === '1';
+  const sh = document.getElementById('sitehistory'); if (sh) sh.checked = localStorage.getItem('slate_sitehistory') === '1';
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
@@ -393,6 +403,7 @@ function closeExport(go) {
   if (fmt === 'html') {
     const hs = document.getElementById('htmlsource'); localStorage.setItem('slate_htmlsource', hs && hs.checked ? '1' : '0');
     const hr = document.getElementById('htmlrunnable'); if (hr) localStorage.setItem('slate_htmlrunnable', hr.checked ? '1' : '0');
+    const hh = document.getElementById('htmlhistory'); if (hh) localStorage.setItem('slate_htmlhistory', hh.checked ? '1' : '0');
     ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     return exportHtml(true);
   }
@@ -406,6 +417,7 @@ function closeExport(go) {
     ['sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     const ss = document.getElementById('sitesource'); if (ss) localStorage.setItem('slate_sitesource', ss.checked ? '1' : '0');
     const srn = document.getElementById('siterunnable'); if (srn) localStorage.setItem('slate_siterunnable', srn.checked ? '1' : '0');
+    const sh = document.getElementById('sitehistory'); if (sh) localStorage.setItem('slate_sitehistory', sh.checked ? '1' : '0');
     return go === 'publish' ? publishSite() : go === 'localsite' ? publishLocalSite() : exportSite();
   }
   if (fmt === 'standalone') return exportStandalone();

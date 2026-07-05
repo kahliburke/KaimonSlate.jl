@@ -238,9 +238,11 @@ x = 1
         rh = NS.export_html(fnb; runnable = true)
         @test occursin("<button id=\"exp-run-btn\">", rh) && occursin("Run this notebook live", rh) && occursin("run.jl", rh)
         @test !occursin("<button id=\"exp-run-btn\">", NS.export_html(fnb))   # only when runnable (CSS is always present)
-        rj = NS._run_script("https://x.github.io/y/notebook.standalone.jl"; agent = true)
+        rj = NS._run_script("https://x.github.io/y/nb.standalone.jl"; agent = true, bundle_name = "nb.standalone.jl")
         @test occursin("Downloads.download(BUNDLE_URL", rj) && occursin("KaimonSlate.jl", rj)
-        @test occursin("x.github.io/y/notebook.standalone.jl", rj)
+        @test occursin("x.github.io/y/nb.standalone.jl", rj)
+        @test occursin("@__DIR__", rj)                               # sibling-first: reads the bundle next to run.jl…
+        @test occursin("startswith(BUNDLE_URL, \"http\")", rj)       # …and only downloads when a real URL is set
         @test occursin("kaimonslate-run", rj)                        # installs into a dedicated env, not the default
         @test !occursin("Pkg.add(url = \"https://github.com/kahliburke/Kaimon.jl", rj)   # never adds Kaimon to this env
         @test !occursin("fetch_bundle()println", rj)                 # statements not glued onto one line (juxtaposition bug)
@@ -248,9 +250,10 @@ x = 1
         @test occursin("KAIMONSLATE_NO_AUTOREGISTER", rj)            # don't touch the user's Kaimon config
         @test occursin("free_port()", rj)                            # pick a free port (8765 may be taken)
         @test occursin("using KaimonSlate\n", rj)                    # load at top level (world-age safe)
-        # local-bundle run.jl reads a sibling file instead of downloading
-        rjl = NS._run_script(""; localbundle = true)
-        @test occursin("@__DIR__", rjl) && !occursin("Downloads.download", rjl)
+        # No-URL run.jl (extracted site / embed): reads the sibling bundle; the per-notebook name is threaded in
+        rjl = NS._run_script(""; bundle_name = "demo.standalone.jl")
+        @test occursin("@__DIR__", rjl) && occursin("demo.standalone.jl", rjl)
+        @test occursin("BUNDLE_URL = get(", rjl)                     # URL const still present (empty ⇒ sibling-only)
         # embedded single-file HTML: run.jl rides inside the page (Blob downloads, no sidecars)
         eh = NS.export_html(fnb; runnable = true, embed_bundle = true)
         @test occursin("<button id=\"exp-run-btn\">", eh)

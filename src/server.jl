@@ -733,13 +733,48 @@ end
 "Stop a hub started by [`start_server`](@ref) (drains SSE, frees the port)."
 stop_server(h::Hub) = stop_hub(h)
 
+# Poll the running hub until it answers HTTP so the "it's live" banner is honest (the server is
+# listening the moment `start_hub` returns, but a first request may still be warming up). Best-effort:
+# give up after `timeout` seconds and show the banner anyway. `status < 500` = the route is up.
+function _await_http_ready(url::AbstractString; timeout::Real = 10)
+    t0 = time()
+    while time() - t0 < timeout
+        try
+            r = HTTP.get(url; retry = false, redirect = false, status_exception = false, readtimeout = 2)
+            r.status < 500 && return true
+        catch
+        end
+        sleep(0.15)
+    end
+    return false
+end
+
+# A prominent, framed "your notebook is live" banner with the openable URL emphasized (bold + underline,
+# the terminal's default hyperlinking makes it clickable). Printed once the hub answers HTTP.
+function _print_ready_banner(url::AbstractString)
+    rule = "─"^72
+    printstyled("\n", rule, "\n"; color = :green)
+    printstyled("  ✓  Your Kaimon Slate notebook is live\n\n"; color = :green, bold = true)
+    print("      →  ")
+    printstyled(url; color = :cyan, bold = true, underline = true)
+    print("\n\n  Open the link above in a browser. Press Ctrl-C here to stop the server.\n")
+    printstyled(rule, "\n\n"; color = :green)
+    flush(stdout)
+end
+
 """
     serve_notebook(path; host="127.0.0.1", port=8765)
 
-Open the notebook at `path` in a hub and serve it. **Blocks** until stopped.
+Open the notebook at `path` in a hub and serve it. **Blocks** until stopped. Once the hub is answering
+HTTP, prints a framed banner with the openable notebook URL (so a launcher like `run.jl` surfaces a
+ready, clickable link rather than a bare port).
 """
 function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765)
     h = start_server(path; host = host, port = port)
+    id = isempty(h.notebooks) ? "" : first(keys(h.notebooks))
+    url = "$(_hub_url(h))/n/$id"
+    _await_http_ready(_hub_url(h))          # wait until the server actually answers before announcing it
+    _print_ready_banner(url)
     wait(h.server)
     return h
 end

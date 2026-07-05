@@ -235,60 +235,79 @@ function _root_repo(projectdir::AbstractString, pathdeps, nbpath::AbstractString
     return nothing
 end
 
+# Stage the notebook's env (Project/Manifest at `envrel`) and its path-deps into a bundle tree, and
+# rewrite the (live) Manifest so EVERY path-dep points at its in-bundle location relative to the env
+# dir — a dep INSIDE the repo resolves from the tree at its repo-relative path; one OUTSIDE is vendored
+# (source only, no data/computed bloat) under `<localroot>/local/<name>`. So no author-absolute path
+# leaks, including the parent package a forked env `dev`s at the repo root. `envroot` is where the env
+# files land (an `overlay/` for the git layout; the stage root for the source snapshot); `localroot` is
+# where `local/` lands. Shared by the repo-rooted (git-history) and source-rooted (no-history) layouts.
+function _stage_env_and_deps!(envroot::AbstractString, localroot::AbstractString,
+                              projectdir::AbstractString, pathdeps, top::AbstractString, envrel::AbstractString)
+    for f in ("Project.toml", "Manifest.toml")
+        s = joinpath(projectdir, f)
+        isfile(s) && (mkpath(joinpath(envroot, envrel)); cp(s, joinpath(envroot, envrel, f); force = true))
+    end
+    targets = Dict{String,String}()
+    for pd in pathdeps
+        s = _pd_source(pd); nm = _pd_name(pd)
+        isdir(s) || continue
+        inside = _within(top, _safe_realpath(s))                              # dep's path within the repo, or `nothing`
+        intree = inside === nothing ? "local/$nm" : inside
+        inside === nothing && _copy_dep_source!(joinpath(localroot, "local", nm), s)
+        targets[nm] = replace(envrel == "." ? intree : relpath(intree, envrel), '\\' => '/')
+    end
+    man = joinpath(envroot, envrel, "Manifest.toml")
+    (isempty(targets) || !isfile(man)) || _rewrite_manifest_paths!(man, targets)
+    return
+end
+
 # Build the base64 archive from explicit coordinates (kernel-independent, so it's unit testable):
 # the active project (env) dir, its path deps `[(name, source)]`, and the notebook's absolute path.
+# `history` chooses what the reproducible tree ships when the notebook lives in a git repo (below).
 #
-# Two layouts:
-#  • REPO-ROOTED — the env and notebook live inside ONE git repo that IS the notebook's project.
-#    Bundle the repo (a matching-SHA git bundle) plus an `overlay/` of the LIVE env files + notebook
-#    at their repo-relative paths. On expand the repo becomes the project ROOT with the notebook back
-#    in place (e.g. `WindowPrimes.jl/` with `src/` + `notebooks/presentation.jl`). Path-deps INSIDE
-#    the repo resolve from the checkout; a path-dep `dev`'d from OUTSIDE it is vendored under
-#    `local/<name>` and the overlaid Manifest is rewritten to point at it — so an external dev-dep no
-#    longer forces the flat layout. The result is a real git checkout wired to `origin`.
-#  • FLAT (fallback) — no enclosing repo, the repo isn't the notebook's project, or the notebook lives
-#    outside it. Stage the env at the root, vendor every path-dep under `local/<name>` (rewriting the
-#    Manifest), drop the notebook at the root. Self-contained, structure-less, and git-free (git
-#    travels only via the repo-rooted layout — a half-git `repo/` subdir was more confusing than useful).
-function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString)
+# Three layouts:
+#  • REPO-ROOTED (history=true) — the notebook lives in a git repo that IS its project. Bundle a
+#    matching-SHA git bundle of the repo plus an `overlay/` of the LIVE env files + notebook. On expand
+#    the repo becomes the project ROOT (its `src/`, `notebooks/…`), the notebook back in place, wired to
+#    `origin` — ready to branch & PR. Ships the FULL commit history (deliberate for a shared `.jl`).
+#  • SOURCE-ROOTED (history=false) — same reconstructed structure, but the repo's TRACKED SOURCE is
+#    staged directly (git `ls-files`, no `.git`) instead of a git bundle — a runnable snapshot that does
+#    NOT publish the commit history (the safe default for a PUBLIC web export). No clone on expand.
+#  • FLAT (fallback) — no enclosing repo (or the notebook lives outside it). Stage the env at the root,
+#    vendor every path-dep under `local/<name>`, drop the notebook at the root. Structure-less, git-free.
+# The env lands at `envrel`: the repo-relative env dir when the env lives INSIDE the repo (package-as-
+# project / a committed `notebooks/` env), else a dedicated `_slate_env/` for a depot FORK outside it
+# (the common Slate case — a per-notebook env that `dev`s the parent package). Path-deps inside the repo
+# resolve from the tree; those `dev`'d from outside are vendored under `local/<name>`.
+function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString;
+                          history::Bool = true)
     stage = mktempdir()
     top = _root_repo(projectdir, pathdeps, nbpath)
     if top !== nothing
         nrel = _within(top, _safe_realpath(nbpath))                           # notebook file relative to repo
         prel = _within(top, _safe_realpath(projectdir))                       # env dir relative to repo, or `nothing`
-        # Where the env's Project/Manifest land in the reconstructed tree. `prel` when the env lives
-        # INSIDE the repo (package-as-project / a committed `notebooks/` env); a dedicated `_slate_env/`
-        # when it's a depot FORK outside the repo (the common Slate case — a per-notebook env that
-        # `dev`s the parent package). Either way the kernel activates this dir with the repo as parent.
         envrel = prel === nothing ? "_slate_env" : prel
-        if nrel !== nothing && _git_bundle!(stage, top)
-            ov = joinpath(stage, "overlay")
-            for f in ("Project.toml", "Manifest.toml")                        # live env files overlay the committed ones
-                s = joinpath(projectdir, f)
-                isfile(s) && (mkpath(joinpath(ov, envrel)); cp(s, joinpath(ov, envrel, f); force = true))
-            end
-            # Rewrite EVERY path-dep in the (live) Manifest to an in-bundle path relative to the env dir:
-            # a dep INSIDE the repo resolves from the checkout at its repo-relative location; one OUTSIDE
-            # is vendored (source only) under `local/<name>`. Uniform rewrite so no author-absolute path
-            # can leak — including the parent package a forked env `dev`s at the repo root.
-            targets = Dict{String,String}()
-            for pd in pathdeps
-                s = _pd_source(pd); nm = _pd_name(pd)
-                isdir(s) || continue
-                inside = _within(top, _safe_realpath(s))                      # dep's path within the repo, or `nothing`
-                intree = inside === nothing ? "local/$nm" : inside
-                inside === nothing && _copy_dep_source!(joinpath(stage, "local", nm), s)
-                targets[nm] = replace(envrel == "." ? intree : relpath(intree, envrel), '\\' => '/')
-            end
-            ovman = joinpath(ov, envrel, "Manifest.toml")
-            (isempty(targets) || !isfile(ovman)) || _rewrite_manifest_paths!(ovman, targets)
+        if nrel !== nothing && history && _git_bundle!(stage, top)
+            ov = joinpath(stage, "overlay")                                   # live files overlay the committed clone
+            _stage_env_and_deps!(ov, stage, projectdir, pathdeps, top, envrel)
             mkpath(dirname(joinpath(ov, nrel)))
             write(joinpath(ov, nrel), cells)                                  # live notebook cells
             write(joinpath(stage, "bundle.json"),
                   JSON.json(Dict("mode" => "repo-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
             return Base64.base64encode(_pack_tree(stage))
+        elseif nrel !== nothing && !history
+            # Source snapshot: the repo's TRACKED files (working-tree copy, no `.git`, no gitignored data)
+            # staged directly at the root, then the env + vendored deps + LIVE notebook cells on top.
+            _copy_dep_source!(stage, top)
+            _stage_env_and_deps!(stage, stage, projectdir, pathdeps, top, envrel)
+            mkpath(dirname(joinpath(stage, nrel)))
+            write(joinpath(stage, nrel), cells)                               # live cells overwrite the committed notebook
+            write(joinpath(stage, "bundle.json"),
+                  JSON.json(Dict("mode" => "source-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
+            return Base64.base64encode(_pack_tree(stage))
         end
-        # fall through to the flat layout (repo present but notebook outside it, or bundle failed)
+        # fall through to the flat layout (notebook outside the repo, or the git bundle failed)
     end
     # ── Flat fallback: self-contained, structure-less, git-free ────────────────────────────────────
     for f in ("Project.toml", "Manifest.toml")
@@ -314,13 +333,17 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
 end
 
 """
-    export_standalone(nb; include_preview=true) -> String
+    export_standalone(nb; include_preview=true, history=true) -> String
 
 Render the notebook as a self-contained single-source `.jl`: the runnable cells, a
 `Slate.bundle` footer embedding the full environment (Project + Manifest), the local package
-source, and (if the project is a git repo) a shallow git bundle — and, when `include_preview`,
-a `Slate.preview` footer holding the cells' rendered outputs so the notebook displays instantly
-while its env reconstructs. Reinflate / run with [`expand`](@ref) or the open box.
+source, and (when the project is a git repo) either its full git history or a source-only
+snapshot — and, when `include_preview`, a `Slate.preview` footer holding the cells' rendered
+outputs so the notebook displays instantly while its env reconstructs. `history=true` (the
+default for a deliberately-shared `.jl`) ships a matching-SHA git bundle so the expanded copy
+can branch & PR; `history=false` ships the tracked SOURCE only — same runnable structure, no
+commit history published — the safe default for a PUBLIC web export. Reinflate / run with
+[`expand`](@ref) or the open box.
 """
 # For a self-contained `.jl`, inline any EXTERNAL bibliography file into its `:bibliography` cell
 # (replace the `.bib` path lines with the file's contents) so the reproducible notebook keeps its
@@ -346,13 +369,13 @@ function _serialize_cells_inlining_bibs(report, nbdir::AbstractString)
     return ReportEngine.serialize_cells(tmp)
 end
 
-function export_standalone(nb::LiveNotebook; include_preview::Bool = true)
+function export_standalone(nb::LiveNotebook; include_preview::Bool = true, history::Bool = true)
     lock(nb.lock) do
         info = ReportEngine.bundle_info(nb.kernel, nb.report)
         isempty(info.projectdir) &&
             error("this notebook has no project environment to bundle (in-process kernel)")
         cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
-        b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells)
+        b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells; history = history)
         out = cells * "\n" * _bundle_footer(b64)
         include_preview && try
             out *= "\n" * _preview_footer(state_json(nb)["cells"])   # frozen render for instant display
@@ -444,7 +467,9 @@ end
 # `parent=""` when detached). Shared by `expand` and `_reconstruct_bundle!`.
 #  • REPO-ROOTED — clone the embedded repo as the ROOT (tidy `origin`), then overlay the LIVE env
 #    files + notebook so the checkout matches the author's tree with the current cells in place.
-#  • FLAT — unpack in place (self-contained; no git — that travels only via the repo-rooted layout).
+#  • SOURCE-ROOTED — unpack in place: the tracked source is already staged at its paths (env + vendored
+#    deps + live notebook alongside), so just drop the `bundle.json` marker and record coords. No git.
+#  • FLAT — unpack in place (self-contained, structure-less; no git).
 function _extract_bundle!(b64::AbstractString, dir::AbstractString)
     try
         _unpack_tree(Base64.base64decode(b64), dir)
@@ -475,6 +500,13 @@ function _extract_bundle!(b64::AbstractString, dir::AbstractString)
         _tidy_git_checkout!(dir, remote_url)                          # clean origin + ignore the coords file
         env = String(get(meta, "env", ".")); nb = String(get(meta, "notebook", ""))
         _write_coords!(dir; mode = "repo-rooted", env = env, parent = ".", notebook = nb)
+        return _read_coords(dir)
+    elseif meta !== nothing && get(meta, "mode", "") == "source-rooted"
+        # The reconstructed tree is already complete (source staged in place, live cells written) — just
+        # drop the marker and record coords (env dir + repo root as parent). No clone, no git needed.
+        rm(joinpath(dir, "bundle.json"); force = true)
+        env = String(get(meta, "env", ".")); nb = String(get(meta, "notebook", ""))
+        _write_coords!(dir; mode = "source-rooted", env = env, parent = ".", notebook = nb)
         return _read_coords(dir)
     end
     # FLAT — self-contained vendored tree, no git.

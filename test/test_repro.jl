@@ -421,6 +421,58 @@ if Sys.which("git") !== nothing
         @test occursin("notebooks/nb.jl", status)                    # the live-cell edit is the only change
     end
 
+    # Source-rooted (history=false): the SAME reconstructed structure as repo-rooted, but the repo's
+    # tracked SOURCE is staged directly (no `.git`, no commit history published) — the safe default for
+    # a PUBLIC web export. Still fully runnable (env + vendored deps + live cells in place).
+    @testset "source-rooted: history=false ships source, not the git history" begin
+        repo = mktempdir()
+        mkpath(joinpath(repo, "src")); mkpath(joinpath(repo, "notebooks"))
+        write(joinpath(repo, "Project.toml"),
+            "name=\"MyPkg\"\nuuid=\"00000000-0000-0000-0000-0000000000c1\"\nversion=\"0.1.0\"\n[deps]\n")
+        write(joinpath(repo, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+        write(joinpath(repo, "src", "MyPkg.jl"), "module MyPkg\nend\n")
+        write(joinpath(repo, "notebooks", "nb.jl"), "#%% code id=a\nx=1\n")
+        write(joinpath(repo, "secret.env"), "TOKEN=hunter2\n")        # committed then DELETED: must not resurface
+        run(pipeline(`git -C $repo init -q`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t add -A`; stderr = devnull))
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t commit -q -m init`; stderr = devnull))
+        rm(joinpath(repo, "secret.env"))                             # no longer tracked in the working tree
+        run(pipeline(`git -C $repo -c user.email=t@t -c user.name=t rm -q --cached secret.env`; stderr = devnull))
+
+        ext = mktempdir(); mkpath(joinpath(ext, "src"))
+        write(joinpath(ext, "Project.toml"), "name=\"Ext\"\nuuid=\"00000000-0000-0000-0000-0000000000e2\"\nversion=\"0.1.0\"\n")
+        write(joinpath(ext, "src", "Ext.jl"), "module Ext\nend\n")
+        env = mktempdir()
+        write(joinpath(env, "Project.toml"),
+            "[deps]\nMyPkg = \"00000000-0000-0000-0000-0000000000c1\"\nExt = \"00000000-0000-0000-0000-0000000000e2\"\n")
+        write(joinpath(env, "Manifest.toml"),
+            "manifest_format=\"2.0\"\n\n[[deps.MyPkg]]\npath = \"$(repo)\"\nuuid = \"00000000-0000-0000-0000-0000000000c1\"\nversion = \"0.1.0\"\n" *
+            "\n[[deps.Ext]]\npath = \"$(ext)\"\nuuid = \"00000000-0000-0000-0000-0000000000e2\"\nversion = \"0.1.0\"\n")
+
+        nbpath = joinpath(repo, "notebooks", "nb.jl")
+        deps = [(name = "MyPkg", source = repo), (name = "Ext", source = ext)]
+        cells = "#%% code id=a\nx=2\n"
+        b64 = _make_bundle_b64(env, deps, nbpath, cells; history = false)
+        sj = joinpath(mktempdir(), "nb.standalone.jl")
+        write(sj, cells * "\n" * _bundle_footer(b64) * "\n")
+        tdir = expand(sj)
+
+        @test !ispath(joinpath(tdir, ".git"))                        # NO git → no commit history published
+        @test !isfile(joinpath(tdir, "repo.gitbundle"))              # no git bundle scaffolding
+        @test isfile(joinpath(tdir, "src", "MyPkg.jl"))              # source travels (runnable structure)
+        @test isfile(joinpath(tdir, "notebooks", "nb.jl"))          # notebook in its subdir
+        @test occursin("x=2", read(joinpath(tdir, "notebooks", "nb.jl"), String))   # live cells
+        @test !isfile(joinpath(tdir, "secret.env"))                  # a since-deleted committed file stays gone
+        @test isfile(joinpath(tdir, "_slate_env", "Manifest.toml"))
+        man = read(joinpath(tdir, "_slate_env", "Manifest.toml"), String)
+        @test occursin("path = \"..\"", man) && occursin("../local/Ext", man)
+        @test !occursin(repo, man) && !occursin(ext, man)            # no author-absolute path leak
+        @test isfile(joinpath(tdir, "local", "Ext", "src", "Ext.jl"))
+        co = _read_coords(tdir)
+        @test co.envdir == joinpath(tdir, "_slate_env") && co.parent == tdir
+        @test co.notebook == joinpath(tdir, "notebooks", "nb.jl")
+    end
+
     # The git bundle is gated to project-IS-repo-root: a project merely NESTED inside a larger
     # repo must not drag that whole repo into the bundle (only the project itself travels).
     @testset "nested project does not bundle the enclosing repo" begin

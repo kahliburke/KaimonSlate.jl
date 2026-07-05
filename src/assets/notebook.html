@@ -271,6 +271,9 @@
   <div class="setrow exrow fmt-html"><label title="Embed the reproducible bundle + a launch script inside the .html so a reader can run it live on their machine (much larger file)">Runnable</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmlrunnable"> Embed a runnable bundle + “Run live” button (larger)</label></div>
+  <div class="setrow exrow fmt-html"><label title="Include the project's FULL git history in the runnable bundle so a reader can branch & PR with matching commits. Off = ship the current source only (a runnable snapshot) — your commit history is NOT published. Off is safer for a public page.">Git history</label>
+    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="htmlhistory"> Ship full git history in the bundle (else source-only snapshot)</label></div>
   <div class="setrow exrow fmt-html sethint"><span></span>A self-contained page — figures embedded, math via KaTeX. No server needed.</div>
   <div class="setrow exrow fmt-markdown"><label>Source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
@@ -293,6 +296,9 @@
   <div class="setrow exrow fmt-website"><label title="Embed the reproducible bundle + a launch script so a visitor can run the notebook live (with the AI agent) on their machine">Runnable</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="siterunnable"> Include a runnable bundle + “Run live” launch script (larger)</label></div>
+  <div class="setrow exrow fmt-website"><label title="Include the project's FULL git history in the runnable bundle so a visitor can branch & PR with matching commits. Off = ship the current source only (a runnable snapshot) — your commit history is NOT published. Off is safer for a PUBLIC site.">Git history</label>
+    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="sitehistory"> Ship full git history in the bundle (else source-only snapshot)</label></div>
   <div class="setrow exrow fmt-website"><label title="For Publish to GitHub Pages — the target repo (a whole SITE; created if missing). Publishing ADDS this notebook to the site alongside any already there.">GitHub repo (site)</label>
     <input id="siterepo" type="text" placeholder="owner/name" autocomplete="off" spellcheck="false"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>

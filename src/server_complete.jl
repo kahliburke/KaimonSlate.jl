@@ -490,7 +490,8 @@ function _make_router(h::Hub)
         _run = get(qp, "bundle", "0") == "1"   # embed the reproducible bundle + a "Run live" launcher
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
                            theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
-                           outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run)
+                           outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run,
+                           history = get(qp, "history", "0") == "1")   # source-only by default (public page)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
             fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
@@ -574,7 +575,8 @@ function _make_router(h::Hub)
         data = try
             export_site(nb; include_source = get(qp, "source", "1") != "0",
                         theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
-                        outputs = get(qp, "outputs", "all"), bundle = get(qp, "bundle", "0") == "1")
+                        outputs = get(qp, "outputs", "all"), bundle = get(qp, "bundle", "0") == "1",
+                        history = get(qp, "history", "0") == "1")   # source-only by default (public page)
         catch e
             return HTTP.Response(500, "Site export failed: " * sprint(showerror, e))
         end
@@ -591,7 +593,8 @@ function _make_router(h::Hub)
         try
             r = export_to_site(nb, String(name); slug = String(get(b, "slug", "")),
                                bundle = get(b, "bundle", false) === true, theme = get(b, "theme", "dark"),
-                               outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0")
+                               outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0",
+                               history = get(b, "history", false) === true)
             return _json(Dict("url" => r.url, "site" => r.site, "slug" => r.slug,
                               "home" => r.home, "docCount" => r.docCount))
         catch e
@@ -632,7 +635,7 @@ function _make_router(h::Hub)
                              private = get(b, "private", false) === true,
                              create = get(b, "create", true) === true, theme = get(b, "theme", "dark"),
                              outputs = get(b, "outputs", "all"), include_source = get(b, "source", "1") != "0",
-                             bundle = get(b, "bundle", false) === true)
+                             bundle = get(b, "bundle", false) === true, history = get(b, "history", false) === true)
             # Remember WHERE this notebook publishes so the dialog pre-fills next time (and a CI
             # action can read the target). Authored intent → travels in the Slate.config footer.
             nb.report.meta["publishrepo"] = String(repo)
@@ -649,8 +652,9 @@ function _make_router(h::Hub)
     # Self-contained single-source .jl: cells + full Project/Manifest + local source (+ a
     # shallow git bundle when the project is a repo). Reinflate with `KaimonSlate.expand`.
     HTTP.register!(router, "GET", "/api/{id}/export.standalone.jl", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
         jl = try
-            export_standalone(nb)
+            export_standalone(nb; history = get(qp, "history", "1") != "0")   # full git history by default (deliberate share)
         catch e
             return HTTP.Response(500, "Standalone export failed: " * sprint(showerror, e))
         end

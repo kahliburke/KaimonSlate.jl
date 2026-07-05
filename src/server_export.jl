@@ -181,7 +181,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", code::AbstractString = "normal",
                      outputs::AbstractString = "all", og_image::AbstractString = "",
                      og_url::AbstractString = "", og_type::AbstractString = "article",
-                     runnable::Bool = false, embed_bundle::Bool = false)
+                     runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
@@ -282,6 +282,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # "Run this live" overlay. Two modes: SITE (sidecar run.jl + bundle next to index.html → a
         # copy-paste one-liner) and EMBED (single-file HTML → the bundle + run.jl ride inside the page and
         # are handed out as client-side Blob downloads, so nothing external is needed).
+        bname = _bundle_filename(nb)                     # per-notebook bundle name (download + run.jl agree on it)
         if runnable
             print(io, "<div id=\"exp-run-bg\"><div class=\"exp-run-modal\">",
                   "<h2>Run this notebook live</h2>",
@@ -296,7 +297,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 print(io, "<p><b>One-liner</b> — paste into a terminal:</p>",
                       "<pre class=\"exp-run-cmd\"><code id=\"exp-run-oneliner\"></code></pre>",
                       "<p><b>Or</b> <a id=\"exp-run-dl\" download=\"", _SITE_RUNJL, "\">download run.jl</a> to inspect first, then <code>julia run.jl</code>. ",
-                      "Just the env? <a id=\"exp-run-bundle\" download=\"", _SITE_BUNDLE, "\">download the bundle</a>.</p>")
+                      "Just the env? <a id=\"exp-run-bundle\" download=\"", bname, "\">download the bundle</a>.</p>")
             end
             print(io, "<div class=\"exp-run-row\">",
                   embed_bundle ? "" : "<button id=\"exp-run-copy\">Copy one-liner</button>",
@@ -322,19 +323,23 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             if embed_bundle
                 # The bundle + run.jl ride inside the page; the buttons hand them out as Blob downloads.
                 # A notebook with no project env (in-process) can't be bundled → embed empty (button no-ops).
-                runjl = _run_script(""; agent = true, localbundle = true)
-                bundle_b64 = try; Base64.base64encode(export_standalone(nb)); catch; ""; end
+                runjl = _run_script(""; agent = true, bundle_name = bname)
+                bundle_b64 = try; Base64.base64encode(export_standalone(nb; history = history)); catch; ""; end
                 print(io, "var _rj=", JSON.json(runjl), ";var _bb64=", JSON.json(bundle_b64), ";",
                       "var _save=function(name,blob){var u=URL.createObjectURL(blob),a=document.createElement('a');",
                       "a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);};",
                       "if(q('exp-run-dl'))q('exp-run-dl').onclick=function(){_save(", JSON.json(_SITE_RUNJL), ",new Blob([_rj],{type:'text/plain'}));};",
                       "if(q('exp-run-bundle'))q('exp-run-bundle').onclick=function(){var bin=atob(_bb64),n=bin.length,arr=new Uint8Array(n);",
-                      "for(var i=0;i<n;i++)arr[i]=bin.charCodeAt(i);_save(", JSON.json(_SITE_BUNDLE), ",new Blob([arr],{type:'text/plain'}));};")
+                      "for(var i=0;i<n;i++)arr[i]=bin.charCodeAt(i);_save(", JSON.json(bname), ",new Blob([arr],{type:'text/plain'}));};")
             else
                 # SITE mode: sidecar files next to index.html; the one-liner is built from the page URL.
+                # The one-liner downloads run.jl to a TEMP dir (no sibling bundle there), so we inject the
+                # bundle's absolute URL — derived from location.href at click time — via SLATE_BUNDLE_URL
+                # (which run.jl reads). This works for any HTTP-served page (local /sites/… or published)
+                # without baking a URL we don't know at export time.
                 print(io, "var base=location.href.replace(/[^/]*(\\?.*)?(#.*)?\$/,'');",
-                      "var runjl=base+", JSON.json(_SITE_RUNJL), ";var bundle=base+", JSON.json(_SITE_BUNDLE), ";",
-                      "var cmd=\"julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
+                      "var runjl=base+", JSON.json(_SITE_RUNJL), ";var bundle=base+", JSON.json(bname), ";",
+                      "var cmd=\"SLATE_BUNDLE_URL=\"+bundle+\" julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
                       "if(q('exp-run-oneliner'))q('exp-run-oneliner').textContent=cmd;",
                       "if(q('exp-run-dl'))q('exp-run-dl').href=runjl;if(q('exp-run-bundle'))q('exp-run-bundle').href=bundle;",
                       "if(q('exp-run-copy'))q('exp-run-copy').onclick=function(){navigator.clipboard&&navigator.clipboard.writeText(cmd);this.textContent='Copied ✓';};")
@@ -408,8 +413,14 @@ end
 
 # A published site can carry a runnable bundle so a viewer can run the notebook LIVE on their machine.
 # These are the fixed filenames the site, `run.jl`, and the page overlay all agree on.
-const _SITE_BUNDLE = "notebook.standalone.jl"   # the reproducible env (export_standalone)
+const _SITE_BUNDLE = "notebook.standalone.jl"   # generic fallback name (kept for back-compat / callers with no nb)
 const _SITE_RUNJL = "run.jl"                     # the generated bootstrap script
+
+# A per-notebook bundle filename so a downloaded/sidecar bundle is recognisable (e.g.
+# `01_whispering_gallery.standalone.jl`, matching the `/export.standalone.jl` download). Same
+# sanitisation as the export routes. `run.jl` reads THIS name beside it, so the two always agree.
+_bundle_filename(nb::LiveNotebook) =
+    replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".standalone.jl"
 
 # The `run.jl` bootstrap. Installs KaimonSlate into a DEDICATED environment (never the user's default —
 # that avoids clobbering their setup, and Kaimon+KaimonSlate can't share one env anyway: they run as
@@ -418,7 +429,7 @@ const _SITE_RUNJL = "run.jl"                     # the generated bootstrap scrip
 # `localbundle`, reads the bundle from a sibling file (the embedded single-file HTML case) instead of
 # fetching `bundle_url`. `agent` only adds guidance for the extra Kaimon/agent setup (installed
 # separately, per the docs). Discrete step functions so it's easy to extend/audit. Idempotent.
-function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle::Bool = false)
+function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name::AbstractString = _SITE_BUNDLE)
     SLATE = "https://github.com/kahliburke/KaimonSlate.jl"
     agentnote = agent ? """
         println(""\"
@@ -434,7 +445,7 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle
     # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).
     #
     # Steps are separate functions so this is easy to extend or audit.
-    using Pkg, Sockets$(localbundle ? "" : ", Downloads")
+    using Pkg, Sockets, Downloads
 
     # Don't auto-register into the user's Kaimon config — this is a self-contained standalone run.
     ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"
@@ -442,11 +453,15 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle
     # A dedicated project env keeps this off your default environment.
     const ENVDIR = joinpath(first(DEPOT_PATH), "environments", "kaimonslate-run")
 
+    # The reproducible bundle: its filename (shipped beside this script), and — for the published-page
+    # one-liner, which runs this script from a temp dir with no sibling — a URL to fetch it from.
+    const BUNDLE_NAME = $(JSON.json(bundle_name))
+    const BUNDLE_URL = get(() -> $(JSON.json(bundle_url)), ENV, "SLATE_BUNDLE_URL")
+
     # Pick a free TCP port (the default 8765 may already be taken, e.g. by a running Kaimon).
     function free_port()
         s = Sockets.listen(Sockets.localhost, 0); p = Int(Sockets.getsockname(s)[2]); close(s); return p
     end
-    $(localbundle ? "" : "# The bundle lives next to this script on the published site; override to self-host.\n    const BUNDLE_URL = get(() -> \"$bundle_url\", ENV, \"SLATE_BUNDLE_URL\")\n")
     function ensure_julia()
         VERSION >= v"1.10" || error("Julia 1.10+ required (found \$VERSION). See https://julialang.org/downloads")
     end
@@ -457,11 +472,18 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle
         Pkg.add(url = "$SLATE")
     end
 
+    # Prefer the bundle shipped NEXT TO this script (extracted site tarball, or downloaded alongside
+    # run.jl); only reach out to BUNDLE_URL when there's no sibling (the published-page one-liner).
     function fetch_bundle()
-    $(localbundle ?
-        "    nb = joinpath(@__DIR__, $(JSON.json(_SITE_BUNDLE)))\n        isfile(nb) || error(\"Put $(_SITE_BUNDLE) next to this script (download it from the page), then re-run.\")" :
-        "    @info \"Downloading the notebook bundle\" BUNDLE_URL\n        nb = joinpath(pwd(), $(JSON.json(_SITE_BUNDLE)))\n        Downloads.download(BUNDLE_URL, nb)")
-        return nb
+        sib = joinpath(@__DIR__, BUNDLE_NAME)
+        isfile(sib) && return sib
+        startswith(BUNDLE_URL, "http") ||
+            error("Bundle \$BUNDLE_NAME not found next to run.jl, and no download URL is set. " *
+                  "Put \$BUNDLE_NAME in this folder (download it from the page) and re-run.")
+        dst = joinpath(pwd(), BUNDLE_NAME)
+        @info "Downloading the notebook bundle" BUNDLE_URL
+        Downloads.download(BUNDLE_URL, dst)
+        return dst
     end
 
     function setup()
@@ -476,8 +498,9 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, localbundle
     # top-level statements, so the just-loaded `KaimonSlate` binding is visible for the serve call.
     const NB = setup()
     port = free_port()
-    println("✓ Serving at http://127.0.0.1:\$port — the notebook's environment reconstructs on open…")
+    println("Starting the notebook server (its environment reconstructs on first open — first run compiles)…")
     using KaimonSlate
+    # serve_notebook blocks; once the hub answers HTTP it prints a framed banner with the live URL.
     KaimonSlate.serve_notebook(NB; port = port)
     """
 end
@@ -488,18 +511,20 @@ end
 # fetch the bundle; `agent` picks the full-Kaimon vs standalone bootstrap. Shared by export_site +
 # publish_site.
 function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = false,
-                          base_url::AbstractString = "", agent::Bool = true, kwargs...)
+                          base_url::AbstractString = "", agent::Bool = true, history::Bool = false, kwargs...)
     img = og_image(nb)
     ogpath = ""
     if img !== nothing
         write(joinpath(dir, "og-image.png"), img); ogpath = "og-image.png"
     end
     if bundle
-        write(joinpath(dir, _SITE_BUNDLE), export_standalone(nb))
-        burl = isempty(strip(base_url)) ? _SITE_BUNDLE : rstrip(String(base_url), '/') * "/" * _SITE_BUNDLE
-        write(joinpath(dir, _SITE_RUNJL), _run_script(burl; agent = agent))
+        bname = _bundle_filename(nb)
+        write(joinpath(dir, bname), export_standalone(nb; history = history))
+        # Absolute URL only when we know the site's address; else "" ⇒ run.jl reads the sibling bundle.
+        burl = isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/" * bname
+        write(joinpath(dir, _SITE_RUNJL), _run_script(burl; agent = agent, bundle_name = bname))
     end
-    write(joinpath(dir, "index.html"), export_html(nb; og_image = ogpath, runnable = bundle, kwargs...))
+    write(joinpath(dir, "index.html"), export_html(nb; og_image = ogpath, runnable = bundle, history = history, kwargs...))
     write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
     return dir
 end
@@ -570,7 +595,8 @@ end
 # returning its manifest entry. `base_url` is the doc's eventual URL (…/<slug>/) so run.jl's bundle
 # fetch is absolute. `date` seeds the entry (a re-publish keeps the original via `_upsert_doc!`).
 function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractString,
-                     base_url::AbstractString = "", bundle::Bool = false, agent::Bool = true, kwargs...)
+                     base_url::AbstractString = "", bundle::Bool = false, agent::Bool = true,
+                     history::Bool = false, kwargs...)
     mkpath(docdir)
     img = og_image(nb)
     ogpath = ""
@@ -580,12 +606,14 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
         ogpath = isempty(strip(base_url)) ? "og-image.png" : rstrip(String(base_url), '/') * "/og-image.png"
     end
     if bundle
-        write(joinpath(docdir, _SITE_BUNDLE), export_standalone(nb))
-        burl = isempty(strip(base_url)) ? _SITE_BUNDLE : rstrip(String(base_url), '/') * "/" * _SITE_BUNDLE
-        write(joinpath(docdir, _SITE_RUNJL), _run_script(burl; agent = agent))
+        bname = _bundle_filename(nb)
+        write(joinpath(docdir, bname), export_standalone(nb; history = history))
+        # Absolute URL only when we know the doc's address; else "" ⇒ run.jl reads the sibling bundle.
+        burl = isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/" * bname
+        write(joinpath(docdir, _SITE_RUNJL), _run_script(burl; agent = agent, bundle_name = bname))
     end
     write(joinpath(docdir, "index.html"),
-          export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, kwargs...))
+          export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history, kwargs...))
     m = _doc_meta(nb)
     cs = nb.report.cells
     md = count(c -> c.kind == MARKDOWN, cs)
