@@ -124,6 +124,8 @@ const _CONFIG_UI = (
      choices = ["16:9", "4:3"], global_default = nothing, restart = false),
     (key = "bibstyle", group = "Slides", label = "Bibliography style", type = :string, default = "ieee",
      choices = String[], global_default = nothing, restart = false),
+    (key = "series", group = "Publishing", label = "Series", type = :string, default = "",
+     choices = String[], global_default = nothing, restart = false),
 )
 
 _config_item(key) = (i = findfirst(x -> x.key == key, _CONFIG_UI); i === nothing ? nothing : _CONFIG_UI[i])

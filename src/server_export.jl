@@ -596,14 +596,20 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
         String[String(get(e, "name", "")) for e in env if e isa AbstractDict && !isempty(String(get(e, "name", "")))] :
         String[]
     today = Dates.format(Dates.today(), "yyyy-mm-dd")
+    # Optional series grouping: a notebook declares `Slate.series` (report.meta["series"]) and every
+    # export/publish carries it into the manifest entry, so the site index groups this doc with its
+    # series-mates (across repos too — each entry carries its own series). Absent ⇒ ungrouped.
+    series = strip(String(get(nb.report.meta, "series", "")))
     # Rich, readily-available metadata for portfolio / front-page consumers. `date` is the FIRST
     # publish (preserved by _upsert_doc!); `updated` is this publish.
-    return Dict{String,Any}("slug" => slug, "title" => m.title, "description" => m.description,
-                            "image" => isempty(ogpath) ? "" : "$slug/og-image.png",
-                            "runnable" => bundle, "date" => today, "updated" => today,
-                            "cells" => length(cs), "code" => length(cs) - md, "md" => md,
-                            "binds" => sum(c -> length(c.binds), cs; init = 0),
-                            "packages" => pkgs)
+    entry = Dict{String,Any}("slug" => slug, "title" => m.title, "description" => m.description,
+                             "image" => isempty(ogpath) ? "" : "$slug/og-image.png",
+                             "runnable" => bundle, "date" => today, "updated" => today,
+                             "cells" => length(cs), "code" => length(cs) - md, "md" => md,
+                             "binds" => sum(c -> length(c.binds), cs; init = 0),
+                             "packages" => pkgs)
+    isempty(series) || (entry["series"] = String(series))
+    return entry
 end
 
 _read_site_manifest(dir::AbstractString) =
@@ -639,15 +645,33 @@ _doc_cards_css() = """
 .slate-cards .cardbody p{margin:0 0 10px;color:#8b949e;font-size:.9rem}
 .slate-cards .meta{color:#8b949e;font-size:.78rem;display:flex;align-items:center;gap:10px}
 .slate-cards .meta .run{color:#58a6ff}.slate-cards-empty{color:#8b949e;padding:12px 0}
+.series-hd{max-width:960px;margin:30px auto 4px;padding:0 0 6px;font-size:1.2rem;font-weight:600;
+ color:#e6edf3;border-bottom:1px solid #30363d}.series-hd:first-child{margin-top:6px}
 """
 
-# The card grid ONLY (no `<style>`), newest first — the part a client refresh re-renders. Its
-# markup is mirrored 1:1 by `_cards_refresh_script`'s JS, so a baked grid and a JS-rebuilt grid
-# are indistinguishable.
-function _cards_grid_html(docs)
-    ds = sort([d for d in docs if d isa AbstractDict]; by = d -> String(get(d, "date", "")), rev = true)
-    isempty(ds) && return "<div class=\"slate-cards-empty\">No documents published yet.</div>"
-    io = IOBuffer()
+# Group manifest docs into ordered (series-label, docs) sections for the index. The UNGROUPED bucket
+# (label "") comes first, then each named series ordered by its newest doc (desc); docs within a
+# group are newest-first. No series anywhere ⇒ a single `"" => all` group ⇒ the plain flat grid.
+function _series_groups(docs)
+    _date(d) = String(get(d, "date", ""))
+    buckets = Dict{String,Vector{Any}}(); order = String[]
+    for d in docs
+        d isa AbstractDict || continue
+        s = strip(String(get(d, "series", "")))
+        haskey(buckets, s) || push!(order, s)
+        push!(get!(buckets, s, Any[]), d)
+    end
+    for v in values(buckets); sort!(v; by = _date, rev = true); end
+    labels = sort(String[s for s in order if !isempty(s)];
+                  by = s -> maximum(_date, buckets[s]; init = ""), rev = true)
+    groups = Pair{String,Vector{Any}}[]
+    haskey(buckets, "") && push!(groups, "" => buckets[""])
+    for s in labels; push!(groups, s => buckets[s]); end
+    return groups
+end
+
+# One `<div class="slate-cards">…</div>` grid for `ds` (already newest-first) — shared by every group.
+function _cards_only!(io, ds)
     print(io, "<div class=\"slate-cards\">")
     for d in ds
         slug = _esc(String(get(d, "slug", ""))); title = _esc(String(get(d, "title", get(d, "slug", ""))))
@@ -663,6 +687,20 @@ function _cards_grid_html(docs)
         print(io, "</div></div></a>")
     end
     print(io, "</div>")
+end
+
+# The card grid ONLY (no `<style>`), newest first, GROUPED into series sections (a `.series-hd`
+# heading per named series; ungrouped docs render headingless first). Its markup is mirrored 1:1 by
+# `_cards_refresh_script`'s JS, so a baked grid and a JS-rebuilt grid are indistinguishable.
+function _cards_grid_html(docs)
+    groups = _series_groups(docs)
+    sum(g -> length(g.second), groups; init = 0) == 0 &&
+        return "<div class=\"slate-cards-empty\">No documents published yet.</div>"
+    io = IOBuffer()
+    for (label, ds) in groups
+        isempty(label) || print(io, "<h2 class=\"series-hd\">", _esc(label), "</h2>")
+        _cards_only!(io, ds)
+    end
     return String(take!(io))
 end
 
@@ -683,20 +721,29 @@ function _cards_refresh_script()
       var esc=function(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
       fetch('slate-site.json',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(m){
         if(!m||!m.docs) return;
-        var ds=m.docs.filter(function(d){return d&&d.slug;}).sort(function(a,b){return String(b.date||'').localeCompare(String(a.date||''));});
+        var ds=m.docs.filter(function(d){return d&&d.slug;});
         if(!ds.length){root.innerHTML='<div class="slate-cards-empty">No documents published yet.</div>';return;}
-        var h='<div class="slate-cards">';
-        ds.forEach(function(d){
-          h+='<a class="card" href="'+esc(d.slug)+'/">';
+        var card=function(d){
+          var h='<a class="card" href="'+esc(d.slug)+'/">';
           if(d.image) h+='<div class="thumb"><img src="'+esc(d.image)+'" alt="" loading="lazy"/></div>';
           h+='<div class="cardbody"><h2>'+esc(d.title||d.slug)+'</h2>';
           if(d.description) h+='<p>'+esc(d.description)+'</p>';
           h+='<div class="meta"><span>'+esc(d.date||'')+'</span>';
           if(d.cells) h+='<span>'+d.cells+' cells</span>';
           if(d.runnable===true) h+='<span class="run">▶ runnable</span>';
-          h+='</div></div></a>';
-        });
-        h+='</div>'; root.innerHTML=h;
+          return h+'</div></div></a>';
+        };
+        var grid=function(list){return '<div class="slate-cards">'+list.map(card).join('')+'</div>';};
+        // Bucket by series, mirroring _series_groups: ungrouped ('') first, then series by newest doc desc.
+        var buckets={},order=[];
+        ds.forEach(function(d){var s=((d.series||'')+'').trim();if(!buckets[s]){buckets[s]=[];order.push(s);}buckets[s].push(d);});
+        var byDate=function(a,b){return String(b.date||'').localeCompare(String(a.date||''));};
+        var newest=function(s){return buckets[s].reduce(function(x,d){var v=String(d.date||'');return v>x?v:x;},'');};
+        Object.keys(buckets).forEach(function(s){buckets[s].sort(byDate);});
+        var labels=order.filter(function(s){return s;}).sort(function(a,b){return newest(b).localeCompare(newest(a));});
+        var h=buckets['']?grid(buckets['']):'';
+        labels.forEach(function(s){h+='<h2 class="series-hd">'+esc(s)+'</h2>'+grid(buckets[s]);});
+        root.innerHTML=h;
       }).catch(function(){});
     })();
     </script>"""

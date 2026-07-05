@@ -224,11 +224,13 @@ end
     r = parse_report("#%% code id=a\nx = 1")
     r.meta["parallel"] = true
     r.meta["threads"] = "8,1"
+    r.meta["series"] = "Optics primer"
     s = serialize_report(r)
     @test occursin("Slate.config", s)
     r2 = parse_report(s)
     @test r2.meta["parallel"] === true          # bool round-trips
     @test r2.meta["threads"] == "8,1"           # string round-trips
+    @test r2.meta["series"] == "Optics primer"  # series (spaces) round-trips
     @test length(r2.cells) == 1                 # cells parse fine (footer stripped, not a cell)
     @test findfirst(c -> c.id == "a", r2.cells) !== nothing
 

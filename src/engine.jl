@@ -413,12 +413,12 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
 const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "agentmodel",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
-                      "publishrepo", "publishslug")
+                      "publishrepo", "publishslug", "series")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            "agentmodel" => :string,
                            "slidelevel" => :int, "slidetransition" => :string,
                            "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string,
-                           "publishrepo" => :string, "publishslug" => :string)
+                           "publishrepo" => :string, "publishslug" => :string, "series" => :string)
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]
