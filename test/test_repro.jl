@@ -440,6 +440,26 @@ end
     rm(r3.root; recursive = true, force = true)
 end
 
+# A truncated / incompatible bundle (e.g. an OLD-format standalone) must fail with an actionable
+# message, not a raw `EOFError: read end of file` in the hydrate banner.
+@testset "corrupt/incompatible bundle → actionable error, not EOFError" begin
+    cells = "#%% code id=a\nusing Foo\n"
+    proj = mktempdir()
+    write(joinpath(proj, "Project.toml"), "name=\"Demo\"\n[deps]\n")
+    write(joinpath(proj, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+    b64 = _make_bundle_b64(proj, NamedTuple[], "demo.jl", cells)
+    half = length(b64) ÷ 2
+    truncated = b64[1:(half - half % 4)]                 # chop the payload (stay base64-length-valid)
+    sj = joinpath(mktempdir(), "corrupt.standalone.jl")
+    write(sj, cells * "\n" * _bundle_footer(truncated) * "\n")
+    rm(_bundle_cache_dir(_read_bundle_b64(read(sj, String))); recursive = true, force = true)
+    e = try; _reconstruct_bundle!(sj); nothing; catch err; err; end
+    @test e !== nothing
+    msg = sprint(showerror, e)
+    @test occursin("incompatible Slate version", msg)    # actionable
+    @test !startswith(msg, "EOFError")                   # NOT the cryptic raw error
+end
+
 # Frozen-render preview: the rendered-cells payload round-trips (gzip+base64) and the footer
 # block is ignored by parse_report (it's terminal, after the cells / bundle).
 @testset "frozen-render preview round-trips" begin

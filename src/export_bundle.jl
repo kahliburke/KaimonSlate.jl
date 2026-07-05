@@ -386,7 +386,16 @@ end
 #    files + notebook so the checkout matches the author's tree with the current cells in place.
 #  • FLAT — unpack in place (self-contained; no git — that travels only via the repo-rooted layout).
 function _extract_bundle!(b64::AbstractString, dir::AbstractString)
-    _unpack_tree(Base64.base64decode(b64), dir)
+    try
+        _unpack_tree(Base64.base64decode(b64), dir)
+    catch e
+        e isa InterruptException && rethrow()
+        # A raw EOFError / bad-gzip / bad-base64 here means the payload is truncated or was written
+        # by an INCOMPATIBLE Slate version (e.g. a pre-`(path,bytes)`-archive bundle) — surface an
+        # actionable message rather than "EOFError: read end of file" in the hydrate banner.
+        error("This notebook's embedded bundle is corrupt or from an incompatible Slate version — " *
+              "re-export the standalone `.jl` from a current Slate. (bundle decode: $(sprint(showerror, e)))")
+    end
     meta = _read_bundle_meta(dir)
     if meta !== nothing && get(meta, "mode", "") == "repo-rooted"
         Sys.which("git") === nothing && error("expand: this is a repo-rooted bundle but `git` isn't available")
