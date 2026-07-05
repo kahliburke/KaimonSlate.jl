@@ -84,6 +84,42 @@ function _copy_tree!(dest::AbstractString, src::AbstractString)
     return dest
 end
 
+# Tracked files (relative, forward-slashed) of the git worktree at `dir`, or `nothing` when `dir`
+# isn't under git. `git ls-files` gives exactly the source we want to ship: it drops `.git`, every
+# `.gitignore`d path (build/output dirs), AND untracked stray files (a 60 MB `test.out` sitting in
+# the tree) — the working-tree copy of each tracked file, so uncommitted source edits still ride.
+function _git_tracked_files(dir::AbstractString)
+    Sys.which("git") === nothing && return nothing
+    out = try; read(pipeline(`git -C $dir ls-files -z`; stderr = devnull), String); catch; return nothing; end
+    files = String[replace(String(f), '\\' => '/') for f in split(out, '\0'; keepempty = false)]
+    return isempty(files) ? nothing : files
+end
+
+# Vendor a path-dep's SOURCE into `dest` WITHOUT its data/computed bloat. A dev'd package can carry
+# huge untracked/ignored artifacts (`bowtie_search/`, `output/`, a stray `test.out`); copying it
+# whole (`_copy_tree!`) ballooned standalone bundles to 100 MB+. If the dep is a git worktree, ship
+# only its tracked files; otherwise ship just what `using <Pkg>` needs — the `*.toml` metadata plus
+# `src`/`ext`/`test` — so a data dir alongside the source can't bloat the bundle.
+function _copy_dep_source!(dest::AbstractString, src::AbstractString)
+    tracked = _git_tracked_files(src)
+    if tracked !== nothing
+        for rel in tracked
+            s = joinpath(src, rel); isfile(s) || continue
+            d = joinpath(dest, rel); mkpath(dirname(d))
+            try; cp(s, d; force = true, follow_symlinks = true); catch; end
+        end
+    else
+        for f in readdir(src)                                             # package metadata (Project/Manifest/…)
+            endswith(lowercase(f), ".toml") && isfile(joinpath(src, f)) &&
+                (mkpath(dest); cp(joinpath(src, f), joinpath(dest, f); force = true))
+        end
+        for d in ("src", "ext", "test")                                   # the loadable source
+            isdir(joinpath(src, d)) && _copy_tree!(joinpath(dest, d), joinpath(src, d))
+        end
+    end
+    return dest
+end
+
 # Canonical path (symlinks resolved) so repo-root and project-dir comparisons line up; falls
 # back to `abspath` if the path can't be resolved.
 _safe_realpath(p::AbstractString) = try realpath(p) catch; abspath(p) end
@@ -219,7 +255,7 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
                 s = _pd_source(pd); nm = _pd_name(pd)
                 isdir(s) || continue
                 _within(top, _safe_realpath(s)) === nothing || continue       # inside the repo → already bundled
-                _copy_tree!(joinpath(stage, "local", nm), s)                  # ship a copy at the root
+                _copy_dep_source!(joinpath(stage, "local", nm), s)            # ship source only (no data/computed bloat)
                 # Manifest path is relative to the env dir (`prel`) → point it at the root `local/<name>`.
                 targets[nm] = replace(prel == "." ? "local/$nm" : relpath("local/$nm", prel), '\\' => '/')
             end
@@ -242,7 +278,7 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
     for pd in pathdeps
         src = _pd_source(pd); nm = _pd_name(pd)
         isdir(src) || continue
-        _copy_tree!(joinpath(stage, "local", nm), src)       # ship our own copy
+        _copy_dep_source!(joinpath(stage, "local", nm), src)  # source only (no data/computed bloat)
         targets[nm] = "local/" * nm
     end
     _rewrite_manifest_paths!(joinpath(stage, "Manifest.toml"), targets)

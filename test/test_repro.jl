@@ -460,6 +460,35 @@ end
     @test !startswith(msg, "EOFError")                   # NOT the cryptic raw error
 end
 
+# A path-dep's data/computed files (a `bowtie_search/`, a gitignored `output/`, a stray 60 MB
+# `test.out`) must NOT ride into the bundle — that ballooned a real notebook's standalone to 100 MB+.
+@testset "path-dep vendoring ships source, drops data bloat" begin
+    # non-git dep → ships *.toml + src/, drops a data dir + stray top-level file
+    d = mktempdir()
+    write(joinpath(d, "Project.toml"), "name=\"D2\"\n")
+    mkpath(joinpath(d, "src")); write(joinpath(d, "src", "D2.jl"), "module D2 end")
+    mkpath(joinpath(d, "data")); write(joinpath(d, "data", "big.bin"), zeros(UInt8, 2_000_000))
+    write(joinpath(d, "stray.out"), zeros(UInt8, 2_000_000))
+    dest = mktempdir(); _copy_dep_source!(dest, d)
+    @test isfile(joinpath(dest, "Project.toml")) && isfile(joinpath(dest, "src", "D2.jl"))
+    @test !ispath(joinpath(dest, "data")) && !isfile(joinpath(dest, "stray.out"))
+
+    if Sys.which("git") !== nothing
+        # git dep → tracked source shipped (incl. tracked non-src like README); untracked + ignored dropped
+        g = mktempdir()
+        write(joinpath(g, "Project.toml"), "name=\"G\"\n"); write(joinpath(g, "README.md"), "hi")
+        mkpath(joinpath(g, "src")); write(joinpath(g, "src", "G.jl"), "module G end")
+        write(joinpath(g, ".gitignore"), "output/\n")
+        mkpath(joinpath(g, "output")); write(joinpath(g, "output", "o.dat"), zeros(UInt8, 2_000_000))
+        write(joinpath(g, "test.out"), zeros(UInt8, 2_000_000))     # untracked, not ignored
+        run(pipeline(`git -C $g init -q`; stderr = devnull))
+        run(pipeline(`git -C $g add Project.toml README.md src .gitignore`; stderr = devnull))
+        dest2 = mktempdir(); _copy_dep_source!(dest2, g)
+        @test isfile(joinpath(dest2, "src", "G.jl")) && isfile(joinpath(dest2, "README.md"))  # tracked kept
+        @test !isfile(joinpath(dest2, "test.out")) && !ispath(joinpath(dest2, "output"))      # untracked/ignored dropped
+    end
+end
+
 # Frozen-render preview: the rendered-cells payload round-trips (gzip+base64) and the footer
 # block is ignored by parse_report (it's terminal, after the cells / bundle).
 @testset "frozen-render preview round-trips" begin
