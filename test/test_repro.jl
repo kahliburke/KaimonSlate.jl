@@ -553,6 +553,37 @@ end
     rm(r3.root; recursive = true, force = true)
 end
 
+# `SLATE_INSTALL_DIR` (run.jl's "where to set this up?" prompt) reconstructs into a DURABLE, user-owned
+# directory instead of the hidden depot cache — `install=true`, reused on a second run, and it refuses
+# to clobber a non-empty dir that isn't a Slate install.
+@testset "install dir: SLATE_INSTALL_DIR reconstructs into a chosen tree" begin
+    cells = "#%% code id=a\nx=1\n"
+    proj = mktempdir()
+    write(joinpath(proj, "Project.toml"), "name=\"Demo\"\n[deps]\n")
+    write(joinpath(proj, "Manifest.toml"), "manifest_format=\"2.0\"\n")
+    sj = joinpath(mktempdir(), "demo.standalone.jl")
+    write(sj, cells * "\n" * _bundle_footer(_make_bundle_b64(proj, NamedTuple[], "demo.jl", cells)) * "\n")
+
+    target = joinpath(mktempdir(), "myproject")          # a fresh, empty path
+    withenv("SLATE_INSTALL_DIR" => target) do
+        r1 = _reconstruct_bundle!(sj)
+        @test r1.install && r1.fresh                     # landed in the chosen dir, freshly extracted
+        @test r1.root == abspath(target)                 # NOT the depot cache
+        @test !occursin("kaimonslate-bundles", r1.root)
+        @test isfile(joinpath(target, ".slatebundle.json")) && isfile(joinpath(target, "demo.jl"))
+
+        r2 = _reconstruct_bundle!(sj)                    # second run reuses the install (no re-extract)
+        @test r2.install && !r2.fresh && r2.root == abspath(target)
+
+        # refuse to clobber a non-empty directory that isn't ours
+        other = mktempdir(); write(joinpath(other, "keep.txt"), "mine")
+        withenv("SLATE_INSTALL_DIR" => other) do
+            @test_throws ErrorException _reconstruct_bundle!(sj)
+        end
+        @test isfile(joinpath(other, "keep.txt"))        # untouched
+    end
+end
+
 # A truncated / incompatible bundle (e.g. an OLD-format standalone) must fail with an actionable
 # message, not a raw `EOFError: read end of file` in the hydrate banner.
 @testset "corrupt/incompatible bundle → actionable error, not EOFError" begin

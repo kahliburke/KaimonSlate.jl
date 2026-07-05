@@ -541,30 +541,46 @@ function _bundle_cache_dir(b64::AbstractString)
 end
 
 """
-    _reconstruct_bundle!(jl_path) -> (root, envdir, parent, notebook, fresh)
+    _reconstruct_bundle!(jl_path) -> (root, envdir, parent, notebook, fresh, install)
 
-Reconstruct a standalone `.jl`'s embedded environment into the content-addressed depot cache
-(`_bundle_cache_dir`) and return its coordinates — the project ROOT, the ENV dir the kernel should
-activate, the PARENT package dir (`""` if none), the reconstructed NOTEBOOK path, and `fresh`
-(`false` when the cache was already populated, reused instantly). Does not instantiate (the caller
-does, so download/precompile can be streamed). Extraction is staged in a sibling `.partial` dir and
+Reconstruct a standalone `.jl`'s embedded environment and return its coordinates — the project ROOT,
+the ENV dir the kernel should activate, the PARENT package dir (`""` if none), the reconstructed
+NOTEBOOK path, `fresh` (`false` when it was already populated, reused instantly), and `install`
+(`true` when it landed in a durable user-chosen dir rather than the cache — the caller re-points the
+notebook there so edits persist).
+
+Destination: the content-addressed depot cache (`_bundle_cache_dir`) by default, OR — when a
+launcher (`run.jl`) sets `ENV["SLATE_INSTALL_DIR"]` — a durable, user-owned directory THERE (a real
+project: a git checkout for a full-history bundle). Does not instantiate (the caller does, so
+download/precompile can be streamed). Cache extraction is staged in a sibling `.partial` dir and
 swapped in, so a crash mid-extract can't leave a half-populated cache.
 """
 function _reconstruct_bundle!(jl_path::AbstractString)
     b64 = _read_bundle_b64(read(jl_path, String))
+    # A durable install dir (run.jl's "where to set this up?" prompt) → reconstruct THERE, not the cache.
+    install = strip(get(ENV, "SLATE_INSTALL_DIR", ""))
+    if !isempty(install)
+        dir = abspath(expanduser(String(install)))
+        isfile(joinpath(dir, ".slatebundle.json")) && return (; _read_coords(dir)..., fresh = false, install = true)  # reuse
+        (isdir(dir) && !isempty(readdir(dir))) &&
+            error("SLATE_INSTALL_DIR is a non-empty directory that isn't a Slate install: $dir\n" *
+                  "Choose an empty/new path, or remove it, and re-run.")
+        _extract_bundle!(b64, dir)
+        return (; _read_coords(dir)..., fresh = true, install = true)
+    end
     dir = _bundle_cache_dir(b64)
-    isfile(joinpath(dir, ".slatebundle.json")) && return (; _read_coords(dir)..., fresh = false)   # cache hit
+    isfile(joinpath(dir, ".slatebundle.json")) && return (; _read_coords(dir)..., fresh = false, install = false)   # cache hit
     mkpath(dirname(dir))
     staging = dir * ".partial"
     rm(staging; recursive = true, force = true)
     _extract_bundle!(b64, staging)
     if isfile(joinpath(dir, ".slatebundle.json"))    # someone raced us → keep theirs
         rm(staging; recursive = true, force = true)
-        return (; _read_coords(dir)..., fresh = false)
+        return (; _read_coords(dir)..., fresh = false, install = false)
     end
     rm(dir; recursive = true, force = true)
     mv(staging, dir)
-    return (; _read_coords(dir)..., fresh = true)
+    return (; _read_coords(dir)..., fresh = true, install = false)
 end
 
 """

@@ -239,6 +239,10 @@ x = 1
         @test occursin("<button id=\"exp-run-btn\">", rh) && occursin("Run this notebook live", rh) && occursin("run.jl", rh)
         @test !occursin("<button id=\"exp-run-btn\">", NS.export_html(fnb))   # only when runnable (CSS is always present)
         rj = NS._run_script("https://x.github.io/y/nb.standalone.jl"; agent = true, bundle_name = "nb.standalone.jl")
+        @test (Meta.parseall(rj); true)                              # the generated script is valid Julia (escaping intact)
+        @test occursin("choose_install_dir", rj) && occursin("SLATE_INSTALL_DIR", rj)   # install-dir prompt threaded in
+        @test occursin("SLATE_KAIMONSLATE_PATH", rj) && occursin("Pkg.develop", rj)      # local-checkout override for dev/forks
+        @test occursin("git credential attribute", rj)               # the noisy LibGit2 warning is filtered
         @test occursin("Downloads.download(BUNDLE_URL", rj) && occursin("KaimonSlate.jl", rj)
         @test occursin("x.github.io/y/nb.standalone.jl", rj)
         @test occursin("@__DIR__", rj)                               # sibling-first: reads the bundle next to run.jl…

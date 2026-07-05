@@ -466,10 +466,32 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         VERSION >= v"1.10" || error("Julia 1.10+ required (found \$VERSION). See https://julialang.org/downloads")
     end
 
+    # LibGit2 (Pkg's git transport) warns about credential attributes newer git sends that its parser
+    # doesn't know ("Unknown git credential attribute … capability[]/state[]") — harmless noise. Drop
+    # just those while installing; everything else logs normally.
+    struct _QuietGit <: Base.CoreLogging.AbstractLogger; sink::Any; end
+    Base.CoreLogging.min_enabled_level(l::_QuietGit) = Base.CoreLogging.min_enabled_level(l.sink)
+    Base.CoreLogging.shouldlog(l::_QuietGit, a...) = Base.CoreLogging.shouldlog(l.sink, a...)
+    Base.CoreLogging.catch_exceptions(l::_QuietGit) = Base.CoreLogging.catch_exceptions(l.sink)
+    function Base.CoreLogging.handle_message(l::_QuietGit, lvl, msg, _mod, grp, id, file, line; kw...)
+        occursin("git credential attribute", string(msg)) && return
+        Base.CoreLogging.handle_message(l.sink, lvl, msg, _mod, grp, id, file, line; kw...)
+    end
+
     function install_packages()
         @info "Installing KaimonSlate into \$ENVDIR (first run compiles — this can take a few minutes)…"
         mkpath(ENVDIR); Pkg.activate(ENVDIR)
-        Pkg.add(url = "$SLATE")
+        # Point at a LOCAL KaimonSlate checkout (dev/testing, or a fork) via SLATE_KAIMONSLATE_PATH;
+        # otherwise install the published package from GitHub.
+        local_src = strip(get(ENV, "SLATE_KAIMONSLATE_PATH", ""))
+        Base.CoreLogging.with_logger(_QuietGit(Base.CoreLogging.current_logger())) do
+            if isempty(local_src)
+                Pkg.add(url = "$SLATE")
+            else
+                @info "Using a local KaimonSlate checkout" path = local_src
+                Pkg.develop(path = expanduser(String(local_src)))
+            end
+        end
     end
 
     # Prefer the bundle shipped NEXT TO this script (extracted site tarball, or downloaded alongside
@@ -494,11 +516,30 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         return nb
     end
 
+    # Where to set this notebook up on your machine. A full-history bundle expands to a real GIT
+    # CHECKOUT (branch & PR with matching commits); a source-only bundle to a plain project. Setting
+    # SLATE_INSTALL_DIR skips the prompt (non-interactive). '-' runs it once from a throwaway cache.
+    function choose_install_dir()
+        pre = strip(get(ENV, "SLATE_INSTALL_DIR", ""))
+        isempty(pre) || return String(pre)
+        stem = endswith(BUNDLE_NAME, ".standalone.jl") ? BUNDLE_NAME[1:end-14] : first(splitext(BUNDLE_NAME))
+        default = joinpath(pwd(), stem)
+        print("\\nWhere should I set up this notebook?\\n  [", default, "]  ",
+              "(Enter = accept · type a path · '-' = run once, don't keep files): ")
+        flush(stdout)
+        ans = try; strip(readline()); catch; ""; end
+        ans == "-" && return ""
+        isempty(ans) ? default : abspath(expanduser(String(ans)))
+    end
+
     # `using` + serve run at TOP LEVEL (not inside a function): the world age advances between
     # top-level statements, so the just-loaded `KaimonSlate` binding is visible for the serve call.
     const NB = setup()
+    let dir = choose_install_dir()
+        isempty(dir) || (ENV["SLATE_INSTALL_DIR"] = dir; println("→ Setting up in ", dir))
+    end
     port = free_port()
-    println("Starting the notebook server (its environment reconstructs on first open — first run compiles)…")
+    println("Starting the notebook server (first run compiles the environment)…")
     using KaimonSlate
     # serve_notebook blocks; once the hub answers HTTP it prints a framed banner with the live URL.
     KaimonSlate.serve_notebook(NB; port = port)

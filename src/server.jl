@@ -210,6 +210,9 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
         kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir)
         lock(nb.lock) do
             nb.kernel = kernel
+            # A durable INSTALL (SLATE_INSTALL_DIR) → serve the notebook FROM the installed project, so
+            # edits save there (and land in its git checkout), not into the throwaway downloaded `.jl`.
+            (rc.install && !isempty(rc.notebook) && isfile(rc.notebook)) && (nb.path = rc.notebook)
             delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
         end
         _drain!(nb)                                  # run everything + WAIT, so `hydrating` stays up for it
