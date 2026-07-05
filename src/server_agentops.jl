@@ -727,6 +727,32 @@ function set_controls_map!(nb::LiveNotebook, map)
     return nb
 end
 
+"""
+    agent_surface_controls!(nb, id, controls; caller="")
+
+Surface `@bind` controls onto cell `id`'s control strip — the agent-facing form of drag-to-host.
+Presentation only (rewrites the `.jl`, no re-eval). `controls` uses the header layout grammar:
+`a,b,c` = a row of single controls; `[a,b],c` = a stacked column `[a,b]` then a column `c`; `""`
+clears the strip. Names must be `@bind` variables defined somewhere in the notebook (validated,
+so a typo is rejected with the available names rather than silently dropped)."""
+function agent_surface_controls!(nb::LiveNotebook, id::AbstractString, controls::AbstractString;
+                                 caller::AbstractString = "")
+    _cell_exists(nb, id) || return "(no cell id=$id)"
+    cols = ReportEngine._parse_controls(String(controls))
+    known = Set(string(b.name) for c in nb.report.cells for b in c.binds)
+    unknown = unique(String[n for col in cols for n in col if !(n in known)])
+    if !isempty(unknown)
+        avail = sort(collect(known))
+        return "⛔ unknown @bind control(s): $(join(unknown, ", ")). " *
+               (isempty(avail) ? "This notebook defines no @bind widgets yet." : "Available: $(join(avail, ", ")).")
+    end
+    set_controls_map!(nb, Dict{String,Any}(String(id) => cols))
+    _renew_floor!(nb, caller)
+    total = sum(length, cols; init = 0)
+    return total == 0 ? "cleared the control strip on id=$id" :
+        "surfaced $total control(s) on id=$id: " * join((join(col, "+") for col in cols), ", ")
+end
+
 # Fold / unfold a cell (view-only; persisted in the `.jl` header as the `collapsed` token, so it
 # travels with the notebook). No re-eval — just flip the flag and rewrite the file.
 function set_collapsed!(nb::LiveNotebook, id::AbstractString, collapsed::Bool)

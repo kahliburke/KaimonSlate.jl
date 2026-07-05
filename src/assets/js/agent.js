@@ -79,7 +79,7 @@ function _extBadge(on) {
 // other tool falls back to its prefix-stripped, de-underscored form.
 const _TOOL_LABEL = {
   slate_read:'📖 read notebook', slate_add_cell:'➕ add cell', slate_edit_cell:'✏️ edit cell',
-  slate_run:'▶ run cell', slate_delete_cell:'🗑 delete cell', slate_view:'🖼 view figure',
+  slate_run:'▶ run cell', slate_delete_cell:'🗑 delete cell', slate_view:'🖼 view figure', slate_surface:'🎛 surface controls',
   slate_search_docs:'🔎 search docs', slate_index_docs:'📇 index docs',
   slate_acquire_floor:'🔒 acquire floor', slate_release_floor:'🔓 release floor',
   slate_inspect:'🔬 inspect cell', slate_diag:'🩺 diagnostics', slate_eval:'λ scratch eval', slate_eval_js:'🧩 eval JS', slate_export_pdf:'📄 export PDF',

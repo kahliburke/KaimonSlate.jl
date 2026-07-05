@@ -114,7 +114,14 @@ const SLATE_API = SlateApiEntry[
         TextField, TextArea, Select, Radio, MultiSelect, MultiCheckBox, ColorPicker, DateField,
         TimeField, Button, TableSelect, playhead. `@bind n Slider(1:100; label=\"n\")`. Group several
         related controls in ONE cell (multiple `@bind` lines → a single combined control strip)
-        rather than a cell per control."""),
+        rather than a cell per control.
+
+        Two placement patterns: EMBED — put the `@bind` in the SAME cell that reads it, and its widget
+        renders right there (best for a control local to one plotting cell). SURFACE — declare the
+        `@bind`s once (e.g. a hidden `hidecode` setup cell) and place the live knobs BESIDE a figure
+        with `slate.surface(notebook, plotcell, \"a,b\")` (layout grammar: `a,b`=row, `[a,b],c`=columns;
+        `\"\"` clears). Presentation only — no re-eval. Prefer surfacing so a reader tweaks the knobs
+        next to the figure they drive."""),
     SlateApiEntry("Slider", "Widgets", "Slider(range; default, label) | Slider(lo, hi, default; step, label)",
         """A range slider. `@bind n Slider(1:100; label=\"n\")` or `@bind x Slider(0.0, 1.0, 0.5; step=0.01)`."""),
     SlateApiEntry("NumberField", "Widgets", "NumberField(default=0; min, max, label)",
@@ -318,6 +325,8 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
 @bind sel TableSelect(df)                               # click a row → sel is a NamedTuple (sel.col)
     # Group several related controls in ONE cell (multiple @bind lines) — they render a single
     # combined control strip. Prefer that to a separate cell per control.
+    # EMBED the @bind in the cell that reads it (widget renders there), OR declare it once and
+    # SURFACE it beside a figure: slate.surface(notebook, plotcell, "a,b")  (a,b=row; [a,b],c=cols)
 
 ## Animation — `animate(frames; …)`  (precompute once, play in the browser)
     anim = animate([field(t) for t in times]; kind=:heatmap, clim=:symmetric, x=r, y=r)

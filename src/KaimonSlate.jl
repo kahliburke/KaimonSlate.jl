@@ -35,7 +35,7 @@ using .ReportRender
 using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
                       find_live, notebook_digest,
-                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!, agent_scratch_eval!,
+                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!, agent_scratch_eval!, agent_surface_controls!,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand
@@ -437,6 +437,30 @@ function create_tools(GateTool::Type)
         return _surfaced(nb, "delete_cell", Dict{String,Any}("cell" => cell), res)
     end
 
+    """
+        surface(notebook, cell, controls) -> String
+
+    Surface `@bind` controls onto `cell`'s control strip — the presentation layer that renders the
+    live widgets WITH a plotting/output cell instead of back at their `@bind` definition, so a reader
+    adjusts the knobs right next to the figure they drive. Presentation only (no re-eval).
+
+    Two authoring patterns for interactive cells:
+      • EMBED — declare `@bind x Slider(…)` in the SAME cell that reads `x`; the widget renders there
+        automatically (no surface call needed). Best when the control is local to one plotting cell.
+      • SURFACE — declare the `@bind`s once (e.g. a hidden `hidecode` setup cell), then surface those
+        variables onto the figure cell(s) that use them. Best when several cells share controls, or to
+        keep the knobs beside the figure.
+
+    `controls` uses the layout grammar: `a,b,c` = a row of single controls; `[a,b],c` = a stacked
+    column `[a,b]` then a column `c`; `""` clears the strip. Names must be `@bind` variables defined
+    somewhere in the notebook (a typo is rejected with the list of available controls).
+    """
+    function surface_controls(notebook::String, cell::String, controls::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        res = agent_surface_controls!(nb, cell, controls; caller = _caller())
+        return _surfaced(nb, "surface", Dict{String,Any}("cell" => cell, "controls" => controls), res)
+    end
+
     # ── Multi-agent write safety (MULTIAGENT.md §3) ───────────────────────────
     # Only needed when SEVERAL agents drive one notebook. A solo agent ignores all of
     # this — your edits already carry your session id implicitly, so they just work.
@@ -707,6 +731,7 @@ function create_tools(GateTool::Type)
         GateTool("rename_cell", rename_cell),
         GateTool("run", run_cell),
         GateTool("delete_cell", delete_cell),
+        GateTool("surface", surface_controls),
         GateTool("acquire_floor", acquire_floor),
         GateTool("release_floor", release_floor),
         GateTool("view", view_cell),

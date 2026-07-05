@@ -172,6 +172,26 @@ const NS = KaimonSlate.NotebookServer
             @test length(nb.report.cells) == n0
         end
 
+        @testset "surface @bind controls onto a cell" begin
+            NS.agent_add_cell!(nb, "@bind sfreq Slider(1:100)\n@bind samp Slider(0:0.1:1)"; id = "sctl")
+            NS.agent_add_cell!(nb, "sfreq * samp"; id = "splot")
+            _ctrls(id) = nb.report.cells[NS._index_of(nb.report.cells, id)].controls
+            # a row of two single-control columns
+            @test occursin("surfaced 2", NS.agent_surface_controls!(nb, "splot", "sfreq,samp"))
+            @test _ctrls("splot") == [["sfreq"], ["samp"]]
+            # columns grammar: one stacked column
+            NS.agent_surface_controls!(nb, "splot", "[sfreq,samp]")
+            @test _ctrls("splot") == [["sfreq", "samp"]]
+            # a typo is rejected (names listed), layout untouched
+            r = NS.agent_surface_controls!(nb, "splot", "nope")
+            @test occursin("unknown", r) && occursin("sfreq", r)
+            @test _ctrls("splot") == [["sfreq", "samp"]]
+            # empty clears the strip; a missing cell is reported
+            NS.agent_surface_controls!(nb, "splot", "")
+            @test isempty(_ctrls("splot"))
+            @test occursin("no cell", NS.agent_surface_controls!(nb, "ghostcell", "sfreq"))
+        end
+
         @testset "external tool calls surface in the chat panel" begin
             # Pure envelope shape — exactly what the browser's `agentEvent` consumes.
             use, res = NS._external_tool_envelopes("ext-1", "edit_cell",
