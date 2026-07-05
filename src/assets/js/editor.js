@@ -18,6 +18,16 @@
   //    live editors without rebuilding the views. `slateSyntaxTheme` persists the selection. ──────
   const themeComp = new Compartment();    // token colours (HighlightStyle)
   const chromeComp = new Compartment();   // editor chrome (EditorView.theme)
+  const wrapComp = new Compartment();     // soft line-wrap: always on for markdown (prose), opt-in for code
+  // Markdown editors always soft-wrap (prose); code editors follow the `slateWrapEditor` preference.
+  const _wrapCodePref = () => localStorage.getItem('slateWrapEditor') === '1';
+  const _wrapExt = isMd => (isMd || _wrapCodePref()) ? EditorView.lineWrapping : [];
+  // Live-toggle code-editor wrapping across every open editor (markdown stays wrapped regardless).
+  window.setEditorWrap = on => {
+    localStorage.setItem('slateWrapEditor', on ? '1' : '0');
+    for (const v of Object.values(window.editors || {}))
+      v.dispatch({ effects: wrapComp.reconfigure((v._wrapMd || on) ? EditorView.lineWrapping : []) });
+  };
   const THEMES = slateThemes || { 'dark-plus': { style: juliaHighlightStyle, chrome: [] } };
   // Exposed for settings.js to build the dropdown — [{name,label}] in declared order.
   window._syntaxThemes = slateThemeMeta || Object.keys(THEMES).map(name => ({ name, label: name }));
@@ -307,6 +317,7 @@
       extensions: [
         history(), drawSelection(), bracketMatching(), closeBrackets(), indentOnInput(),
         indentUnit.of('    '), EditorState.tabSize.of(4), errField, originField, flashField,
+        wrapComp.of(_wrapExt(!!opts.markdown)),
         ...lang,
         // Markdown editors complete citations + fenced code only (never prose); code cells get Julia.
         autocompletion({ override: [opts.markdown ? markdownComplete : juliaComplete], icons: true }),
@@ -358,6 +369,7 @@
         }, { dark: true }),
       ],
     });
+    view._wrapMd = !!opts.markdown;   // markdown views stay wrapped when the code-wrap toggle flips
     if (opts.cellId) window.editors[opts.cellId] = view;
     return view;
   }

@@ -113,8 +113,8 @@ button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid v
          border-radius:6px; padding:4px 12px; cursor:pointer; font-size:.82rem;
          text-decoration:none; display:inline-block; }
 button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
-.page { max-width:980px; margin:0 auto; padding:var(--page-pad) var(--page-pad) 160px; transition:margin-right .18s ease; }
-body.fullwidth .page { max-width:none; }
+.page { max-width:var(--page-max, 980px); margin:0 auto; padding:var(--page-pad) var(--page-pad) 160px; transition:margin-right .18s ease; }
+body.fullwidth .page { max-width:none; }   /* Full page width overrides the column-width slider */
 /* When the agent chat is open, slide the notebook column left of the panel so cells
    and the chat never overlap (the panel is a fixed 380px drawer on the right). */
 body.agent-open .page { margin-right:392px; }
@@ -317,7 +317,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   content:"loading…"; position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
   color:var(--muted); font-size:12px; background:var(--bg); }
 .anim-stage { position:relative; display:flex; align-items:flex-start; gap:8px; }
-.anim-canvas-wrap { position:relative; display:block; max-width:100%; }
+.anim-canvas-wrap { position:relative; display:block; max-width:min(100%, var(--fig-max, 980px)); }
 .anim-canvas { display:block; border-radius:4px; background:#000; image-rendering:auto; max-width:100%; }
 .anim-overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 .anim-cbar { width:14px; height:auto; align-self:stretch; border-radius:2px; }
@@ -351,7 +351,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .slatetable .st-pag { display:flex; align-items:center; gap:8px; margin-top:6px; }
 .slatetable .st-pag button { padding:2px 9px; font-size:.76rem; }
 .slatetable .st-page { color:var(--dim); font-size:.74rem; }
-.disp.img img { max-width:100%; height:auto; border-radius:4px; display:block; }
+.disp.img img { max-width:min(100%, var(--fig-max, 980px)); height:auto; border-radius:4px; display:block; margin-inline:auto; }
 .disp.html table { border-collapse:collapse; } .disp.html td,.disp.html th { border:1px solid var(--border); padding:3px 8px; }
 .disp.latex { overflow-x:auto; padding:6px 2px; } .disp.latex .katex-display { margin:.3em 0; }
 .disp.latex .katex { font-size:1.3em; }                 /* output equations: match markdown display math */
@@ -365,7 +365,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md .phantom { color:var(--dim); }
 .md .ival { color:var(--green); font-family:'Cascadia Code',monospace; }   /* {{ }} scalar */
 .md .interr { color:var(--red); font-family:'Cascadia Code',monospace; }   /* {{ }} error */
-.md .disp.img img { max-width:100%; height:auto; border-radius:4px; }       /* {{ plot }} */
+.md .disp.img img { max-width:min(100%, var(--fig-max, 980px)); height:auto; border-radius:4px; }       /* {{ plot }} */
 .md .ichart { height:300px; margin:8px 0; }                                 /* {{ echart(…) }} */
 .md .itable { margin:8px 0; display:block; }                                /* {{ slate_table(…) }} */
 .srcedit { padding:4px 6px; }
@@ -870,6 +870,10 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
            font-family:monospace; font-size:.76rem; padding:0 4px; width:14ch; }
 /* Settings modal */
 .setmodal .setrow { display:flex; align-items:center; justify-content:space-between; gap:18px; margin:14px 0; }
+/* Section header grouping the settings rows (Display / Appearance / Editing / Agent). */
+.setmodal .setsec { color:var(--dim); font-size:.7rem; font-weight:600; text-transform:uppercase; letter-spacing:.08em;
+  margin:18px 0 2px; padding-bottom:4px; border-bottom:1px solid var(--border); }
+.setmodal .setsec:first-of-type { margin-top:6px; }
 .setmodal label { color:var(--text); font-size:.86rem; }
 .setmodal .rt { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:.82rem; }
 .setmodal input[type=range] { accent-color:var(--accent); }

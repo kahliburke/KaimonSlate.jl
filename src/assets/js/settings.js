@@ -23,19 +23,67 @@ function setSlateTheme(name) {
   else document.documentElement.dataset.slateTheme = name;
 }
 
+// ── Figure display width ────────────────────────────────────────────────────────
+// Max display width (px) for rendered figures/images, exposed as a CSS var (`--fig-max`) on
+// <body>. Full-page-width mode drops the page's max-width so tables/charts/code can breathe —
+// but a raster plot then scales to the WHOLE window and turns huge/tall. This caps it. Default
+// 980 = the normal reading column (a no-op outside full-width); floored so it can't go tiny.
+const _FIG_MAX_DEFAULT = 980, _FIG_MAX_MIN = 480;
+function _figMax() { const n = parseInt(localStorage.getItem('slateFigMax'), 10); return (n && n >= _FIG_MAX_MIN) ? n : _FIG_MAX_DEFAULT; }
+function setFigMax(px) {
+  const v = Math.max(_FIG_MAX_MIN, parseInt(px, 10) || _FIG_MAX_DEFAULT);
+  localStorage.setItem('slateFigMax', v);
+  document.body.style.setProperty('--fig-max', v + 'px');
+}
+function applyFigMax() { document.body.style.setProperty('--fig-max', _figMax() + 'px'); }
+applyFigMax();   // apply the saved cap at load (before the first figure renders)
+
+// ── Notebook column (page/cell) width ──────────────────────────────────────────
+// Width of the notebook column — cells and text — as a CSS var (`--page-max`) on the `.page`
+// container. The "Full page width" toggle still overrides to the whole window (body.fullwidth);
+// this sets the constrained column width otherwise. Default 980 = the historical column.
+const _PAGE_MAX_DEFAULT = 980, _PAGE_MAX_MIN = 720;
+function _pageMax() { const n = parseInt(localStorage.getItem('slatePageMax'), 10); return (n && n >= _PAGE_MAX_MIN) ? n : _PAGE_MAX_DEFAULT; }
+function setPageMax(px) {
+  const v = Math.max(_PAGE_MAX_MIN, parseInt(px, 10) || _PAGE_MAX_DEFAULT);
+  localStorage.setItem('slatePageMax', v);
+  document.body.style.setProperty('--page-max', v + 'px');
+}
+function applyPageMax() { document.body.style.setProperty('--page-max', _pageMax() + 'px'); }
+applyPageMax();   // apply the saved column width at load
+
 // ── Settings modal ────────────────────────────────────────────────────────────
 function openSettings() {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
   deb.value = updateMs; v.textContent = updateMs;
   deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
   const wide = document.getElementById('setwide');
+  // Notebook column width (live via --page-max); disabled while Full page width overrides it.
+  const page = document.getElementById('setpage'), pagev = document.getElementById('setpagev');
+  const _syncPage = () => { if (page) page.disabled = wide.checked; };
   wide.checked = document.body.classList.contains('fullwidth');
-  wide.onchange = () => { document.body.classList.toggle('fullwidth', wide.checked); localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0'); };
+  wide.onchange = () => { document.body.classList.toggle('fullwidth', wide.checked); localStorage.setItem('slateFullWidth', wide.checked ? '1' : '0'); _syncPage(); };
+  if (page) {
+    page.value = _pageMax(); pagev.textContent = _pageMax(); _syncPage();
+    page.oninput = () => { pagev.textContent = page.value; setPageMax(page.value); };
+  }
+  // Figure display-width cap (live via the --fig-max CSS var; most visible in full-page-width mode).
+  const fig = document.getElementById('setfig'), figv = document.getElementById('setfigv');
+  if (fig) {
+    fig.value = _figMax(); figv.textContent = _figMax();
+    fig.oninput = () => { figv.textContent = fig.value; setFigMax(fig.value); };
+  }
   // Wrap wide text output (default off → matrices/wide tables scroll horizontally instead of wrapping).
   const wrap = document.getElementById('setwrap');
   if (wrap) {
     wrap.checked = document.body.classList.contains('wrap-output');
     wrap.onchange = () => { document.body.classList.toggle('wrap-output', wrap.checked); localStorage.setItem('slateWrapOutput', wrap.checked ? '1' : '0'); };
+  }
+  // Soft-wrap long lines in the CODE editor (markdown editors always wrap). Live across all editors.
+  const wraped = document.getElementById('setwraped');
+  if (wraped) {
+    wraped.checked = localStorage.getItem('slateWrapEditor') === '1';
+    wraped.onchange = () => { window.setEditorWrap && window.setEditorWrap(wraped.checked); };
   }
   // Per-notebook settings (hot-reload, parallel, threads, slides, bibstyle, agent-model override)
   // now live in the "🎚 Notebook config" panel (config.js) — a single view with effective value +

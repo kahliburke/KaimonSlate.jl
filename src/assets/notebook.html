@@ -165,17 +165,26 @@
 <div class="ctlpop tagpop" id="tagpop"></div>
 <div class="modal-bg" id="setbg"><div class="modal setmodal">
   <div class="msg"><strong>Settings</strong></div>
-  <div class="setrow"><label>Live-update debounce</label>
-    <span class="rt"><input type="range" id="setdeb" min="0" max="1000" step="25"/><span id="setdebv"></span> ms</span></div>
+  <div class="setsec">Display</div>
   <div class="setrow"><label>Full page width</label>
     <span class="rt"><input type="checkbox" id="setwide"/></span></div>
+  <div class="setrow"><label title="Width of the notebook column (cells + text). The Full page width toggle overrides this to fill the window">Page width</label>
+    <span class="rt"><input type="range" id="setpage" min="720" max="1600" step="20"/><span id="setpagev"></span> px</span></div>
+  <div class="setrow"><label title="Cap the display width of rendered figures/images — keeps a plot from blowing up to the whole window in full-page-width mode">Figure width</label>
+    <span class="rt"><input type="range" id="setfig" min="480" max="1800" step="20"/><span id="setfigv"></span> px</span></div>
   <div class="setrow"><label title="Wrap wide text output (matrices, wide tables) instead of scrolling it horizontally">Wrap text output</label>
     <span class="rt"><input type="checkbox" id="setwrap"/></span></div>
-  <div class="setrow sethint"><span></span>Per-notebook settings (threads, parallel, slides, agent-model override…) now live in <strong>☰ → 🎚 Notebook config</strong>.</div>
+  <div class="setrow"><label title="Soft-wrap long lines in the code editor. Markdown cells always wrap.">Wrap code editor</label>
+    <span class="rt"><input type="checkbox" id="setwraped"/></span></div>
+  <div class="setsec">Appearance</div>
   <div class="setrow"><label title="Overall colour theme for the Slate notebook UI">Theme</label>
     <select id="settheme"><!-- options populated from SLATE_UI_THEMES (settings.js) --></select></div>
   <div class="setrow"><label title="Theme for code syntax highlighting in the editor — token colours and editor chrome">Editor syntax</label>
     <select id="setsyntax"><!-- options populated from the cm6 theme registry (settings.js) --></select></div>
+  <div class="setsec">Editing</div>
+  <div class="setrow"><label>Live-update debounce</label>
+    <span class="rt"><input type="range" id="setdeb" min="0" max="1000" step="25"/><span id="setdebv"></span> ms</span></div>
+  <div class="setsec">Agent</div>
   <div class="setrow"><label title="Your default model for every notebook. A single notebook can override it in 🎚 Notebook config.">Agent model (global default)</label>
     <select id="setmodel">
       <option value="">Sonnet (default)</option>
@@ -193,6 +202,7 @@
       <option value="bypass">Bypass (no checks — trusted only)</option>
     </select></div>
   <div class="setrow sethint" id="setmodelhint" style="display:none"><span></span>↻ restarts the agent on your next message (chat history kept).</div>
+  <div class="setrow sethint"><span></span>Per-notebook settings (threads, parallel, slides, agent-model override…) live in <strong>☰ → 🎚 Notebook config</strong>.</div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
 </div></div>
 <div class="modal-bg" id="exportbg"><div class="modal setmodal">
