@@ -290,13 +290,21 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   "<a href=\"https://julialang.org/downloads/\" target=\"_blank\" rel=\"noopener\">Julia 1.10+</a>. ",
                   "The launch script installs Kaimon + KaimonSlate and starts the notebook (its exact environment is reconstructed from the bundle).</p>")
             if embed_bundle
-                print(io, "<p>Download BOTH files into one folder, then run <code>julia run.jl</code>:</p>",
+                print(io, "<p><b>macOS / Linux</b> — download <b>run.jl</b> + the <b>bundle</b> into one folder, then <code>julia run.jl</code>:</p>",
                       "<div class=\"exp-run-row\" style=\"justify-content:flex-start\">",
-                      "<button id=\"exp-run-dl\">⬇ run.jl</button><button id=\"exp-run-bundle\">⬇ notebook bundle</button></div>")
+                      "<button id=\"exp-run-dl\">⬇ run.jl</button><button id=\"exp-run-bundle\">⬇ notebook bundle</button></div>",
+                      "<p><b>Windows</b> — also grab <b>run.bat</b> + <b>run.ps1</b> into that folder, then double-click <b>run.bat</b>:</p>",
+                      "<div class=\"exp-run-row\" style=\"justify-content:flex-start\">",
+                      "<button id=\"exp-run-bat\">⬇ run.bat</button><button id=\"exp-run-ps1\">⬇ run.ps1</button></div>")
             else
-                print(io, "<p><b>One-liner</b> — paste into a terminal:</p>",
+                print(io, "<p><b>One-liner</b> — <span id=\"exp-run-osname\">your platform</span> (paste into a terminal):</p>",
                       "<pre class=\"exp-run-cmd\"><code id=\"exp-run-oneliner\"></code></pre>",
+                      "<p><a href=\"#\" id=\"exp-run-ostoggle\">Show the command for another OS ▾</a></p>",
+                      "<div id=\"exp-run-osall\" style=\"display:none\">",
+                      "<p><b>macOS / Linux</b> (bash):</p><pre class=\"exp-run-cmd\"><code id=\"exp-run-ol-bash\"></code></pre>",
+                      "<p><b>Windows</b> (PowerShell):</p><pre class=\"exp-run-cmd\"><code id=\"exp-run-ol-ps\"></code></pre></div>",
                       "<p><b>Or</b> <a id=\"exp-run-dl\" download=\"", _SITE_RUNJL, "\">download run.jl</a> to inspect first, then <code>julia run.jl</code>. ",
+                      "On Windows, grab <a id=\"exp-run-bat\" download=\"", _SITE_BAT, "\">run.bat</a> + <a id=\"exp-run-ps1\" download=\"", _SITE_PS1, "\">run.ps1</a> beside it and double-click run.bat. ",
                       "Just the env? <a id=\"exp-run-bundle\" download=\"", bname, "\">download the bundle</a>.</p>")
             end
             print(io, "<div class=\"exp-run-row\">",
@@ -325,10 +333,12 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 # A notebook with no project env (in-process) can't be bundled → embed empty (button no-ops).
                 runjl = _run_script(""; agent = true, bundle_name = bname)
                 bundle_b64 = try; Base64.base64encode(export_standalone(nb; history = history)); catch; ""; end
-                print(io, "var _rj=", JSON.json(runjl), ";var _bb64=", JSON.json(bundle_b64), ";",
+                print(io, "var _rj=", JSON.json(runjl), ";var _rps1=", JSON.json(_run_ps1()), ";var _rbat=", JSON.json(_run_bat()), ";var _bb64=", JSON.json(bundle_b64), ";",
                       "var _save=function(name,blob){var u=URL.createObjectURL(blob),a=document.createElement('a');",
                       "a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);};",
                       "if(q('exp-run-dl'))q('exp-run-dl').onclick=function(){_save(", JSON.json(_SITE_RUNJL), ",new Blob([_rj],{type:'text/plain'}));};",
+                      "if(q('exp-run-ps1'))q('exp-run-ps1').onclick=function(){_save(", JSON.json(_SITE_PS1), ",new Blob([_rps1],{type:'text/plain'}));};",
+                      "if(q('exp-run-bat'))q('exp-run-bat').onclick=function(){_save(", JSON.json(_SITE_BAT), ",new Blob([_rbat],{type:'text/plain'}));};",
                       "if(q('exp-run-bundle'))q('exp-run-bundle').onclick=function(){var bin=atob(_bb64),n=bin.length,arr=new Uint8Array(n);",
                       "for(var i=0;i<n;i++)arr[i]=bin.charCodeAt(i);_save(", JSON.json(bname), ",new Blob([arr],{type:'text/plain'}));};")
             else
@@ -339,10 +349,23 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 # without baking a URL we don't know at export time.
                 print(io, "var base=location.href.replace(/[^/]*(\\?.*)?(#.*)?\$/,'');",
                       "var runjl=base+", JSON.json(_SITE_RUNJL), ";var bundle=base+", JSON.json(bname), ";",
+                      "var runps1=base+", JSON.json(_SITE_PS1), ";var runbat=base+", JSON.json(_SITE_BAT), ";",
                       "var cmd=\"SLATE_BUNDLE_URL=\"+bundle+\" julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
-                      "if(q('exp-run-oneliner'))q('exp-run-oneliner').textContent=cmd;",
+                      # PowerShell: $env: sets the var, and single-quotes keep the julia -e string literal (no PS interpolation).
+                      "var pscmd=\"\$env:SLATE_BUNDLE_URL='\"+bundle+\"'; julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
+                      # Detect the VIEWER's OS so we lead with the command their shell can actually run
+                      # (the bash `VAR=val cmd` form is invalid in PowerShell, and vice-versa). userAgentData
+                      # is the modern signal; platform/userAgent are the fallbacks. Only Windows-vs-not matters.
+                      "var isWin=(navigator.userAgentData&&/Windows/i.test(navigator.userAgentData.platform))||/Win/i.test(navigator.platform||'')||/Windows/i.test(navigator.userAgent||'');",
+                      "var primary=isWin?pscmd:cmd;",
+                      "if(q('exp-run-oneliner'))q('exp-run-oneliner').textContent=primary;",
+                      "if(q('exp-run-osname'))q('exp-run-osname').textContent=isWin?'Windows (PowerShell)':'macOS / Linux (bash)';",
+                      "if(q('exp-run-ol-bash'))q('exp-run-ol-bash').textContent=cmd;",
+                      "if(q('exp-run-ol-ps'))q('exp-run-ol-ps').textContent=pscmd;",
+                      "if(q('exp-run-ostoggle'))q('exp-run-ostoggle').onclick=function(e){e.preventDefault();var d=q('exp-run-osall');var s=d.style.display==='none';d.style.display=s?'block':'none';this.textContent=s?'Hide other platforms ▴':'Show the command for another OS ▾';};",
                       "if(q('exp-run-dl'))q('exp-run-dl').href=runjl;if(q('exp-run-bundle'))q('exp-run-bundle').href=bundle;",
-                      "if(q('exp-run-copy'))q('exp-run-copy').onclick=function(){navigator.clipboard&&navigator.clipboard.writeText(cmd);this.textContent='Copied ✓';};")
+                      "if(q('exp-run-ps1'))q('exp-run-ps1').href=runps1;if(q('exp-run-bat'))q('exp-run-bat').href=runbat;",
+                      "if(q('exp-run-copy'))q('exp-run-copy').onclick=function(){navigator.clipboard&&navigator.clipboard.writeText(primary);this.textContent='Copied ✓';};")
             end
             print(io, "})();")
         end
@@ -415,6 +438,8 @@ end
 # These are the fixed filenames the site, `run.jl`, and the page overlay all agree on.
 const _SITE_BUNDLE = "notebook.standalone.jl"   # generic fallback name (kept for back-compat / callers with no nb)
 const _SITE_RUNJL = "run.jl"                     # the generated bootstrap script
+const _SITE_PS1 = "run.ps1"                      # Windows launcher (PowerShell): runs run.jl
+const _SITE_BAT = "run.bat"                      # Windows double-click launcher → run.ps1
 
 # A per-notebook bundle filename so a downloaded/sidecar bundle is recognisable (e.g.
 # `01_whispering_gallery.standalone.jl`, matching the `/export.standalone.jl` download). Same
@@ -573,6 +598,53 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     """
 end
 
+# The Windows launcher (`run.ps1`). PowerShell is the modern Windows shell, so it holds the launch
+# logic: it checks Julia is on PATH (guiding to juliaup if not — it does NOT install Julia) and runs
+# the sibling `run.jl`, which does the real work (install Kaimon + KaimonSlate, fetch the bundle,
+# serve). Nothing per-notebook lives here — `run.jl` already knows the bundle name — so this is a
+# fixed script. Run it via the `run.bat` double-click launcher, or right-click → "Run with PowerShell".
+function _run_ps1()
+    return """
+    #!/usr/bin/env pwsh
+    # ── Run this Kaimon Slate notebook live (Windows / PowerShell) ───────────────────────────────
+    # Auto-generated. Runs the sibling $(_SITE_RUNJL), which installs Kaimon + KaimonSlate into a
+    # dedicated environment, fetches this notebook's reproducible bundle, and serves it — the
+    # notebook's exact environment reconstructs on open. Prerequisite: Julia 1.10+ (juliaup /
+    # https://julialang.org/downloads). Double-click $(_SITE_BAT), or right-click this file →
+    # "Run with PowerShell".
+    \$ErrorActionPreference = "Stop"
+    Set-Location -Path \$PSScriptRoot
+    # Keep the window open on exit so a message is readable — UNLESS run.bat launched us (it pauses
+    # itself, so we'd otherwise double-prompt). The bat sets SLATE_LAUNCHED_BY_BAT before calling.
+    function Hold { if (-not \$env:SLATE_LAUNCHED_BY_BAT) { Read-Host "`nPress Enter to close" } }
+    if (-not (Get-Command julia -ErrorAction SilentlyContinue)) {
+        Write-Host "Julia was not found on your PATH." -ForegroundColor Yellow
+        Write-Host "Install it from https://julialang.org/downloads/  (or run:  winget install julia )"
+        Hold; exit 1
+    }
+    julia (Join-Path \$PSScriptRoot "$(_SITE_RUNJL)")
+    Hold
+    """
+end
+
+# The Windows double-click launcher (`run.bat`). `.bat`/`.cmd` is the only script Windows runs on a
+# double-click without a security prompt; a `.ps1` double-click opens an editor, and a downloaded
+# `.ps1` is blocked by the default ExecutionPolicy. So this two-line launcher just invokes `run.ps1`
+# with a per-invocation Bypass (affects only this process — nothing system-wide is changed). CRLF
+# line endings so cmd.exe parses it cleanly. Kept trivial on purpose — all logic lives in run.ps1.
+function _run_bat()
+    return join([
+        "@echo off",
+        "rem Double-click launcher for $(_SITE_PS1). PowerShell holds the launch logic; this only",
+        "rem exists so a double-click runs it (a .ps1 double-click opens an editor, not runs).",
+        "set SLATE_LAUNCHED_BY_BAT=1",
+        "powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0$(_SITE_PS1)\"",
+        "rem Backstop: keep the window open even if PowerShell itself was blocked from running the",
+        "rem script (e.g. locked-down machine), so the error is readable rather than flashing shut.",
+        "pause",
+    ], "\r\n") * "\r\n"
+end
+
 # Materialise the site into `dir`: index.html (wired to the og-image sidecar) + og-image.png +
 # .nojekyll, and — when `bundle` — the reproducible `notebook.standalone.jl` + a `run.jl` bootstrap so
 # the page can offer "Run this live". `base_url` (the eventual site URL) is baked into run.jl so it can
@@ -591,6 +663,9 @@ function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = 
         # Absolute URL only when we know the site's address; else "" ⇒ run.jl reads the sibling bundle.
         burl = isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/" * bname
         write(joinpath(dir, _SITE_RUNJL), _run_script(burl; agent = agent, bundle_name = bname))
+        # Windows launchers: run.bat (double-click) → run.ps1 → run.jl.
+        write(joinpath(dir, _SITE_PS1), _run_ps1())
+        write(joinpath(dir, _SITE_BAT), _run_bat())
     end
     write(joinpath(dir, "index.html"), export_html(nb; og_image = ogpath, runnable = bundle, history = history, kwargs...))
     write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
@@ -679,6 +754,10 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
         # Absolute URL only when we know the doc's address; else "" ⇒ run.jl reads the sibling bundle.
         burl = isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/" * bname
         write(joinpath(docdir, _SITE_RUNJL), _run_script(burl; agent = agent, bundle_name = bname))
+        # Windows launchers: run.bat (double-click) → run.ps1 → run.jl. The page's "Run live" overlay
+        # links to these as siblings, so a blog/published doc must ship them alongside run.jl.
+        write(joinpath(docdir, _SITE_PS1), _run_ps1())
+        write(joinpath(docdir, _SITE_BAT), _run_bat())
     end
     write(joinpath(docdir, "index.html"),
           export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history, kwargs...))

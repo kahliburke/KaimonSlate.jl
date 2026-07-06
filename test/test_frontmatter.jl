@@ -269,7 +269,28 @@ x = 1
         eh = NS.export_html(fnb; runnable = true, embed_bundle = true)
         @test occursin("<button id=\"exp-run-btn\">", eh)
         @test occursin("_rj=", eh) && occursin("_bb64=", eh)         # embedded script + bundle slot
+        @test occursin("_rps1=", eh) && occursin("_rbat=", eh)       # Windows launchers ride along too
+        @test occursin("exp-run-bat", eh) && occursin("exp-run-ps1", eh)
         @test !occursin("exp-run-oneliner", eh)                      # no URL one-liner in embed mode
+
+        # Windows launchers: run.ps1 holds the launch logic, run.bat is the double-click shim → run.ps1.
+        ps1 = NS._run_ps1()
+        @test occursin("Get-Command julia", ps1)                     # detect-and-guide, does NOT install Julia
+        @test occursin("julialang.org/downloads", ps1)               # points at the installer instead of running one
+        @test occursin("Join-Path", ps1) && occursin("run.jl", ps1)  # runs the sibling run.jl…
+        @test occursin("PSScriptRoot", ps1)                          # …from its own folder (sibling bundle found)
+        @test occursin("SLATE_LAUNCHED_BY_BAT", ps1)                 # single-pause guard (skip its own pause under the bat)
+        bat = NS._run_bat()
+        @test occursin("ExecutionPolicy Bypass", bat) && occursin("run.ps1", bat)   # double-click shim → run.ps1
+        @test occursin("set SLATE_LAUNCHED_BY_BAT=1", bat)           # marks the bat launch so run.ps1 doesn't double-pause
+        @test occursin("\npause", bat)                               # backstop: window stays open if PS was blocked
+        @test occursin("\r\n", bat)                                  # CRLF so cmd.exe parses it
+        # The URL (site) one-liner overlay is OS-aware: JS detects the viewer's platform and shows THEIR
+        # command, with a toggle revealing both (bash + PowerShell). Plus the Windows launcher links.
+        @test occursin("exp-run-osname", rh) && occursin("exp-run-ostoggle", rh)   # OS label + reveal toggle
+        @test occursin("exp-run-ol-bash", rh) && occursin("exp-run-ol-ps", rh)     # both forms available
+        @test occursin("navigator.userAgentData", rh) && occursin("isWin", rh)     # OS detection
+        @test occursin("run.bat", rh) && occursin("run.ps1", rh)                   # Windows launcher links
     end
 
     # Multi-document site (blog): each notebook lives under its own /<slug>/, a manifest tracks them,

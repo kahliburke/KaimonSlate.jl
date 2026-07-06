@@ -765,6 +765,23 @@ function _print_ready_banner(url::AbstractString)
     flush(stdout)
 end
 
+# Open `url` in the viewer's default browser, best-effort. This is what makes a Windows double-click
+# (run.bat → run.ps1 → run.jl) actually land in a browser rather than a bare console. Cross-platform:
+# `start` on Windows, `open` on macOS, `xdg-open` on Linux. Opt out with KAIMONSLATE_NO_OPEN=1 (e.g.
+# a headless/CI serve). Never fatal — if it fails, the printed URL still stands.
+function _open_in_browser(url::AbstractString)
+    get(ENV, "KAIMONSLATE_NO_OPEN", "0") == "1" && return false
+    try
+        cmd = Sys.iswindows() ? `cmd /c start "" $url` :
+              Sys.isapple()   ? `open $url` :
+                                `xdg-open $url`
+        run(pipeline(cmd; stdout = devnull, stderr = devnull))
+        return true
+    catch
+        return false
+    end
+end
+
 """
     serve_notebook(path; host="127.0.0.1", port=8765)
 
@@ -778,6 +795,7 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765)
     url = "$(_hub_url(h))/n/$id"
     _await_http_ready(_hub_url(h))          # wait until the server actually answers before announcing it
     _print_ready_banner(url)
+    _open_in_browser(url)                    # best-effort: land a double-click launch straight in a browser
     wait(h.server)
     return h
 end
