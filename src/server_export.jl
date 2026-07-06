@@ -1047,14 +1047,14 @@ function build_site!(dir::AbstractString, nb::LiveNotebook; site_url::AbstractSt
     return _assemble_site!(dir, nb; site_url = site_url, slug = slg, bundle = bundle, kwargs...)
 end
 
-# ── Local site host: depot-backed named sites, served by the hub over HTTP ─────────────────────────
+# ── Local site host: cache-home-backed named sites, served by the hub over HTTP ────────────────────
 # The local mirror of the GitHub publish flow: build a `home`/portfolio front page and export OTHER
 # notebooks into it, served at /sites/<name>/ so the client-side index's `fetch('slate-site.json')`
-# works (it can't over file://). Persistent (depot-backed) — a site is a staging area you accrete over
+# works (it can't over file://). Persistent — a site is a staging area you accrete over
 # time, then push to GitHub when ready. Same `build_site!` primitive, a different destination — the
-# seed of a hosted "Slate cloud". Relocatable via KAIMONSLATE_SITES_DIR (also lets tests use a temp).
-_sites_dir() = get(ENV, "KAIMONSLATE_SITES_DIR",
-                   joinpath(first(Base.DEPOT_PATH), "scratchspaces", "kaimonslate", "sites"))
+# seed of a hosted "Slate cloud". Lives under KaimonSlate's OWN cache home (was the GC-able depot
+# scratchspace — see SlateHome); relocatable via KAIMONSLATE_SITES_DIR (also lets tests use a temp).
+_sites_dir() = SlateHome.sites_dir()
 
 # The build dir for a named site (name → URL/filesystem-safe slug). `nothing` for an empty name.
 function _site_dir(name::AbstractString)

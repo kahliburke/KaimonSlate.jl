@@ -28,7 +28,9 @@ import JSON
 
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
-include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRender)
+include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
+include("ledger.jl")    # module PublishLedger — the publish ledger + LedgerStore backends
+include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRender, ..SlateHome)
 
 using .ReportEngine
 using .ReportRender
@@ -184,7 +186,7 @@ end
 # A small JSON file alongside the extension registry. Currently holds the worker Julia-thread spec —
 # more compute threads enable true multi-core CPU parallelism for independent cells. Read at init into
 # ReportEngine.WORKER_THREADS[] (which `_spawn_worker!` consumes), and editable live from the panel.
-_slate_config_path() = joinpath(_kaimon_dir(), "slate.json")   # XDG-aware (see _kaimon_dir)
+_slate_config_path() = SlateHome.config_file()   # our OWN XDG config home (off Kaimon's dir; see SlateHome)
 
 _slate_config() = (f = _slate_config_path(); isfile(f) ?
     (try; JSON.parsefile(f); catch; Dict{String,Any}(); end) : Dict{String,Any}())
@@ -204,7 +206,7 @@ function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
     ReportEngine.WORKER_THREADS[] = s
     cfg = _slate_config(); cfg["worker_threads"] = s
     try
-        isdir(_kaimon_dir()) && write(_slate_config_path(), JSON.json(cfg, 2))
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
     catch e
         @warn "slate: could not persist worker-threads setting" exception = e
     end
@@ -230,7 +232,7 @@ per-notebook Settings toggle still overrides for a specific notebook.
 function set_parallel_default!(on::Bool)
     NotebookServer.PARALLEL_DEFAULT[] = on
     cfg = _slate_config(); cfg["parallel"] = on
-    try; isdir(_kaimon_dir()) && write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
+    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
     return on
 end
 

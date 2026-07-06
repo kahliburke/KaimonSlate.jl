@@ -17,6 +17,7 @@ import Typst_jll
 import Pkg
 using ..ReportEngine
 using ..ReportRender
+import ..SlateHome
 
 include("history.jl")   # module SlateHistory — durable content-addressed time machine
 include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the parallel dataflow scheduler
