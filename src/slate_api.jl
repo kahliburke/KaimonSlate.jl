@@ -185,6 +185,60 @@ const SLATE_API = SlateApiEntry[
     SlateApiEntry("slate_query", "Tables", "slate_query(…) -> paged provider",
         """A server-paged table provider for large/lazy data — only the visible page crosses the wire."""),
 
+    # ── Assets & front-end ─────────────────────────────────────────────────────────────────────────
+    SlateApiEntry("@asset", "Assets & front-end", "@asset \"path\" -> String   ·   @asset bytes \"path\" -> Vector{UInt8}",
+        """Read a sibling file's contents into the cell. The path resolves relative to the notebook's
+        PROJECT dir (or an absolute path). Because the path is a SOURCE LITERAL, Slate can see the
+        dependency WITHOUT running the cell and treats the file as a first-class cell INPUT — this is
+        what makes the asset system reactive:
+        - the cell's durable memo folds the file's content hash, so editing the file invalidates the
+          cache (a changed asset never serves a stale cell);
+        - a file-watcher RE-RUNS the reading cell (and its dependents) when the file changes on disk —
+          the same lightweight live refresh as a `@bind` change (edit `app.css` → the page updates).
+
+        `@asset bytes "logo.png"` returns raw `Vector{UInt8}` (images/binaries) instead of a String.
+        Assets are ALSO served by a real URL under the notebook (`asset/<path>`), so front-end JS can
+        `<script src="asset/app.js">` (cacheable, debuggable, source-mapped) rather than inlining.
+        The primary use is feeding TRACKED source into `WebPage` / display HTML.
+        ```julia
+        WebPage(css=@asset("app.css"), js=@asset("app.js"), html=@asset("app.html"))  # edits stay live
+        logo = @asset bytes "logo.png"        # raw bytes
+        ```
+        DYNAMIC caveat: a COMPUTED path can't be tracked statically — use `readfile(path)` for that
+        (an escape hatch with no memo-invalidation and no watcher). Prefer `@asset "literal"` whenever
+        the path is known at author time. See also `readfile`, `@use`, `WebPage`."""),
+    SlateApiEntry("readfile", "Assets & front-end", "readfile(path; bytes=false) -> String | Vector{UInt8}",
+        """The runtime escape hatch for `@asset` when the path is COMPUTED (not a literal Slate can
+        extract). Same resolution — relative to the notebook's project dir, or absolute. UNLIKE
+        `@asset`, it is NOT statically tracked: no memo-hash folding and no file-watcher, so a cell
+        using `readfile` won't auto-recompute when the file changes and its cache can go stale. Reach
+        for it only when the filename is dynamic; otherwise use `@asset "literal"`.
+        ```julia
+        cfg = readfile("configs/\$name.json")     # path depends on a variable → @asset can't see it
+        ```"""),
+    SlateApiEntry("@use", "Assets & front-end", "@use \"name\" => \"url\"    (or @use \"name\" \"url\")",
+        """DECLARE a browser ES-module import at the NOTEBOOK level — the front-end counterpart of
+        `@asset` (a JS module dep instead of a file dep). It's a runtime no-op: the literal pair is
+        extracted statically and merged into the page's single `<script type=\"importmap\">`, injected
+        in BOTH the live shell `<head>` and the static export `<head>`. So notebook front-end JS (in a
+        `WebPage`, an `@asset`ed script, or inline) can `import` the bare specifier, live AND in an
+        exported/published page. The import map is fixed at page load, so adding or changing a `@use`
+        needs a reload to take effect (editing the JS that uses it stays instant).
+        ```julia
+        @use \"d3\" => \"https://esm.sh/d3@7\"    # then, in front-end JS:  import * as d3 from \"d3\"
+        ```"""),
+    SlateApiEntry("WebPage", "Assets & front-end", "WebPage(; html=\"\", css=\"\", js=\"\", obscure=false)",
+        """Compose a self-contained HTML page from CSS/HTML/JS strings — RETURN it from a cell to render
+        ONE `text/html` output (`<style>` + body + `<script>`). It behaves identically in the live
+        notebook (its `<script>` is revived by the frontend) and in a static export/publish
+        (self-contained — no external requests). Pass the pieces via `@asset` so the source files on
+        disk stay TRACKED (edit → the cell re-runs, the memo won't serve stale) and remain plain and
+        debuggable. `obscure=true` base64-packs the JS (trivially reversible, but keeps it out of a
+        casual View-Source). Pairs with `@use` for bare-specifier imports.
+        ```julia
+        WebPage(css=@asset("app.css"), js=@asset("app.js"), html=@asset("app.html"))
+        ```"""),
+
     # ── Progress ───────────────────────────────────────────────────────────────────────────────────
     SlateApiEntry("slate_progress", "Progress", "slate_progress(frac; msg=\"\", id=\"\", done=false)",
         """Report progress (0..1) from a running cell — drives the cell's progress bar + the floating
@@ -338,6 +392,13 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
     @onchange n (level[] = n)          # runs on change; cell does NOT recompute
 
 ## Tables — `slate_table(df)`   ·   Progress — `slate_progress(frac; msg)`
+
+## Assets & front-end — include TRACKED files + browser modules
+    @asset "app.js"        # read a file (String). Path is a LITERAL → TRACKED: edit the file and the
+    #   cell re-runs + its memo won't serve stale (a watcher + memo-hash on the file). @asset bytes "logo.png" → bytes
+    readfile("data/\$n.json")            # runtime read for a COMPUTED path — NOT tracked (no watcher/memo)
+    @use "d3" => "https://esm.sh/d3@7"  # declare a browser ES-module import (import map; reload to change)
+    WebPage(css=@asset("app.css"), js=@asset("app.js"), html=@asset("app.html"))  # self-contained HTML page
 
 ## Cell tags (🏷 in the cell header, or `#%%` header tokens, e.g. `#%% md id=abs abstract`)
     collapsed · hidecode · trace · nocache (skip durable caching) · plus free-form tags.

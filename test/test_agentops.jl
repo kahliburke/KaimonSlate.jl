@@ -92,6 +92,8 @@ const NS = KaimonSlate.NotebookServer
             full = NS.slate_api_reference()
             @test occursin("echart", full) && occursin("@bind", full) && occursin("animate", full)
             @test occursin("playhead", full) && occursin("nocache", full)   # newest helpers present
+            @test occursin("@asset", full) && occursin("readfile", full) &&
+                  occursin("@use", full) && occursin("WebPage", full)       # front-end asset system present
             one = NS.slate_api_reference("animate")
             @test occursin("animate", one) && !occursin("## Charts", one)     # filtered detail, not full ref
             @test occursin("No Slate API entry", NS.slate_api_reference("zzzznope"))
@@ -105,9 +107,22 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("candlestick", ec) && occursin("boxplot", ec)     # per-kind data shapes
             @test occursin("type=:log", NS.slate_api_reference("log axis")) ||    # searchable by concept
                   occursin("echart", NS.slate_api_reference("log axis"))
+            # @asset + the front-end asset system: documented in full AND teaching the non-obvious
+            # bit — a LITERAL path is statically TRACKED (memo-invalidation + a file-watcher re-run),
+            # while a computed path needs `readfile` (untracked). Agents get this from the reference.
+            as = NS.slate_api_reference("@asset")
+            @test occursin("bytes", as) && occursin("readfile", as)          # both forms + the escape hatch
+            @test occursin("track", lowercase(as)) && occursin("watch", lowercase(as))   # reactivity explained
+            @test occursin("WebPage", as)                                    # cross-ref to the primary consumer
+            @test occursin("readfile", NS.slate_api_reference("computed path")) ||    # searchable by concept
+                  occursin("@asset", NS.slate_api_reference("read a file"))
             recs = NS.slate_api_records()
             @test !isempty(recs) && all(r -> r["module"] == "Slate", recs)
             @test any(r -> r["name"] == "@bind", recs) && any(r -> r["name"] == "animate", recs)
+            # These records ARE what feeds `slate.search_docs` (module "Slate"), so every asset helper
+            # must ride along — that's how they surface in search, not just the `slate.api` tool.
+            @test all(nm -> any(r -> r["name"] == nm, recs), ["@asset", "readfile", "@use", "WebPage"])
+            @test any(r -> r["name"] == "@asset" && occursin("track", lowercase(r["doc"])), recs)
             @test !isempty(NS.slate_api_version())
             # Drill-down / "Related" resolution: a Slate helper resolves from the registry (real doc),
             # NOT a live binding (which for a DSL constructor/macro yields "No documentation found").
