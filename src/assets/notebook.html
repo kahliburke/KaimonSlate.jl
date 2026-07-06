@@ -184,6 +184,10 @@
   <div class="setsec">Editing</div>
   <div class="setrow"><label>Live-update debounce</label>
     <span class="rt"><input type="range" id="setdeb" min="0" max="1000" step="25"/><span id="setdebv"></span> ms</span></div>
+  <div class="setrow"><label title="How long to pause typing before the autocomplete popup opens on its own — cuts the flicker of it appearing/vanishing mid-word. Manual Tab / Ctrl-Space are always instant. Applies to newly opened editors.">Autocomplete delay</label>
+    <span class="rt"><input type="range" id="setcompdelay" min="0" max="1000" step="25"/><span id="setcompdelayv"></span> ms</span></div>
+  <div class="setrow"><label title="What Tab does when the autocomplete popup is open. Accept: Tab (and Enter) accept the highlighted item — the standard IDE convention. Navigate: Tab moves down the list, Shift-Tab up; only Enter accepts.">Tab in autocomplete</label>
+    <span class="rt"><select id="setcomptab"><option value="accept">Accept (standard)</option><option value="navigate">Navigate list</option></select></span></div>
   <div class="setsec">Agent</div>
   <div class="setrow"><label title="Your default model for every notebook. A single notebook can override it in 🎚 Notebook config.">Agent model (global default)</label>
     <select id="setmodel">

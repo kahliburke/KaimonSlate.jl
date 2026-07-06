@@ -57,6 +57,20 @@ function openSettings() {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
   deb.value = updateMs; v.textContent = updateMs;
   deb.oninput = () => { updateMs = parseInt(deb.value, 10) || 0; v.textContent = updateMs; localStorage.setItem('slateUpdateMs', updateMs); };
+  // Autocomplete: typing delay before the popup auto-opens (applies to newly opened editors), and what
+  // Tab does when the popup is open (applies live). Defaults: 250ms, Accept (the standard convention).
+  const cd = document.getElementById('setcompdelay'), cdv = document.getElementById('setcompdelayv');
+  if (cd) {
+    const _cur = () => { const n = parseInt(localStorage.getItem('slateCompleteDelay'), 10); return Number.isFinite(n) ? n : 250; };
+    cd.value = _cur(); cdv.textContent = _cur();
+    // Live across every open editor via setCompleteDelay (reconfigures the autocompletion compartment).
+    cd.oninput = () => { cdv.textContent = cd.value; window.setCompleteDelay ? window.setCompleteDelay(cd.value) : localStorage.setItem('slateCompleteDelay', cd.value); };
+  }
+  const ct = document.getElementById('setcomptab');
+  if (ct) {
+    ct.value = localStorage.getItem('slateCompleteTab') || 'accept';
+    ct.onchange = () => localStorage.setItem('slateCompleteTab', ct.value);
+  }
   const wide = document.getElementById('setwide');
   // Notebook column width (live via --page-max); disabled while Full page width overrides it.
   const page = document.getElementById('setpage'), pagev = document.getElementById('setpagev');

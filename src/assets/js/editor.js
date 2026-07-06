@@ -21,6 +21,22 @@
   const wrapComp = new Compartment();     // soft line-wrap: always on for markdown (prose), opt-in for code
   // Markdown editors always soft-wrap (prose); code editors follow the `slateWrapEditor` preference.
   const _wrapCodePref = () => localStorage.getItem('slateWrapEditor') === '1';
+  // How long to pause typing before the completion popup auto-opens (Settings → Editing). Manual
+  // triggers (Tab / Ctrl-Space) are instant regardless. Default 250ms — a middle ground: CM6's native
+  // default is a flickery ~100ms, VS Code is near-instant; 250 cuts the on/off churn without feeling
+  // sluggish. In a Compartment so the setting applies LIVE to every open editor (not just new ones).
+  const acompComp = new Compartment();
+  const _completeDelay = () => { const n = parseInt(localStorage.getItem('slateCompleteDelay'), 10); return Number.isFinite(n) ? n : 250; };
+  // The completion extension for one editor (markdown vs code differ only in the override source).
+  // `markdownComplete`/`juliaComplete` are hoisted function declarations, so referencing them here is fine.
+  const _acompExt = isMd => autocompletion({ override: [isMd ? markdownComplete : juliaComplete], icons: true,
+    activateOnTypingDelay: _completeDelay() });
+  // Live-apply the autocomplete typing-delay across every open editor (Settings → Editing).
+  window.setCompleteDelay = ms => {
+    localStorage.setItem('slateCompleteDelay', String(parseInt(ms, 10) || 0));
+    for (const v of Object.values(window.editors || {}))
+      try { v.dispatch({ effects: acompComp.reconfigure(_acompExt(!!v._wrapMd)) }); } catch (_) {}
+  };
   const _wrapExt = isMd => (isMd || _wrapCodePref()) ? EditorView.lineWrapping : [];
   // Live-toggle code-editor wrapping across every open editor (markdown stays wrapped regardless).
   window.setEditorWrap = on => {
@@ -201,17 +217,31 @@
     return null;
   }
 
-  // Tab: accept an open completion → else indent when the cursor is in leading whitespace or a
-  // selection is active (block indent) → else trigger completion. This way `diag(`+Tab completes
-  // the call (after `(` isn't whitespace) while Tab at line start still indents. Returns false to
-  // fall through to indentWithTab when we choose to indent.
+  // CM6's bundle doesn't export moveCompletionSelection, but completionKeymap binds it to the
+  // arrows — pull those run fns out so Tab/Shift-Tab can drive the SAME navigation.
+  const _compNav = dir => (completionKeymap.find(k => k.key === (dir > 0 ? 'ArrowDown' : 'ArrowUp')) || {}).run;
+  const _compDown = _compNav(1), _compUp = _compNav(-1);
+  // What Tab does in an OPEN popup, from the `slateCompleteTab` preference (Settings → Editing):
+  //   'accept'   — Tab (and Enter) accept the highlighted item. The mainstream IDE convention. DEFAULT.
+  //   'navigate' — Tab moves to the next option, Shift-Tab to the previous; only Enter accepts.
+  // Read live (per keypress) so the toggle takes effect without a reload.
+  const _tabMode = () => (localStorage.getItem('slateCompleteTab') || 'accept');
+  // Tab in an OPEN popup accepts or navigates per the pref. With the popup CLOSED, Tab indents when
+  // the cursor is in leading whitespace / a selection is active (block indent), else OPENS completion.
+  // Enter always accepts + closes (completionKeymap). Returns false to fall through to indentWithTab.
   function tabComplete(v) {
-    if (completionStatus(v.state) === 'active') return acceptCompletion(v);
+    if (completionStatus(v.state) === 'active')
+      return _tabMode() === 'navigate' ? (_compDown ? _compDown(v) : true) : acceptCompletion(v);
     const sel = v.state.selection.main;
     if (!sel.empty) return false;                                   // selection → indent block
     const line = v.state.doc.lineAt(sel.from);
     if (/^\s*$/.test(v.state.sliceDoc(line.from, sel.from))) return false;   // only whitespace before → indent
     return startCompletion(v);
+  }
+  // Shift-Tab: navigate UP through an open popup (navigate-mode only), else fall through to indentLess.
+  function shiftTabComplete(v) {
+    if (completionStatus(v.state) === 'active' && _tabMode() === 'navigate') return _compUp ? _compUp(v) : true;
+    return false;
   }
 
   // ── error-line decoration (replaces CM5 addLineClass) ──────────────────────────
@@ -324,7 +354,11 @@
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ...lang,
         // Markdown editors complete citations + fenced code only (never prose); code cells get Julia.
-        autocompletion({ override: [opts.markdown ? markdownComplete : juliaComplete], icons: true }),
+        // Don't pop the completion list WHILE typing — only after a brief pause — so it stops
+        // flickering on/off mid-word (and Tab-to-indent can't accidentally land on a just-opened
+        // popup). Manual triggers (Tab / Ctrl-Space / Alt-Space) are immediate regardless. Tunable
+        // via window.slateCompleteDelay (a settings hook); default 500ms.
+        acompComp.of(_acompExt(!!opts.markdown)),
         keymap.of([
           ...completionKeymap,                  // popup nav/close (Escape) takes precedence over cell keys
           ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below
@@ -337,10 +371,10 @@
           { key: 'Mod-Shift-ArrowLeft', run: () => { window.navBack && window.navBack(); return true; } },
           { key: 'Mod-Shift-ArrowRight', run: () => { window.navFwd && window.navFwd(); return true; } },
           { key: 'Mod-/', run: toggleComment }, { key: 'Ctrl-/', run: toggleComment },
-          // Tab: accept the open completion → else trigger one when a word/`\`/`.` precedes the
-          // cursor → else fall through to indent. Restores CM5's Tab-to-complete. (macOS eats
-          // Ctrl-Space, so Alt-Space is the reliable manual trigger; Ctrl-Space kept for others.)
-          { key: 'Tab', run: tabComplete },
+          // Tab: navigate an open popup (down) / open one when a word/`\`/`.` precedes the cursor /
+          // else indent — it never accepts (Enter accepts + closes). Shift-Tab navigates up / indents
+          // less. (macOS eats Ctrl-Space, so Alt-Space is the reliable manual trigger.)
+          { key: 'Tab', run: tabComplete }, { key: 'Shift-Tab', run: shiftTabComplete },
           { key: 'Ctrl-Space', run: startCompletion }, { key: 'Alt-Space', run: startCompletion },
           indentWithTab, ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap,
         ]),
