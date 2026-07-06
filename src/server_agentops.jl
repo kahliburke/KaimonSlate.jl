@@ -583,6 +583,32 @@ function agent_delete_cell!(nb::LiveNotebook, id::AbstractString;
     return "deleted id=$id"
 end
 
+# Delete SEVERAL cells in one guarded, atomic step (a single undo entry) — so an agent removing a
+# run of cells makes one call, not one per id. `ids` is any iterable of cell ids; ids that don't
+# exist are reported, not fatal (the rest still delete). Mirrors `agent_delete_cell!` for the
+# build-floor guard / floor renewal / agent push, folding the whole batch into one commit.
+function agent_delete_cells!(nb::LiveNotebook, ids;
+                             caller::AbstractString = "", expected_version::Int = -1)
+    want = String[strip(String(i)) for i in ids]
+    want = String[i for i in want if !isempty(i)]
+    isempty(want) && return "(no cell ids given)"
+    present = String[id for id in want if _cell_exists(nb, id)]
+    absent = String[id for id in want if !_cell_exists(nb, id)]
+    isempty(present) && return "(no such cell$(length(want) == 1 ? "" : "s"): $(join(want, ", ")))"
+    rej = lock(nb.lock) do
+        r = _guard_commit(nb; caller = caller, expected_version = expected_version)
+        r === nothing || return r
+        delete_cells!(nb, present)
+        return nothing
+    end
+    rej === nothing || return rej
+    _renew_floor!(nb, caller)
+    _agent_push!(nb)
+    msg = "deleted $(_n_cells(length(present))): $(join(present, ", "))"
+    isempty(absent) || (msg *= " · not found: $(join(absent, ", "))")
+    return msg
+end
+
 # Find a live notebook by hub id or by (expanded, absolute) path. (`h` is a `Hub`;
 # untyped because `Hub` is defined later in this file.)
 function find_live(h, key::AbstractString)

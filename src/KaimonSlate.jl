@@ -35,7 +35,7 @@ using .ReportRender
 using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
                       find_live, notebook_digest,
-                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_rename_cell!, agent_scratch_eval!, agent_surface_controls!,
+                      agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_surface_controls!,
                       acquire_floor!, release_floor!, floor_status,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand
@@ -427,14 +427,22 @@ function create_tools(GateTool::Type)
     end
 
     """
-        delete_cell(notebook, cell, token, expected_version) -> String
+        delete_cell(notebook, cell) -> String
 
-    Delete cell `cell` from the notebook.
+    Delete a cell from the notebook. `cell` is a cell id — or SEVERAL ids (comma- or
+    space-separated) to delete many at once in a single step, so you needn't call this once per
+    cell. Ids that don't exist are reported, and the rest still delete.
     """
     function delete_cell(notebook::String, cell::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_delete_cell!(nb, cell; caller = _caller())
-        return _surfaced(nb, "delete_cell", Dict{String,Any}("cell" => cell), res)
+        ids = String.(split(strip(cell), r"[\s,]+"; keepempty = false))   # ids are [A-Za-z0-9_] → safe to split
+        isempty(ids) && return "(no cell id given)"
+        if length(ids) == 1
+            res = agent_delete_cell!(nb, ids[1]; caller = _caller())
+            return _surfaced(nb, "delete_cell", Dict{String,Any}("cell" => ids[1]), res)
+        end
+        res = agent_delete_cells!(nb, ids; caller = _caller())
+        return _surfaced(nb, "delete_cell", Dict{String,Any}("cells" => join(ids, ", ")), res)
     end
 
     """

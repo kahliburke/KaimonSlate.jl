@@ -44,6 +44,22 @@ const NS = KaimonSlate.NotebookServer
             @test length(nb.report.cells) == n0
         end
 
+        @testset "delete several cells in one call" begin
+            n0 = length(nb.report.cells)
+            a = match(r"id=(\w+)", NS.agent_add_cell!(nb, "111"))[1]
+            b = match(r"id=(\w+)", NS.agent_add_cell!(nb, "222"))[1]
+            c = match(r"id=(\w+)", NS.agent_add_cell!(nb, "333"))[1]
+            @test length(nb.report.cells) == n0 + 3
+            # a list of ids → one atomic delete; missing ids are reported, the rest still go
+            r = NS.agent_delete_cells!(nb, [a, b, "nope_zzz"])
+            @test occursin("deleted 2 cells", r) && occursin("not found: nope_zzz", r)
+            @test length(nb.report.cells) == n0 + 1                        # only c remains of the three
+            @test NS._cell_exists(nb, c) && !NS._cell_exists(nb, a) && !NS._cell_exists(nb, b)
+            NS.agent_delete_cells!(nb, [c])                                # single-element list also works
+            @test length(nb.report.cells) == n0
+            @test occursin("no cell", NS.agent_delete_cells!(nb, String[]))   # empty → guarded message
+        end
+
         @testset "add_cell with an explicit id; rename_cell" begin
             r = NS.agent_add_cell!(nb, "1 + 1"; id = "my_sum")
             @test occursin("id=my_sum", r)
