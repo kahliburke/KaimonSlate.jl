@@ -172,12 +172,25 @@ _asset_mtime(f) = try; mtime(f); catch; 0.0; end
 # editors that save via atomic rename). Server's own writes match canonically in
 # `sync_from_file!`, so they don't echo back.
 function _start_watcher!(nb::LiveNotebook)
-    @async while true
-        try
-            FileWatching.watch_file(nb.path, 2.0)
-            sync_from_file!(nb) && _broadcast(nb, string(nb.version))
-        catch
-            sleep(0.5)
+    @async begin
+        last = _asset_mtime(nb.path)
+        while true
+            try
+                FileWatching.watch_file(nb.path, 2.0)
+                # Guard the atime self-wake loop: `sync_from_file!` READS + RE-PARSES the whole .jl, and
+                # that read bumps the file's atime, which `watch_file` reports as a change (NOTE_ATTRIB)
+                # → without this it re-parses in a tight CPU loop (an intermittent 300%+ spin that
+                # starved the eval). Only sync when mtime actually advanced; `sleep` floors event storms
+                # to ≤5 Hz — the same hardening as the @asset watcher below.
+                m = _asset_mtime(nb.path)
+                if m != last
+                    last = m
+                    sync_from_file!(nb) && _broadcast(nb, string(nb.version))
+                end
+                sleep(0.2)
+            catch
+                sleep(0.5)
+            end
         end
     end
     # `@asset` reactivity: watch the files cells read via `@asset` → on a content change, recompute
