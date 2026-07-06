@@ -242,6 +242,12 @@ x = 1
         @test (Meta.parseall(rj); true)                              # the generated script is valid Julia (escaping intact)
         @test occursin("choose_install_dir", rj) && occursin("SLATE_INSTALL_DIR", rj)   # install-dir prompt threaded in
         @test occursin("SLATE_KAIMONSLATE_PATH", rj) && occursin("Pkg.develop", rj)      # local-checkout override for dev/forks
+        @test occursin("Kaimon.jl", rj) && occursin("import Kaimon", rj)                 # Kaimon installed + loaded (the compute gate)
+        @test occursin("SLATE_KAIMON_PATH", rj)                      # local Kaimon override too
+        @test occursin("KAIMON_GATE_MODE", rj) && occursin("KAIMONSLATE_NO_AUTOINDEX", rj)   # pure code, no services
+        # the doc-index background service is on by default (extension) but off under the standalone flag
+        @test NS._autoindex_enabled()
+        @test withenv(() -> NS._autoindex_enabled(), "KAIMONSLATE_NO_AUTOINDEX" => "1") == false
         @test occursin("git credential attribute", rj)               # the noisy LibGit2 warning is filtered
         @test occursin("Downloads.download(BUNDLE_URL", rj) && occursin("KaimonSlate.jl", rj)
         @test occursin("x.github.io/y/nb.standalone.jl", rj)

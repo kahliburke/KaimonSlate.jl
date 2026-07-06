@@ -422,25 +422,25 @@ const _SITE_RUNJL = "run.jl"                     # the generated bootstrap scrip
 _bundle_filename(nb::LiveNotebook) =
     replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".standalone.jl"
 
-# The `run.jl` bootstrap. Installs KaimonSlate into a DEDICATED environment (never the user's default —
-# that avoids clobbering their setup, and Kaimon+KaimonSlate can't share one env anyway: they run as
-# separate processes in the real extension model), fetches the notebook's reproducible bundle, and
-# serves it standalone — the notebook's own env reconstructs in its gate worker on open. With
-# `localbundle`, reads the bundle from a sibling file (the embedded single-file HTML case) instead of
-# fetching `bundle_url`. `agent` only adds guidance for the extra Kaimon/agent setup (installed
-# separately, per the docs). Discrete step functions so it's easy to extend/audit. Idempotent.
+# The `run.jl` bootstrap. Installs Kaimon + KaimonSlate into a DEDICATED environment (never the user's
+# default — avoids clobbering their setup), fetches the notebook's reproducible bundle, and serves it —
+# the notebook's exact env reconstructs in a gate worker on open. Kaimon is REQUIRED, not optional: it
+# provides the compute gate (`ConnectionManager`/`connect_tcp!`) that spawns + drives the worker; without
+# `Main.Kaimon` the notebook would fall back to running cells in this bootstrap env (wrong packages). It
+# also enables the in-notebook agent. `bundle_url` is where to fetch the bundle when there's no sibling.
+# Discrete step functions so it's easy to extend/audit. Idempotent.
 function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name::AbstractString = _SITE_BUNDLE)
     SLATE = "https://github.com/kahliburke/KaimonSlate.jl"
+    KAIMON = "https://github.com/kahliburke/Kaimon.jl"
     agentnote = agent ? """
         println(""\"
-        ┌ For the AI agent (optional): install & run Kaimon separately (it runs KaimonSlate as an
-        │ extension in its own process). See https://github.com/kahliburke/Kaimon.jl and the
-        └ KaimonSlate install docs. This script runs the notebook in standalone mode.
+        ┌ Kaimon is installed alongside KaimonSlate, so the in-notebook AI agent is available.
+        └ See https://github.com/kahliburke/Kaimon.jl for standalone Kaimon usage.
         ""\")""" : ""
     return """
     #!/usr/bin/env julia
     # ── Run this Kaimon Slate notebook live on your machine ──────────────────────────────────────
-    # Auto-generated. Installs KaimonSlate into a dedicated environment, gets this notebook's
+    # Auto-generated. Installs Kaimon + KaimonSlate into a dedicated environment, gets this notebook's
     # reproducible bundle, and serves it — the notebook's exact environment reconstructs on open.
     # Re-runnable (idempotent). Prerequisite: Julia 1.10+ (juliaup / https://julialang.org/downloads).
     #
@@ -478,20 +478,27 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         Base.CoreLogging.handle_message(l.sink, lvl, msg, _mod, grp, id, file, line; kw...)
     end
 
-    function install_packages()
-        @info "Installing KaimonSlate into \$ENVDIR (first run compiles — this can take a few minutes)…"
-        mkpath(ENVDIR); Pkg.activate(ENVDIR)
-        # Point at a LOCAL KaimonSlate checkout (dev/testing, or a fork) via SLATE_KAIMONSLATE_PATH;
-        # otherwise install the published package from GitHub.
-        local_src = strip(get(ENV, "SLATE_KAIMONSLATE_PATH", ""))
+    # Install one package: a LOCAL checkout via `env_path` (dev/testing, or a fork) if set, else the
+    # published package from `url`. Under the quiet-git logger so LibGit2 noise stays out of the way.
+    function _add_pkg(name, url, env_path)
+        src = strip(get(ENV, env_path, ""))
         Base.CoreLogging.with_logger(_QuietGit(Base.CoreLogging.current_logger())) do
-            if isempty(local_src)
-                Pkg.add(url = "$SLATE")
+            if isempty(src)
+                Pkg.add(url = url)
             else
-                @info "Using a local KaimonSlate checkout" path = local_src
-                Pkg.develop(path = expanduser(String(local_src)))
+                @info "Using a local \$name checkout" path = src
+                Pkg.develop(path = expanduser(String(src)))
             end
         end
+    end
+
+    function install_packages()
+        @info "Installing Kaimon + KaimonSlate into \$ENVDIR (first run compiles — this can take several minutes)…"
+        mkpath(ENVDIR); Pkg.activate(ENVDIR)
+        # Kaimon FIRST: it provides the compute gate the notebook's env reconstructs through (and the
+        # agent). KaimonSlate second — both want HTTP 2, so they co-resolve into one env.
+        _add_pkg("Kaimon", "$KAIMON", "SLATE_KAIMON_PATH")
+        _add_pkg("KaimonSlate", "$SLATE", "SLATE_KAIMONSLATE_PATH")
     end
 
     # Prefer the bundle shipped NEXT TO this script (extracted site tarball, or downloaded alongside
@@ -540,6 +547,15 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     end
     port = free_port()
     println("Starting the notebook server (first run compiles the environment)…")
+    # We only need Kaimon as the compute-gate CLIENT (it spawns/drives the notebook's worker) — pure
+    # code, no services. Its __init__ would auto-start a gate SERVER if a kaimon.toml [gate] / KAIMON_GATE_*
+    # env is configured (a non-issue on a fresh machine, but a port clash if the viewer already runs
+    # Kaimon) — a non-tcp mode makes that auto-serve early-return.
+    get(ENV, "KAIMON_GATE_MODE", "") == "" && (ENV["KAIMON_GATE_MODE"] = "off")
+    # And don't fire the agent doc-index background service just to VIEW a notebook (it would harvest the
+    # whole package doc set). The in-notebook agent can still index on demand.
+    get(ENV, "KAIMONSLATE_NO_AUTOINDEX", "") == "" && (ENV["KAIMONSLATE_NO_AUTOINDEX"] = "1")
+    import Kaimon        # defines Main.Kaimon → the compute gate that spawns the worker + reconstructs the env
     using KaimonSlate
     # serve_notebook blocks; once the hub answers HTTP it prints a framed banner with the live URL.
     KaimonSlate.serve_notebook(NB; port = port)

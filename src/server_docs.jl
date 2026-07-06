@@ -136,6 +136,11 @@ end
 # is version-cached (persistent), so re-opens are instant and only changed deps re-index.
 const _DOC_CACHE = Dict{String,String}()                 # package name → last-indexed version
 const _DOC_CACHE_LOCK = ReentrantLock()
+# Keys (package names / "Slate" / "ECharts") with a harvest IN FLIGHT. The version cache is only
+# written AFTER a harvest completes, so without this a re-trigger during a slow harvest (e.g. a huge
+# Makie doc set) sees the same packages still "pending" and spawns ANOTHER overlapping harvest — they
+# pile up, each re-parsing the same docstrings, pegging every thread. Single-flight per key fixes that.
+const _INDEXING = Set{String}()
 const _DOC_SCHEMA = "3"   # bump when the indexed payload shape changes → forces a one-time re-harvest
                           # (schema 2 added the `text` payload that Kaimon's FTS index needs;
                           #  schema 3 added the `metadata.module` payload that module-scoped filters read)
@@ -201,37 +206,53 @@ function _inscope_modules(nb::LiveNotebook)
 end
 
 "Background auto-index: project deps (eager) ∪ packages the cells use, version-cached."
+# Auto-indexing is a background SERVICE (agent doc-search). A standalone/BYOC run brings Kaimon in
+# only as the compute gate — it shouldn't fire this (a viewer opening a notebook shouldn't trigger a
+# giant package doc-harvest). `KAIMONSLATE_NO_AUTOINDEX=1` turns it off; run.jl sets it.
+_autoindex_enabled() = get(ENV, "KAIMONSLATE_NO_AUTOINDEX", "0") != "1"
+
 function _autoindex!(nb::LiveNotebook)
-    _agent_available() || return nothing
-    Threads.@spawn try
-        _doc_cache_load()
-        # Slate's own injected helpers (echart / @bind / animate / …) — indexed under module "Slate"
-        # so `search_docs` finds them too. Version-cached on the API docs' content hash.
-        if get(_DOC_CACHE, "Slate", nothing) != slate_api_version()
-            ns = index_docs!(slate_api_records())
-            ns == 0 || (ensure_docs_fts!(); _doc_cache_put!("Slate", slate_api_version()))
+    (_agent_available() && _autoindex_enabled()) || return nothing
+    Threads.@spawn begin
+        claimed = String[]                                 # keys this task owns; released in `finally`
+        try
+            _doc_cache_load()
+            # What needs (re)indexing: Slate helpers + ECharts DSL (version-cached on content hash),
+            # plus the notebook's project deps and any package a cell `using`s.
+            want = Dict{String,String}("Slate" => slate_api_version(), "ECharts" => echarts_docs_version())
+            for d in (try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end)
+                n = string(get(d, "name", "")); isempty(n) || (want[n] = string(get(d, "version", "")))
+            end
+            for u in _used_packages(nb.report); haskey(want, u) || (want[u] = ""); end
+            # CLAIM only the stale keys that no concurrent harvest already owns (single-flight) — so a
+            # re-trigger during a slow harvest can't spawn a second pass over the same docstrings.
+            lock(_DOC_CACHE_LOCK) do
+                for (k, v) in want
+                    (get(_DOC_CACHE, k, nothing) != v && !(k in _INDEXING)) && (push!(claimed, k); push!(_INDEXING, k))
+                end
+            end
+            isempty(claimed) && return
+            if "Slate" in claimed
+                ns = index_docs!(slate_api_records())
+                ns == 0 || (ensure_docs_fts!(); _doc_cache_put!("Slate", slate_api_version()))
+            end
+            if "ECharts" in claimed
+                ne = index_docs!(echarts_doc_records())
+                ne == 0 || (ensure_docs_fts!(); _doc_cache_put!("ECharts", echarts_docs_version()))
+            end
+            pkgs = String[k for k in claimed if k != "Slate" && k != "ECharts"]
+            if !isempty(pkgs)
+                recs = ReportEngine.harvest_docs(nb.kernel, nb.report, pkgs)
+                index_docs!(recs)
+                ensure_docs_fts!()   # mirror the new text+metadata payloads into the FTS index
+                for n in pkgs; _doc_cache_put!(n, get(want, n, "")); end
+                @info "slate: auto-indexed docs" notebook = nb.id packages = pkgs symbols = length(recs)
+            end
+        catch e
+            @warn "slate: auto-index failed" exception = (e, catch_backtrace()) maxlog = 5
+        finally
+            isempty(claimed) || lock(_DOC_CACHE_LOCK) do; setdiff!(_INDEXING, claimed); end
         end
-        # Curated ECharts option reference (module "ECharts"), mapped to the DSL — so a chart question
-        # ("logarithmic axis", "dataZoom", "markLine") surfaces the option AND how to reach it. Same
-        # version-cached path as the Slate helpers.
-        if get(_DOC_CACHE, "ECharts", nothing) != echarts_docs_version()
-            ne = index_docs!(echarts_doc_records())
-            ne == 0 || (ensure_docs_fts!(); _doc_cache_put!("ECharts", echarts_docs_version()))
-        end
-        want = Dict{String,String}()
-        for d in (try; ReportEngine.project_deps(nb.kernel, nb.report); catch; Dict{String,Any}[]; end)
-            n = string(get(d, "name", "")); isempty(n) || (want[n] = string(get(d, "version", "")))
-        end
-        for u in _used_packages(nb.report); haskey(want, u) || (want[u] = ""); end
-        pending = String[n for (n, v) in want if get(_DOC_CACHE, n, nothing) != v]
-        isempty(pending) && return
-        recs = ReportEngine.harvest_docs(nb.kernel, nb.report, pending)
-        index_docs!(recs)
-        ensure_docs_fts!()   # mirror the new text+metadata payloads into the FTS index
-        for n in pending; _doc_cache_put!(n, get(want, n, "")); end
-        @info "slate: auto-indexed docs" notebook = nb.id packages = pending symbols = length(recs)
-    catch e
-        @warn "slate: auto-index failed" exception = (e, catch_backtrace())
     end
     return nothing
 end
