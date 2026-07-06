@@ -20,12 +20,15 @@ function _id_prefix(code::String, pos::Int)
     return (i, String(cu[(i + 1):pos]), dotted)
 end
 
-# Stable re-rank for the popup: cell-local bindings float to the top and keywords sink,
-# while names of the same kind keep REPLCompletions' (alphabetical) order. `prefix` is the
-# typed token — an exact match (you've already typed the whole name) drops to the bottom.
-const _KIND_RANK = Dict("local" => 0, "field" => 1, "kwarg" => 1, "var" => 2, "function" => 2,
-                        "type" => 2, "const" => 2, "module" => 2, "method" => 2, "key" => 2,
-                        "path" => 2, "text" => 3, "latex" => 3, "keyword" => 4)
+# Stable re-rank for the popup. Three tiers of the reader's own names float to the top, above
+# general library symbols, and keywords sink; names of the same kind keep REPLCompletions'
+# (alphabetical) order. `prefix` is the typed token — an exact match (you've already typed the whole
+# name) drops to the bottom. Tiers: `local` = a binding in the CURRENT cell; `notebook` = a variable
+# defined in ANOTHER cell (owned by the namespace, not imported); then general Base/package names.
+const _KIND_RANK = Dict("local" => 0, "notebook" => 1, "field" => 2, "kwarg" => 2,
+                        "var" => 3, "function" => 3, "type" => 3, "const" => 3, "module" => 3,
+                        "method" => 3, "key" => 3, "path" => 3, "text" => 4, "latex" => 4,
+                        "keyword" => 5)
 function _rank_completions(items::Vector{Tuple{String,String}}, prefix::AbstractString)
     length(items) <= 1 && return items
     order = collect(enumerate(items))
@@ -404,8 +407,11 @@ function _make_router(h::Hub)
         end
         if !dotted                          # union in cell-local bindings (skip field access)
             have = Set(first.(items))
-            locals = try; _cell_locals(code); catch; Set{Symbol}(); end
-            extra = sort!(String[n for n in (String(s) for s in locals) if startswith(n, prefix) && !(n in have)])
+            lset = Set(String(s) for s in (try; _cell_locals(code); catch; Set{Symbol}(); end))
+            # A CURRENT-cell binding is the top tier ("local") — even one already evaluated (so the
+            # worker returned it as "notebook"): re-tag those, then prepend the not-yet-run ones.
+            isempty(lset) || (items = Tuple{String,String}[(t, t in lset ? "local" : k) for (t, k) in items])
+            extra = sort!(String[n for n in lset if startswith(n, prefix) && !(n in have)])
             isempty(extra) || (items = vcat(Tuple{String,String}[(n, "local") for n in extra], items))
         end
         items = _rank_completions(items, prefix)

@@ -131,9 +131,13 @@
     if (!raw.length) return null;
     const from = _charFromByte(code, d.from);
     const to = _charFromByte(code, d.to);
-    const options = raw.map(it => {
+    const options = raw.map((it, i) => {
       const o = (it && typeof it === 'object') ? it : { text: String(it) };
       const text = o.text != null ? o.text : (o.label != null ? o.label : String(it));
+      // The server already ranks (current-cell locals → other-cell notebook vars → library names).
+      // CM6 would otherwise re-sort by its own fuzzy score, burying those tiers — so pin each option's
+      // `boost` to its server position (descending, floored at -99) to preserve the intended order.
+      const boost = Math.max(-99, 99 - i);
       if (o.kind === 'method') {
         // Clean label (no location), module as detail, full arg specs as tab-through snippet fields
         // (e.g. `A::AbstractMatrix`). Braces in parametric types are escaped for the snippet syntax.
@@ -143,7 +147,7 @@
         // the closing paren (CM6 has no implicit end field, so without this the last Tab indents).
         const tmpl = m.name + '(' + m.args.map(a => '${' + esc(a) + '}').join(', ') + ')${}';
         return {
-          label: m.sig, detail: m.mod || 'method', type: 'function', info: docPreview(m.name),
+          label: m.sig, detail: m.mod || 'method', type: 'function', info: docPreview(m.name), boost,
           apply: (view, completion, from, to) => {
             // The server range covers just the name; swallow the `(` the user typed AND the `)`
             // that closeBrackets auto-inserted, so the snippet's own `()` isn't doubled.
@@ -153,7 +157,7 @@
           },
         };
       }
-      const opt = { label: text, type: _cmType(o.kind) };
+      const opt = { label: text, type: _cmType(o.kind), boost };
       // LaTeX/emoji: a partial query shows the NAME (`\alpha`, filterable) but the server attaches
       // the resolved symbol as `o.apply` → insert the character in ONE step. An exact query already
       // returns the symbol as `text` (no `o.apply`). Show the symbol as the detail (`\alpha  α`);

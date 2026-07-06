@@ -34,6 +34,20 @@ function _binding_kind(parent::Module, name::AbstractString)
     (v isa Function || v isa Base.Callable) ? "function" : "const"
 end
 
+# True when `name` is a global OWNED by the notebook namespace `mod` — a binding the reader made
+# in a cell, NOT a name reached through `using` (Base / a package). `binding_module` returns the
+# module a binding is defined in: for the reader's own `df = …` that's `mod`; for an imported `sin`
+# it's `Base`. Guarded — an odd/undefined binding just isn't "owned". Used to FAVOR the reader's own
+# variables in the completion popup (they rank with cell-locals, above library symbols).
+function _owned_by(mod::Module, name::AbstractString)
+    sym = Symbol(name)
+    try
+        return isdefined(mod, sym) && Base.binding_module(mod, sym) === mod
+    catch
+        return false
+    end
+end
+
 # A dead generic-function stub: a name bound to a non-builtin Function with NO methods — e.g. a
 # function whose only method Revise removed when its def was deleted from /src (Julia can't unbind
 # the name, so it lingers as `f (generic function with 0 methods)`). Excludes builtins (whose
@@ -139,6 +153,13 @@ function slate_completions(mod::Module, code::AbstractString, pos::Integer)
             # icon and auto-closes the quote instead of leaving a stray `"`.
             (endswith(t, '"') && !startswith(t, '"')) && (k = "str")
             k == "method" && (t = try; _retype_kwargs(t, _kwarg_types(c.method)); catch; t; end)
+            # Favor the reader's OWN variables: a DATA binding (a value — kind "const"/"var", not a
+            # function/type/module) OWNED by the notebook namespace (bound in a cell, not imported) is
+            # tagged "notebook" so it ranks ABOVE general Base/package names. Functions/types are left
+            # alone — that keeps injected Slate helpers (echart, Slider, …) out of the promotion. The
+            # CURRENT cell's own bindings are lifted a further tier ("local") by the /complete route.
+            (k == "const" || k == "var") && c isa REPL.REPLCompletions.ModuleCompletion &&
+                c.parent === mod && _owned_by(mod, t) && (k = "notebook")
             push!(items, (t, k))
         end
     catch

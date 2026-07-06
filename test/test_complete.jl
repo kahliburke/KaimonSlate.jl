@@ -49,6 +49,31 @@ end
         # Partial prefix offers the names to extend to (REPL two-step behaviour).
         @test "\\alpha" in _latex("\\al")
     end
+
+    # Favor the reader's own names over library symbols. slate_completions tags a DATA variable
+    # owned by the namespace "notebook"; a function (user or injected) and imported names are left
+    # general — so injected Slate helpers don't get promoted.
+    @testset "favor the reader's own variables (kind tagging)" begin
+        m = Module(:CompFavor)
+        Core.eval(m, :(results = [1, 2, 3]))     # a data variable → owned → "notebook"
+        Core.eval(m, :(myproc(x) = x))           # a function → owned but NOT promoted (stays general)
+        k(mod, code) = Dict(RE.slate_completions(mod, code, lastindex(code)).items)
+        kr = k(m, "res")
+        @test get(kr, "results", "") == "notebook"          # the reader's variable is promoted
+        @test "reshape" in keys(kr) && get(kr, "reshape", "") != "notebook"   # Base name stays general
+        @test get(k(m, "myproc"), "myproc", "") == "function"   # a function isn't promoted (keeps helpers out)
+    end
+
+    # The popup order: current-cell binding first, then other-cell notebook variable, then the
+    # library names — the three tiers the ranker enforces.
+    @testset "three-tier completion ranking" begin
+        items = Tuple{String,String}[("reshape", "function"), ("results", "notebook"),
+                                     ("resA", "local"), ("Result", "type")]
+        ranked = first.(NS._rank_completions(items, "res"))
+        @test ranked[1] == "resA"                            # current-cell local, tier 0
+        @test ranked[2] == "results"                         # other-cell notebook variable, tier 1
+        @test findfirst(==("reshape"), ranked) > 2           # general library names sink below both
+    end
 end
 
 @testset "output image externalization" begin
