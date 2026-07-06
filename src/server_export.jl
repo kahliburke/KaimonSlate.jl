@@ -510,10 +510,12 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     #   3. until then, track `main` on GitHub. `rev="main"` is deliberate: a plain `Pkg.add(url=…)` on a
     #      package already pinned to an OLDER `main` commit is a no-op ("already satisfied") and never
     #      advances to the tip — pinning the branch re-resolves to the CURRENT tip each run.
-    # Quiet-git wraps LibGit2 noise.
-    function _add_pkg(name, uuid, url, env_path)
+    # `force_main` skips step 2 even when a registry has the UUID — for a package whose registered
+    # release is STALE/incompatible with its sibling (so we must track the branch tip until a
+    # compatible version is registered). Quiet-git wraps LibGit2 noise.
+    function _add_pkg(name, uuid, url, env_path; force_main::Bool = false)
         src = strip(get(ENV, env_path, ""))
-        registered = try
+        registered = !force_main && try
             any(r -> haskey(r.pkgs, Base.UUID(uuid)), Pkg.Registry.reachable_registries())
         catch; false; end
         Base.CoreLogging.with_logger(_QuietGit(Base.CoreLogging.current_logger())) do
@@ -533,7 +535,10 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         mkpath(ENVDIR); Pkg.activate(ENVDIR)
         # Kaimon FIRST: it provides the compute gate the notebook's env reconstructs through (and the
         # agent). KaimonSlate second — both want HTTP 2, so they co-resolve into one env.
-        _add_pkg("Kaimon", "d3856c55-31fd-4246-b7e8-380411123c01", "$KAIMON", "SLATE_KAIMON_PATH")
+        # NOTE: Kaimon's currently-REGISTERED release predates KaimonSlate's move to HTTP 2 (its compat
+        # pins HTTP 1.x), so it can't co-resolve with KaimonSlate. Track Kaimon's `main` tip (HTTP 2)
+        # for now via force_main — DROP that once a HTTP-2 Kaimon is registered (then it self-switches).
+        _add_pkg("Kaimon", "d3856c55-31fd-4246-b7e8-380411123c01", "$KAIMON", "SLATE_KAIMON_PATH"; force_main = true)
         _add_pkg("KaimonSlate", "f7b954f5-0334-4562-ac21-b005218ce1da", "$SLATE", "SLATE_KAIMONSLATE_PATH")
     end
 

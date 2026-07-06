@@ -244,6 +244,9 @@ x = 1
         @test occursin("SLATE_KAIMONSLATE_PATH", rj) && occursin("Pkg.develop", rj)      # local-checkout override for dev/forks
         @test occursin("Kaimon.jl", rj) && occursin("import Kaimon", rj)                 # Kaimon installed + loaded (the compute gate)
         @test occursin("reachable_registries", rj) && occursin("rev = \"main\"", rj)   # registered release once published, else track main tip
+        # Kaimon's registered release is stale (HTTP 1.x) vs KaimonSlate (HTTP 2) → force its main tip
+        # until a HTTP-2 Kaimon is registered. (Drop this assertion + `force_main=true` at that point.)
+        @test occursin("force_main = true", rj)
         @test occursin("SLATE_KAIMON_PATH", rj)                      # local Kaimon override too
         @test occursin("KAIMON_GATE_MODE", rj) && occursin("KAIMONSLATE_NO_AUTOINDEX", rj)   # pure code, no services
         # the doc-index background service is on by default (extension) but off under the standalone flag
