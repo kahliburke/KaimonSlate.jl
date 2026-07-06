@@ -204,6 +204,19 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         r4 = parse_report("#%% code id=a\nbuf[1] = 1\n#%% code id=b\npush!(buf, 2)")
         build_dependencies!(r4)
         @test "buf" in r4.meta["multidef"]
+        # `using X` in TWO cells is NOT a collision — re-importing the same exports is a no-op, not a
+        # redefinition (the reported bug). Seed the resolved-exports cache (normally filled post-eval).
+        lock(ReportEngine._USING_LOCK) do; ReportEngine._USING_EXPORTS["FakeMod"] = [:foo, :bar]; end
+        r5 = parse_report("#%% code id=a\nusing FakeMod\n#%% code id=b\nusing FakeMod\nfoo()\n")
+        build_dependencies!(r5)
+        @test isempty(r5.meta["multidef"])                       # foo/bar are PROVIDED (imported), not defined
+        @test :foo in findcell(r5, "a").writes                   # …still in `writes` (so readers get a dep edge)
+        @test :foo in findcell(r5, "a").provides                 # …and marked as provided, not a definition
+        # a genuine redefinition ALONGSIDE the import is still flagged; the import name is not
+        lock(ReportEngine._USING_LOCK) do; ReportEngine._USING_EXPORTS["FakeMod2"] = [:baz]; end
+        r6 = parse_report("#%% code id=a\nusing FakeMod2\nq = 1\n#%% code id=b\nq = 2\n")
+        build_dependencies!(r6)
+        @test "q" in r6.meta["multidef"] && !("baz" in r6.meta["multidef"])
     end
 
 end

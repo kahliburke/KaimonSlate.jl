@@ -211,7 +211,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String}}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # No per-cell eviction (a deleted cell / closed notebook never removes its entry), so on a
 # long-lived server this would otherwise grow forever. Entries are small, but cap it — once full,
@@ -226,17 +226,18 @@ function infer_bindings!(cell::Cell)
         empty!(cell.writes); union!(cell.writes, hit[3])
         hit[4] ? push!(cell.flags, :opaque) : delete!(cell.flags, :opaque)
         empty!(cell.inputs); append!(cell.inputs, hit[5])   # `@asset` file deps (statically extracted)
+        empty!(cell.provides); union!(cell.provides, hit[6])   # `using`/`import`-brought names (⊆ writes)
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && empty!(_BIND_CACHE)
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs))
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides))
     end
     return cell
 end
 function _infer_bindings_uncached!(cell::Cell)
-    empty!(cell.reads); empty!(cell.writes); empty!(cell.inputs)
+    empty!(cell.reads); empty!(cell.writes); empty!(cell.inputs); empty!(cell.provides)
     delete!(cell.flags, :opaque)
     if cell.kind == MARKDOWN
         # A markdown cell "reads" the free variables of its `{{ expr }}` blocks, so
@@ -280,9 +281,11 @@ function _infer_bindings_uncached!(cell::Cell)
         if imp !== :notimport                 # a top-level using/import
             if imp === nothing                # plain `using X` → barrier UNLESS X's exports are resolved
                 w = _resolved_using_writes(s)
-                w === nothing ? push!(cell.flags, :opaque) : union!(cell.writes, w)
+                # Bring the exports into scope (writes → downstream readers depend on this cell), but mark
+                # them as PROVIDED (import, not definition) so re-`using X` in another cell isn't a collision.
+                w === nothing ? push!(cell.flags, :opaque) : (union!(cell.writes, w); union!(cell.provides, w))
             else
-                union!(cell.writes, imp)      # binds known names → just writes
+                union!(cell.writes, imp); union!(cell.provides, imp)   # explicitly-named import → provided, not defined
             end
             continue
         end
@@ -391,6 +394,7 @@ function build_dependencies!(report::Report)
     # cell's `writes` is a Set). Stashed on meta (runtime-only; never serialized) for the UI.
     wcells = Dict{Symbol,Vector{String}}()
     for c in report.cells, w in c.writes
+        w in c.provides && continue          # brought in by `using`/`import` — availability, not a colliding def
         push!(get!(wcells, w, String[]), c.id)
     end
     report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)

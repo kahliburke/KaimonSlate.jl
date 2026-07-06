@@ -80,6 +80,8 @@ mutable struct Cell
     binds::Vector{BindSpec}       # the `@bind` widgets this cell defines (a *control group* if >1)
     controls::Vector{Vector{String}}  # control strip as columns of stacked var names (§Layer 3 UX)
     interp::Vector{CellOutput}    # captured outputs of a markdown cell's `{{ }}` interpolations
+    provides::Set{Symbol}         # names brought in by `using`/`import` (⊆ writes) — availability for the
+                                  # dep graph, NOT a definition: excluded from the multi-def collision check
 end
 
 "Construct a fresh cell, hashing its source and marking it stale (never-run)."
@@ -87,7 +89,7 @@ function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
                 Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
-                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[])
+                STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}())
 end
 
 # Markdown variable interpolation: `{{ expr }}` blocks are captured (rich) and
