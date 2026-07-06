@@ -478,16 +478,27 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         Base.CoreLogging.handle_message(l.sink, lvl, msg, _mod, grp, id, file, line; kw...)
     end
 
-    # Install one package: a LOCAL checkout via `env_path` (dev/testing, or a fork) if set, else the
-    # published package from `url`. Under the quiet-git logger so LibGit2 noise stays out of the way.
-    function _add_pkg(name, url, env_path)
+    # Install one package, always at its LATEST — never a pinned snapshot. Precedence:
+    #   1. a LOCAL checkout via `env_path` (dev/testing, or a fork), if set;
+    #   2. the registered RELEASE once the package is published (latest compatible) — detected by the
+    #      UUID being reachable in a registry, so this SELF-SWITCHES at release with no edit here;
+    #   3. until then, track `main` on GitHub. `rev="main"` is deliberate: a plain `Pkg.add(url=…)` on a
+    #      package already pinned to an OLDER `main` commit is a no-op ("already satisfied") and never
+    #      advances to the tip — pinning the branch re-resolves to the CURRENT tip each run.
+    # Quiet-git wraps LibGit2 noise.
+    function _add_pkg(name, uuid, url, env_path)
         src = strip(get(ENV, env_path, ""))
+        registered = try
+            any(r -> haskey(r.pkgs, Base.UUID(uuid)), Pkg.Registry.reachable_registries())
+        catch; false; end
         Base.CoreLogging.with_logger(_QuietGit(Base.CoreLogging.current_logger())) do
-            if isempty(src)
-                Pkg.add(url = url)
-            else
+            if !isempty(src)
                 @info "Using a local \$name checkout" path = src
                 Pkg.develop(path = expanduser(String(src)))
+            elseif registered
+                Pkg.add(Pkg.PackageSpec(name = name, uuid = uuid))     # registered → latest release
+            else
+                Pkg.add(url = url, rev = "main")                        # unregistered → track the branch tip
             end
         end
     end
@@ -497,8 +508,8 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
         mkpath(ENVDIR); Pkg.activate(ENVDIR)
         # Kaimon FIRST: it provides the compute gate the notebook's env reconstructs through (and the
         # agent). KaimonSlate second — both want HTTP 2, so they co-resolve into one env.
-        _add_pkg("Kaimon", "$KAIMON", "SLATE_KAIMON_PATH")
-        _add_pkg("KaimonSlate", "$SLATE", "SLATE_KAIMONSLATE_PATH")
+        _add_pkg("Kaimon", "d3856c55-31fd-4246-b7e8-380411123c01", "$KAIMON", "SLATE_KAIMON_PATH")
+        _add_pkg("KaimonSlate", "f7b954f5-0334-4562-ac21-b005218ce1da", "$SLATE", "SLATE_KAIMONSLATE_PATH")
     end
 
     # Prefer the bundle shipped NEXT TO this script (extracted site tarball, or downloaded alongside
