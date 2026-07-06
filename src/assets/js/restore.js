@@ -151,7 +151,18 @@ function _rcClose(msg) { const m = document.getElementById('reconcilemodal'); if
 // Resolve the current cell (keep mine → restore my edit; else keep the saved version), then advance.
 function _rcResolve(useMine) {
   const c = _rcQueue[_rcIdx];
-  if (c) useMine ? _applyRestore(c.id, c.mine) : _discardRestored([c.id]);
+  if (c && useMine) {
+    _applyRestore(c.id, c.mine);
+    // A LIVE conflict interrupted active editing — hand the cursor back so typing continues. Focus now
+    // AND on the next frame, so any blur from closing the modal / state re-render can't win the race.
+    if (c.live && window.edFocus) { const _fid = c.id; window.edFocus(_fid); requestAnimationFrame(() => window.edFocus(_fid)); }
+  } else if (c) {
+    _discardRestored([c.id]);
+    // Accepting the incoming change: notebook.js FROZE the external result while the conflict was open
+    // (so it couldn't clobber your edit), so re-apply it now from live state — else the cell would keep
+    // showing your stale output next to the incoming source.
+    if (c.live && window.patchCells) { const nc = _cellOf(c.id); if (nc) window.patchCells([nc]); }
+  }
   if (++_rcIdx >= _rcQueue.length) _rcClose(`Reconciled ${_rcQueue.length} cell${_rcQueue.length === 1 ? '' : 's'}`);
   else _rcRender();
 }

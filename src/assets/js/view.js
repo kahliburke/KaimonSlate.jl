@@ -358,15 +358,33 @@ function patchCells(cells) {
   });
   if (structural) { _publishState({ ...nbState, cells: list.slice() }); return; }
   cells.forEach(nc => {
+    // Keep a CLEAN editor in lockstep with the saved source. This path advances srcMap but does NO
+    // Preact re-render, so an untouched editor would be left showing the OLD source while its
+    // baseline jumped ahead — then the next full render (notebook.js) reads the advanced srcMap as
+    // `_prevSrc`, sees editor ≠ baseline, and pops a phantom "a change just landed while you were
+    // editing" conflict for a cell you never touched. Mirror notebook.js: fast-forward only when
+    // there are no local edits; a genuine divergence is left for the reconcile flow.
+    const _eqw = (a, b) => (a || '').replace(/\s+$/, '') === (b || '').replace(/\s+$/, '');
+    const _prevSrc = srcMap[nc.id];
     srcMap[nc.id] = nc.source;
+    if (editors[nc.id]) {
+      const _mine = edText(nc.id);
+      if (_eqw(_mine, _prevSrc) && !_eqw(_mine, nc.source)) edSetText(nc.id, nc.source);
+    }
+    // A cell you're actively editing is YOURS until you resolve: if its editor still diverges from the
+    // incoming source (a live conflict), freeze its source/output/charts — don't let the external run
+    // replace what you're looking at. Same rule as notebook.js; the reconcile flow re-applies on accept.
+    const _conflicted = editors[nc.id] && !_eqw(edText(nc.id), nc.source);
     const cell = document.getElementById('cell-' + nc.id);
     if (cell) {
-      cell.className = cell.className.replace(/\bstate-\S+/, 'state-' + nc.state);
-      const badge = cell.querySelector('.badge'); if (badge) badge.textContent = nc.state;
-      if (nc.kind === 'md') { const md = cell.querySelector('.md'); if (md) { _swapOutput(md, mdHtml(nc)); typeset(md); } }
-      else { const out = cell.querySelector('.output'); if (out) { _swapOutput(out, nc.output); typeset(out); } }
+      cell.className = cell.className.replace(/\bstate-\S+/, 'state-' + (_conflicted ? 'edited' : nc.state));
+      const badge = cell.querySelector('.badge'); if (badge) badge.textContent = _conflicted ? 'edited' : nc.state;
+      if (!_conflicted) {
+        if (nc.kind === 'md') { const md = cell.querySelector('.md'); if (md) { _swapOutput(md, mdHtml(nc)); typeset(md); } }
+        else { const out = cell.querySelector('.output'); if (out) { _swapOutput(out, nc.output); typeset(out); } }
+      }
     }
-    renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] });
+    if (!_conflicted) { renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] }); }
   });
 }
 // `cellpre:` — an agent add/edit, shown BEFORE its eval finishes. Upsert by id: replace an

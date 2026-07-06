@@ -233,16 +233,21 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
       if (host) { host.innerHTML = window.controlStripInner(c); rebuilt = true; }
     }
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
+    // A cell you're actively editing is YOURS until you resolve. When its editor holds unsaved edits
+    // that diverge from the incoming server source (a live conflict — the modal above is offering the
+    // choice), DON'T let the external run's output/charts replace what you're looking at. Freeze the
+    // presentation; the reconcile flow re-applies the incoming result if you pick "use the change".
+    const _conflicted = window.editors[c.id] && !_eq(window.edText(c.id), c.source);
     const out = el.querySelector('.output');
-    if (out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
+    if (!_conflicted && out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
     // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook
     // (a real CPU sink during slider drags). Data changes produce a fresh cell object → fresh array.
-    if (c.echarts !== last.current.echarts) { last.current.echarts = c.echarts; window.renderCharts(c); }
-    if (c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
-    if (c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
+    if (!_conflicted && c.echarts !== last.current.echarts) { last.current.echarts = c.echarts; window.renderCharts(c); }
+    if (!_conflicted && c.tables !== last.current.tables) { last.current.tables = c.tables; window.renderTables(c); }
+    if (!_conflicted && c.animations !== last.current.animations) { last.current.animations = c.animations; window.renderAnimation && window.renderAnimation(c); }
     if ((c.binds && c.binds.length) || (c.controls && c.controls.length)) window.syncControlValues({ cells: [c] });
 
     // Only a plain code cell has the always-on <Editor> to refresh once it becomes visible.
