@@ -647,6 +647,7 @@ function _make_router(h::Hub)
             nb.report.meta["publishrepo"] = String(repo)
             nb.report.meta["publishslug"] = r.home ? "" : String(r.slug)
             _persist!(nb)
+            record_publish_site!(nb, String(repo), r)   # keep the publish ledger (history + doc↔target) in sync
             return _json(Dict("url" => r.url, "docUrl" => r.docUrl, "slug" => r.slug, "repo" => r.repo,
                               "created" => r.created, "docCount" => r.docCount, "home" => r.home,
                               "pagesEnabled" => r.pagesEnabled, "pagesError" => r.pagesError,

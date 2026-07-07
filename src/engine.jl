@@ -415,12 +415,15 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
 const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "agentmodel",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
-                      "publishrepo", "publishslug", "series")
+                      "publishrepo", "publishslug", "series", "docid")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            "agentmodel" => :string,
                            "slidelevel" => :int, "slidetransition" => :string,
                            "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string,
-                           "publishrepo" => :string, "publishslug" => :string, "series" => :string)
+                           "publishrepo" => :string, "publishslug" => :string, "series" => :string,
+                           # `docid` = the notebook's STABLE publish-ledger identity, generated once and
+                           # carried in the file so it never flips when the path/repo/origin changes.
+                           "docid" => :string)
 
 function _render_config_footer(meta)::String
     items = Tuple{String,String}[]

@@ -48,6 +48,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .open button:hover{border-color:#569cd6;color:#569cd6;}
 .modal-bg{position:fixed;inset:0;background:rgba(5,8,16,.66);display:none;align-items:center;justify-content:center;z-index:50;}
 .modal-bg.show{display:flex;}
+#modalbg{z-index:90;}   /* shared confirm/alert sits above the publishing dashboard (also .modal-bg z-index:50) */
 .modal{background:#141828;border:1px solid #2a2e40;border-radius:10px;padding:18px 20px;max-width:520px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,.55);}
 .modal .msg{color:#d4d8e8;font-size:.92rem;line-height:1.5;margin-bottom:16px;white-space:pre-wrap;word-break:break-word;}
 .modal .row{display:flex;justify-content:flex-end;gap:10px;}
@@ -79,14 +80,43 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .nb:hover,.ritem:hover{transform:translateX(2px);box-shadow:0 4px 18px rgba(0,0,0,.28);}
 /* Featured "Sites" strip (published local sites), full-width under the header. Collapses when empty. */
 .sitesband{max-width:1160px;margin:0 0 26px;}.sitesband:empty{display:none;}
-.sitecards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;}
-.sitecard{display:grid;grid-template-columns:auto 1fr;grid-template-rows:auto auto;column-gap:10px;align-items:center;
+.sitecards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;}
+.sitecard{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;column-gap:11px;align-items:center;
   background:#141828;border:1px solid #2a2e40;border-radius:11px;padding:12px 15px;text-decoration:none;
   transition:border-color .14s,transform .14s,box-shadow .14s;}
 .sitecard:hover{border-color:#569cd6;transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.3);}
-.sitecard .si{grid-row:1/3;font-size:1.35rem;opacity:.9;}
-.sitecard .sn{color:#e6ebf7;font-weight:600;font-size:.96rem;}
-.sitecard .su{color:#6a7090;font-size:.73rem;font-family:Menlo,monospace;}</style></head>
+.sitecard .si{grid-row:1/3;font-size:1.3rem;opacity:.9;}
+.sitecard .sn{color:#e6ebf7;font-weight:600;font-size:.96rem;min-width:0;overflow-wrap:anywhere;}
+.sitecard .su{color:#6a7090;font-size:.73rem;font-family:Menlo,monospace;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* Publishing dashboard — full-screen global ledger surface (documents, targets, secrets, sites) */
+.herobtn{margin-left:auto;align-self:center;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.85rem;}
+.herobtn:hover{border-color:#569cd6;color:#569cd6;}
+.pubdash{max-width:none;width:min(1040px,94vw);max-height:88vh;display:flex;flex-direction:column;}
+.pdhead{display:flex;align-items:center;gap:10px;margin-bottom:2px;}
+.pdhead strong{font-size:1.05rem;color:#fff;} .pdhead .pdsub{color:#6a7090;font-size:.78rem;}
+.pdhead .pdx{margin-left:auto;background:none;border:none;color:#6a7090;font-size:1rem;cursor:pointer;padding:2px 8px;} .pdhead .pdx:hover{color:#569cd6;}
+.pdbody{display:flex;gap:26px;overflow:auto;flex:1;padding:8px 0;} .pdcol{flex:1;min-width:0;}
+.pdsec{color:#8a90b0;font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin:16px 0 6px;} .pdsec:first-child{margin-top:0;}
+.pdrow{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:.84rem;color:#d4d8e8;flex-wrap:wrap;}
+.pdrow .pl{font-weight:600;color:#e6ebf7;} .pddim{color:#6a7090;font-size:.77rem;}
+.pdchip{font-size:.68rem;padding:1px 7px;border-radius:10px;border:1px solid #2a2e40;color:#9aa3c0;} .pdchip.ok{color:#56d364;border-color:#1e5a2e;}
+.pdlink{color:#569cd6;font-size:.78rem;text-decoration:none;} .pdlink:hover{text-decoration:underline;}
+.pdbtn{background:#1a1e2e;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:.76rem;} .pdbtn:hover{border-color:#569cd6;color:#569cd6;}
+.pdbtn.primary{background:#569cd6;color:#0d1120;border-color:#569cd6;font-weight:600;} .pdmini{margin-left:auto;}
+.pdform{display:flex;flex-direction:column;gap:6px;margin:8px 0;padding:10px;border:1px dashed #2a2e40;border-radius:8px;}
+.pdinp{background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:5px 9px;font-size:.82rem;} .pdinp:focus{outline:none;border-color:#569cd6;}
+.pdtag{display:inline-flex;align-items:center;gap:6px;font-size:.82rem;color:#d4d8e8;}
+.pdtarget{border:1px solid #2a2e40;border-radius:9px;padding:9px 12px;margin:8px 0;background:#10131f;}
+.pdtdocs{margin-left:4px;margin-top:5px;border-left:2px solid #21253a;padding-left:11px;}
+.pdrow.pdsub2{font-size:.8rem;margin:3px 0;}
+.pdarr-sec{border:1px solid #2a2e40;border-radius:8px;padding:8px 10px;margin:8px 0;background:#10131f;}
+.pdarr-hd{margin-bottom:5px;}
+.pdarr-name{background:#141828;border:1px solid #2a2e40;color:#e6ebf7;border-radius:5px;padding:3px 9px;font-size:.85rem;font-weight:600;}
+.pdarr-list{min-height:26px;display:flex;flex-direction:column;gap:5px;padding:2px;border-radius:6px;}
+.pdarr-list.over{outline:1px dashed #569cd6;outline-offset:2px;}
+.pdarr-row{display:flex;align-items:center;gap:9px;padding:7px 10px;background:#141828;border:1px solid #2a2e40;border-radius:6px;cursor:grab;font-size:.85rem;color:#d4d8e8;}
+.pdarr-row:hover{border-color:#569cd6;} .pdarr-row.dragging{opacity:.45;}
+.pdarr-grip{color:#6a7090;} .pdarr-empty{padding:6px 10px;font-size:.78rem;color:#6a7090;}</style></head>
 <body>
 <div class="hero">
   <svg class="logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
@@ -97,6 +127,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <circle cx="22" cy="34" r="4" fill="#56d364"/>
   </svg>
   <div><h1>Kaimon Slate</h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
+  <button id="pubdashbtn" class="herobtn" title="Manage publishing — targets, secrets, history">☁ Publishing</button>
 </div>
 <div id="localsites" class="sitesband"></div>
 <div id="published" class="sitesband"></div>
@@ -118,6 +149,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 </div>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
+<div class="modal-bg" id="pubdashbg"><div class="modal pubdash">
+  <div class="pdhead"><strong>Publishing</strong><span class="pdsub" id="pdbackend"></span><button class="pdx" onclick="closePubDash()" title="Close">✕</button></div>
+  <div class="pdbody">
+    <div class="pdcol" style="flex:1.7">
+      <div class="pdsec">Targets &amp; their documents</div><div id="pdtargets"></div>
+    </div>
+    <div class="pdcol">
+      <div class="pdsec">Secrets</div><div id="pdsecrets"></div>
+    </div>
+  </div>
+  <div class="row"><button class="primary" onclick="closePubDash()">Done</button></div>
+</div></div>
+<div class="modal-bg" id="pdarrangebg"><div class="modal pubdash" style="max-width:660px;max-height:86vh">
+  <div class="pdhead"><strong>Arrange documents</strong><span class="pdsub" id="pdarrsub"></span><button class="pdx" onclick="closeArrange()" title="Close">✕</button></div>
+  <div class="pddim" style="font-size:.76rem;margin-bottom:6px">Drag to reorder within a section, or between sections. Add sections and rename them. Apply re-pushes just the index — the pages themselves aren't rebuilt.</div>
+  <div class="pdbody" style="flex-direction:column;overflow:auto"><div id="pdarrbody" style="width:100%"></div></div>
+  <div class="row"><button onclick="pdAddSection()">+ Section</button><button onclick="closeArrange()">Cancel</button><button class="primary" id="pdarrapply" onclick="applyArrange()">Apply &amp; re-push</button></div>
+</div></div>
 <div class="modal-bg" id="importbg"><div class="modal importmodal">
   <div class="msg"><strong>Self-contained notebook</strong> <span style="color:#7a82a4;font-weight:400">— run it now (temporary), or import into a project you own</span></div>
   <div class="imrow"><label>Source</label><span id="imsrc" class="impath"></span></div>
@@ -351,6 +400,219 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       }).join('')+'</div>' : '';
     }).catch(function(){});
   }
+  // ── Publishing dashboard: the global ledger (documents, targets, secrets, sites). Publishing a
+  // specific document hands off into its notebook (the build + SSE need the live notebook). ─────
+  var pubdashBg=document.getElementById('pubdashbg');
+  var _pdView={documents:[],targets:[],sites:[],secretRefs:[],availableKinds:[]};
+  var _abs=function(p){return /^([A-Za-z]:[\\/]|\/)/.test(p||'');};
+  // Fetch + render into the (still-hidden) panel, THEN reveal it — so it never flashes empty while the
+  // ledger loads (the gist read is a network call). A spinner covers the wait.
+  function openPubDash(){
+    showLoading('Loading publishing…');
+    loadPubDash(function(){ hideLoading(); pubdashBg.classList.add('show'); },
+               function(){ hideLoading(); alertDark('Could not load the publishing ledger.'); });
+  }
+  function closePubDash(){ pubdashBg.classList.remove('show'); }
+  window.openPubDash=openPubDash; window.closePubDash=closePubDash;
+  function loadPubDash(done,fail){
+    fetch('/api/publish/ledger',{cache:'no-store'}).then(function(r){return r.json();}).then(function(v){
+      _pdView=v; document.getElementById('pdbackend').textContent=v.backend?('— ledger: '+v.backend):'';
+      renderPdTargets(); renderPdSecrets();
+      if(done)done();
+    }).catch(function(){ if(fail)fail(); });
+  }
+  // Open a document's notebook by its stable docId (uses its absolute source path).
+  function pdOpenDoc(docId){
+    var d=(_pdView.documents||[]).filter(function(x){return x.docId===docId;})[0]; if(!d)return;
+    if(!_abs(d.sourcePath)){ alertDark('“'+(d.title||d.slug)+'” has no local path on this machine to open.'); return; }
+    showLoading('Opening…');
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:d.sourcePath})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(r){location.href=r.url;})
+      .catch(function(e){hideLoading();alertDark('Open failed: '+e);});
+  }
+  window.pdOpenDoc=pdOpenDoc;
+  // Documents with ≥1 event to target `tname` → {doc, version(count), latest(newest event)}.
+  function docsForTarget(tname){
+    return (_pdView.documents||[]).map(function(d){
+      var evs=(d.events||[]).filter(function(e){return e.target===tname;});
+      return evs.length?{doc:d,version:evs.length,latest:evs[0]}:null;
+    }).filter(Boolean);
+  }
+  function pdTargetLive(t){
+    if(t.kind==='github-pages'&&t.config.repo){var p=t.config.repo.split('/');return p.length===2?('https://'+p[0]+'.github.io/'+p[1]+'/'):'';}
+    return t.config.url||'';
+  }
+  function pdTargetSummary(t){
+    if(t.kind==='github-pages')return t.config.repo||'';
+    if(t.kind==='zenodo')return (t.config.secretRef?'secret:'+t.config.secretRef:'')+(t.config.sandbox?' sandbox':'');
+    return t.config.dest||t.config.url||'';
+  }
+  // TARGET-primary: each target card, with the documents published to it nested underneath.
+  function renderPdTargets(){
+    var ts=_pdView.targets||[], kinds=_pdView.availableKinds||['github-pages','s3','r2','rsync','zenodo'];
+    var cards = ts.length ? ts.map(function(t,i){
+      var live=pdTargetLive(t), docs=docsForTarget(t.name);
+      var drows = docs.length ? docs.map(function(x){
+        return '<div class="pdrow pdsub2"><span>'+esc(x.doc.title||x.doc.slug)+'</span>'+
+          '<span class="pdchip'+(x.latest.status==='ok'?' ok':'')+'">v'+x.version+'</span>'+
+          '<span class="pddim">'+esc((x.latest.ts||'').slice(0,10))+'</span>'+
+          (x.latest.url?' <a class="pdlink" href="'+esc(x.latest.url)+'" target="_blank" rel="noopener">page</a>':'')+
+          (x.latest.doi?' <span class="pddim">DOI '+esc(x.latest.doi)+'</span>':'')+
+          '<button class="pdbtn pdmini" onclick="pdOpenDoc(\''+esc(x.doc.docId)+'\')">open notebook</button></div>';
+      }).join('') : '<div class="pddim pdsub2">No documents published here yet.</div>';
+      var arr=(t.kind==='github-pages'&&t.config.repo)?'<button class="pdbtn" onclick="openArrange(\''+esc(t.config.repo)+'\',\''+esc(t.name)+'\')">⇅ arrange</button>':'';
+      return '<div class="pdtarget"><div class="pdrow"><span class="pl">'+esc(t.name)+'</span>'+
+        '<span class="pdchip">'+esc(t.kind)+'</span> <span class="pddim">'+esc(pdTargetSummary(t))+'</span>'+
+        (live?' <a class="pdlink" href="'+esc(live)+'" target="_blank" rel="noopener">live</a>':'')+
+        '<span style="margin-left:auto;display:inline-flex;gap:6px">'+arr+'<button class="pdbtn" onclick="pdDelTargetIdx('+i+')">✕</button></span></div>'+
+        '<div class="pdtdocs">'+drows+'</div></div>';
+    }).join('') : '<div class="pddim">No targets yet. Add one below, or publish a notebook (☰ → ☁ Publish…).</div>';
+    var owner=(_pdView.ghUser||'');
+    var form='<div class="pdform"><div class="pddim" style="font-size:.72rem">Add a destination — GitHub: just a repo NAME publishes under your account'+(owner?(' ('+esc(owner)+'/…)'):'')+'.</div>'+
+      '<input id="pdtname" class="pdinp" placeholder="label — optional (auto-named from the repo/bucket)"/>'+
+      '<select id="pdtkind" class="pdinp" onchange="pdKindFields()">'+kinds.map(function(k){return '<option value="'+esc(k)+'">'+esc(k)+'</option>';}).join('')+'</select>'+
+      '<div id="pdtfields"></div><button class="pdbtn primary" onclick="pdAddTarget()">+ Add / update target</button></div>';
+    document.getElementById('pdtargets').innerHTML=cards+form; pdKindFields();
+  }
+  function pdFld(id,ph){return '<input id="pdf_'+id+'" class="pdinp" placeholder="'+esc(ph)+'"/>';}
+  function pdChk(id,label,on){return '<label class="pdtag"><input type="checkbox" id="pdf_'+id+'" '+(on?'checked':'')+'/> '+esc(label)+'</label>';}
+  function pdRefSel(id,refs){return '<select id="pdf_'+id+'" class="pdinp"><option value="">— secret ref —</option>'+(refs||[]).map(function(r){return '<option value="'+esc(r)+'">'+esc(r)+'</option>';}).join('')+'</select>';}
+  function pdKindFields(){
+    var k=(document.getElementById('pdtkind')||{}).value, refs=_pdView.secretRefs||[], owner=_pdView.ghUser||'', h='';
+    if(k==='github-pages')h=pdFld('repo',owner?(owner+'/repo-name  (or owner/name)'):'owner/name')+pdFld('branch','branch (default gh-pages)')+pdFld('subdir','subdir (optional)')+pdChk('private','Private repo')+pdChk('create','Create repo if missing',true);
+    else if(k==='cloudflare-pages')h=pdFld('project','Pages project name')+pdFld('accountId','Cloudflare account id')+pdRefSel('secretRef',refs)+pdFld('url','public URL (optional)');
+    else if(k==='netlify')h=pdFld('siteId','Netlify site id')+pdRefSel('secretRef',refs)+pdFld('url','public URL (optional)');
+    else if(k==='s3'||k==='r2')h=pdFld('dest','s3://bucket/prefix')+pdFld('url','public URL (optional)')+(k==='r2'?pdFld('endpoint','R2 endpoint URL'):'')+pdChk('delete','Mirror deletes',true);
+    else if(k==='rsync')h=pdFld('dest','user@host:/var/www')+pdFld('url','public URL (optional)')+pdChk('delete','Mirror deletes',true);
+    else if(k==='zenodo')h=pdRefSel('secretRef',refs)+pdChk('sandbox','Use Zenodo sandbox');
+    var host=document.getElementById('pdtfields'); if(host)host.innerHTML=h;
+  }
+  window.pdKindFields=pdKindFields;
+  function pdReadKind(kind){
+    var c={},v=function(id){var e=document.getElementById('pdf_'+id);return e?(e.value||'').trim():'';},b=function(id){var e=document.getElementById('pdf_'+id);return e?e.checked:false;};
+    var put=function(k,id){var x=v(id);if(x)c[k]=x;};
+    if(kind==='github-pages'){put('repo','repo');put('branch','branch');put('subdir','subdir');c.private=b('private');c.create=b('create');}
+    else if(kind==='cloudflare-pages'){put('project','project');put('accountId','accountId');put('secretRef','secretRef');put('url','url');}
+    else if(kind==='netlify'){put('siteId','siteId');put('secretRef','secretRef');put('url','url');}
+    else if(kind==='s3'||kind==='r2'){put('dest','dest');put('url','url');put('endpoint','endpoint');c['delete']=b('delete');}
+    else if(kind==='rsync'){put('dest','dest');put('url','url');c['delete']=b('delete');}
+    else if(kind==='zenodo'){put('secretRef','secretRef');c.sandbox=b('sandbox');}
+    return c;
+  }
+  // Auto-name a target from its main field so the label can be left blank.
+  function pdDeriveName(kind,c){
+    if(kind==='github-pages'&&c.repo)return c.repo.split('/').filter(Boolean).pop()||'';
+    if(kind==='cloudflare-pages'&&c.project)return c.project;
+    if(kind==='netlify')return 'netlify';
+    if((kind==='s3'||kind==='r2'||kind==='rsync')&&c.dest)return c.dest.replace(/^\w+:\/\//,'').split(/[\/:]/).filter(Boolean)[0]||kind;
+    if(kind==='zenodo')return 'zenodo';
+    return '';
+  }
+  function pdAddTarget(){
+    var kind=(document.getElementById('pdtkind')||{}).value, config=pdReadKind(kind);
+    if(kind==='github-pages'&&config.repo&&config.repo.indexOf('/')<0&&_pdView.ghUser){config.repo=_pdView.ghUser+'/'+config.repo;}  // bare name → your account
+    var name=(document.getElementById('pdtname').value||'').trim()||pdDeriveName(kind,config);
+    if(!name){alertDark('Fill the repo/destination (or type a label)');return;}
+    fetch('/api/publish/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,kind:kind,config:config})})
+      .then(function(r){return r.json();}).then(function(v){_pdView=v;renderPdTargets();}).catch(function(){alertDark('Save failed');});
+  }
+  window.pdAddTarget=pdAddTarget;
+  function pdDelTargetIdx(i){var t=(_pdView.targets||[])[i];if(!t)return;
+    confirmDark('Delete target “'+t.name+'”? Published history is kept.','Delete','danger').then(function(ok){if(!ok)return;
+      fetch('/api/publish/target-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:t.name})})
+        .then(function(r){return r.json();}).then(function(v){_pdView=v;renderPdTargets();}).catch(function(){alertDark('Delete failed');});});}
+  window.pdDelTargetIdx=pdDelTargetIdx;
+  function renderPdSecrets(){
+    var refs=_pdView.secretRefs||[];
+    var rows=refs.length?refs.map(function(r,i){return '<div class="pdrow"><span class="pl">'+esc(r)+'</span><span class="pdchip ok">set</span><button class="pdbtn pdmini" onclick="pdDelSecretIdx('+i+')">✕</button></div>';}).join(''):'<div class="pddim">None.</div>';
+    var form='<div class="pdform"><input id="pdsref" class="pdinp" placeholder="ref name (e.g. zenodo-token)"/>'+
+      '<div style="display:flex;gap:8px;align-items:center"><input id="pdsval" class="pdinp" type="text" placeholder="secret value" autocomplete="off" style="flex:1"/>'+
+      '<label class="pdtag" style="font-size:.74rem;white-space:nowrap"><input type="checkbox" id="pdsmask" onchange="pdToggleSecretMask()"/> hide</label></div>'+
+      '<button class="pdbtn primary" onclick="pdSetSecret()">Save secret</button></div>'+
+      '<div class="pddim" style="font-size:.72rem">Visible as you type; stored only in your config home (chmod 600) — never in the ledger/gist.</div>';
+    document.getElementById('pdsecrets').innerHTML=rows+form;
+  }
+  function pdToggleSecretMask(){var e=document.getElementById('pdsval'); if(e)e.type=document.getElementById('pdsmask').checked?'password':'text';}
+  window.pdToggleSecretMask=pdToggleSecretMask;
+  function pdSecretPost(ref,value){
+    fetch('/api/publish/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:ref,value:value})})
+      .then(function(r){return r.json();}).then(function(d){_pdView.secretRefs=d.refs||[];renderPdSecrets();pdKindFields();}).catch(function(){alertDark('Secret save failed');});
+  }
+  function pdSetSecret(){var ref=(document.getElementById('pdsref').value||'').trim(),val=document.getElementById('pdsval').value;if(!ref){alertDark('Secret needs a ref name');return;}pdSecretPost(ref,val);}
+  window.pdSetSecret=pdSetSecret;
+  function pdDelSecretIdx(i){var r=(_pdView.secretRefs||[])[i];if(!r)return;confirmDark('Delete secret “'+r+'”?','Delete','danger').then(function(ok){if(ok)pdSecretPost(r,'');});}
+  window.pdDelSecretIdx=pdDelSecretIdx;
+  // ── Arrange documents on a site: drag-reorder within/between sections → re-push the index ────────
+  var _arrRepo='';
+  function openArrange(repo,tname){
+    _arrRepo=repo;
+    document.getElementById('pdarrsub').textContent='— '+tname+' · '+repo;
+    document.getElementById('pdarrbody').innerHTML='<div class="pddim">Loading published site…</div>';
+    document.getElementById('pdarrangebg').classList.add('show');
+    fetch('/api/publish/site-docs?repo='+encodeURIComponent(repo),{cache:'no-store'})
+      .then(function(r){return r.json();}).then(function(d){renderArrange((d&&d.docs)||[]);})
+      .catch(function(){document.getElementById('pdarrbody').innerHTML='<div class="pddim">Could not load the site (is it published?).</div>';});
+  }
+  window.openArrange=openArrange;
+  function closeArrange(){document.getElementById('pdarrangebg').classList.remove('show');}
+  window.closeArrange=closeArrange;
+  function _arrRow(d){return '<div class="pdarr-row" draggable="true" data-slug="'+esc(d.slug)+'"><span class="pdarr-grip">⠿</span><span>'+esc(d.title||d.slug)+'</span> <span class="pddim">'+esc(d.date||'')+'</span></div>';}
+  function _arrSec(name,rows,ungrouped){var hd=ungrouped?'<span class="pddim">Ungrouped</span>':'<input class="pdarr-name" value="'+esc(name)+'"/>';return '<div class="pdarr-sec"><div class="pdarr-hd">'+hd+'</div><div class="pdarr-list">'+(rows||'<div class="pdarr-empty">drop here</div>')+'</div></div>';}
+  function renderArrange(docs){
+    var secs=[],by={};
+    docs.forEach(function(d){var s=(d.section||'');if(!(s in by)){by[s]=[];secs.push(s);}by[s].push(d);});
+    if(secs.indexOf('')<0)secs.unshift('');
+    secs.sort(function(a,b){return a===''?-1:b===''?1:0;});
+    document.getElementById('pdarrbody').innerHTML=secs.map(function(s){return _arrSec(s,(by[s]||[]).map(_arrRow).join(''),s==='');}).join('');
+    wireArrangeDnD();
+  }
+  function arrAfter(list,y){var rows=[].slice.call(list.querySelectorAll('.pdarr-row:not(.dragging)'));var best={o:-Infinity,el:null};rows.forEach(function(c){var b=c.getBoundingClientRect();var o=y-b.top-b.height/2;if(o<0&&o>best.o)best={o:o,el:c};});return best.el;}
+  function wireArrangeDnD(){
+    var body=document.getElementById('pdarrbody');
+    body.querySelectorAll('.pdarr-row').forEach(function(row){
+      if(row._wired)return;row._wired=true;
+      row.addEventListener('dragstart',function(){row.classList.add('dragging');});
+      row.addEventListener('dragend',function(){row.classList.remove('dragging');});
+    });
+    body.querySelectorAll('.pdarr-list').forEach(function(list){
+      if(list._wired)return;list._wired=true;
+      list.addEventListener('dragover',function(e){
+        e.preventDefault();var dragging=body.querySelector('.pdarr-row.dragging');if(!dragging)return;
+        var empty=list.querySelector('.pdarr-empty');if(empty)empty.remove();
+        var after=arrAfter(list,e.clientY);
+        if(after==null)list.appendChild(dragging);else list.insertBefore(dragging,after);
+      });
+    });
+  }
+  function pdAddSection(){
+    var body=document.getElementById('pdarrbody');var div=document.createElement('div');div.className='pdarr-sec';
+    div.innerHTML='<div class="pdarr-hd"><input class="pdarr-name" value="New section"/></div><div class="pdarr-list"><div class="pdarr-empty">drop here</div></div>';
+    body.appendChild(div);wireArrangeDnD();
+  }
+  window.pdAddSection=pdAddSection;
+  function applyArrange(){
+    var body=document.getElementById('pdarrbody');var ordering=[];var idx=0;
+    body.querySelectorAll('.pdarr-sec').forEach(function(sec){
+      var nameEl=sec.querySelector('.pdarr-name');var section=nameEl?(nameEl.value||'').trim():'';
+      sec.querySelectorAll('.pdarr-row').forEach(function(row){ordering.push({slug:row.getAttribute('data-slug'),section:section,order:(idx++)*10});});
+    });
+    if(!ordering.length){alertDark('Nothing to arrange.');return;}
+    var btn=document.getElementById('pdarrapply');if(btn)btn.disabled=true;showLoading('Re-pushing the site index…');
+    fetch('/api/publish/site-reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo:_arrRepo,ordering:ordering})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(d){hideLoading();if(btn)btn.disabled=false;closeArrange();alertDark(d.changed?('Re-pushed — the new order goes live at '+d.url+' shortly (Pages deploy).'):'No changes to push.');})
+      .catch(function(e){hideLoading();if(btn)btn.disabled=false;alertDark('Reorder failed: '+e);});
+  }
+  window.applyArrange=applyArrange;
+  var _arrBg=document.getElementById('pdarrangebg');
+  _arrBg.addEventListener('mousedown',function(e){if(e.target===_arrBg)closeArrange();});
+  document.getElementById('pubdashbtn').onclick=openPubDash;
+  // Opened from a notebook's "🗂 Publishing manager…" (new tab → /#publishing): auto-open the manager.
+  if(location.hash==='#publishing'){ try{history.replaceState(null,'',location.pathname);}catch(e){} openPubDash(); }
+  pubdashBg.addEventListener('mousedown',function(e){if(e.target===pubdashBg)closePubDash();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&pubdashBg.classList.contains('show'))closePubDash();});
+
   loadSessions(); loadLocalSites(); loadPublished();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
   // from other tabs, agents, or MCP tools), and refresh immediately when the tab regains focus.

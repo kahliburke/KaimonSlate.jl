@@ -48,23 +48,29 @@ end
 """
     notebook_docid(nb) -> (; docId, sourceRepo, sourcePath)
 
-The document's stable identity for the ledger. Git-backed notebooks get a repo-relative-path + origin
-id (survives file moves within the repo, matches across checkouts); otherwise the abspath id.
+The document's stable ledger identity. It is a one-time id **embedded in the notebook** (`meta["docid"]`,
+persisted to the `.jl` footer), so it never changes when the file moves or the repo gains/loses an
+`origin` — the failure that used to split one notebook into two ledger entries. Generated + persisted on
+first use. `sourceRepo`/`sourcePath` are derived from git purely for DISPLAY.
 """
 function notebook_docid(nb::LiveNotebook)
     path = abspath(nb.path)
     dir = dirname(path)
-    okroot, root = _git_run(dir, `git rev-parse --show-toplevel`)
+    # `sourcePath` stays ABSOLUTE so the manager can open the notebook on this machine; `sourceRepo`
+    # (owner/name, when there's an origin) is display-only provenance.
+    sourceRepo, sourcePath = "", path
+    okroot, _ = _git_run(dir, `git rev-parse --show-toplevel`)
     if okroot
-        rootp = strip(root)
-        rel = replace(relpath(path, rootp), '\\' => '/')
         okorg, origin = _git_run(dir, `git config --get remote.origin.url`)
-        if okorg && !isempty(strip(origin))
-            return (; docId = PublishLedger.docid_git(rel, strip(origin)),
-                    sourceRepo = _repo_slug(origin), sourcePath = rel)
-        end
+        (okorg && !isempty(strip(origin))) && (sourceRepo = _repo_slug(origin))
     end
-    return (; docId = PublishLedger.docid_local(path), sourceRepo = "", sourcePath = path)
+    id = String(get(nb.report.meta, "docid", ""))
+    if isempty(id)
+        id = string("nb_", bytes2hex(rand(UInt8, 12)))     # stable, file-carried identity
+        nb.report.meta["docid"] = id
+        try; _persist!(nb); catch e; @warn "slate: could not persist docid" exception = e; end
+    end
+    return (; docId = id, sourceRepo = sourceRepo, sourcePath = sourcePath)
 end
 
 # Ensure a Document exists for `nb` in `ledger`, refreshing its slug/title/source metadata; returns
@@ -89,7 +95,7 @@ end
 # ── ledger → view JSON ─────────────────────────────────────────────────────────────────────────────
 # The manager's read model. Targets carry only NON-secret config; we surface `secretRef` names, never
 # secret values. `available` lists the target kinds the UI can offer.
-const _TARGET_KINDS = ["github-pages", "s3", "r2", "rsync", "zenodo"]
+const _TARGET_KINDS = ["github-pages", "cloudflare-pages", "netlify", "s3", "r2", "rsync", "zenodo"]
 
 _event_view(e) = Dict{String,Any}("id" => e.id, "ts" => e.ts, "target" => e.target,
     "status" => e.status, "url" => e.url, "doi" => e.doi, "commit" => e.commit, "note" => e.note)
@@ -103,12 +109,26 @@ end
 _target_view(t) = Dict{String,Any}("name" => t.name, "kind" => t.kind, "config" => t.config)
 _site_view(s) = Dict{String,Any}("name" => s.name, "target" => s.target, "home" => s.home)
 
+# The authenticated GitHub login (for owner auto-fill so a new github-pages target only needs a repo
+# NAME). Best-effort + cached; "" when `gh` is absent/unauthed.
+const _GH_USER = Ref{Union{String,Nothing}}(nothing)
+function gh_user()
+    _GH_USER[] === nothing || return _GH_USER[]
+    gh = Sys.which("gh"); u = ""
+    if gh !== nothing
+        try; u = strip(read(pipeline(`$gh api user --jq .login`; stderr = devnull), String)); catch; end
+    end
+    _GH_USER[] = String(u)
+    return _GH_USER[]
+end
+
 function _ledger_view(ledger)
     return Dict{String,Any}(
         "documents" => [_doc_view(d) for d in values(ledger.documents)],
         "targets" => [_target_view(t) for t in values(ledger.targets)],
         "sites" => [_site_view(s) for s in values(ledger.sites)],
         "secretRefs" => secret_refs(),
+        "ghUser" => gh_user(),
         "availableKinds" => _TARGET_KINDS)
 end
 
@@ -172,6 +192,46 @@ function publish_doc_set_targets!(nb::LiveNotebook, names)
     return publish_doc_info(nb)
 end
 
+# The ledger name to use for a github-pages `repo` — an existing target for that repo, else a fresh
+# name auto-derived from the repo (its last path segment, e.g. "you/portfolio" → "portfolio").
+function _target_name_for_repo(led, repo::AbstractString)
+    for (name, t) in led.targets
+        (t.kind == "github-pages" && String(get(t.config, "repo", "")) == String(repo)) && return name
+    end
+    segs = filter(!isempty, split(String(repo), '/'))
+    return isempty(segs) ? "github" : String(last(segs))
+end
+
+"""
+    record_publish_site!(nb, repo, result) -> String
+
+Reflect a successful `publish_site` to `repo` in the ledger: ensure a github-pages target for the repo
+(auto-named, reusing an existing one), ensure this notebook's document (assigned to that target), and
+append a publish event (live URL, commit SHA, deploy status). Returns the target name. Best-effort —
+a ledger failure is logged and never fails the publish itself.
+"""
+function record_publish_site!(nb::LiveNotebook, repo::AbstractString, result)
+    tname = ""
+    try
+        store = PublishLedger.default_store()
+        led = PublishLedger.load(store)
+        tname = _target_name_for_repo(led, repo)
+        get!(led.targets, tname,
+             PublishLedger.Target(tname, "github-pages"; config = Dict{String,Any}("repo" => String(repo))))
+        di = _ensure_doc!(led, nb; target_names = [tname])
+        ok = get(result, :pagesEnabled, true) !== false
+        PublishLedger.record_event!(led, di.docId, tname;
+            status = ok ? "ok" : "error",
+            url = String(get(result, :docUrl, get(result, :url, ""))),
+            commit = String(get(result, :commit, "")),
+            note = String(get(result, :deployStatus, "")))
+        PublishLedger.save(store, led)
+    catch e
+        @warn "slate: ledger recording after publish failed" exception = e
+    end
+    return tname
+end
+
 # ── multi-target publish with SSE progress ─────────────────────────────────────────────────────────
 # Summarise per-target results for the SSE `done` event / a tool return.
 function _publish_summary(names, results)
@@ -182,13 +242,15 @@ function _publish_summary(names, results)
 end
 
 """
-    run_publish(nb, target_names; on_event=nothing) -> summary::Dict
+    run_publish(nb, target_names; on_event=nothing, build opts…) -> summary::Dict
 
 Load the ledger, ensure this notebook's document + its targets, resolve secrets from the config home,
-fan out the publish concurrently, record one event per target, and persist. `on_event(i, phase,
-payload)` streams progress. Throws (caught by the SSE handler) if a named target isn't configured.
+fan out the publish concurrently (forwarding the site-build options to each adapter — GitHub/S3/rsync
+build+deploy the site, Zenodo ignores them and archives the bundle), record one event per target, and
+persist. `on_event(i, phase, payload)` streams progress. Throws if a named target isn't configured.
 """
-function run_publish(nb::LiveNotebook, target_names; on_event = nothing)
+function run_publish(nb::LiveNotebook, target_names; on_event = nothing, slug = "", site_title = "",
+                     theme = "dark", outputs = "all", source = true, bundle = false, history = false)
     names = collect(String, target_names)
     isempty(names) && error("no targets selected")
     store = PublishLedger.default_store()
@@ -197,8 +259,11 @@ function run_publish(nb::LiveNotebook, target_names; on_event = nothing)
     missing = [n for n in names if !haskey(led.targets, n)]
     isempty(missing) || error("unconfigured target(s): $(join(missing, ", ")) — add them in the manager first")
     secrets = _secrets_load()
+    slg = isempty(strip(String(slug))) ? di.slug : String(slug)
     results = publish_document!(nb, led, di.docId, store; target_names = names, secrets = secrets,
-                               slug = di.slug, on_event = on_event)
+                               slug = slg, site_title = String(site_title), theme = String(theme),
+                               outputs = String(outputs), include_source = source, bundle = bundle,
+                               history = history, on_event = on_event)
     return _publish_summary(names, results)
 end
 
@@ -226,6 +291,11 @@ function _sse_publish(stream::HTTP.Stream, h::Hub)
         return
     end
     names = filter(!isempty, strip.(split(get(q, "targets", ""), ',')))
+    # site-build options (forwarded to the adapters; ignored by Zenodo)
+    bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
+             theme = get(q, "theme", "dark"), outputs = get(q, "outputs", "all"),
+             source = get(q, "source", "1") != "0", bundle = get(q, "bundle", "0") == "1",
+             history = get(q, "history", "0") == "1")
     ch = Channel{Tuple{String,String}}(128)
     task = @async begin
         try
@@ -240,7 +310,9 @@ function _sse_publish(stream::HTTP.Stream, h::Hub)
                     r.ok || isempty(strip(r.log)) || put!(ch, ("log", first(split(strip(r.log), '\n'))))
                 end
             end
-            summary = run_publish(nb, names; on_event = on_event)
+            summary = run_publish(nb, names; on_event = on_event, slug = bopts.slug,
+                                  site_title = bopts.site_title, theme = bopts.theme, outputs = bopts.outputs,
+                                  source = bopts.source, bundle = bopts.bundle, history = bopts.history)
             put!(ch, ("done", JSON.json(summary)))
         catch e
             put!(ch, ("failed", sprint(showerror, e)))
@@ -295,6 +367,25 @@ function _register_publish_routes!(router, h::Hub)
         ref = strip(String(get(b, "ref", "")))
         isempty(ref) && return HTTP.Response(400, "missing secret ref")
         _json(Dict("refs" => publish_secret_set!(ref, String(get(b, "value", "")))))
+    end)
+    # A published github-pages site's docs (with section/order) — for the manager's reorder view (global).
+    HTTP.register!(router, "GET", "/api/publish/site-docs", req -> begin
+        repo = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "repo", "")))
+        isempty(repo) && return HTTP.Response(400, "missing repo")
+        _json(Dict("repo" => repo, "docs" => published_site_docs(String(repo))))
+    end)
+    # Apply a new section/order to a site's docs and re-push just the manifest + index (global).
+    HTTP.register!(router, "POST", "/api/publish/site-reorder", req -> begin
+        b = _body(req)
+        repo = strip(String(get(b, "repo", "")))
+        ordering = get(b, "ordering", Any[])
+        isempty(repo) && return HTTP.Response(400, "missing repo")
+        try
+            r = reorder_published_site(String(repo), ordering)
+            _json(Dict("ok" => r.ok, "changed" => r.changed, "url" => r.url, "commit" => r.commit))
+        catch e
+            HTTP.Response(500, "Reorder failed: " * sprint(showerror, e))
+        end
     end)
     return router
 end

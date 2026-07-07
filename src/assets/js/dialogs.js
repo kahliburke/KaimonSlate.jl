@@ -161,8 +161,9 @@ async function exportSite() {
 // just this doc and preserves the others already in the site.
 function _slug(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
 async function publishSite() {
-  const repo = ((document.getElementById('siterepo') || {}).value || '').trim();
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter the target repo as owner/name.'); return; }
+  let repo = ((document.getElementById('siterepo') || {}).value || '').trim();
+  if (repo && !repo.includes('/') && _siteGhUser) repo = _siteGhUser + '/' + repo;   // bare name → under your account
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter a repo name (published under your account) or owner/name.'); return; }
   const isPrivate = ((document.getElementById('sitevis') || {}).value || 'public') === 'private';
   const create = !!(document.getElementById('sitecreate') || { checked: true }).checked;
   const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
@@ -358,8 +359,110 @@ function _exSyncRows() {
   document.querySelectorAll('#exportbg .exrow').forEach(el => { el.style.display = el.classList.contains('fmt-' + f) ? '' : 'none'; });
   if (f === 'pdf') _pdfSyncSlides();
 }
+// Two separate flows, deliberately: LIVE SITES (github/s3/r2/rsync/cloudflare/netlify) are a
+// re-pushable multiselect; ZENODO is a distinct "mint a permanent DOI version" action (immutable —
+// you can't edit/delete it), so it's split out with its own warning below.
+const _STATIC_KINDS = ['github-pages', 's3', 'r2', 'rsync', 'cloudflare-pages', 'netlify'];
+let _siteTargets = [], _siteGhUser = '';
+async function _loadSiteTargets() {
+  const host = document.getElementById('sitetargets'); if (!host) return;
+  try {
+    const v = await (await fetch('/api/publish/ledger', { cache: 'no-store' })).json();
+    _siteTargets = v.targets || []; _siteGhUser = v.ghUser || '';
+  } catch (e) { _siteTargets = []; _siteGhUser = ''; }
+  const remembered = (nbState && nbState.publishRepo) || localStorage.getItem('slate_siterepo') || '';
+  const statics = _siteTargets.filter(t => _STATIC_KINDS.indexOf(t.kind) >= 0);
+  host.innerHTML = statics.length ? statics.map(t => {
+    const dest = t.kind === 'github-pages' ? (t.config.repo || '') : (t.config.dest || t.config.url || '');
+    const pre = t.kind === 'github-pages' && (t.config.repo || '') === remembered;
+    return '<label class="pubpick"><input type="checkbox" class="sitetgt" value="' + _escHtml(t.name) + '"' + (pre ? ' checked' : '') + '/>' +
+      '<span class="publ">' + _escHtml(t.name) + '</span> <span class="pubdim">' + _escHtml(t.kind) + '</span>' +
+      ' <span class="pubdim" style="font-family:monospace;font-size:.76rem">' + _escHtml(dest) + '</span></label>';
+  }).join('') : '<div class="pubdim" style="font-size:.8rem">No live-site targets yet — check "New GitHub repo" below, or add targets in the Publishing manager (☰ → 🗂).</div>';
+  // Zenodo archive targets (separate, permanent)
+  const zhost = document.getElementById('sitezenodo');
+  if (zhost) {
+    const zt = _siteTargets.filter(t => t.kind === 'zenodo');
+    zhost.innerHTML = zt.length ? zt.map((t, i) =>
+      '<label class="pubpick"><input type="radio" name="zenodotgt" value="' + _escHtml(t.name) + '"' + (i === 0 ? ' checked' : '') + '/>' +
+      '<span class="publ">' + _escHtml(t.name) + '</span> <span class="pubdim">' + (t.config.sandbox ? 'sandbox' : 'zenodo') + '</span></label>').join('')
+      : '<div class="pubdim" style="font-size:.78rem">No Zenodo target — add one in the manager (with your token in Secrets) to mint a citable DOI.</div>';
+  }
+  const owner = document.getElementById('siterepo-owner'); if (owner) owner.textContent = _siteGhUser ? _siteGhUser + '/' : '';
+  const repoIn = document.getElementById('siterepo');
+  if (repoIn && !repoIn._wired) { repoIn._wired = true; repoIn.addEventListener('input', () => { const c = document.getElementById('sitenewrepo'); if (c) c.checked = !!repoIn.value.trim(); }); }
+}
+
+// Shared SSE runner for /api/{id}/publish-run — streams per-target progress into the dialog log.
+let _pubDone = false;
+function _streamPublish(names, buildOpts) {
+  const q = new URLSearchParams(Object.assign({ targets: names.join(',') }, buildOpts || {}));
+  const row = document.getElementById('sitepubrow'), log = document.getElementById('sitepublog');
+  const btn = document.getElementById('sitepublishbtn');
+  row.style.display = ''; log.innerHTML = ''; if (btn) btn.disabled = true; _pubDone = false;
+  try { row.scrollIntoView({ block: 'center' }); } catch (e) {}   // bring the log into view in the tall dialog
+  const line = (t, c) => { const d = document.createElement('div'); d.className = 'publogln ' + (c || ''); d.textContent = t; log.appendChild(d); log.scrollTop = log.scrollHeight; };
+  const es = new EventSource(_apipath('/api/publish-run') + '?' + q.toString());
+  es.addEventListener('status', e => line(e.data, 'st'));
+  es.addEventListener('log', e => line(e.data));
+  es.addEventListener('done', e => {
+    _pubDone = true; es.close(); if (btn) btn.disabled = false;
+    let d = {}; try { d = JSON.parse(e.data); } catch (_) {}
+    line(d.ok ? '✓ Done' : 'Finished with errors', d.ok ? 'ok' : 'err');
+    toast(d.ok ? 'Done' : 'Finished with errors', 4500, d.ok ? '' : 'warn');
+  });
+  es.addEventListener('failed', e => { _pubDone = true; es.close(); if (btn) btn.disabled = false; line('✗ ' + e.data, 'err'); });
+  es.onerror = () => { if (_pubDone) return; _pubDone = true; if (btn) btn.disabled = false; line('✗ connection lost', 'err'); try { es.close(); } catch (_) {} };
+}
+
+// LIVE SITES — fan out to every checked static host (+ an optional new GitHub repo). Re-pushable.
+async function publishTargets() {
+  const names = Array.from(document.querySelectorAll('.sitetgt:checked')).map(c => c.value);
+  if ((document.getElementById('sitenewrepo') || {}).checked) {
+    const raw = ((document.getElementById('siterepo') || {}).value || '').trim();
+    let repo = raw.includes('/') ? raw : (_siteGhUser ? _siteGhUser + '/' + raw : raw);
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter a repo name (published under your account) or owner/name.'); return; }
+    const tname = repo.split('/').pop();
+    try {
+      await fetch('/api/publish/target', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: tname, kind: 'github-pages', config: { repo: repo,
+          create: (document.getElementById('sitecreate') || {}).checked !== false,
+          private: ((document.getElementById('sitevis') || {}).value === 'private') } }) });
+      if (names.indexOf(tname) < 0) names.push(tname);
+    } catch (e) { await alertDark('Could not save the new GitHub target.'); return; }
+  }
+  if (!names.length) { await alertDark('Check at least one live-site destination (or add a New GitHub repo).'); return; }
+  if (!await confirmDark('Publish “' + ((nbState && nbState.title) || 'this notebook') + '” to:\n· ' + names.join('\n· '), 'Publish')) return;
+  const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim()) || _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
+  _streamPublish(names, {
+    slug: slug, siteTitle: ((document.getElementById('sitetitle') || {}).value || '').trim(),
+    theme: (document.getElementById('sitetheme') || {}).value || 'dark',
+    outputs: (document.getElementById('exoutputs') || {}).value || 'all',
+    source: (document.getElementById('sitesource') || {}).checked ? '1' : '0',
+    bundle: (document.getElementById('siterunnable') || {}).checked ? '1' : '0',
+    history: (document.getElementById('sitehistory') || {}).checked ? '1' : '0'
+  });
+}
+window.publishTargets = publishTargets;
+
+// ZENODO — deliberate, permanent: mint a citable DOI version (immutable; can't edit/delete).
+async function archiveZenodo() {
+  const sel = document.querySelector('input[name=zenodotgt]:checked');
+  if (!sel) { await alertDark('No Zenodo target configured. Add one in the Publishing manager (with your Zenodo token in Secrets).'); return; }
+  const name = sel.value;
+  if (!await confirmDark('Archive “' + ((nbState && nbState.title) || 'this notebook') +
+      '” to Zenodo (“' + name + '”).\n\nThis mints a PERMANENT, citable DOI version — you cannot edit or delete it afterward. ' +
+      'Do this at a milestone (a release, a paper), not for a small tweak.', 'Mint DOI', 'danger')) return;
+  _streamPublish([name], { history: (document.getElementById('sitehistory') || {}).checked ? '1' : '0' });
+}
+window.archiveZenodo = archiveZenodo;
+
+// Publish shortcut → the export dialog on its Website tab (publishing IS Export → Website).
+function openPublish() { openExport('website'); }
+window.openPublish = openPublish;
 function openExport(preset) {
-  const fmt = preset === 'slides' ? 'pdf' : (localStorage.getItem('slate_exfmt') || 'html');
+  let fmt = preset === 'slides' ? 'pdf' : preset === 'website' ? 'website' : (localStorage.getItem('slate_exfmt') || 'html');
+  if (preset !== 'website' && fmt === 'website') fmt = 'html';   // Website is Publish now, not an Export format
   document.getElementById('exfmt').value = fmt;
   ['pdftheme', 'pdflayout', 'pdfbody', 'pdfcode'].forEach(id => {
     const v = localStorage.getItem('slate_' + id); if (v != null) document.getElementById(id).value = v;
@@ -391,7 +494,15 @@ function openExport(preset) {
   const _sl = document.getElementById('sitelocal');
   if (_sl && !_sl._unexWired) { _sl._unexWired = true; _sl.addEventListener('input', () => { clearTimeout(_sl._unexT); _sl._unexT = setTimeout(refreshSiteDocs, 300); }); }
   refreshSiteDocs();
+  _loadSiteTargets();            // populate the "Publish to" dropdown from saved targets
   _exSyncRows();
+  // Publish mode (opened via ☁ Publish…): focus the dialog on the Website flow — retitle it and hide
+  // the format picker, so it reads as "put this online", clearly distinct from Export's format menu.
+  const _pub = preset === 'website';
+  document.getElementById('exhdr').textContent = _pub ? 'Publish' : 'Export';
+  document.getElementById('exsub').textContent = _pub ? '— publish this notebook to the web' : '— render or package this notebook';
+  document.getElementById('exfmtrow').style.display = _pub ? 'none' : '';
+  const _pr = document.getElementById('sitepubrow'); if (_pr) _pr.style.display = 'none';   // no empty log until a publish runs
   document.getElementById('exportbg').classList.add('show');
 }
 // `go`: false = cancel, true = primary export, 'copy' = Markdown-to-clipboard.

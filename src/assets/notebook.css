@@ -841,6 +841,10 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .chip.hosted { opacity:.7; }
 .modal-bg { position:fixed; inset:0; background:rgba(5,8,16,.66); display:none; align-items:center; justify-content:center; z-index:50; }
 .modal-bg.show { display:flex; }
+/* The shared confirm/alert (#modalbg, driven by dlg/confirmDark) is a modal-ON-modal — it must sit
+   above any base surface (settings/export/publishing all share .modal-bg z-index:50) and the loading
+   spinner (60) / palette (65), so a confirmation never hides behind the surface that opened it. */
+#modalbg { z-index: 90; }
 .modal { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:18px 20px; max-width:520px; width:90%;
          box-shadow:0 16px 48px rgba(0,0,0,.55); }
 .modal .msg { color:var(--text); font-size:.92rem; line-height:1.5; margin-bottom:16px; white-space:pre-wrap; word-break:break-word; }
@@ -882,6 +886,17 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
                           border-radius:6px; padding:4px 8px; font-size:.84rem; font-family:'Cascadia Code',monospace; }
 .setmodal input.settext:focus { outline:none; border-color:var(--accent); }
 .setmodal .sethint { display:block; color:var(--dim); font-size:.76rem; margin:-6px 0 4px; }
+/* Export/Publish dialog can get tall (many rows) — widen it, cap the height with a scroll, and pin the
+   action buttons to the bottom so they're always reachable and the progress log stays in view. */
+#exportbg .modal { max-width:720px; max-height:88vh; overflow-y:auto; }
+#exportbg .setrow { margin:11px 0; }
+#exportbg .row { position:sticky; bottom:-18px; background:var(--bg2); margin:8px -20px -18px; padding:12px 20px; border-top:1px solid var(--border); z-index:2; }
+/* Themed scrollbars for the publish/manager scroll areas (Firefox + WebKit), matching the dark UI. */
+#exportbg .modal, .publog, .pubmodal, .pubbody, .pubdash, .pdbody { scrollbar-width:thin; scrollbar-color:var(--border) transparent; }
+#exportbg .modal::-webkit-scrollbar, .publog::-webkit-scrollbar, .pubmodal::-webkit-scrollbar, .pubbody::-webkit-scrollbar, .pubdash::-webkit-scrollbar, .pdbody::-webkit-scrollbar { width:10px; height:10px; }
+#exportbg .modal::-webkit-scrollbar-track, .publog::-webkit-scrollbar-track, .pubmodal::-webkit-scrollbar-track, .pubbody::-webkit-scrollbar-track, .pubdash::-webkit-scrollbar-track, .pdbody::-webkit-scrollbar-track { background:transparent; }
+#exportbg .modal::-webkit-scrollbar-thumb, .publog::-webkit-scrollbar-thumb, .pubmodal::-webkit-scrollbar-thumb, .pubbody::-webkit-scrollbar-thumb, .pubdash::-webkit-scrollbar-thumb, .pdbody::-webkit-scrollbar-thumb { background:var(--border); border-radius:7px; border:2px solid transparent; background-clip:padding-box; }
+#exportbg .modal::-webkit-scrollbar-thumb:hover, .publog::-webkit-scrollbar-thumb:hover, .pubmodal::-webkit-scrollbar-thumb:hover, .pubbody::-webkit-scrollbar-thumb:hover, .pubdash::-webkit-scrollbar-thumb:hover, .pdbody::-webkit-scrollbar-thumb:hover { background:var(--accent); }
 /* Publishing manager — a wide two-column surface on the shared .modal-bg/.setmodal primitive */
 .pubmodal { max-width:none; width:min(1080px,94vw); max-height:88vh; display:flex; flex-direction:column; }
 .pubhead { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
@@ -915,6 +930,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .pubsite { margin:6px 0; }
 .pubpages { margin-left:14px; }
 .pubrow.pubsub2 { font-size:.8rem; margin:2px 0; }
+.pubpicks { display:flex; flex-direction:column; gap:4px; }
+.pubpick { display:flex; align-items:center; gap:8px; font-size:.85rem; color:var(--text); cursor:pointer; padding:6px 8px; border:1px solid transparent; border-radius:7px; }
+.pubpick:hover { border-color:var(--border); background:var(--bg3); }
+.pubpick input[type=radio] { accent-color:var(--accent); flex:0 0 auto; }
+.pubpick .pubinp { margin-left:auto; }
 /* Command palette (⌘K) */
 .palette-bg { position:fixed; inset:0; background:rgba(5,8,16,.5); display:none; justify-content:center; align-items:flex-start; z-index:65; }
 .palette-bg.show { display:flex; }

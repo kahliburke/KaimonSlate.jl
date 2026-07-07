@@ -805,6 +805,9 @@ function _upsert_doc!(manifest, entry)
         push!(docs, entry)
     else
         entry["date"] = get(docs[i], "date", entry["date"])     # keep first-published date on re-publish
+        for k in ("order", "section")                            # keep the manager-set position/section
+            haskey(docs[i], k) && (entry[k] = docs[i][k])
+        end
         docs[i] = entry
     end
     manifest["docs"] = docs
@@ -834,16 +837,24 @@ _doc_cards_css() = """
 # group are newest-first. No series anywhere ⇒ a single `"" => all` group ⇒ the plain flat grid.
 function _series_groups(docs)
     _date(d) = String(get(d, "date", ""))
+    _grp(d) = strip(String(get(d, "section", get(d, "series", ""))))   # manager-set section, else the config series
+    _ord(d) = (o = get(d, "order", nothing); o isa Number ? Float64(o) : Inf)   # explicit order, else "unset" (Inf)
     buckets = Dict{String,Vector{Any}}(); order = String[]
     for d in docs
         d isa AbstractDict || continue
-        s = strip(String(get(d, "series", "")))
+        s = _grp(d)
         haskey(buckets, s) || push!(order, s)
         push!(get!(buckets, s, Any[]), d)
     end
-    for v in values(buckets); sort!(v; by = _date, rev = true); end
-    labels = sort(String[s for s in order if !isempty(s)];
-                  by = s -> maximum(_date, buckets[s]; init = ""), rev = true)
+    # within a section: explicit `order` ascending, ties fall back to date (newest first)
+    for v in values(buckets)
+        sort!(v; by = _date, rev = true)
+        sort!(v; by = _ord, alg = Base.Sort.MergeSort)   # stable → same-order docs keep date-desc
+    end
+    # sections: by lowest `order` in the section, ties fall back to newest doc
+    labels = String[s for s in order if !isempty(s)]
+    sort!(labels; by = s -> maximum(_date, buckets[s]; init = ""), rev = true)
+    sort!(labels; by = s -> minimum(_ord, buckets[s]; init = Inf), alg = Base.Sort.MergeSort)
     groups = Pair{String,Vector{Any}}[]
     haskey(buckets, "") && push!(groups, "" => buckets[""])
     for s in labels; push!(groups, s => buckets[s]); end
@@ -914,13 +925,17 @@ function _cards_refresh_script()
           return h+'</div></div></a>';
         };
         var grid=function(list){return '<div class="slate-cards">'+list.map(card).join('')+'</div>';};
-        // Bucket by series, mirroring _series_groups: ungrouped ('') first, then series by newest doc desc.
+        // Bucket by section (else series), mirroring _series_groups: ungrouped ('') first, then sections
+        // by lowest order (ties: newest doc). Within a section: explicit order asc, ties by date desc.
+        var grp=function(d){return ((d.section!=null?d.section:(d.series||''))+'').trim();};
+        var ord=function(d){return (typeof d.order==='number')?d.order:Infinity;};
         var buckets={},order=[];
-        ds.forEach(function(d){var s=((d.series||'')+'').trim();if(!buckets[s]){buckets[s]=[];order.push(s);}buckets[s].push(d);});
-        var byDate=function(a,b){return String(b.date||'').localeCompare(String(a.date||''));};
+        ds.forEach(function(d){var s=grp(d);if(!buckets[s]){buckets[s]=[];order.push(s);}buckets[s].push(d);});
+        var byDateDesc=function(a,b){return String(b.date||'').localeCompare(String(a.date||''));};
+        Object.keys(buckets).forEach(function(s){buckets[s].sort(function(a,b){var oa=ord(a),ob=ord(b);return oa!==ob?oa-ob:byDateDesc(a,b);});});
+        var minOrd=function(s){return buckets[s].reduce(function(x,d){return Math.min(x,ord(d));},Infinity);};
         var newest=function(s){return buckets[s].reduce(function(x,d){var v=String(d.date||'');return v>x?v:x;},'');};
-        Object.keys(buckets).forEach(function(s){buckets[s].sort(byDate);});
-        var labels=order.filter(function(s){return s;}).sort(function(a,b){return newest(b).localeCompare(newest(a));});
+        var labels=order.filter(function(s){return s;}).sort(function(a,b){var ma=minOrd(a),mb=minOrd(b);return ma!==mb?ma-mb:newest(b).localeCompare(newest(a));});
         var h=buckets['']?grid(buckets['']):'';
         labels.forEach(function(s){h+='<h2 class="series-hd">'+esc(s)+'</h2>'+grid(buckets[s]);});
         root.innerHTML=h;
@@ -1152,6 +1167,69 @@ function unexport_from_site(name::AbstractString, slug::AbstractString)
     write(joinpath(dir, "index.html"),
           isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
     return (; removed, docCount = length(docs))
+end
+
+# The docs on `repo`'s published site (manifest entries incl. section/order) — for the manager's
+# reorder view. `[]` when unpublished/unreachable.
+function published_site_docs(repo::AbstractString)
+    gh = Sys.which("gh"); gh === nothing && return Any[]
+    apipath = "repos/$repo/contents/$_SITE_MANIFEST?ref=gh-pages"
+    accept = "Accept: application/vnd.github.raw"
+    raw = try; read(pipeline(`$gh api $apipath -H $accept`; stderr = devnull), String); catch; return Any[]; end
+    m = try; JSON.parse(raw); catch; return Any[]; end
+    return Any[Dict{String,Any}("slug" => String(get(d, "slug", "")),
+                                "title" => String(get(d, "title", get(d, "slug", ""))),
+                                "date" => String(get(d, "date", "")),
+                                "section" => String(get(d, "section", get(d, "series", ""))),
+                                "order" => get(d, "order", nothing))
+               for d in get(m, "docs", Any[]) if d isa AbstractDict]
+end
+
+"""
+    reorder_published_site(repo, ordering) -> (; ok, changed, url, commit)
+
+Apply a new `section`/`order` to `repo`'s published-site docs and re-push ONLY the manifest + regenerated
+index to `gh-pages` (no doc rebuild). `ordering` is an iterable of dicts `{slug, section, order}`.
+"""
+function reorder_published_site(repo::AbstractString, ordering)
+    gh = Sys.which("gh"); gh === nothing && error("`gh` CLI not found")
+    occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be owner/name")
+    token = strip(read(`$gh auth token`, String)); isempty(token) && error("`gh auth token` empty — run `gh auth login`")
+    pushurl = "https://x-access-token:$token@github.com/$repo.git"
+    owner, name = split(repo, "/")
+    work = mktempdir(); dir = joinpath(work, "site")
+    try
+        _git_run(work, `git clone --depth 1 --branch gh-pages --single-branch $pushurl site`)[1] ||
+            error("couldn't clone $repo gh-pages — is the site published?")
+        manifest = _read_site_manifest(dir)
+        docs = get(manifest, "docs", Any[])
+        omap = Dict{String,Any}(String(get(o, "slug", "")) => o for o in ordering)
+        for d in docs
+            d isa AbstractDict || continue
+            o = get(omap, String(get(d, "slug", "")), nothing); o === nothing && continue
+            d["section"] = String(get(o, "section", ""))
+            ordv = get(o, "order", nothing)
+            ordv === nothing || (d["order"] = Float64(ordv))
+        end
+        manifest["docs"] = docs
+        write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
+        htmpl = joinpath(dir, ".slate-home.html")
+        write(joinpath(dir, "index.html"),
+              isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+        _git_run(dir, `git add -A`)
+        okc, logc = _git_run(dir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Reorder site"`)
+        if !okc
+            (occursin("nothing to commit", logc) || occursin("working tree clean", logc)) &&
+                return (; ok = true, changed = false, url = "https://$owner.github.io/$name/", commit = "")
+            error("commit failed: $logc")
+        end
+        sha = strip(_git_run(dir, `git rev-parse HEAD`)[2])
+        ok, log = _git_run(dir, `git push $pushurl gh-pages`)
+        ok || error("push failed: $(replace(log, token => "***"))")
+        return (; ok = true, changed = true, url = "https://$owner.github.io/$name/", commit = sha)
+    finally
+        rm(work; recursive = true, force = true)
+    end
 end
 
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.

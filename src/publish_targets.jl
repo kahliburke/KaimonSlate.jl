@@ -118,16 +118,100 @@ function preflight(t::GenericUploadTarget)
 end
 
 # ── shared process runner ────────────────────────────────────────────────────────────────────────
-# Run `cmd`, merging stdout+stderr; returns (ok, output). Never throws.
-function _run_capture(cmd::Cmd)
+# Run `cmd`, merging stdout+stderr; returns (ok, output). `env` adds vars to the child environment
+# (for CLI tokens). Never throws.
+function _run_capture(cmd::Cmd; env = nothing)
     buf = IOBuffer()
+    c = env === nothing ? cmd : addenv(cmd, env)
     ok = try
-        run(pipeline(cmd; stdout = buf, stderr = buf))
+        run(pipeline(c; stdout = buf, stderr = buf))
         true
     catch
         false
     end
     return (ok, String(take!(buf)))
+end
+
+# ── Cloudflare Pages / Netlify — one-token static-host deploys via their CLIs ────────────────────────
+# Both build the site dir, then run the platform's CLI with a token pulled from the (injected) child
+# environment. Cloudflare Pages: unlimited-bandwidth free tier. Netlify: 100GB/mo hard cap. Falls back
+# to `npx <cli>` when the CLI isn't installed globally.
+
+"Deploy to a Cloudflare Pages project via `wrangler pages deploy` (token = CLOUDFLARE_API_TOKEN)."
+struct CloudflarePagesTarget <: PublishTarget
+    name::String
+    project::String        # Cloudflare Pages project name
+    account_id::String     # CLOUDFLARE_ACCOUNT_ID
+    token::String          # CLOUDFLARE_API_TOKEN (secret, injected — never stored on the ledger)
+    url::String
+    branch::String         # "" = wrangler's default (production)
+end
+
+CloudflarePagesTarget(; name = "cloudflare-pages", project, account_id = "", token = "", url = "", branch = "") =
+    CloudflarePagesTarget(String(name), String(project), String(account_id), String(token),
+                          isempty(url) ? "https://$(project).pages.dev/" : String(url), String(branch))
+
+function publish(t::CloudflarePagesTarget, nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
+    dir = mktempdir()
+    try
+        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug, bundle = bundle, kwargs...)
+        wr = Sys.which("wrangler")
+        cmd = wr === nothing ? `npx --yes wrangler pages deploy $dir --project-name $(t.project)` :
+                               `$wr pages deploy $dir --project-name $(t.project)`
+        isempty(t.branch) || (cmd = `$cmd --branch $(t.branch)`)
+        env = Dict{String,String}()
+        isempty(t.token) || (env["CLOUDFLARE_API_TOKEN"] = t.token)
+        isempty(t.account_id) || (env["CLOUDFLARE_ACCOUNT_ID"] = t.account_id)
+        ok, log = _run_capture(cmd; env = env)
+        return PublishResult(; ok = ok, url = t.url, log = log)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+function preflight(t::CloudflarePagesTarget)
+    warnings = String[]
+    (Sys.which("wrangler") === nothing && Sys.which("npx") === nothing) &&
+        push!(warnings, "neither `wrangler` nor `npx` found on PATH (install Wrangler)")
+    isempty(strip(t.project)) && push!(warnings, "no Cloudflare Pages project name")
+    isempty(strip(t.token)) && push!(warnings, "no CLOUDFLARE_API_TOKEN (set the target's secretRef)")
+    return (; ok = isempty(warnings), warnings = warnings)
+end
+
+"Deploy to a Netlify site via `netlify deploy --prod` (token = NETLIFY_AUTH_TOKEN)."
+struct NetlifyTarget <: PublishTarget
+    name::String
+    site_id::String        # NETLIFY_SITE_ID
+    token::String          # NETLIFY_AUTH_TOKEN (secret, injected)
+    url::String
+end
+
+NetlifyTarget(; name = "netlify", site_id, token = "", url = "") =
+    NetlifyTarget(String(name), String(site_id), String(token), String(url))
+
+function publish(t::NetlifyTarget, nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
+    dir = mktempdir()
+    try
+        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug, bundle = bundle, kwargs...)
+        nl = Sys.which("netlify")
+        cmd = nl === nothing ? `npx --yes netlify-cli deploy --prod --dir $dir` : `$nl deploy --prod --dir $dir`
+        env = Dict{String,String}()
+        isempty(t.token) || (env["NETLIFY_AUTH_TOKEN"] = t.token)
+        isempty(t.site_id) || (env["NETLIFY_SITE_ID"] = t.site_id)
+        ok, log = _run_capture(cmd; env = env)
+        return PublishResult(; ok = ok, url = t.url, log = log)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+function preflight(t::NetlifyTarget)
+    warnings = String[]
+    (Sys.which("netlify") === nothing && Sys.which("npx") === nothing) &&
+        push!(warnings, "neither `netlify` nor `npx` found on PATH (install the Netlify CLI)")
+    isempty(strip(t.site_id)) && push!(warnings, "no Netlify site id")
+    isempty(strip(t.token)) && push!(warnings, "no NETLIFY_AUTH_TOKEN (set the target's secretRef)")
+    return (; ok = isempty(warnings), warnings = warnings)
 end
 
 # ── multi-target fan-out ───────────────────────────────────────────────────────────────────────────
@@ -181,6 +265,12 @@ function target_from_ledger(t; secrets = Dict{String,String}())
         kind = t.kind == "rsync" ? :rsync : :s3
         return GenericUploadTarget(; name = t.name, kind = kind, dest = _s("dest"), url = _s("url"),
                                    endpoint = _s("endpoint"), delete = get(cfg, "delete", true) !== false)
+    elseif t.kind == "cloudflare-pages"
+        return CloudflarePagesTarget(; name = t.name, project = _s("project"), account_id = _s("accountId"),
+                                     token = _secret(secrets, _s("secretRef")), url = _s("url"), branch = _s("branch"))
+    elseif t.kind == "netlify"
+        return NetlifyTarget(; name = t.name, site_id = _s("siteId"),
+                             token = _secret(secrets, _s("secretRef")), url = _s("url"))
     elseif t.kind == "zenodo"
         token = _secret(secrets, _s("secretRef"))
         return ZenodoTarget(; name = t.name,
