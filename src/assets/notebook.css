@@ -882,6 +882,39 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
                           border-radius:6px; padding:4px 8px; font-size:.84rem; font-family:'Cascadia Code',monospace; }
 .setmodal input.settext:focus { outline:none; border-color:var(--accent); }
 .setmodal .sethint { display:block; color:var(--dim); font-size:.76rem; margin:-6px 0 4px; }
+/* Publishing manager — a wide two-column surface on the shared .modal-bg/.setmodal primitive */
+.pubmodal { max-width:none; width:min(1080px,94vw); max-height:88vh; display:flex; flex-direction:column; }
+.pubhead { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+.pubhead strong { font-size:1rem; }
+.pubhead .pubsub { color:var(--dim); font-size:.78rem; font-weight:400; }
+.pubhead .pubx { margin-left:auto; background:transparent; border:none; color:var(--dim); font-size:1rem; cursor:pointer; padding:2px 8px; }
+.pubhead .pubx:hover { color:var(--accent); }
+.pubbody { display:flex; gap:26px; overflow:auto; flex:1; }
+.pubbody .pubcol { flex:1; min-width:0; }
+.pubmodal .setsec { margin-top:16px; }
+.pubrow { display:flex; align-items:center; gap:8px; margin:5px 0; font-size:.84rem; color:var(--text); flex-wrap:wrap; }
+.pubrow .publ { font-weight:600; }
+.pubdim { color:var(--dim); font-size:.78rem; }
+.pubcfg { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:40%; }
+.pubchip { font-size:.68rem; padding:1px 7px; border-radius:10px; border:1px solid var(--border); color:var(--dim); }
+.pubchip.ok { color:var(--accent); border-color:var(--accent); }
+.pubchip.err { color:var(--red); border-color:#3a2030; }
+.publink { color:var(--accent); font-size:.78rem; text-decoration:none; }
+.publink:hover { text-decoration:underline; }
+.pubtags { display:flex; flex-direction:column; gap:4px; }
+.pubtag { display:inline-flex; align-items:center; gap:6px; font-size:.82rem; color:var(--text); cursor:pointer; }
+.pubmini { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:3px 10px; cursor:pointer; font-size:.76rem; margin-left:auto; }
+.pubmini:hover { border-color:var(--accent); color:var(--accent); }
+.pubmini.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; margin-left:0; }
+.pubform { display:flex; flex-direction:column; gap:6px; margin:8px 0 4px; padding:10px; border:1px dashed var(--border); border-radius:8px; }
+.pubinp { background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 9px; font-size:.82rem; }
+.pubinp:focus { outline:none; border-color:var(--accent); }
+.publog { display:block; margin:10px 0; padding:8px 10px; background:var(--bg); border:1px solid var(--border); border-radius:8px; max-height:180px; overflow:auto; font-family:ui-monospace,monospace; font-size:.76rem; }
+.publogln { white-space:pre-wrap; line-height:1.45; color:var(--dim); }
+.publogln.st { color:var(--text); } .publogln.ok { color:var(--accent); } .publogln.err { color:var(--red); }
+.pubsite { margin:6px 0; }
+.pubpages { margin-left:14px; }
+.pubrow.pubsub2 { font-size:.8rem; margin:2px 0; }
 /* Command palette (⌘K) */
 .palette-bg { position:fixed; inset:0; background:rgba(5,8,16,.5); display:none; justify-content:center; align-items:flex-start; z-index:65; }
 .palette-bg.show { display:flex; }

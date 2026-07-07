@@ -64,6 +64,7 @@
       <button onclick="openPalette();closeTopMenu()">⌘K Command palette</button>
       <hr>
       <button onclick="openExport();closeTopMenu()">⬆ Export…</button>
+      <button onclick="openPublishing();closeTopMenu()">☁ Publishing…</button>
       <hr>
       <button onclick="resetAll();closeTopMenu()">↻ Rebuild (fresh namespace)</button>
       <button onclick="restartWorker();closeTopMenu()">⟲ Restart worker</button>
@@ -208,6 +209,31 @@
   <div class="setrow sethint" id="setmodelhint" style="display:none"><span></span>↻ restarts the agent on your next message (chat history kept).</div>
   <div class="setrow sethint"><span></span>Per-notebook settings (threads, parallel, slides, agent-model override…) live in <strong>☰ → 🎚 Notebook config</strong>.</div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
+</div></div>
+<div class="modal-bg" id="pubbg"><div class="modal setmodal pubmodal">
+  <div class="pubhead"><strong>Publishing</strong><span class="pubsub" id="pubbackend"></span>
+    <button class="pubx" onclick="closePublishing()" title="Close">✕</button></div>
+  <div class="pubbody">
+    <div class="pubcol">
+      <div class="setsec">This document</div>
+      <div id="pubdoc"></div>
+      <div class="setsec">Publish to</div>
+      <div id="pubdoctargets" class="pubtags"></div>
+      <div class="pubrow" style="margin-top:12px"><button class="primary" id="pubrunbtn" onclick="runPublish()">☁ Publish</button></div>
+      <div id="pubprogress" class="publog" style="display:none"></div>
+      <div class="setsec">History</div>
+      <div id="pubhistory"></div>
+    </div>
+    <div class="pubcol">
+      <div class="setsec">Targets</div>
+      <div id="pubtargets"></div>
+      <div class="setsec">Secrets</div>
+      <div id="pubsecrets"></div>
+      <div class="setsec">Local sites</div>
+      <div id="pubsites"></div>
+    </div>
+  </div>
+  <div class="row"><button class="primary" onclick="closePublishing()">Done</button></div>
 </div></div>
 <div class="modal-bg" id="exportbg"><div class="modal setmodal">
   <div class="msg"><strong>Export</strong> <span style="color:var(--dim);font-weight:400">— render or package this notebook</span></div>
@@ -354,6 +380,7 @@
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/keyboard.js"></script>
 <script src="/assets/js/settings.js"></script>
+<script src="/assets/js/publishing.js"></script>
 <script src="/assets/js/palette.js"></script>
 <script src="/assets/js/outputs.js"></script>
 <script src="/assets/js/agent.js"></script>

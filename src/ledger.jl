@@ -171,6 +171,30 @@ end
 merge_ledgers(a::Ledger, b::Ledger) = merge!(_copy(a), b)
 _copy(l::Ledger) = from_dict(to_dict(l))
 
+"""
+    _reconcile_for_save(remote, mine) -> mine
+
+The reconciliation a store applies before persisting `mine` over `remote`. `mine` is **authoritative
+for structure** — which documents/targets/sites exist and their config — so edits *and deletes* stick
+(the ledger is effectively single-writer for config; fine for a local-first workflow). But we still
+**rescue events** the backend has that `mine` is missing, for documents that survive in `mine`, so a
+concurrent machine's publish history is never lost. Callers must therefore load→mutate→save, not save
+a partially-built ledger. Mutates and returns `mine`.
+"""
+function _reconcile_for_save(remote::Ledger, mine::Ledger)
+    for (id, mdoc) in mine.documents
+        rdoc = get(remote.documents, id, nothing)
+        rdoc === nothing && continue
+        seen = Set(e.id for e in mdoc.events)
+        for e in rdoc.events
+            e.id in seen || push!(mdoc.events, e)
+        end
+        sort!(mdoc.events; by = e -> e.ts)
+    end
+    mine.version = max(mine.version, remote.version)
+    return mine
+end
+
 # ── JSON (de)serialisation ───────────────────────────────────────────────────────────────────────
 _event_to_dict(e::Event) = Dict{String,Any}("id" => e.id, "ts" => e.ts, "target" => e.target,
     "status" => e.status, "url" => e.url, "doi" => e.doi, "commit" => e.commit,
@@ -269,9 +293,9 @@ end
 
 function save(s::LocalStore, ledger::Ledger)
     mkpath(dirname(s.path))
-    # load-merge-save: fold OUR ledger into whatever's on disk so a concurrent writer's events survive
-    # (last-writer wins for config, union for events — see `merge!`).
-    merged = isfile(s.path) ? merge!(load(s), ledger) : ledger
+    # load→reconcile→save: our ledger is authoritative for structure (edits/deletes stick) while any
+    # events already on disk are rescued into surviving docs (see `_reconcile_for_save`).
+    merged = isfile(s.path) ? _reconcile_for_save(load(s), ledger) : ledger
     _atomic_write(s.path, to_json(merged))
     return merged
 end
@@ -284,6 +308,208 @@ function _atomic_write(path::AbstractString, content::AbstractString)
     write(tmp, content)
     mv(tmp, path; force = true)
     return path
+end
+
+# ── gist backend (self-locating, off-disk backup) ───────────────────────────────────────────────
+# The DEFAULT backend when `gh` is authed: a free, unlisted **secret** gist, git-versioned for free,
+# reusing the user's existing `gh` auth. The KEY property is **self-location** — the ledger's location
+# is re-discoverable from the user's GitHub identity + a fixed marker, never only from local disk:
+#
+#   description = `kaimonslate-publish-ledger`,  filename = `kaimonslate-ledger.json`
+#
+# Local disk only *caches* the resolved gist id (in the config home); if that cache is gone (a fresh
+# machine) we `gist list` and match the marker to re-cache it — **list-first, create only if no
+# match**, so two machines never fork the ledger. Caveat baked into the design: an unlisted gist is
+# not ACL-private, which is why the ledger carries NO secrets (that invariant is load-bearing here).
+
+const GIST_MARKER = "kaimonslate-publish-ledger"
+const GIST_FILENAME = "kaimonslate-ledger.json"
+
+"""
+    GistClient
+
+The GitHub-gist operations `GistStore` needs, as an interface so tests can inject an in-memory fake.
+Implement `gist_list`, `gist_read`, `gist_create`, `gist_update` for a concrete client. Ships `GhCli`
+(shells out to `gh api` for deterministic JSON I/O).
+"""
+abstract type GistClient end
+
+"Real client — drives GitHub via the authenticated `gh` CLI's `api` subcommand."
+struct GhCli <: GistClient
+    gh::String
+end
+GhCli() = GhCli(something(Sys.which("gh"), "gh"))
+
+"Is a `gh` binary on PATH at all?"
+gh_available() = Sys.which("gh") !== nothing
+
+"Is `gh` present AND authenticated (so the gist backend can actually reach GitHub)?"
+function gh_authed()
+    gh = Sys.which("gh")
+    gh === nothing && return false
+    return success(pipeline(`$gh auth status`; stdout = devnull, stderr = devnull))
+end
+
+# Run `gh <args…>`, optionally feeding `stdin_str`; returns (stdout::String, ok::Bool). Never throws.
+function _gh(c::GhCli, args::Vector{String}; stdin_str::Union{Nothing,AbstractString} = nothing)
+    out = IOBuffer()
+    cmd = `$(c.gh) $args`
+    try
+        if stdin_str === nothing
+            run(pipeline(cmd; stdout = out, stderr = devnull))
+        else
+            run(pipeline(cmd; stdin = IOBuffer(String(stdin_str)), stdout = out, stderr = devnull))
+        end
+        return (String(take!(out)), true)
+    catch
+        return (String(take!(out)), false)
+    end
+end
+
+# Build the PATCH/POST body GitHub's gists API expects: {description?, public?, files: {name: {content}}}.
+function _gist_body(filename::AbstractString, content::AbstractString; desc = nothing, public = nothing)
+    files = Dict{String,Any}(String(filename) => Dict("content" => String(content)))
+    body = Dict{String,Any}("files" => files)
+    desc === nothing || (body["description"] = String(desc))
+    public === nothing || (body["public"] = public)
+    return JSON.json(body)
+end
+
+"List the caller's gists as `(id, description)` — up to 100 (enough to find our single marker gist)."
+function gist_list(c::GhCli)
+    out, ok = _gh(c, ["api", "/gists?per_page=100"])
+    ok || error("PublishLedger: `gh api /gists` failed — is `gh` authenticated? (`gh auth login`)")
+    arr = JSON.parse(out)
+    return Tuple{String,String}[(String(g["id"]), String(something(get(g, "description", ""), ""))) for g in arr]
+end
+
+"Read `filename` out of gist `id`; `nothing` if the gist or file is gone."
+function gist_read(c::GhCli, id::AbstractString, filename::AbstractString)
+    out, ok = _gh(c, ["api", "/gists/$id"])
+    ok || return nothing
+    files = get(JSON.parse(out), "files", Dict())
+    haskey(files, filename) || return nothing
+    return String(get(files[filename], "content", ""))
+end
+
+"Create a secret gist carrying the marker `desc`; returns the new gist id."
+function gist_create(c::GhCli, desc::AbstractString, filename::AbstractString, content::AbstractString)
+    body = _gist_body(filename, content; desc = desc, public = false)
+    out, ok = _gh(c, ["api", "-X", "POST", "/gists", "--input", "-"]; stdin_str = body)
+    ok || error("PublishLedger: gist create failed")
+    return String(JSON.parse(out)["id"])
+end
+
+"Overwrite `filename` in gist `id`."
+function gist_update(c::GhCli, id::AbstractString, filename::AbstractString, content::AbstractString)
+    _, ok = _gh(c, ["api", "-X", "PATCH", "/gists/$id", "--input", "-"];
+                stdin_str = _gist_body(filename, content))
+    ok || error("PublishLedger: gist update failed")
+    return nothing
+end
+
+"""
+    GistStore(; client=GhCli(), marker=GIST_MARKER, filename=GIST_FILENAME,
+                pointer_file=<config_home>/ledger-pointer.json)
+
+Self-locating gist backend. `pointer_file` caches the resolved gist id; it is *only* a cache — the
+real pointer is the GitHub identity + `marker` convention, so a lost cache self-repairs via
+[`locate`](@ref). `save` does create-on-first-write then fetch-before-write union merge thereafter.
+"""
+mutable struct GistStore <: LedgerStore
+    client::GistClient
+    marker::String
+    filename::String
+    pointer_file::String
+    id::Union{String,Nothing}    # resolved gist id, cached in-process
+end
+
+GistStore(; client::GistClient = GhCli(), marker::AbstractString = GIST_MARKER,
+          filename::AbstractString = GIST_FILENAME,
+          pointer_file::AbstractString = joinpath(SlateHome.config_home(), "ledger-pointer.json")) =
+    GistStore(client, String(marker), String(filename), String(pointer_file), nothing)
+
+function _read_pointer(s::GistStore)
+    isfile(s.pointer_file) || return nothing
+    try
+        id = get(JSON.parse(read(s.pointer_file, String)), "gist", nothing)
+        return id === nothing ? nothing : String(id)
+    catch
+        return nothing
+    end
+end
+
+function _write_pointer(s::GistStore, id::AbstractString)
+    mkpath(dirname(s.pointer_file))
+    _atomic_write(s.pointer_file, JSON.json(Dict("gist" => String(id)), 2))
+    return nothing
+end
+
+"""
+    locate(s::GistStore) -> Union{String,Nothing}
+
+Resolve (and cache) the ledger gist id via the self-location flow: in-process cache → pointer file →
+`gist list` matched on the marker (re-caching on a hit). Returns `nothing` only when no marker gist
+exists yet (the create-on-first-write case). List-first here is what stops two machines forking.
+"""
+function locate(s::GistStore)
+    s.id === nothing || return s.id
+    cached = _read_pointer(s)
+    if cached !== nothing
+        s.id = cached
+        return cached
+    end
+    for (id, desc) in gist_list(s.client)
+        if desc == s.marker
+            s.id = id
+            _write_pointer(s, id)
+            return id
+        end
+    end
+    return nothing
+end
+
+function load(s::GistStore)::Ledger
+    id = locate(s)
+    id === nothing && return Ledger()
+    content = gist_read(s.client, id, s.filename)
+    (content === nothing || isempty(strip(content))) && return Ledger()
+    try
+        return from_json(content)
+    catch e
+        @warn "PublishLedger: could not parse gist ledger; starting empty" gist = id exception = e
+        return Ledger()
+    end
+end
+
+function save(s::GistStore, ledger::Ledger)
+    id = locate(s)
+    if id === nothing
+        # First write ever: `locate` already list-matched (no marker gist), so creating one is safe.
+        newid = gist_create(s.client, s.marker, s.filename, to_json(ledger))
+        s.id = newid
+        _write_pointer(s, newid)
+        return ledger
+    end
+    # fetch-before-write: reconcile against the current remote (our structure wins; rescue remote events).
+    merged = _reconcile_for_save(load(s), ledger)
+    gist_update(s.client, id, s.filename, to_json(merged))
+    return merged
+end
+
+# ── Store selection ──────────────────────────────────────────────────────────────────────────────
+"""
+    default_store() -> LedgerStore
+
+The backend to use when nothing is explicitly configured. `KAIMONSLATE_LEDGER_BACKEND=local|gist`
+forces one; otherwise `GistStore` when `gh` is authenticated (off-disk, self-locating, free version
+history), else `LocalStore` (local-only fallback — the UI should nudge the user to configure a backup).
+"""
+function default_store()
+    b = lowercase(strip(get(ENV, "KAIMONSLATE_LEDGER_BACKEND", "")))
+    b == "local" && return LocalStore()
+    b == "gist" && return GistStore()
+    return gh_authed() ? GistStore() : LocalStore()
 end
 
 end # module PublishLedger

@@ -99,6 +99,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div><h1>Kaimon Slate</h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
 </div>
 <div id="localsites" class="sitesband"></div>
+<div id="published" class="sitesband"></div>
 <div class="cols">
 <div class="colL">
   <div class="open">
@@ -334,12 +335,28 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       }).join('')+'</div>' : '';
     }).catch(function(){});
   }
-  loadSessions(); loadLocalSites();
+  // Published documents (the publish ledger): what's been published where, with live URLs / DOIs.
+  // Read-only here — configure + publish from a notebook's ☁ Publishing manager.
+  function pubLatest(d){ var e=(d.events&&d.events[0])||null; return e||{}; }   // events are newest-first
+  function loadPublished(){
+    return fetch('/api/publish/ledger').then(function(r){return r.json();}).then(function(v){
+      var box=document.getElementById('published'); if(!box) return;
+      var docs=(v&&v.documents)||[];
+      docs=docs.filter(function(d){return d.events&&d.events.length;});
+      box.innerHTML = docs.length ? '<h2 class="sect">Published</h2><div class="sitecards">'+docs.map(function(d){
+        var e=pubLatest(d); var url=e.url||''; var doi=e.doi||'';
+        var href=url||(doi?('https://doi.org/'+doi):'#');
+        return '<a class="sitecard" href="'+esc(href)+'" target="_blank" rel="noopener"><span class="si">'+(doi?'📄':'🌐')+'</span>'+
+          '<span class="sn">'+esc(d.title||d.slug)+'</span><span class="su">'+esc(doi?('DOI '+doi):url)+'</span></a>';
+      }).join('')+'</div>' : '';
+    }).catch(function(){});
+  }
+  loadSessions(); loadLocalSites(); loadPublished();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
   // from other tabs, agents, or MCP tools), and refresh immediately when the tab regains focus.
-  setInterval(function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); } }, 4000);
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); } });
-  window.addEventListener('pageshow',function(){ loadSessions(); loadLocalSites(); });   // back/forward cache restore
+  setInterval(function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); } }, 4000);   // not loadPublished — its ledger read can hit the network (gist)
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); loadPublished(); } });
+  window.addEventListener('pageshow',function(){ loadSessions(); loadLocalSites(); loadPublished(); });   // back/forward cache restore
   // Prefill the last directory we opened from (but DON'T open the completion
   // dropdown on load — it would cover the open-sessions list; it opens when the
   // user types or Tabs).

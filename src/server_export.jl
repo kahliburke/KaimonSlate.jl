@@ -1338,7 +1338,7 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
             if occursin("nothing to commit", logc) || occursin("working tree clean", logc)
                 _cmd_out(`$gh workflow run $(basename(_PAGES_WF_FILE)) --repo $repo --ref gh-pages`)
                 return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
-                        slug = home ? "" : slg, home, created,
+                        slug = home ? "" : slg, home, created, commit = "",
                         pagesEnabled = pok, pagesError = pok ? "" : strip(replace(plog, r"\s+" => " ")),
                         deployStatus = "unchanged", docCount = built.docCount)
             end
@@ -1360,7 +1360,7 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
             dep.done ? "GitHub Pages deploy failed (workflow: $(dep.conclusion))" * (isempty(dep.url) ? "" : " — see $(dep.url)") :
             "GitHub Pages deploy still $(dep.conclusion) after $(round(Int, 120))s — the live site may lag; check the repo's Actions tab."
         return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
-                slug = home ? "" : slg, home,
+                slug = home ? "" : slg, home, commit = sha,
                 created, pagesEnabled, pagesError, deployStatus = dep.conclusion, docCount = built.docCount)
     finally
         rm(work; recursive = true, force = true)

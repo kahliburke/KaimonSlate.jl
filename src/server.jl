@@ -18,6 +18,7 @@ import Pkg
 using ..ReportEngine
 using ..ReportRender
 import ..SlateHome
+import ..PublishLedger
 
 include("history.jl")   # module SlateHistory — durable content-addressed time machine
 include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the parallel dataflow scheduler
@@ -715,7 +716,10 @@ include("server_snapshots.jl")
 include("slate_api.jl")        # Slate notebook-API registry (SSOT for the api tool, search, prompt)
 include("echarts_docs.jl")     # curated ECharts option reference, mapped to the DSL, indexed for search
 include("server_export.jl")
+include("publish_targets.jl")  # PublishTarget adapters (github-pages, generic-upload) + multi-target fan-out
+include("publish_zenodo.jl")   # Zenodo archival target — versioned citable DOI
 include("server_hub.jl")
+include("server_publish.jl")   # Publishing manager service layer (ledger view, targets, secrets, SSE publish)
 include("server_complete.jl")
 
 # ── Standalone convenience (one notebook) ─────────────────────────────────────

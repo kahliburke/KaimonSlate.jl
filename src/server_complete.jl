@@ -915,10 +915,13 @@ function _make_router(h::Hub)
         hash = String(get(_body(req), "hash", ""))
         restore_history!(nb, hash) ? _json(state_json(nb)) : HTTP.Response(404, "no such snapshot")
     end))
+    # Publishing manager: ledger view, target/secret config, per-notebook doc info (see server_publish.jl).
+    _register_publish_routes!(router, h)
     return router
 end
 
 const _EVENTS_RE = r"^/api/([^/]+)/events$"
+const _PUBLISH_RE = r"^/api/([^/]+)/publish-run\b"
 
 """
     start_hub(; host="127.0.0.1", port=8765) -> Hub
@@ -938,6 +941,8 @@ function start_hub(; host = "127.0.0.1", port = 8765)
             nb === nothing ? (HTTP.setstatus(stream, 404); HTTP.startwrite(stream)) : _sse(stream, nb)
         elseif startswith(target, "/api/import-standalone")   # long-lived SSE; raw Stream, not router
             _sse_import(stream, h)
+        elseif occursin(_PUBLISH_RE, target)                  # multi-target publish; per-target SSE progress
+            _sse_publish(stream, h)
         else
             t0 = time()
             handle(stream)
