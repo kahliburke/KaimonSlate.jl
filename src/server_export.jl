@@ -351,8 +351,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                       "var runjl=base+", JSON.json(_SITE_RUNJL), ";var bundle=base+", JSON.json(bname), ";",
                       "var runps1=base+", JSON.json(_SITE_PS1), ";var runbat=base+", JSON.json(_SITE_BAT), ";",
                       "var cmd=\"SLATE_BUNDLE_URL=\"+bundle+\" julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
-                      # PowerShell: $env: sets the var, and single-quotes keep the julia -e string literal (no PS interpolation).
-                      "var pscmd=\"\$env:SLATE_BUNDLE_URL='\"+bundle+\"'; julia -e 'using Downloads; include(Downloads.download(\\\"\"+runjl+\"\\\"))'\";",
+                      # PowerShell: $env: sets the var, single-quotes keep the julia -e string literal (no PS
+                      # interpolation). The inner double-quotes MUST be backslash-escaped (\") — PowerShell strips
+                      # bare " when handing the argument to native julia.exe, so an unescaped download("…") arrives
+                      # at Julia unquoted and errors. (bash above is fine: it passes the literal " through.)
+                      "var pscmd=\"\$env:SLATE_BUNDLE_URL='\"+bundle+\"'; julia -e 'using Downloads; include(Downloads.download(\\\\\\\"\"+runjl+\"\\\\\\\"))'\";",
                       # Detect the VIEWER's OS so we lead with the command their shell can actually run
                       # (the bash `VAR=val cmd` form is invalid in PowerShell, and vice-versa). userAgentData
                       # is the modern signal; platform/userAgent are the fallbacks. Only Windows-vs-not matters.
