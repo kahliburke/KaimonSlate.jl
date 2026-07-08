@@ -43,6 +43,7 @@
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title">Notebook</h1>
   <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span>
+  <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="a slate.eval is running in the worker — click to open the Scratchpad"><span class="scrdot"></span>🧪 scratch<span class="scrn"></span></span>
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
@@ -123,7 +124,7 @@
   <div id="histprev" class="histprev"></div>
 </aside>
 <aside id="scratchpanel" class="scratchpanel">
-  <div class="aphead"><strong>🧪 Scratchpad</strong><span class="hint">slate.eval — throwaway diagnostics, not saved</span>
+  <div class="aphead"><strong>🧪 Scratchpad</strong>
     <button class="hbtn" onclick="clearScratch()" title="clear the scratchpad">🧹 Clear</button>
     <button class="pclose" onclick="toggleScratch()" title="close">✕</button></div>
   <div id="scratchbody" class="scratchbody"></div>
