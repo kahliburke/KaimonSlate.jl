@@ -353,6 +353,8 @@ function connectLive() {
     if (e.data.startsWith('cellprog:')) { try { const p = JSON.parse(e.data.slice(9)); window.onCellProgress && window.onCellProgress(p); } catch (_) {} return; }   // {frac,msg,id,done} — one bar per id
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
     if (e.data.startsWith('js:')) { try { const r = JSON.parse(e.data.slice(3)); window._slateEvalJs && window._slateEvalJs(r.reqid, r.code); } catch (_) {} return; }   // slate.eval_js: run agent JS in this tab
+    if (e.data.startsWith('scratchclear:')) { window.onScratchClear && window.onScratchClear(); return; }               // scratchpad emptied
+    if (e.data.startsWith('scratch:')) { try { window.onScratchCell && window.onScratchCell(JSON.parse(e.data.slice(8))); } catch (_) {} return; }   // a slate.eval scratch cell (running/done)
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // (fallback) full pull
     if (e.data.startsWith('srcreload:')) {   // parent /src hot-reload (Revise): show the persistent banner
       const n = parseInt(e.data.slice(10), 10) || 0;
@@ -370,3 +372,47 @@ function connectLive() {
     if (document.getElementById('histpanel').classList.contains('open') && !histReplaying) loadHistory();
   };
 }
+
+// ── Scratchpad panel ──────────────────────────────────────────────────────────
+// Renders the in-memory scratch cells (slate.eval) the server streams over `scratch:` / `scratchclear:`.
+// Read-only: source + the server-rendered output HTML (text, value reprs, and STATIC images — Makie
+// plots come through as <img>). Interactive ECharts/paged tables aren't wired here (flagged instead) —
+// scratch is for throwaway diagnostics, kept out of the document. `state.scratch` seeds it on load.
+let _scratchCells = [];
+function _scEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function _scBadge(st) {
+  return st === 'running' ? '<span class="scspin"></span>'
+       : st === 'errored' ? '<span class="scx">⚠</span>' : '<span class="scok">✓</span>';
+}
+function _scCellHtml(c) {
+  const st = c.state || 'fresh';
+  const dur = c.duration != null ? (c.duration + ' ms') : '';
+  const rich = ((c.echarts && c.echarts.length) || (c.tables && c.tables.length))
+    ? '<div class="scnote">interactive output — run it in a real cell to see the chart/table</div>' : '';
+  return '<div class="sccell sc-' + _scEsc(st) + '">' +
+    '<div class="schdr">' + _scBadge(st) + '<span class="scdur">' + _scEsc(dur) + '</span></div>' +
+    '<pre class="scsrc">' + _scEsc(c.source) + '</pre>' +
+    '<div class="scout">' + (c.output || '') + '</div>' + rich + '</div>';
+}
+function _scRender() {
+  const b = document.getElementById('scratchbody'); if (!b) return;
+  b.innerHTML = _scratchCells.length ? _scratchCells.map(_scCellHtml).join('')
+    : '<div class="scempty">No scratch evals yet. Agents use <code>slate.eval</code> for throwaway diagnostics — they land here, out of the document.</div>';
+  b.scrollTop = b.scrollHeight;                                   // newest at the bottom, keep it visible
+  const btn = document.getElementById('scratchbtn');
+  if (btn) btn.dataset.count = _scratchCells.length ? String(_scratchCells.length) : '';
+}
+window.onScratchCell = function (cell) {
+  if (!cell || !cell.id) return;
+  const i = _scratchCells.findIndex(c => c.id === cell.id);
+  if (i >= 0) _scratchCells[i] = cell; else _scratchCells.push(cell);
+  if (_scratchCells.length > 50) _scratchCells = _scratchCells.slice(-50);
+  _scRender();
+};
+window.onScratchClear = function () { _scratchCells = []; _scRender(); };
+window.loadScratch = function (cells) { _scratchCells = Array.isArray(cells) ? cells.slice() : []; _scRender(); };
+window.toggleScratch = function () { const p = document.getElementById('scratchpanel'); if (p) p.classList.toggle('open'); };
+window.clearScratch = function () {
+  try { fetch(_apipath('/api/scratch/clear'), { method: 'POST' }); } catch (_) {}
+  _scratchCells = []; _scRender();                               // optimistic; server broadcast confirms
+};
