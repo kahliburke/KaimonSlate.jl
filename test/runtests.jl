@@ -26,10 +26,11 @@ module Slides;    include("test_slides.jl");    end
 module Frontmatter; include("test_frontmatter.jl"); end
 module Export;    include("test_export.jl");    end
 module Publishing; include("test_publishing.jl"); end
+module App;       include("test_app.jl");       end
 
 const _TESTMODS = (Defname, Demux, Parsched, Parallel, Animation, Echarts, Engine, Eval, Deps,
                    Bind, Render, Tables, Trace, Complete, History, Agentops, Repro, Slides,
-                   Frontmatter, Export, Publishing)
+                   Frontmatter, Export, Publishing, App)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 retest(_TESTMODS..., ARGS...)

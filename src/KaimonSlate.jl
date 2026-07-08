@@ -70,8 +70,9 @@ end
 Add this package to Kaimon's extension registry (`~/.config/kaimon/extensions.json`) so Kaimon
 loads the `slate.*` tools automatically — no hand-wiring. **Idempotent**: returns `false`
 (nothing written) if Kaimon isn't installed here or the entry already exists, and `true` when an
-entry is added. Runs automatically on load (see `__init__`); call it explicitly to (re)register a
-specific `project_path` or to flip `auto_start`.
+entry is added. Registration is consented: the `slate` app prompts on first run (see app.jl), and
+loads only self-register when spawned AS the extension (see `__init__`). Call it explicitly to
+(re)register a specific `project_path` or to flip `auto_start`.
 """
 function register_extension(; auto_start::Bool = true, enabled::Bool = true, force::Bool = false,
                             project_path = pkgdir(@__MODULE__))
@@ -99,17 +100,32 @@ function register_extension(; auto_start::Bool = true, enabled::Bool = true, for
     return true
 end
 
-# Auto-register on first load when Kaimon is present, so installing + loading the package once is
-# all it takes. Best-effort and idempotent — never breaks loading; opt out with
-# `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`.
+# Auto-register on load ONLY when this process was spawned BY Kaimon as the extension
+# (KAIMON_EXTENSION set — a no-op then, since being spawned proves the entry exists). Everything
+# else goes through the `slate` app's consent prompt (app.jl): a bare `using KaimonSlate` never
+# touches Kaimon's config, and a REMOVED extension entry stays removed (the app re-asks; nothing
+# silently re-registers — even after a previous Yes). Best-effort and idempotent — never breaks
+# loading; opt out with `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`.
 function __init__()
     get(ENV, "KAIMONSLATE_NO_AUTOREGISTER", "0") in ("1", "true") && return nothing
+    haskey(ENV, "KAIMON_EXTENSION") || return nothing
     try
         register_extension()
     catch e
         @debug "KaimonSlate auto-registration skipped" exception = (e, catch_backtrace())
     end
     return nothing
+end
+
+# Is a KaimonSlate checkout (any identity, see `_is_slate_project`) already in Kaimon's extension
+# registry? Drives the app's first-run onboarding ("already wired in → don't ask").
+function _slate_registered()
+    file = joinpath(_kaimon_dir(), "extensions.json")
+    isfile(file) || return false
+    data = try; JSON.parsefile(file); catch; return false; end
+    exts = get(data, "extensions", nothing)
+    exts isa AbstractVector || return false
+    return any(e -> e isa AbstractDict && _is_slate_project(String(get(e, "project_path", ""))), exts)
 end
 
 # ── Single-server hub ─────────────────────────────────────────────────────────
@@ -218,6 +234,20 @@ function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
     end
     @info "slate: worker threads set" spec = s respawned = respawn
     return s
+end
+
+"The user's onboarding answer for extension registration: \"yes\" | \"dismissed\" | \"\" (not asked)."
+ext_prompt_choice()::String = String(get(_slate_config(), "ext_prompt", ""))
+
+"Persist the onboarding answer (see `ext_prompt_choice`). Returns the stored choice."
+function set_ext_prompt_choice!(choice::AbstractString)
+    cfg = _slate_config(); cfg["ext_prompt"] = String(choice)
+    try
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+    catch e
+        @warn "slate: could not persist onboarding choice" exception = e
+    end
+    return String(choice)
 end
 
 "Whether inter-cell parallel execution is on by default for notebooks (persisted; default true)."
@@ -885,6 +915,8 @@ function on_event(channel, data, session_name)
     end
     return nothing
 end
+
+include("app.jl")   # the `slate` Pkg-app entrypoint + Tachikoma status TUI
 
 """
     on_shutdown()
