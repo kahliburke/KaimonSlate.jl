@@ -353,6 +353,8 @@ function connectLive() {
     if (e.data.startsWith('cellprog:')) { try { const p = JSON.parse(e.data.slice(9)); window.onCellProgress && window.onCellProgress(p); } catch (_) {} return; }   // {frac,msg,id,done} — one bar per id
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
     if (e.data.startsWith('js:')) { try { const r = JSON.parse(e.data.slice(3)); window._slateEvalJs && window._slateEvalJs(r.reqid, r.code); } catch (_) {} return; }   // slate.eval_js: run agent JS in this tab
+    if (e.data.startsWith('scratchclear:')) { window.onScratchClear && window.onScratchClear(); return; }               // scratchpad emptied
+    if (e.data.startsWith('scratch:')) { try { window.onScratchCell && window.onScratchCell(JSON.parse(e.data.slice(8))); } catch (_) {} return; }   // a slate.eval scratch cell (running/done)
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // (fallback) full pull
     if (e.data.startsWith('srcreload:')) {   // parent /src hot-reload (Revise): show the persistent banner
       const n = parseInt(e.data.slice(10), 10) || 0;
@@ -370,3 +372,89 @@ function connectLive() {
     if (document.getElementById('histpanel').classList.contains('open') && !histReplaying) loadHistory();
   };
 }
+
+// ── Scratchpad panel ──────────────────────────────────────────────────────────
+// Renders the in-memory scratch cells (slate.eval) the server streams over `scratch:` / `scratchclear:`.
+// Read-only: source + the server-rendered output HTML (text, value reprs, and STATIC images — Makie
+// plots come through as <img>). Interactive ECharts/paged tables aren't wired here (flagged instead) —
+// scratch is for throwaway diagnostics, kept out of the document. `state.scratch` seeds it on load.
+let _scratchCells = [], _scUnread = 0;
+function _scPanelOpen() { const p = document.getElementById('scratchpanel'); return !!(p && p.classList.contains('open')); }
+function _scEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function _scBadge(st) {
+  return st === 'running' ? '<span class="scspin"></span>'
+       : st === 'errored' ? '<span class="scx">⚠</span>' : '<span class="scok">✓</span>';
+}
+function _scCellHtml(c) {
+  const st = c.state || 'fresh';
+  const dur = c.duration != null ? (c.duration + ' ms') : '';
+  const rich = ((c.echarts && c.echarts.length) || (c.tables && c.tables.length))
+    ? '<div class="scnote">interactive output — run it in a real cell to see the chart/table</div>' : '';
+  return '<div class="sccell sc-' + _scEsc(st) + '">' +
+    '<div class="schdr">' + _scBadge(st) + '<span class="scdur">' + _scEsc(dur) + '</span></div>' +
+    '<pre class="scsrc">' + _scEsc(c.source) + '</pre>' +
+    '<div class="scout">' + (c.output || '') + '</div>' + rich + '</div>';
+}
+function _scRender() {
+  const b = document.getElementById('scratchbody'); if (!b) return;
+  b.innerHTML = _scratchCells.length ? _scratchCells.map(_scCellHtml).join('')
+    : '<div class="scempty">No scratch evals yet. Agents use <code>slate.eval</code> for throwaway diagnostics — they land here, out of the document.</div>';
+  b.scrollTop = b.scrollHeight;                                   // newest at the bottom, keep it visible
+  _scWireImages(b);
+  _scUpdateChrome();
+}
+// Topbar "🧪 scratch" pill + menu-item badge — the always-visible signal that a slate.eval is
+// running in the worker (it holds the eval mutex, so cell runs are paused meanwhile).
+function _scUpdateChrome() {
+  const running = _scratchCells.filter(c => (c.state || '') === 'running').length;
+  const ind = document.getElementById('scratchrun');
+  if (ind) {
+    ind.style.display = (running || _scUnread) ? '' : 'none';        // notification: running OR unviewed evals
+    ind.classList.toggle('sc-running', running > 0);                 // pulse the dot only while actually running
+    const _lbl = ind.querySelector('.scrlabel');
+    if (_lbl) _lbl.textContent = running ? 'scratch' : (_scUnread + ' new');
+    const n = ind.querySelector('.scrn'); if (n) n.textContent = running > 1 ? (' ×' + running) : ''; }
+  const btn = document.getElementById('scratchbtn');
+  if (btn) btn.dataset.count = _scUnread ? String(_scUnread) : '';   // NEW since last viewed, not the total
+}
+// Scratch output images render as thumbnails; click → a full-size lightbox (Esc / click to close).
+function _scZoom(src) {
+  let m = document.getElementById('scratchimgmodal');
+  if (!m) {
+    m = document.createElement('div'); m.id = 'scratchimgmodal'; m.className = 'scimgmodal';
+    m.innerHTML = '<img alt="scratch output"/>';
+    m.addEventListener('click', () => m.classList.remove('show'));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && m.classList.contains('show')) m.classList.remove('show'); });
+    document.body.appendChild(m);
+  }
+  m.querySelector('img').src = src;
+  m.classList.add('show');
+}
+function _scWireImages(b) {
+  b.querySelectorAll('.scout img').forEach(img => {
+    if (img._scwired) return; img._scwired = true;
+    img.classList.add('scthumb');
+    img.title = 'click to enlarge';
+    img.addEventListener('click', () => _scZoom(img.currentSrc || img.src));
+  });
+}
+window.onScratchCell = function (cell) {
+  if (!cell || !cell.id) return;
+  const i = _scratchCells.findIndex(c => c.id === cell.id);
+  const isNew = i < 0;
+  if (i >= 0) _scratchCells[i] = cell; else _scratchCells.push(cell);
+  if (_scratchCells.length > 50) _scratchCells = _scratchCells.slice(-50);
+  if (isNew && !_scPanelOpen()) _scUnread++;              // a NEW eval while the panel is closed → unread
+  _scRender();
+};
+window.onScratchClear = function () { _scratchCells = []; _scUnread = 0; _scRender(); };
+window.loadScratch = function (cells) { _scratchCells = Array.isArray(cells) ? cells.slice() : []; _scRender(); };
+window.toggleScratch = function () {
+  const p = document.getElementById('scratchpanel'); if (!p) return;
+  p.classList.toggle('open');
+  if (p.classList.contains('open')) { _scUnread = 0; _scUpdateChrome(); }   // viewing clears the unread badge
+};
+window.clearScratch = function () {
+  try { fetch(_apipath('/api/scratch/clear'), { method: 'POST' }); } catch (_) {}
+  _scratchCells = []; _scRender();                               // optimistic; server broadcast confirms
+};

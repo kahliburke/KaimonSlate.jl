@@ -43,6 +43,7 @@
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title">Notebook</h1>
   <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span>
+  <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
@@ -58,6 +59,7 @@
       <button onclick="toggleAct();closeTopMenu()">📋 Activity log</button>
       <button onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
       <button onclick="toggleHistory();closeTopMenu()">🕘 History</button>
+      <button id="scratchbtn" onclick="toggleScratch();closeTopMenu()">🧪 Scratchpad</button>
       <hr>
       <button id="undobtn" onclick="undoNb();closeTopMenu()">↶ Undo</button>
       <button id="redobtn" onclick="redoNb();closeTopMenu()">↷ Redo</button>
@@ -120,6 +122,12 @@
     <button class="pclose" onclick="toggleHistory()" title="close">✕</button></div>
   <div id="histlist" class="histlist"></div>
   <div id="histprev" class="histprev"></div>
+</aside>
+<aside id="scratchpanel" class="scratchpanel">
+  <div class="aphead"><strong>🧪 Scratchpad</strong>
+    <button class="hbtn" onclick="clearScratch()" title="clear the scratchpad">🧹 Clear</button>
+    <button class="pclose" onclick="toggleScratch()" title="close">✕</button></div>
+  <div id="scratchbody" class="scratchbody"></div>
 </aside>
 <aside id="logpanel" class="logpanel">
   <div class="aphead"><strong>🪵 Worker log</strong><span id="logstatus" class="hint"></span>

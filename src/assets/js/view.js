@@ -337,8 +337,8 @@ function cancelSource(id) {
 // store. renderAll/updateStates now just publish the state + refresh the chrome; the component
 // diffs cells by id (so editors survive structural ops) and does per-cell output processing in
 // effects. The old full-wipe rebuild and the in-place patch collapse into one publish.
-function renderAll(state)    { _publishState(state); }
-function updateStates(state) { _publishState(state); }
+function renderAll(state)    { _publishState(state); window.loadScratch && window.loadScratch(state && state.scratch); }
+function updateStates(state) { _publishState(state); window.loadScratch && window.loadScratch(state && state.scratch); }
 // Targeted live refresh (SSE `refresh:` event): merge ONLY the changed cells into nbState and
 // patch THOSE cells imperatively — charts `setOption`, tables refill, output swap, control values
 // — with NO full-state GET and NO all-cells re-render. nbState.cells is mutated in place so the

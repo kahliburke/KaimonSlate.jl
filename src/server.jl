@@ -25,7 +25,7 @@ include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the paralle
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
-export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_surface_controls!
+export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!
 export cell_image, set_snapshot!
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")
@@ -47,6 +47,11 @@ mutable struct LiveNotebook
     agent_id::String                     # default/solo agent (crew "") — back-compat alias of agents[""]
     agent_busy::Bool                     # true while ANY bound agent has a turn in flight (history attribution)
     agents::Dict{String,String}          # crew label → Kaimon agent id (multi-agent crew; "" = default)
+    scratch::Vector{Cell}                # in-memory scratchpad cells (slate.eval) — never persisted/exported/graphed
+    # Inner constructor takes the original 13 fields and starts an empty scratchpad, so every existing
+    # positional call site (server + tests) is unchanged; scratch is populated at runtime by slate.eval.
+    LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
+        new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents, Cell[])
 end
 
 # Wire/unwire the engine's out-of-band callback registry (eval.jl) for one notebook — the seam
