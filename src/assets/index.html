@@ -550,7 +550,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
           (d.section?'<span class="pdchip" style="margin-left:6px">'+esc(d.section)+'</span>':'')+
           '<button class="pdbtn pdmini" onclick="pdRemoveSiteDoc(\''+esc(s.name)+'\',\''+esc(sl)+'\')" title="remove from site">✕</button></div>';
       }).join(''):'<div class="pddim">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
-      docMgmt='<div class="pdsec">Documents</div>'+rows+
+      var fp=s.hasHome?('<div class="pddim" style="margin:2px 0">Front page: <b>'+esc(s.homeTitle||'home')+'</b> <span class="pdchip">home</span></div>')
+                      :'<div class="pddim" style="margin:2px 0">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
+      docMgmt='<div class="pdsec">Front page</div>'+fp+'<div class="pdsec">Documents</div>'+rows+
         (docs.length?'<div class="pdrow" style="margin-top:8px"><button class="pdbtn" onclick="openSiteArrange(\''+esc(s.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag to order + group into sections</span></div>':'');
     }
     document.getElementById('pdextra').innerHTML='<div class="pdform">'+

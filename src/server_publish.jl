@@ -107,8 +107,12 @@ function _doc_view(d)
 end
 
 _target_view(t) = Dict{String,Any}("name" => t.name, "kind" => t.kind, "config" => t.config)
-_site_view(s) = Dict{String,Any}("name" => s.name, "targets" => copy(s.targets), "home" => s.home,
-                                 "docs" => site_docs(s.name))   # docs/order/sections from the local build
+function _site_view(s)
+    fp = site_frontpage(s.name)
+    return Dict{String,Any}("name" => s.name, "targets" => copy(s.targets),
+        "docs" => site_docs(s.name),            # docs/order/sections from the local build
+        "hasHome" => fp.home, "homeTitle" => fp.title)   # the front-page notebook (tagged `home`), if any
+end
 
 # The authenticated GitHub login (for owner auto-fill so a new github-pages target only needs a repo
 # NAME). Best-effort + cached; "" when `gh` is absent/unauthed.

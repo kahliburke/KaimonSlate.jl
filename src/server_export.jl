@@ -1147,6 +1147,15 @@ function site_docs(name::AbstractString)
     return docs isa AbstractVector ? docs : Any[]
 end
 
+# The site's front page: whether a `home`-tagged notebook was built into it (renders to the root) and
+# the site title (which, for a home page, is that notebook's title) — for the manager to name it.
+function site_frontpage(name::AbstractString)
+    dir = _site_dir(name)
+    (dir === nothing || !isdir(dir)) && return (; home = false, title = "")
+    man = _read_site_manifest(dir)
+    return (; home = get(man, "home", false) === true, title = String(get(man, "title", "")))
+end
+
 """
     unexport_from_site(name, slug) -> (; removed, docCount)
 
