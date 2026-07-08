@@ -466,6 +466,78 @@ function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
     return _output_result_text(out)
 end
 
+# ── Background scratch-eval jobs ─────────────────────────────────────────────────────────────────
+# A slate.eval that outruns the grace window is promoted to a background JOB (mirrors the gate `ex`
+# tool): the tool call returns a job id instead of blocking to the 300s session-tool cap, the eval
+# keeps computing on the worker, and the agent polls `slate.check_eval`. In-memory only — jobs are
+# lost on a worker/extension restart (scratch is throwaway by design).
+struct ScratchJob
+    id::String
+    nb::String                            # notebook id (for future per-notebook listing)
+    started::Float64
+    task::Task
+    result::Ref{Union{Nothing,String}}    # filled by the task when the eval finishes
+    done::Ref{Bool}
+end
+const _SCRATCH_JOBS = Dict{String,ScratchJob}()
+const _SCRATCH_LOCK = ReentrantLock()
+const _SCRATCH_SEQ = Threads.Atomic{Int}(0)
+_new_scratch_id() = "sj" * string(Threads.atomic_add!(_SCRATCH_SEQ, 1) + 1)
+# Grace window before a slow scratch eval is handed back as a job id (overridable). Well under the
+# 300s session-tool cap that was truncating long evals.
+_scratch_grace() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SCRATCH_GRACE", "")), 30.0)
+
+"""
+    agent_scratch_eval_bg!(nb, source; ephemeral=false, grace=_scratch_grace(), memo_*…)
+        -> (; done::Bool, jobid::String, text::String)
+
+Non-blocking scratch eval. Runs `agent_scratch_eval!` on a background task and races it against
+`grace` seconds: finishes in time → `(done=true, text=<result>)`; still running → `(done=false,
+jobid=<id>, text=<hint>)`, the eval continuing on the worker (poll `slate.check_eval`). The tool
+call thus never blocks past `grace`, so it can't hit the session-tool timeout.
+"""
+function agent_scratch_eval_bg!(nb::LiveNotebook, source::AbstractString;
+                                ephemeral::Bool = false, grace::Real = _scratch_grace(),
+                                memo_key::AbstractString = "", memo_names = String[],
+                                memo_threshold::Real = 0.0)
+    resultref = Ref{Union{Nothing,String}}(nothing)
+    doneref = Ref(false)
+    task = @async begin
+        r = try
+            agent_scratch_eval!(nb, source; ephemeral = ephemeral, memo_key = memo_key,
+                                memo_names = memo_names, memo_threshold = memo_threshold)
+        catch e
+            "Scratch eval errored: " * sprint(showerror, e)
+        end
+        resultref[] = r
+        doneref[] = true
+        r
+    end
+    jid = _new_scratch_id()
+    lock(_SCRATCH_LOCK) do
+        _SCRATCH_JOBS[jid] = ScratchJob(jid, nb.id, time(), task, resultref, doneref)
+    end
+    if timedwait(() -> doneref[], Float64(grace); pollint = 0.1) === :ok
+        lock(_SCRATCH_LOCK) do; delete!(_SCRATCH_JOBS, jid); end
+        return (; done = true, jobid = "", text = something(resultref[], "(no result)"))
+    end
+    hint = "⏳ Still running after $(round(Int, grace))s — promoted to background job $jid. Poll it with " *
+           "slate.check_eval(job=\"$jid\"). The eval keeps computing on the worker; the notebook's cell " *
+           "runs stay paused until it finishes."
+    return (; done = false, jobid = jid, text = hint)
+end
+
+"Poll a background scratch job: its result if finished (and forget it), else a still-running note."
+function scratch_check(jobid::AbstractString)
+    job = lock(_SCRATCH_LOCK) do; get(_SCRATCH_JOBS, String(jobid), nothing); end
+    job === nothing && return "No such scratch job '$jobid' — it already finished and was collected, or never existed."
+    if job.done[]
+        lock(_SCRATCH_LOCK) do; delete!(_SCRATCH_JOBS, job.id); end
+        return something(job.result[], "(no result)")
+    end
+    return "⏳ Scratch job $jobid still running ($(round(Int, time() - job.started))s elapsed). Poll again with slate.check_eval."
+end
+
 "Add a cell (default code) after `after` (end if empty) WITH `source`, run it,
 return id + result. One file write (build the cell with its source up front) so the
 async file-watcher can't race the intermediate empty-cell state."

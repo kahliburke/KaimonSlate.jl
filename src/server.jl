@@ -25,7 +25,7 @@ include("parsched.jl")  # ParCell / par_blockers / run_scheduled — the paralle
 
 export serve_notebook, start_server, stop_server, LiveNotebook
 export Hub, start_hub, open_notebook!, close_notebook!, stop_hub
-export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_surface_controls!
+export find_live, notebook_digest, agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!
 export cell_image, set_snapshot!
 
 const _ASSET = joinpath(@__DIR__, "assets", "notebook.html")

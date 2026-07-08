@@ -612,14 +612,31 @@ function create_tools(GateTool::Type)
     diagnostic state across calls), while wrapping in `let … end` — or passing `ephemeral="1"`,
     which wraps your code in a child scope — keeps bindings local (a pure read-only poke). Runs
     ON the notebook's eval queue (serialised with cell runs), so it never races a parallel batch.
+
+    LONG EVALS DON'T TIME OUT: if the eval outruns a ~30s grace window it's promoted to a background
+    job (like the gate `ex`) and the call returns a job id immediately — the eval keeps computing on
+    the worker; poll for its result with `check_eval(notebook, job)`. So use `eval` freely for slow
+    computations; you'll just get a job id to poll instead of blocking.
     """
     function scratch_eval(notebook::String, source::String; ephemeral::String = "0",
                           memo_key::String = "", memo_threshold::String = "0")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_scratch_eval!(nb, source;
+        r = agent_scratch_eval_bg!(nb, source;
             ephemeral = lowercase(ephemeral) in ("1", "true", "yes", "on"),
             memo_key = memo_key, memo_threshold = something(tryparse(Float64, memo_threshold), 0.0))
-        return _surfaced(nb, "eval", Dict{String,Any}("source" => source, "ephemeral" => ephemeral), res)
+        return _surfaced(nb, "eval", Dict{String,Any}("source" => source, "ephemeral" => ephemeral), r.text)
+    end
+    """
+        check_eval(notebook, job) -> String
+
+    Poll a background scratch-eval job — the id `eval` hands back when a slow eval outran its ~30s
+    grace window. Returns the eval's captured result once it finishes (and forgets the job), else a
+    still-running note to poll again. Mirrors the gate `check_eval` for `ex`. The job id is global;
+    `notebook` just routes/validates the caller.
+    """
+    function check_scratch_eval(notebook::String, job::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        return scratch_check(job)
     end
 
     function eval_js(notebook::String, code::String)::String
@@ -839,6 +856,7 @@ function create_tools(GateTool::Type)
         GateTool("inspect", inspect_cell),
         GateTool("diag", notebook_diag),
         GateTool("eval", scratch_eval),
+        GateTool("check_eval", check_scratch_eval),
         GateTool("eval_js", eval_js),
         GateTool("export_pdf", export_pdf_tool),
         GateTool("index_docs", index_docs),
