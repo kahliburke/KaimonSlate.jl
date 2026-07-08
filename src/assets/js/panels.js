@@ -408,7 +408,12 @@ function _scRender() {
 function _scUpdateChrome() {
   const running = _scratchCells.filter(c => (c.state || '') === 'running').length;
   const ind = document.getElementById('scratchrun');
-  if (ind) { ind.style.display = running ? '' : 'none'; const n = ind.querySelector('.scrn'); if (n) n.textContent = running > 1 ? (' ×' + running) : ''; }
+  if (ind) {
+    ind.style.display = (running || _scUnread) ? '' : 'none';        // notification: running OR unviewed evals
+    ind.classList.toggle('sc-running', running > 0);                 // pulse the dot only while actually running
+    const _lbl = ind.querySelector('.scrlabel');
+    if (_lbl) _lbl.textContent = running ? 'scratch' : (_scUnread + ' new');
+    const n = ind.querySelector('.scrn'); if (n) n.textContent = running > 1 ? (' ×' + running) : ''; }
   const btn = document.getElementById('scratchbtn');
   if (btn) btn.dataset.count = _scUnread ? String(_scUnread) : '';   // NEW since last viewed, not the total
 }
