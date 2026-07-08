@@ -87,3 +87,24 @@ end
     @test occursin("exp-tbl-filter", NS._EXPORT_TABLE_JS)
     @test occursin("querySelectorAll('table.exp-table')", NS._EXPORT_TABLE_JS)
 end
+
+@testset "Typst export — table align/format/zebra/repeat/truncation" begin
+    spec = Dict{String,Any}(
+        "columns" => Any[
+            Dict{String,Any}("name" => "Product", "type" => "string", "align" => "left", "format" => nothing),
+            Dict{String,Any}("name" => "Revenue", "type" => "float", "align" => "right",
+                             "format" => Dict{String,Any}("kind" => "currency", "digits" => 2, "sep" => true, "prefix" => "\$", "suffix" => "")),
+            Dict{String,Any}("name" => "Margin", "type" => "float", "align" => "right",
+                             "format" => Dict{String,Any}("kind" => "percent", "digits" => 1, "sep" => false, "prefix" => "", "suffix" => "")),
+        ],
+        "rows" => Any[Any["Widget", 45999.5, 0.324]],
+        "opts" => Dict{String,Any}("nrows" => 250, "ncols" => 3),   # only 1 row shipped ⇒ note vs the true total
+    )
+    typ = NS._typst_table(spec; theme = "light")
+    @test occursin("align: (left, right, right)", typ)     # per-column alignment
+    @test occursin("\$45,999.50", typ)                     # formatted currency (numbers no longer stringified)
+    @test occursin("32.4%", typ)                           # formatted percent
+    @test occursin("table.header(repeat: true", typ)       # header repeats across page breaks
+    @test occursin("calc.odd(row)", typ)                   # zebra striping
+    @test occursin("249 more rows (250 total)", typ)       # accurate truncation from opts.nrows
+end

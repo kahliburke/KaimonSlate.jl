@@ -53,14 +53,14 @@ const _PALETTES = Dict(
                 valbg = "rgb(\"#f0f7f1\")", valfg = "rgb(\"#177245\")",
                 errbg = "rgb(\"#fdeeee\")", errfg = "rgb(\"#b00020\")",
                 parbg = "rgb(\"#eef2fb\")", parborder = "rgb(\"#c3d0ec\")", parlabel = "rgb(\"#3a4a72\")",
-                tablestroke = "luma(200)", tableheadbg = "luma(244)"),
+                tablestroke = "luma(200)", tableheadbg = "luma(244)", tablestripe = "luma(250)"),
     "dark"  => (page = "rgb(\"#12141c\")", text = "rgb(\"#d6dae8\")",  rule = "luma(90)",
                 title = "white",         codebg = "rgb(\"#1b1f2b\")", codetheme = "code-dark.tmTheme",
                 outbg = "rgb(\"#181c26\")", outfg = "rgb(\"#aeb6cc\")",
                 valbg = "rgb(\"#142318\")", valfg = "rgb(\"#5fcf6e\")",
                 errbg = "rgb(\"#2a1619\")", errfg = "rgb(\"#f08a8a\")",
                 parbg = "rgb(\"#1a2233\")", parborder = "rgb(\"#2c3a57\")", parlabel = "rgb(\"#8ab4f8\")",
-                tablestroke = "luma(90)",  tableheadbg = "rgb(\"#1b1f2b\")"),
+                tablestroke = "luma(90)",  tableheadbg = "rgb(\"#1b1f2b\")", tablestripe = "rgb(\"#171b25\")"),
 )
 _palette(theme) = get(_PALETTES, theme, _PALETTES["light"])
 
@@ -335,21 +335,34 @@ end
 function _typst_table(spec; theme::AbstractString = "light")::String
     cols = get(spec, "columns", Any[])
     rows = get(spec, "rows", Any[])
+    opts = get(spec, "opts", Dict{String,Any}())
     isempty(cols) && return ""
+    ncol = length(cols)
     p = _palette(theme)
-    name(c) = c isa AbstractDict ? string(get(c, "name", "")) : string(c)
-    cell(v, sz) = "[#text(size: $(sz)pt, \"" * _typ_str(v === nothing ? "" : string(v)) * "\")]"
+    _cname(c)  = c isa AbstractDict ? string(get(c, "name", "")) : string(c)
+    _calign(c) = c isa AbstractDict ? string(get(c, "align", "left")) : "left"
+    _cfmt(c)   = c isa AbstractDict ? get(c, "format", nothing) : nothing
+    _typalign(a) = a == "right" ? "right" : (a == "center" ? "center" : "left")
+    fmts = Any[_cfmt(c) for c in cols]
+    cell(v, fmt) = "[#text(size: 8pt, \"" * _typ_str(ReportEngine._format_cell(v, fmt)) * "\")]"
     io = IOBuffer()
-    print(io, "#table(columns: ", length(cols), ", inset: 5pt, align: left, stroke: 0.4pt + $(p.tablestroke),\n")
-    print(io, "  fill: (_, row) => if row == 0 { $(p.tableheadbg) },\n")
-    print(io, "  table.header(", join(["[#text(size: 8.5pt, weight: \"bold\", \"" * _typ_str(name(c)) * "\")]" for c in cols], ", "), "),\n")
-    maxr = 60
+    # per-column alignment (numbers right, bools center) + a themed grid stroke
+    print(io, "#table(columns: ", ncol, ", inset: 5pt, align: (", join((_typalign(_calign(c)) for c in cols), ", "), "), stroke: 0.4pt + $(p.tablestroke),\n")
+    # zebra: header shaded (row 0), odd body rows a subtle stripe
+    print(io, "  fill: (_, row) => if row == 0 { $(p.tableheadbg) } else if calc.odd(row) { $(p.tablestripe) },\n")
+    # repeat the header on every page a long table spills onto
+    print(io, "  table.header(repeat: true, ", join(["[#text(size: 8.5pt, weight: \"bold\", \"" * _typ_str(_cname(c)) * "\")]" for c in cols], ", "), "),\n")
+    maxr = 200
     for (ri, r) in enumerate(rows)
         ri > maxr && break
-        print(io, "  ", join([cell(v, 8) for v in r], ", "), ",\n")
+        print(io, "  ", join([cell(ci <= length(r) ? r[ci] : nothing, fmts[ci]) for ci in 1:ncol], ", "), ",\n")
     end
     print(io, ")\n")
-    length(rows) > maxr && print(io, "#text(size: 8pt, fill: gray)[… ", length(rows) - maxr, " more rows]\n")
+    # accurate truncation: the wire ships at most `maxr` here AND a paged table ships only page 1,
+    # so report against opts.nrows (the true total), not the shipped-row count.
+    total = Int(get(opts, "nrows", length(rows)))
+    shown = min(length(rows), maxr)
+    shown < total && print(io, "#text(size: 8pt, fill: gray)[… ", total - shown, " more rows (", total, " total)]\n")
     return String(take!(io))
 end
 
