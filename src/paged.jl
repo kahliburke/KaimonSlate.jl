@@ -15,13 +15,8 @@
 
 # ── Protocol ──────────────────────────────────────────────────────────────────
 
-"A column in a paged table: name, `:numeric`/`:text` type, and capability flags."
-struct PagedColumnDef
-    name::String
-    col_type::Symbol      # :numeric | :text
-    sortable::Bool
-    filterable::Bool
-end
+# Paged tables use the same `ColumnDef` as eager tables (defined in tables.jl, included first), so
+# every consumer reads ONE column shape. A numeric column (`type ∈ (:int,:float)`) sorts numerically.
 
 "A request for one page: 1-based `page`, `sort_col` (0 = none), direction, global search."
 struct PageRequest
@@ -41,7 +36,7 @@ end
 "A data source that serves pages on demand. Implement [`page_columns`](@ref) + [`fetch_page`](@ref)."
 abstract type PagedProvider end
 
-"`page_columns(provider) -> Vector{PagedColumnDef}` — the provider's columns."
+"`page_columns(provider) -> Vector{ColumnDef}` — the provider's columns."
 function page_columns end
 "`fetch_page(provider, ::PageRequest) -> PageResult` — one page, sorted/filtered/paged."
 function fetch_page end
@@ -106,7 +101,7 @@ end
 "A captured paged table: the registered provider id, columns, total, and page 1."
 struct SlatePagedTable
     id::String
-    columns::Vector{PagedColumnDef}
+    columns::Vector{ColumnDef}
     total::Int
     page_size::Int
     page1::Vector{Vector{Any}}    # already JSON-safe
@@ -128,17 +123,11 @@ _as_slate_table(t::SlatePagedTable) = t
 _table_wire(t::SlatePagedTable) = Dict{String,Any}(
     "paged"    => true,
     "tableId"  => t.id,
-    "columns"  => Any[Dict{String,Any}("name" => c.name, "type" => String(c.col_type),
-                                       "sortable" => c.sortable, "filterable" => c.filterable)
-                      for c in t.columns],
+    "columns"  => Any[_col_wire(c) for c in t.columns],   # shared column shape (tables.jl)
     "rows"     => t.page1,
     "pageSize" => t.page_size,
     "opts"     => Dict{String,Any}("nrows" => t.total, "ncols" => length(t.columns)),
 )
-
-# ── Column extraction (column-major; raw values kept for correct sorting) ────
-_infer_coltype(col) =
-    all(v -> v === nothing || v === missing || v isa Real, col) ? :numeric : :text
 
 function _paged_columns_data(x)
     T = _tables_mod()
@@ -169,7 +158,7 @@ end
 # ── InMemoryPagedProvider ─────────────────────────────────────────────────────
 "Pages/sorts/filters a column-major dataset in-process (the paged form of `slate_table`)."
 struct InMemoryPagedProvider <: PagedProvider
-    columns::Vector{PagedColumnDef}
+    columns::Vector{ColumnDef}
     data::Vector{Vector{Any}}        # column-major
 end
 
@@ -199,8 +188,7 @@ function _inmemory_provider(x)
     cd = _paged_columns_data(x)
     cd === nothing && return nothing
     names, data = cd
-    cols = PagedColumnDef[PagedColumnDef(names[i], _infer_coltype(data[i]), true, true) for i in eachindex(names)]
-    return InMemoryPagedProvider(cols, data)
+    return InMemoryPagedProvider(_infer_columns(names, data), data)   # `_infer_columns` from tables.jl
 end
 
 # ── SqlPagedProvider (soft DBInterface + Tables.jl; SQL pushdown) ────────────
@@ -210,7 +198,7 @@ _dbinterface_mod() = (for (id, m) in Base.loaded_modules; id.name == "DBInterfac
 struct SqlPagedProvider <: PagedProvider
     conn::Any
     sql::String                      # a SELECT; wrapped as a subquery
-    columns::Vector{PagedColumnDef}
+    columns::Vector{ColumnDef}
 end
 
 page_columns(p::SqlPagedProvider) = p.columns
@@ -249,6 +237,19 @@ function fetch_page(p::SqlPagedProvider, req::PageRequest)
     return PageResult(rows, total)
 end
 
+# Map a SQL schema column type to our physical column type (finer than the old :numeric/:text so the
+# static exporters can align + format). `Missing` is stripped; date-like detected by type name.
+function _sql_coltype(t)
+    t === nothing && return :string
+    nm = try Base.nonmissingtype(t) catch; t end
+    nm isa Type || return :string
+    nm <: Bool && return :bool
+    nm <: Integer && return :int
+    nm <: Real && return :float
+    string(nameof(nm)) in ("Date", "DateTime", "Time") && return :date
+    return :string
+end
+
 function _sql_provider(conn, sql::AbstractString)
     DB = _dbinterface_mod()
     DB === nothing && throw(ArgumentError("slate_query requires DBInterface.jl + a driver (DuckDB/SQLite) loaded"))
@@ -257,9 +258,8 @@ function _sql_provider(conn, sql::AbstractString)
     probe = Base.invokelatest(DB.execute, conn, "SELECT * FROM ($sql) AS _t LIMIT 0")
     sch = Base.invokelatest(T.schema, probe)
     names = String[string(n) for n in sch.names]
-    types = sch.types === nothing ? fill(:text, length(names)) :
-        Symbol[(t !== nothing && (t <: Real || t <: Union{Missing,Real})) ? :numeric : :text for t in sch.types]
-    cols = PagedColumnDef[PagedColumnDef(names[i], types[i], true, true) for i in eachindex(names)]
+    types = sch.types === nothing ? fill(:string, length(names)) : Symbol[_sql_coltype(t) for t in sch.types]
+    cols = ColumnDef[ColumnDef(names[i], types[i], _default_align(types[i]), nothing, true, true) for i in eachindex(names)]
     return SqlPagedProvider(conn, String(sql), cols)
 end
 

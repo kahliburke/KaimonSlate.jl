@@ -120,8 +120,69 @@ function _cmp(a, b) {
   if (typeof a === 'number' && typeof b === 'number') return a - b;
   return String(a).localeCompare(String(b), undefined, { numeric: true });
 }
-// Columns are strings (eager) or {name,type,sortable,filterable} objects (paged).
+// Columns are {name,type,align,format,sortable,filterable} objects (older specs may be bare strings).
 const _colName = c => (typeof c === 'string' ? c : c.name);
+
+// ── Cell formatter — the JS mirror of Julia `_format_cell` (src/format.jl) ────
+// MUST match the Julia output; the golden fixture test/fixtures/format_cases.json is asserted from
+// both sides. Rounding is hand-rolled (half-away-from-zero) to avoid `toFixed` divergence.
+function _asNumber(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (typeof v === 'boolean') return null;
+  if (typeof v === 'string') { const n = parseFloat(v); return isNaN(n) ? null : n; }
+  return null;
+}
+function _roundDec(x, d) {                          // half-away-from-zero → plain decimal string
+  const neg = x < 0;
+  const u = Math.floor(Math.abs(x) * Math.pow(10, d) + 0.5);
+  let s = String(u);
+  if (d > 0) { while (s.length < d + 1) s = '0' + s; s = s.slice(0, s.length - d) + '.' + s.slice(s.length - d); }
+  return (neg && u !== 0) ? '-' + s : s;
+}
+function _group3(dec) {
+  const neg = dec[0] === '-', body = neg ? dec.slice(1) : dec;
+  const dot = body.indexOf('.'), ip = dot < 0 ? body : body.slice(0, dot), rest = dot < 0 ? '' : body.slice(dot);
+  let out = ''; const n = ip.length;
+  for (let i = 0; i < n; i++) { if (i > 0 && (n - i) % 3 === 0) out += ','; out += ip[i]; }
+  return (neg ? '-' : '') + out + rest;
+}
+const _maybeGroup = (dec, sep) => (sep ? _group3(dec) : dec);
+function _sci(x, sig) {
+  if (x === 0) return '0e0';
+  const neg = x < 0, ax = Math.abs(x); let e = Math.floor(Math.log10(ax)); const m = ax / Math.pow(10, e);
+  let ms = _roundDec(m, Math.max(sig - 1, 0));
+  if (parseFloat(ms) >= 10) { e += 1; ms = _roundDec(m / 10, Math.max(sig - 1, 0)); }
+  return (neg ? '-' : '') + ms + 'e' + String(e);
+}
+const _BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+function _bytes(x, d) {
+  const neg = x < 0; let ax = Math.abs(x), i = 0;
+  while (ax >= 1024 && i < _BYTE_UNITS.length - 1) { ax /= 1024; i++; }
+  return (neg ? '-' : '') + _roundDec(ax, i === 0 ? 0 : d) + ' ' + _BYTE_UNITS[i];
+}
+// Clean default render for a raw value when a column has NO explicit format (mirrors Julia
+// `_clean_default`): numbers via native String() (already trims `.0` and avoids sci for normal ranges).
+function _cleanDefault(v) { return v == null ? '' : String(v); }
+function fmtCell(value, fmt) {
+  if (value == null) return '';
+  if (!fmt) return _cleanDefault(value);
+  const n = _asNumber(value);
+  if (n === null) return String(value);            // non-numeric cell in a formatted column → raw
+  const kind = fmt.kind || 'fixed';
+  const digits = (fmt.digits != null) ? fmt.digits : null;
+  const sep = !!fmt.sep, prefix = fmt.prefix || '', suffix = fmt.suffix || '';
+  let body;
+  if (kind === 'integer') body = _maybeGroup(_roundDec(n, 0), sep);
+  else if (kind === 'percent') body = _roundDec(n * 100, digits == null ? 1 : digits) + '%';
+  else if (kind === 'currency') body = _maybeGroup(_roundDec(n, digits == null ? 2 : digits), sep);
+  else if (kind === 'scientific') body = _sci(n, digits == null ? 3 : digits);
+  else if (kind === 'bytes') body = _bytes(n, digits == null ? 1 : digits);
+  else body = _maybeGroup(_roundDec(n, digits == null ? 2 : digits), sep);   // fixed
+  const neg = body[0] === '-';                      // sign sits OUTSIDE the prefix: -$1,234.50
+  const core = neg ? body.slice(1) : body;
+  return (neg ? '-' : '') + prefix + core + suffix;
+}
+// ── end cell formatter (marker for the Node parity test test/js/format_parity.mjs) ──
 function renderTables(c) {
   const specs = c.tables || [];
   const host = document.querySelector('#cell-' + c.id + ' .tables');
@@ -238,12 +299,16 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
   const sel = wrap._sel;                                 // selection mode (TableSelect), else null
   const curSel = sel ? (sel.value() || 0) : 0;           // 1-based original index currently bound
   tbody.innerHTML = '';
+  const cols = spec.columns || [];
   pageRows.forEach((r, k) => {
     const tr = document.createElement('tr');
-    r.forEach(v => {
+    r.forEach((v, ci) => {
+      const col = cols[ci] || {};
       const td = document.createElement('td');
-      if (typeof v === 'number') td.className = 'num';
-      td.textContent = v == null ? '' : v;
+      const numeric = col.type === 'int' || col.type === 'float' || (col.type == null && typeof v === 'number');
+      const align = col.align || (numeric ? 'right' : 'left');   // ColumnDef.align (default from type)
+      td.className = (numeric ? 'num ' : '') + 'align-' + align;
+      td.textContent = col.format ? fmtCell(v, col.format) : _cleanDefault(v);
       td.title = td.textContent;
       tr.appendChild(td);
     });

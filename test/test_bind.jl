@@ -47,7 +47,7 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
     @testset "TableSelect binds the clicked row as a NamedTuple" begin
         ts = RE.TableSelect([(sym = "AAPL", px = 42.0), (sym = "MSFT", px = 13.5)])
         @test ts.kind == "tableselect"
-        @test ts.params["columns"] == ["sym", "px"]
+        @test [c["name"] for c in ts.params["columns"]] == ["sym", "px"]   # object-form columns
         @test ts.default == 0                                   # nothing selected initially
         # No selection → nothing; a valid 1-based index → the row as a NamedTuple (field per column)
         @test RE._wrap_choice(ts, 0) === nothing

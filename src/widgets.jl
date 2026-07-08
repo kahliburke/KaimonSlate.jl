@@ -161,7 +161,7 @@ function TableSelect(data; default = nothing, label = nothing, maxrows::Integer 
     st = slate_table(data)   # accepts anything slate_table does (Tables.jl source, Vector{NamedTuple}, …)
     n = min(length(st.rows), Int(maxrows))
     p = _wparams(label)
-    p["columns"] = st.columns
+    p["columns"] = Any[_col_wire(c) for c in st.columns]   # object-form columns (name/type/align/format)
     p["rows"] = st.rows[1:n]
     o = Dict{String,Any}("nrows" => get(st.opts, "nrows", length(st.rows)), "ncols" => length(st.columns))
     length(st.rows) > n && (o["truncated"] = true)
@@ -174,9 +174,10 @@ end
 function _row_namedtuple(w::Widget, idx::Integer)
     rows = get(w.params, "rows", Vector{Any}[])
     (idx < 1 || idx > length(rows)) && return nothing
-    cols = get(w.params, "columns", String[])
+    cols = get(w.params, "columns", Any[])
     row = rows[idx]
-    names = Tuple(Symbol(c) for c in cols)
+    _cname(c) = c isa AbstractDict ? String(get(c, "name", "")) : string(c)   # object-form columns → name
+    names = Tuple(Symbol(_cname(c)) for c in cols)
     vals = Tuple(i <= length(row) ? row[i] : nothing for i in eachindex(cols))
     return NamedTuple{names}(vals)
 end

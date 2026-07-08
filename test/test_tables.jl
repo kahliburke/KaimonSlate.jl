@@ -6,6 +6,9 @@ using ReTest
 
 const HERE = @__DIR__
 include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
+import JSON
+
+_names(t) = String[c.name for c in t.columns]              # ColumnDef → names, for terse assertions
 
 @testset "SlateTable / slate_table" begin
 
@@ -13,23 +16,24 @@ include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
         # Vector of NamedTuples → columns from keys, rows in order.
         t = slate_table([(name = "a", x = 1), (name = "b", x = 2)])
         @test t isa SlateTable
-        @test t.columns == ["name", "x"]
+        @test _names(t) == ["name", "x"]
+        @test [c.type for c in t.columns] == [:string, :int]   # inferred physical types
         @test t.rows == [Any["a", 1], Any["b", 2]]
         @test t.opts["nrows"] == 2 && t.opts["ncols"] == 2
 
         # NamedTuple of column vectors.
         tc = slate_table((x = [1, 2, 3], y = [4, 5, 6]))
-        @test tc.columns == ["x", "y"]
+        @test _names(tc) == ["x", "y"]
         @test length(tc.rows) == 3 && tc.rows[3] == Any[3, 6]
 
         # Dict of column vectors (key order is unspecified — compare as sets).
         td = slate_table(Dict("a" => [1, 2], "b" => [3, 4]))
-        @test Set(td.columns) == Set(["a", "b"])
+        @test Set(_names(td)) == Set(["a", "b"])
         @test length(td.rows) == 2
 
         # Explicit columns + rows, and a matrix.
         te = slate_table(["p", "q"], [[1, 2], [3, 4]])
-        @test te.columns == ["p", "q"] && te.rows == [Any[1, 2], Any[3, 4]]
+        @test _names(te) == ["p", "q"] && te.rows == [Any[1, 2], Any[3, 4]]
         tm = slate_table(["p", "q"], [1 2; 3 4])
         @test tm.rows == [Any[1, 2], Any[3, 4]]
 
@@ -38,7 +42,32 @@ include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
         @test_throws ArgumentError slate_table(42)
 
         # Empty vector → an empty (but valid) table, not an error.
-        @test slate_table(Vector{NamedTuple}()).columns == String[]
+        @test isempty(slate_table(Vector{NamedTuple}()).columns)
+    end
+
+    @testset "column type inference + default alignment" begin
+        t = slate_table((i = [1, 2], f = [1.5, 2.5], b = [true, false], s = ["a", "b"]))
+        @test [c.type for c in t.columns] == [:int, :float, :bool, :string]
+        @test [c.align for c in t.columns] == [:right, :right, :center, :left]
+        # a column with a missing/nothing mixed in still infers from the present values
+        tm = slate_table((x = [1, missing, 3],))
+        @test tm.columns[1].type == :int
+        # all-missing / empty ⇒ :string
+        @test slate_table((x = [missing, nothing],)).columns[1].type == :string
+    end
+
+    @testset "format / align DSL" begin
+        t = slate_table((Revenue = [45999.5, 12050.0], Margin = [0.324, 0.281], Product = ["A", "B"]);
+                        format = (Revenue = :currency, Margin = (kind = :percent, digits = 1)),
+                        align  = (Product = :center,))
+        cols = Dict(c.name => c for c in t.columns)
+        @test cols["Revenue"].format.kind == :currency && cols["Revenue"].format.digits == 2
+        @test cols["Margin"].format.kind == :percent && cols["Margin"].format.digits == 1
+        @test cols["Product"].align == :center
+        @test cols["Revenue"].align == :right                 # inferred default preserved
+        # coltype override + unknown-column typo → hard error
+        @test slate_table(["x"], [[1]]; coltype = (x = :string,)).columns[1].type == :string
+        @test_throws ArgumentError slate_table(["x"], [[1]]; format = (nope = :currency,))
     end
 
     @testset "cells are reduced to JSON-safe scalars" begin
@@ -68,14 +97,17 @@ include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
         out = r.cells[1].output
         @test out.exception === nothing
         @test length(out.tables) == 1
-        @test out.tables[1]["columns"] == ["a", "b"]
+        @test [c["name"] for c in out.tables[1]["columns"]] == ["a", "b"]
+        @test out.tables[1]["columns"][1]["type"] == "int"      # object-form columns carry type/align/format
+        @test out.tables[1]["columns"][1]["align"] == "right"
+        @test out.tables[1]["columns"][1]["format"] === nothing
         @test out.tables[1]["rows"] == [Any[1, 2], Any[3, 4]]
         @test out.value_repr == ""               # richer output suppresses the text repr
         @test isempty(out.display)               # not captured as a MIME chunk
 
         # The wire form (gate contract) carries the same raw spec.
         w = run_capture(report_module(r), "slate_table([(a=1,),(a=2,)])")
-        @test length(w.tables) == 1 && w.tables[1]["columns"] == ["a"]
+        @test length(w.tables) == 1 && [c["name"] for c in w.tables[1]["columns"]] == ["a"]
     end
 
     @testset "no auto-render without Tables.jl" begin
@@ -94,7 +126,7 @@ include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
         @test prov isa P.InMemoryPagedProvider
         cols = P.page_columns(prov)
         @test [c.name for c in cols] == ["a", "b"]
-        @test cols[1].col_type == :numeric && cols[2].col_type == :text
+        @test cols[1].type == :int && cols[2].type == :string
 
         @test P.fetch_page(prov, P.PageRequest(1, 2, 0, false, "")).total == 5
         @test length(P.fetch_page(prov, P.PageRequest(1, 2, 0, false, "")).rows) == 2
@@ -134,11 +166,44 @@ include(joinpath(HERE, "..", "src", "engine.jl")); using .ReportEngine
         P = ReportEngine
         @test P._like_arg("A'b%c") == "%a''b\\%c%"     # lowercased, quote-doubled, %/_ escaped
         prov = P.SqlPagedProvider(nothing, "SELECT * FROM t",
-            [P.PagedColumnDef("x", :numeric, true, true), P.PagedColumnDef("y", :text, true, true)])
+            [P.ColumnDef("x", :int, :right, nothing, true, true), P.ColumnDef("y", :string, :left, nothing, true, true)])
         w = P._sql_where(prov, P.PageRequest(1, 10, 0, false, "foo"))
         @test occursin("LOWER(CAST(\"x\" AS VARCHAR)) LIKE", w) && occursin(" OR ", w)
         @test P._sql_where(prov, P.PageRequest(1, 10, 0, false, "")) == ""
         # Without DBInterface/Tables loaded, slate_query errors clearly (not a MethodError).
         @test_throws ArgumentError slate_query(nothing, "SELECT 1")
+    end
+
+    @testset "formatter parity fixture (_format_cell)" begin
+        # The SAME golden fixture is asserted from JS (fmtCell) — see test/js/format_parity.mjs.
+        cases = JSON.parsefile(joinpath(HERE, "fixtures", "format_cases.json"))
+        fails = String[]
+        for c in cases
+            got = ReportEngine._format_cell(c["value"], c["format"])
+            got == c["expected"] ||
+                push!(fails, "$(c["value"]) $(c["format"]) → $(repr(got)) (expected $(repr(c["expected"])))")
+        end
+        @test isempty(fails)   # aggregate: one assertion, all divergences listed on failure
+        isempty(fails) || foreach(println, fails)
+
+        # The conservative default (no format) cleans numbers without a DSL opt-in.
+        @test ReportEngine._format_cell(210000.0, nothing) == "210000"
+        @test ReportEngine._format_cell(1.25e6, nothing) == "1250000"
+        @test ReportEngine._format_cell(0.4153, nothing) == "0.4153"
+        @test ReportEngine._format_cell(42, nothing) == "42"
+        @test ReportEngine._format_cell(nothing, nothing) == ""
+    end
+
+    @testset "formatter parity: JS fmtCell (node, if available)" begin
+        node = Sys.which("node")
+        if node === nothing
+            @info "node not found — skipping JS↔Julia formatter parity (Julia fixture asserted above)"
+            @test true
+        else
+            io = IOBuffer()
+            ok = success(pipeline(`$node $(joinpath(HERE, "js", "format_parity.mjs"))`; stdout = io, stderr = io))
+            ok || print(String(take!(io)))         # surface the diverging cases on failure
+            @test ok
+        end
     end
 end

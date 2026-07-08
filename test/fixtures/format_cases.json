@@ -1,0 +1,22 @@
+[
+  {"value": 1250000,  "format": {"kind": "integer", "sep": true},                                "expected": "1,250,000"},
+  {"value": 1250000,  "format": {"kind": "integer", "sep": false},                               "expected": "1250000"},
+  {"value": 0.324,    "format": {"kind": "percent", "digits": 1},                                "expected": "32.4%"},
+  {"value": 0.324,    "format": {"kind": "percent", "digits": 0},                                "expected": "32%"},
+  {"value": -0.05,    "format": {"kind": "percent", "digits": 1},                                "expected": "-5.0%"},
+  {"value": 45999.5,  "format": {"kind": "currency", "digits": 2, "sep": true, "prefix": "$"},   "expected": "$45,999.50"},
+  {"value": -1234.5,  "format": {"kind": "currency", "digits": 2, "sep": true, "prefix": "$"},   "expected": "-$1,234.50"},
+  {"value": 1000000,  "format": {"kind": "currency", "digits": 2, "sep": true, "prefix": "€"},   "expected": "€1,000,000.00"},
+  {"value": 3.14159,  "format": {"kind": "fixed", "digits": 2},                                  "expected": "3.14"},
+  {"value": 2.5,      "format": {"kind": "fixed", "digits": 0},                                  "expected": "3"},
+  {"value": 3.5,      "format": {"kind": "fixed", "digits": 0},                                  "expected": "4"},
+  {"value": -2.5,     "format": {"kind": "fixed", "digits": 0},                                  "expected": "-3"},
+  {"value": 100,      "format": {"kind": "fixed", "digits": 2, "suffix": " kg"},                 "expected": "100.00 kg"},
+  {"value": 1536,     "format": {"kind": "bytes", "digits": 1},                                  "expected": "1.5 KB"},
+  {"value": 1048576,  "format": {"kind": "bytes", "digits": 2},                                  "expected": "1.00 MB"},
+  {"value": 512,      "format": {"kind": "bytes", "digits": 1},                                  "expected": "512 B"},
+  {"value": 12345,    "format": {"kind": "scientific", "digits": 3},                             "expected": "1.23e4"},
+  {"value": 0.0012,   "format": {"kind": "scientific", "digits": 3},                             "expected": "1.20e-3"},
+  {"value": 1000,     "format": {"kind": "scientific", "digits": 3},                             "expected": "1.00e3"},
+  {"value": "not a number", "format": {"kind": "currency"},                                      "expected": "not a number"}
+]

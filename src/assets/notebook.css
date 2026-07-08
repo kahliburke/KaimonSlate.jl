@@ -348,6 +348,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .slatetable tbody tr:nth-child(even) { background:var(--rowstripe); }
 .slatetable tbody tr:hover { background:rgba(86,156,214,.08); }
 .slatetable td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--green); }
+/* explicit per-column alignment (from ColumnDef.align) — declared AFTER .num so an override wins */
+.slatetable td.align-left { text-align:left; }
+.slatetable td.align-center { text-align:center; }
+.slatetable td.align-right { text-align:right; }
 .slatetable .st-pag { display:flex; align-items:center; gap:8px; margin-top:6px; }
 .slatetable .st-pag button { padding:2px 9px; font-size:.76rem; }
 .slatetable .st-page { color:var(--dim); font-size:.74rem; }

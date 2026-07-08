@@ -197,7 +197,7 @@ end
 # it prints and notes what was elided (never a silent cap).
 function _table_text(t; maxrows::Int = 20, maxcols::Int = 20, maxcolw::Int = 28)
     t isa AbstractDict || return "[rendered: table]"
-    cols = String[string(c) for c in get(t, "columns", String[])]
+    cols = String[c isa AbstractDict ? string(get(c, "name", "")) : string(c) for c in get(t, "columns", Any[])]
     rows = get(t, "rows", Any[])
     opts = get(t, "opts", Dict{String,Any}())
     (isempty(cols) && isempty(rows)) && return "(empty table)"
