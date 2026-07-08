@@ -64,7 +64,7 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-table td.align-center,.exp-table th.align-center{text-align:center;}
 .exp-table tbody tr:nth-child(even){background:rgba(127,127,127,.06);}
 /* interactive enhancer (hydrated client-side): sortable headers, filter, paging, CSV */
-.exp-tblwrap{margin:8px 0;}
+.exp-tblwrap{width:fit-content;max-width:100%;margin:10px auto;}   /* center the table block on the page */
 .exp-table th{cursor:pointer;user-select:none;} .exp-table th::after{content:attr(data-arr);color:var(--accent);}
 .exp-tbl-bar{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
 .exp-tbl-filter{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:.78rem;min-width:150px;}
@@ -73,6 +73,8 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-tbl-csv,.exp-tbl-pg button{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 9px;font-size:.74rem;cursor:pointer;font-family:inherit;}
 .exp-tbl-csv{margin-left:auto;} .exp-tbl-csv:hover,.exp-tbl-pg button:hover{border-color:var(--accent);}
 .exp-tbl-pg{display:flex;align-items:center;gap:8px;margin-top:4px;} .exp-tbl-pg span{color:var(--dim);font-size:.74rem;}
+.exp-tbl-page{cursor:pointer;} .exp-tbl-page:hover{color:var(--accent);}
+.exp-tbl-goto{width:3.6em;background:var(--bg3);color:var(--text);border:1px solid var(--accent);border-radius:5px;padding:1px 5px;font-size:.74rem;font-family:inherit;}
 .exp-tblnote{color:var(--dim);font-size:.74rem;margin-top:3px;font-style:italic;}
 .exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
 .exp-code{margin:14px 0;border:1px solid var(--border);border-radius:8px;background:var(--bg2);overflow:hidden;}
@@ -119,8 +121,15 @@ function enh(table){
     tb.innerHTML='';rows.slice(start,ps?start+ps:undefined).forEach(function(tr){tb.appendChild(tr);});
     info.textContent=total?(start+1)+'–'+Math.min(start+ps,total)+' of '+total:'0';
     pg.innerHTML='';
-    if(pages>1){var mk=function(t,to,d){var b=document.createElement('button');b.textContent=t;b.disabled=d;b.addEventListener('click',function(){st.page=to;render();});return b;};
-      pg.appendChild(mk('‹ prev',st.page-1,st.page<=0));var s=document.createElement('span');s.textContent='page '+(st.page+1)+' / '+pages;pg.appendChild(s);pg.appendChild(mk('next ›',st.page+1,st.page>=pages-1));}}
+    if(pages>1){var go=function(to){st.page=Math.max(0,Math.min(pages-1,to));render();};
+      var mk=function(t,to,d){var b=document.createElement('button');b.textContent=t;b.disabled=d;b.addEventListener('click',function(){go(to);});return b;};
+      pg.appendChild(mk('«',0,st.page<=0));pg.appendChild(mk('‹ prev',st.page-1,st.page<=0));
+      var s=document.createElement('span');s.className='exp-tbl-page';s.textContent='page '+(st.page+1)+' / '+pages;s.title='click to jump to a page';
+      s.addEventListener('click',function(){var inp=document.createElement('input');inp.type='number';inp.className='exp-tbl-goto';inp.min=1;inp.max=pages;inp.value=st.page+1;
+        s.replaceWith(inp);inp.focus();inp.select();
+        var commit=function(jump){inp.onblur=null;if(jump){var n=parseInt(inp.value,10);if(!isNaN(n)){go(n-1);return;}}render();};
+        inp.addEventListener('keydown',function(e){if(e.key==='Enter')commit(true);else if(e.key==='Escape')commit(false);});inp.onblur=function(){commit(true);};});
+      pg.appendChild(s);pg.appendChild(mk('next ›',st.page+1,st.page>=pages-1));pg.appendChild(mk('»',pages-1,st.page>=pages-1));}}
   ths.forEach(function(th,ci){th.addEventListener('click',function(){if(st.sort===ci)st.dir=-st.dir;else{st.sort=ci;st.dir=1;}st.page=0;render();});});
   fi.addEventListener('input',function(){st.filter=fi.value;st.page=0;render();});
   csv.addEventListener('click',function(){var lines=[ths.map(function(th){return esc(th.getAttribute('data-label'));}).join(',')];
@@ -131,6 +140,24 @@ function enh(table){
 }
 [].forEach.call(document.querySelectorAll('table.exp-table'),enh);
 })();"""
+
+# Inline background for an in-cell `:bar`/`:heat` column, scaled over the column's numeric domain
+# (min,max). Shares the CSS "hard-stop linear-gradient = bar" trick with the live table (core.js).
+function _viz_style_html(v, col)
+    col isa AbstractDict || return ""
+    viz = get(col, "viz", nothing); viz === nothing && return ""
+    dom = get(col, "domain", nothing)
+    (v isa Real && !(v isa Bool) && dom isa AbstractVector && length(dom) == 2) || return ""
+    lo, hi = Float64(dom[1]), Float64(dom[2])
+    f = hi > lo ? clamp((Float64(v) - lo) / (hi - lo), 0.0, 1.0) : 1.0
+    if viz == "bar"
+        p = string(round(f * 100; digits = 1))
+        return " style=\"background:linear-gradient(to right,rgba(88,166,255,.20) $p%,transparent $p%)\""
+    elseif viz == "heat"
+        return " style=\"background:rgba(88,166,255,$(round(0.05 + 0.32 * f; digits = 3)))\""
+    end
+    return ""
+end
 
 function _export_table_html(spec)
     cols = get(spec, "columns", Any[])
@@ -146,7 +173,9 @@ function _export_table_html(spec)
         print(io, "<th class=\"", _cnumeric(c) ? "num " : "", "align-", _calign(c), "\">", _esc(_cname(c)), "</th>")
     end
     print(io, "</tr></thead><tbody>")
-    for r in rows
+    cap = get(opts, "export_rows", nothing)                 # per-table hint: only the first N rows in fixed exports
+    shown = (cap !== nothing && length(rows) > cap) ? view(rows, 1:cap) : rows
+    for r in shown
         print(io, "<tr>")
         for (ci, v) in enumerate(r)
             c = ci <= length(cols) ? cols[ci] : nothing
@@ -155,14 +184,14 @@ function _export_table_html(spec)
             txt = ReportEngine._format_cell(v, c === nothing ? nothing : _cfmt(c))
             # numeric cells carry the RAW value in data-v so the interactive enhancer sorts numerically
             dv = (num && v isa Real && !(v isa Bool)) ? string(" data-v=\"", v, "\"") : ""
-            print(io, "<td class=\"", num ? "num " : "", "align-", al, "\"", dv, ">", _esc(txt), "</td>")
+            print(io, "<td class=\"", num ? "num " : "", "align-", al, "\"", dv, _viz_style_html(v, c), ">", _esc(txt), "</td>")
         end
         print(io, "</tr>")
     end
     print(io, "</tbody></table>")
-    # Never silently truncate: a capped eager table / a paged table's page-1-only spec says how much is hidden.
+    # Never silently truncate: a capped/export_rows-limited eager table / a paged page-1 spec says how much is hidden.
     nrows = Int(get(opts, "nrows", length(rows)))
-    length(rows) < nrows && print(io, "<div class=\"exp-tblnote\">Showing ", length(rows), " of ", nrows, " rows</div>")
+    length(shown) < nrows && print(io, "<div class=\"exp-tblnote\">Showing ", length(shown), " of ", nrows, " rows</div>")
     print(io, "</div>")
     return String(take!(io))
 end
@@ -1651,14 +1680,24 @@ end
 # only the loaded rows). `|` in a cell is escaped so it doesn't break the column layout.
 function _md_table(spec)
     cols = get(spec, "columns", Any[]); rows = get(spec, "rows", Any[])
+    opts = get(spec, "opts", Dict{String,Any}())
     names = String[c isa AbstractDict ? string(get(c, "name", "")) : string(c) for c in cols]
     isempty(names) && return ""
+    _calign(c) = c isa AbstractDict ? string(get(c, "align", "left")) : "left"
+    _cfmt(c)   = c isa AbstractDict ? get(c, "format", nothing) : nothing
+    _gfmsep(a) = a == "right" ? "---:" : (a == "center" ? ":--:" : ":---")   # GFM alignment row
     io = IOBuffer()
     println(io, "| ", join(names, " | "), " |")
-    println(io, "| ", join(fill("---", length(names)), " | "), " |")
-    for r in rows
-        println(io, "| ", join((v === nothing ? "" : replace(string(v), "|" => "\\|") for v in r), " | "), " |")
+    println(io, "| ", join((_gfmsep(_calign(c)) for c in cols), " | "), " |")
+    cap = get(opts, "export_rows", nothing)
+    shown = (cap !== nothing && length(rows) > cap) ? view(rows, 1:cap) : rows
+    for r in shown
+        cells = String[replace(ReportEngine._format_cell(v, ci <= length(cols) ? _cfmt(cols[ci]) : nothing),
+                               "|" => "\\|") for (ci, v) in enumerate(r)]
+        println(io, "| ", join(cells, " | "), " |")
     end
+    nrows = Int(get(opts, "nrows", length(rows)))
+    length(shown) < nrows && println(io, "\n_Showing ", length(shown), " of ", nrows, " rows._")
     return String(take!(io))
 end
 

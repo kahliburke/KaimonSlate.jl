@@ -332,6 +332,30 @@ end
 # A static Typst table from a wire table spec (Dict with "columns"/"rows"). Capped.
 # Cell/header text inherits the document text colour, so it follows the theme; only the
 # rule colour and header fill are themed explicitly via the palette.
+# Wrap a Typst table-cell body in a `table.cell(fill: …)` for an in-cell `:bar`/`:heat` column,
+# scaled over the column's numeric domain. `:bar` uses a hard-stop linear gradient (the Typst analog
+# of the CSS bar); `:heat` an alpha-shaded fill. The empty part is fully transparent so zebra shows.
+function _typ_viz_cell(v, col, inner::AbstractString)
+    col isa AbstractDict || return inner
+    viz = get(col, "viz", nothing); viz === nothing && return inner
+    dom = get(col, "domain", nothing)
+    (v isa Real && !(v isa Bool) && dom isa AbstractVector && length(dom) == 2) || return inner
+    lo, hi = Float64(dom[1]), Float64(dom[2])
+    f = hi > lo ? clamp((Float64(v) - lo) / (hi - lo), 0.0, 1.0) : 1.0
+    if viz == "bar"
+        p = string(round(f * 100; digits = 1))
+        fill = "gradient.linear((rgb(\"#58a6ff\").transparentize(80%), 0%), " *
+               "(rgb(\"#58a6ff\").transparentize(80%), $p%), " *
+               "(rgb(\"#58a6ff\").transparentize(100%), $p%), " *
+               "(rgb(\"#58a6ff\").transparentize(100%), 100%))"
+        return "table.cell(fill: $fill)$inner"
+    elseif viz == "heat"
+        t = string(round((1 - (0.10 + 0.35 * f)) * 100; digits = 1))   # transparentize %  (0% ⇒ opaque)
+        return "table.cell(fill: rgb(\"#58a6ff\").transparentize($t%))$inner"
+    end
+    return inner
+end
+
 function _typst_table(spec; theme::AbstractString = "light")::String
     cols = get(spec, "columns", Any[])
     rows = get(spec, "rows", Any[])
@@ -344,18 +368,20 @@ function _typst_table(spec; theme::AbstractString = "light")::String
     _cfmt(c)   = c isa AbstractDict ? get(c, "format", nothing) : nothing
     _typalign(a) = a == "right" ? "right" : (a == "center" ? "center" : "left")
     fmts = Any[_cfmt(c) for c in cols]
-    cell(v, fmt) = "[#text(size: 8pt, \"" * _typ_str(ReportEngine._format_cell(v, fmt)) * "\")]"
+    inner(v, fmt) = "[#text(size: 8pt, \"" * _typ_str(ReportEngine._format_cell(v, fmt)) * "\")]"
+    cell(v, col, fmt) = _typ_viz_cell(v, col, inner(v, fmt))
     io = IOBuffer()
     # per-column alignment (numbers right, bools center) + a themed grid stroke
+    print(io, "#align(center)[\n")   # center the table block on the page
     print(io, "#table(columns: ", ncol, ", inset: 5pt, align: (", join((_typalign(_calign(c)) for c in cols), ", "), "), stroke: 0.4pt + $(p.tablestroke),\n")
     # zebra: header shaded (row 0), odd body rows a subtle stripe
     print(io, "  fill: (_, row) => if row == 0 { $(p.tableheadbg) } else if calc.odd(row) { $(p.tablestripe) },\n")
     # repeat the header on every page a long table spills onto
     print(io, "  table.header(repeat: true, ", join(["[#text(size: 8.5pt, weight: \"bold\", \"" * _typ_str(_cname(c)) * "\")]" for c in cols], ", "), "),\n")
-    maxr = 200
+    maxr = Int(something(get(opts, "export_rows", nothing), 200))   # per-table export_rows hint, else default cap
     for (ri, r) in enumerate(rows)
         ri > maxr && break
-        print(io, "  ", join([cell(ci <= length(r) ? r[ci] : nothing, fmts[ci]) for ci in 1:ncol], ", "), ",\n")
+        print(io, "  ", join([cell(ci <= length(r) ? r[ci] : nothing, cols[ci], fmts[ci]) for ci in 1:ncol], ", "), ",\n")
     end
     print(io, ")\n")
     # accurate truncation: the wire ships at most `maxr` here AND a paged table ships only page 1,
@@ -363,6 +389,7 @@ function _typst_table(spec; theme::AbstractString = "light")::String
     total = Int(get(opts, "nrows", length(rows)))
     shown = min(length(rows), maxr)
     shown < total && print(io, "#text(size: 8pt, fill: gray)[… ", total - shown, " more rows (", total, " total)]\n")
+    print(io, "]\n")   # close #align(center)
     return String(take!(io))
 end
 

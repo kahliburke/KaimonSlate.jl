@@ -70,6 +70,19 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         @test_throws ArgumentError slate_table(["x"], [[1]]; format = (nope = :currency,))
     end
 
+    @testset "viz (bar/heat) + domain + export_rows" begin
+        t = slate_table((a = [1, 2, 3, 4], b = ["w", "x", "y", "z"]); viz = (a = :bar,), export_rows = 2)
+        ca, cb = t.columns
+        @test ca.viz == :bar
+        @test ca.domain == (1.0, 4.0)                 # numeric domain inferred at capture (for scaling)
+        @test cb.viz == :none && cb.domain === nothing
+        @test t.opts["export_rows"] == 2
+        # wire carries viz + domain only for the viz column
+        wa = ReportEngine._col_wire(ca)
+        @test wa["viz"] == "bar" && wa["domain"] == Any[1.0, 4.0]
+        @test !haskey(ReportEngine._col_wire(cb), "viz")
+    end
+
     @testset "cells are reduced to JSON-safe scalars" begin
         cv = ReportEngine._cellval
         @test cv(nothing) === nothing

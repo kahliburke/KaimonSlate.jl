@@ -37,6 +37,21 @@ struct ColumnDef
     format::Union{ColumnFormat,Nothing}
     sortable::Bool
     filterable::Bool
+    viz::Symbol                   # :none :bar :heat — in-cell visualization for a numeric column
+    domain::Union{Nothing,Tuple{Float64,Float64}}   # (min,max) for scaling bar/heat; nothing = non-numeric / no data
+end
+# Back-compat convenience: the 6-arg form (pre-viz call sites) defaults viz/domain.
+ColumnDef(name, type, align, format, sortable, filterable) =
+    ColumnDef(name, type, align, format, sortable, filterable, :none, nothing)
+
+# (min, max) of a column's finite numeric RAW values, or nothing (used to scale :bar/:heat).
+function _col_domain(col)
+    lo = Inf; hi = -Inf
+    for v in col
+        (v isa Real && !(v isa Bool) && isfinite(v)) || continue
+        f = Float64(v); f < lo && (lo = f); f > hi && (hi = f)
+    end
+    return isfinite(lo) ? (lo, hi) : nothing
 end
 
 # Alignment implied by a column's physical type (numbers right, bools centered, else left).
@@ -72,8 +87,10 @@ end
 function _infer_columns(names::Vector{String}, rawcols)::Vector{ColumnDef}
     cols = Vector{ColumnDef}(undef, length(names))
     for i in eachindex(names)
-        t = i <= length(rawcols) ? _infer_type(rawcols[i]) : :string
-        cols[i] = ColumnDef(names[i], t, _default_align(t), nothing, true, true)
+        rc = i <= length(rawcols) ? rawcols[i] : ()
+        t = _infer_type(rc)
+        dom = (t === :int || t === :float) ? _col_domain(rc) : nothing   # for :bar/:heat scaling
+        cols[i] = ColumnDef(names[i], t, _default_align(t), nothing, true, true, :none, dom)
     end
     return cols
 end
@@ -229,21 +246,26 @@ end
 # Overlay user `format=`/`align=`/`coltype=` (each a column-name-keyed NamedTuple/Dict) onto the
 # inferred `ColumnDef`s IN PLACE (immutable structs → replace by index). An unknown column name is a
 # build-time authoring typo → hard error listing the available names.
-function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple())
+function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align = NamedTuple(),
+                         coltype = NamedTuple(), viz = NamedTuple())
     idx = Dict(c.name => i for (i, c) in enumerate(cols))
     _at(nm) = (i = get(idx, String(nm), nothing); i === nothing &&
         throw(ArgumentError("slate_table: no column \"$nm\" (have: $(join((c.name for c in cols), ", ")))")); i)
     for (nm, v) in pairs(coltype)
         i = _at(nm); c = cols[i]; t = Symbol(v)
-        cols[i] = ColumnDef(c.name, t, _default_align(t), c.format, c.sortable, c.filterable)
+        cols[i] = ColumnDef(c.name, t, _default_align(t), c.format, c.sortable, c.filterable, c.viz, c.domain)
     end
     for (nm, v) in pairs(align)
         i = _at(nm); c = cols[i]
-        cols[i] = ColumnDef(c.name, c.type, Symbol(v), c.format, c.sortable, c.filterable)
+        cols[i] = ColumnDef(c.name, c.type, Symbol(v), c.format, c.sortable, c.filterable, c.viz, c.domain)
     end
     for (nm, v) in pairs(format)
         i = _at(nm); c = cols[i]
-        cols[i] = ColumnDef(c.name, c.type, c.align, _parse_col_format(v), c.sortable, c.filterable)
+        cols[i] = ColumnDef(c.name, c.type, c.align, _parse_col_format(v), c.sortable, c.filterable, c.viz, c.domain)
+    end
+    for (nm, v) in pairs(viz)
+        i = _at(nm); c = cols[i]
+        cols[i] = ColumnDef(c.name, c.type, c.align, c.format, c.sortable, c.filterable, Symbol(v), c.domain)
     end
     return cols
 end
@@ -251,7 +273,7 @@ end
 # ── Public helper (injected into the cell namespace as `slate_table`) ─────────
 
 """
-    slate_table(data; format=…, align=…, coltype=…) -> SlateTable
+    slate_table(data; format=…, align=…, coltype=…, viz=…) -> SlateTable
     slate_table(columns, rows; …) -> SlateTable
 
 Build an interactive table. `data` may be a DataFrame / any Tables.jl source, a
@@ -267,32 +289,42 @@ name); a value is a preset `Symbol` or a `NamedTuple` naming a `kind` plus overr
 
     slate_table(df; format = (Revenue = :currency, Margin = (kind=:percent, digits=1)),
                     align  = (Product = :left,))
+
+`viz` adds an in-cell visualization to a numeric column, scaled over its min→max: `:bar` (a
+proportional bar behind the value) or `:heat` (a background shaded by magnitude):
+
+    slate_table(df; format = (Revenue = :currency,), viz = (Revenue = :bar, Margin = :heat))
+
+`export_rows = n` caps the rows shown in FIXED exports (PDF / markdown / static HTML) to the first
+`n` (with a "showing n of N" note); the live table stays fully paginated.
 """
 
 # `paged=true` builds a server-paged table (provider lives where cells eval; the
 # browser fetches one page at a time) — see paged.jl. Otherwise the eager form
 # below materializes all rows (capped). `page_size` sets the paged page length.
-function slate_table(x; paged::Bool = false, page_size::Int = 50,
-                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple())
+function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = nothing,
+                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple())
     if paged
         prov = _inmemory_provider(x)
         prov === nothing && throw(ArgumentError(
             "slate_table(…; paged=true): cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl " *
             "source, a Vector of NamedTuples, or a Dict/NamedTuple of column vectors."))
         pt = _make_paged(prov; page_size = page_size)
-        _apply_col_opts!(pt.columns; format, align, coltype)
-        return pt
+        _apply_col_opts!(pt.columns; format, align, coltype, viz)
+        return pt   # paged tables are already page-limited in fixed exports (only page 1 ships)
     end
     t = _as_slate_table(x)
     t === nothing && (t = _table_manual(x))
     t === nothing && throw(ArgumentError(
         "slate_table: cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl source, " *
         "a Vector of NamedTuples, a Dict/NamedTuple of column vectors, or `columns, rows`."))
-    _apply_col_opts!(t.columns; format, align, coltype)
+    _apply_col_opts!(t.columns; format, align, coltype, viz)
+    export_rows === nothing || (t.opts["export_rows"] = Int(export_rows))   # cap rows in fixed exports (PDF/md/HTML)
     return t
 end
 
-function slate_table(columns, rows; format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple())
+function slate_table(columns, rows; export_rows = nothing,
+                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple())
     names = String[string(c) for c in columns]
     ncol = length(names)
     rawrows = rows isa AbstractMatrix ?
@@ -301,8 +333,10 @@ function slate_table(columns, rows; format = NamedTuple(), align = NamedTuple(),
     rws = Vector{Any}[Any[_cellval(v) for v in r] for r in rawrows]
     rawcols = Any[Any[(j <= length(r) ? r[j] : nothing) for r in rawrows] for j in 1:ncol]
     cols = _infer_columns(names, rawcols)
-    _apply_col_opts!(cols; format, align, coltype)
-    return _finish(cols, rws)
+    _apply_col_opts!(cols; format, align, coltype, viz)
+    t = _finish(cols, rws)
+    export_rows === nothing || (t.opts["export_rows"] = Int(export_rows))
+    return t
 end
 
 # Serialize a column (+ its optional format) to the wire — the SINGLE column shape shared by eager
@@ -310,9 +344,15 @@ end
 _format_wire(::Nothing) = nothing
 _format_wire(f::ColumnFormat) = Dict{String,Any}(
     "kind" => String(f.kind), "digits" => f.digits, "sep" => f.sep, "prefix" => f.prefix, "suffix" => f.suffix)
-_col_wire(c::ColumnDef) = Dict{String,Any}(
-    "name" => c.name, "type" => String(c.type), "align" => String(c.align),
-    "format" => _format_wire(c.format), "sortable" => c.sortable, "filterable" => c.filterable)
+function _col_wire(c::ColumnDef)
+    d = Dict{String,Any}("name" => c.name, "type" => String(c.type), "align" => String(c.align),
+        "format" => _format_wire(c.format), "sortable" => c.sortable, "filterable" => c.filterable)
+    if c.viz !== :none                                   # in-cell bar/heat + its numeric domain (min,max)
+        d["viz"] = String(c.viz)
+        c.domain === nothing || (d["domain"] = Any[c.domain[1], c.domain[2]])
+    end
+    return d
+end
 
 # The wire representation carried in `run_capture`'s `tables` field (raw Dict;
 # serializes over the gate and JSON-encodes server-side, like an echarts option).

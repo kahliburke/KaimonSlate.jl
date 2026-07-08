@@ -107,4 +107,27 @@ end
     @test occursin("table.header(repeat: true", typ)       # header repeats across page breaks
     @test occursin("calc.odd(row)", typ)                   # zebra striping
     @test occursin("249 more rows (250 total)", typ)       # accurate truncation from opts.nrows
+    @test occursin("#align(center)[", typ)                 # tables centered on the page
+end
+
+@testset "table export — in-cell viz + export_rows cap" begin
+    spec = Dict{String,Any}(
+        "columns" => Any[
+            Dict{String,Any}("name" => "n", "type" => "int", "align" => "right", "format" => nothing,
+                             "viz" => "bar", "domain" => Any[0.0, 100.0]),
+            Dict{String,Any}("name" => "h", "type" => "int", "align" => "right", "format" => nothing,
+                             "viz" => "heat", "domain" => Any[0.0, 100.0]),
+        ],
+        "rows" => Any[Any[50, 25], Any[100, 75], Any[0, 100]],
+        "opts" => Dict{String,Any}("nrows" => 3, "ncols" => 2, "export_rows" => 2),
+    )
+    html = NS._export_table_html(spec)
+    @test occursin("linear-gradient(to right,rgba(88,166,255,.20) 50.0%", html)   # :bar scaled 50/100
+    @test occursin("background:rgba(88,166,255,", html)                            # :heat shade
+    @test occursin("Showing 2 of 3 rows", html)                                    # export_rows cap (not silent)
+    @test occursin("data-v=\"100\"", html) && !occursin("data-v=\"0\"", html)      # only the first 2 rows emitted
+
+    typ = NS._typst_table(spec; theme = "light")
+    @test occursin("table.cell(fill: gradient.linear", typ)                        # :bar per-cell gradient
+    @test occursin("table.cell(fill: rgb(\"#58a6ff\").transparentize", typ)        # :heat per-cell fill
 end

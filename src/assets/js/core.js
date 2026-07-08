@@ -228,7 +228,14 @@ function _buildShell(wrap, cols, spec, st) {
   const doFilter = () => { st.filter = fi.value; st.page = 0; _refreshTable(wrap, spec, st); };
   fi.oninput = spec.paged ? debounce(doFilter, 250) : doFilter;   // paged hits the server → debounce
   const info = document.createElement('span'); info.className = 'st-info';
-  bar.appendChild(fi); bar.appendChild(info); wrap.appendChild(bar);
+  bar.appendChild(fi); bar.appendChild(info);
+  if (cols.some(c => c && c.viz)) {                          // in-cell viz present → a show/hide toggle
+    const vb = document.createElement('button'); vb.className = 'st-viztoggle'; vb.title = 'toggle in-cell bars / heat';
+    vb.textContent = st.vizOff ? '▢ viz' : '▤ viz';
+    vb.onclick = () => { st.vizOff = !st.vizOff; vb.textContent = st.vizOff ? '▢ viz' : '▤ viz'; _refreshTable(wrap, spec, st); };
+    bar.appendChild(vb);
+  }
+  wrap.appendChild(bar);
   const tbl = document.createElement('table'); tbl.className = 'st-table';
   const thead = document.createElement('thead'); const htr = document.createElement('tr');
   const ths = cols.map((c, ci) => {
@@ -310,6 +317,11 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
       td.className = (numeric ? 'num ' : '') + 'align-' + align;
       td.textContent = col.format ? fmtCell(v, col.format) : _cleanDefault(v);
       td.title = td.textContent;
+      if (col.viz && col.domain && !st.vizOff && typeof v === 'number') {   // in-cell bar/heat (toggleable), scaled over the domain
+        const lo = col.domain[0], hi = col.domain[1], f = hi > lo ? Math.max(0, Math.min(1, (v - lo) / (hi - lo))) : 1;
+        if (col.viz === 'bar') { const p = (f * 100).toFixed(1); td.style.background = 'linear-gradient(to right,rgba(88,166,255,.20) ' + p + '%,transparent ' + p + '%)'; }
+        else if (col.viz === 'heat') td.style.background = 'rgba(88,166,255,' + (0.05 + 0.32 * f).toFixed(3) + ')';
+      }
       tr.appendChild(td);
     });
     if (sel && pageIdx) {                                // clickable, highlightable selection row
@@ -328,14 +340,28 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
   const pages = Math.max(1, Math.ceil(total / st.pageSize));
   pag.innerHTML = '';
   if (pages > 1) {
+    const go = to => { st.page = Math.max(0, Math.min(pages - 1, to)); _refreshTable(wrap, spec, st); };
     const mk = (label, to, disabled) => {
       const b = document.createElement('button'); b.textContent = label; b.disabled = disabled;
-      b.onclick = () => { st.page = to; _refreshTable(wrap, spec, st); }; return b;
+      b.onclick = () => go(to); return b;
     };
+    pag.appendChild(mk('«', 0, st.page <= 0));                    // first
     pag.appendChild(mk('‹ prev', st.page - 1, st.page <= 0));
     const lbl = document.createElement('span'); lbl.className = 'st-page';
-    lbl.textContent = `page ${st.page + 1} / ${pages}`; pag.appendChild(lbl);
+    lbl.textContent = `page ${st.page + 1} / ${pages}`; lbl.title = 'click to jump to a page';
+    lbl.onclick = () => {                                          // click the label → a go-to input
+      const inp = document.createElement('input'); inp.type = 'number'; inp.className = 'st-goto';
+      inp.min = 1; inp.max = pages; inp.value = st.page + 1;
+      lbl.replaceWith(inp); inp.focus(); inp.select();
+      const commit = jump => { inp.onblur = null;
+        if (jump) { const n = parseInt(inp.value, 10); if (!isNaN(n)) return go(n - 1); }   // go() clamps to [1, pages]
+        _refreshTable(wrap, spec, st); };
+      inp.onkeydown = e => { if (e.key === 'Enter') commit(true); else if (e.key === 'Escape') commit(false); };
+      inp.onblur = () => commit(true);
+    };
+    pag.appendChild(lbl);
     pag.appendChild(mk('next ›', st.page + 1, st.page >= pages - 1));
+    pag.appendChild(mk('»', pages - 1, st.page >= pages - 1));    // last
   }
 }
 
