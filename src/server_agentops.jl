@@ -303,7 +303,7 @@ function _outline_cell!(io::IO, c::Cell)
         isempty(head) || print(io, "  ", _trunc(head, 80))
         isempty(body) || print(io, " — ", _trunc(body, 70))
     else
-        defs = sort!(String[string(w) for w in c.writes])
+        defs = sort!(String[string(w) for w in cell_definitions(c)])
         isempty(defs) || print(io, "  defines: ", _trunc(join(defs, ", "), 70))
         print(io, "  (", count(==('\n'), c.source) + 1, "L)")
         r = strip(_cell_result_text(c))
@@ -416,7 +416,10 @@ function cell_inspect(nb::LiveNotebook, cellid::AbstractString)
                 " — position ", idx, "/", length(nb.report.cells), " — v", nb.version)
         if c.kind == CODE
             isempty(c.reads)  || println(io, "reads:    ", join(sort(string.(collect(c.reads))), ", "))
-            isempty(c.writes) || println(io, "writes:   ", join(sort(string.(collect(c.writes))), ", "))
+            let defs = cell_definitions(c)
+                isempty(defs)      || println(io, "writes:   ", join(sort(string.(collect(defs))), ", "))
+            end
+            isempty(c.mutates) || println(io, "mutates:  ", join(sort(string.(collect(c.mutates))), ", "))
             isempty(c.deps)   || println(io, "deps:     ", join(sort(collect(c.deps)), ", "))
             o = c.output
             (o !== nothing && o.duration_ms > 0) && println(io, "duration: ", round(o.duration_ms; digits = 2), " ms")

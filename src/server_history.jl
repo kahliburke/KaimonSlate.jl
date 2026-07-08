@@ -480,8 +480,9 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
-        # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor.
-        "defs"    => c.kind == CODE ? sort!(String[string(w) for w in c.writes]) : String[],
+        # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the
+        # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
+        "defs"    => c.kind == CODE ? sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
     if !isempty(c.controls)
         # resolve each column's names to (defining cell, spec); drop unknown names + empty columns
@@ -535,7 +536,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # Names this cell defines that are ALSO defined by another cell — a silent footgun in a shared
     # namespace (last-writer-wins). The UI flags it so collisions don't masquerade as dead reactivity.
     if c.kind == CODE && !isempty(multidef)
-        dup = sort!(String[string(w) for w in c.writes if string(w) in multidef])
+        dup = sort!(String[string(w) for w in cell_definitions(c) if string(w) in multidef])
         isempty(dup) || (d["dupdefs"] = dup)
     end
     # Truncated outputs → append an access bar (open ↗ / editor / download) to the rendered output.

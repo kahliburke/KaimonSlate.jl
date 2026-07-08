@@ -139,8 +139,16 @@ end
 function _record_global_mutations!(cell::Cell, ex, globals)
     mw = Set{Symbol}(); mr = Set{Symbol}()
     _collect_mutations!(mw, mr, ex)
-    for s in mw; s in globals && push!(cell.writes, s); end
-    for s in mr; s in globals && push!(cell.reads,  s); end
+    for s in mw
+        s in globals || continue
+        # A purely-mutated global (`prog[] = …`, `push!(v, …)`) is NOT a definition: mark it in `mutates`
+        # so the multi-def check + "defines" label skip it. But if the cell ALSO rebinds it (`x = []; push!(x,1)`)
+        # it's already in `writes` as a real def — leave it a def. Either way keep it in `writes`, which drives
+        # ordering / write-conflicts / the reactive self-trigger exclusion (a mutator must still be a "writer" there).
+        s in cell.writes || push!(cell.mutates, s)
+        push!(cell.writes, s)
+    end
+    for s in mr; s in globals && push!(cell.reads, s); end
     return nothing
 end
 
@@ -211,7 +219,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol}}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # No per-cell eviction (a deleted cell / closed notebook never removes its entry), so on a
 # long-lived server this would otherwise grow forever. Entries are small, but cap it — once full,
@@ -227,17 +235,18 @@ function infer_bindings!(cell::Cell)
         hit[4] ? push!(cell.flags, :opaque) : delete!(cell.flags, :opaque)
         empty!(cell.inputs); append!(cell.inputs, hit[5])   # `@asset` file deps (statically extracted)
         empty!(cell.provides); union!(cell.provides, hit[6])   # `using`/`import`-brought names (⊆ writes)
+        empty!(cell.mutates); union!(cell.mutates, hit[7])   # in-place-mutated-only names (⊆ writes, ⊄ defines)
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && empty!(_BIND_CACHE)
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides))
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates))
     end
     return cell
 end
 function _infer_bindings_uncached!(cell::Cell)
-    empty!(cell.reads); empty!(cell.writes); empty!(cell.inputs); empty!(cell.provides)
+    empty!(cell.reads); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
     delete!(cell.flags, :opaque)
     if cell.kind == MARKDOWN
         # A markdown cell "reads" the free variables of its `{{ expr }}` blocks, so
@@ -395,6 +404,7 @@ function build_dependencies!(report::Report)
     wcells = Dict{Symbol,Vector{String}}()
     for c in report.cells, w in c.writes
         w in c.provides && continue          # brought in by `using`/`import` — availability, not a colliding def
+        w in c.mutates && continue           # mutated here (`prog[] = …`, `push!(v, …)`), not defined — not a collision
         push!(get!(wcells, w, String[]), c.id)
     end
     report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)

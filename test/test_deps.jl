@@ -200,10 +200,23 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
                           "#%% code id=b\nlet\n  acc = zeros(2)\n  acc[2] = 9\n  sum(acc)\nend")
         build_dependencies!(r3)
         @test isempty(r3.meta["multidef"])          # `acc` is local to each cell — no real collision
-        # …but two cells mutating the SAME GLOBAL in place IS still a real multi-writer collision.
+        # In-place mutation is NOT a definition, so it never counts toward the multi-def collision (which
+        # flags redefinitions — 2+ DEFINERS). Two cells that only MUTATE the same global don't define it, so
+        # nothing is flagged; `buf` being undefined is a runtime error, caught elsewhere — not a multi-def.
         r4 = parse_report("#%% code id=a\nbuf[1] = 1\n#%% code id=b\npush!(buf, 2)")
         build_dependencies!(r4)
-        @test "buf" in r4.meta["multidef"]
+        @test isempty(r4.meta["multidef"])
+        @test :buf in findcell(r4, "a").mutates                     # recorded as a mutation…
+        @test !(:buf in cell_definitions(findcell(r4, "a")))        # …NOT a definition
+        # The reactive producer+handler pattern: one cell DEFINES a value, another MUTATES it in place
+        # (`prog[] = …`). The mutator is not a second definer, so this is NOT flagged — the false collision
+        # (and false "defines" label) the mutate/rebind split fixes.
+        r4b = parse_report("#%% code id=a\nprog = 0\n#%% code id=b\nprog[] = 5")
+        build_dependencies!(r4b)
+        @test isempty(r4b.meta["multidef"])
+        @test :prog in cell_definitions(findcell(r4b, "a"))         # cell a defines prog
+        @test :prog in findcell(r4b, "b").mutates                   # cell b only mutates it
+        @test !(:prog in cell_definitions(findcell(r4b, "b")))      # …so it is not a definer
         # `using X` in TWO cells is NOT a collision — re-importing the same exports is a no-op, not a
         # redefinition (the reported bug). Seed the resolved-exports cache (normally filled post-eval).
         lock(ReportEngine._USING_LOCK) do; ReportEngine._USING_EXPORTS["FakeMod"] = [:foo, :bar]; end

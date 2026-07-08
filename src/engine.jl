@@ -15,7 +15,7 @@ module ReportEngine
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
 export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
-export parse_report, serialize_report, serialize_cells, source_text
+export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
 
 # ── Model ────────────────────────────────────────────────────────────────────
 
@@ -71,7 +71,11 @@ mutable struct Cell
     source::String
     src_hash::UInt64
     reads::Set{Symbol}
-    writes::Set{Symbol}
+    writes::Set{Symbol}           # rebindings/definitions ∪ in-place mutations — the full write-set used for
+                                  # ordering (most-recent-writer), parallel write-conflicts, and reactive self-trigger
+    mutates::Set{Symbol}          # the subset of `writes` reached ONLY via in-place mutation here (x[]=…, x.f=…,
+                                  # x .= …, f!(x)) and NOT defined in this cell — excluded from the multi-def
+                                  # collision check and the "defines" label (a mutator is not a definer)
     deps::Set{String}             # upstream cell ids (most-recent-writer, §6)
     inputs::Vector{String}        # external-input fingerprints (files)
     state::CellState
@@ -88,9 +92,15 @@ end
 function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
-                Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
+                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}())
 end
+
+# The names a cell DEFINES — its full write-set minus the names it only mutates in place. A mutation
+# (`prog[] = …`, `push!(v, …)`) is a write for ordering/reactive purposes but not a definition, so it's
+# excluded from the "defines" label and the multi-def collision check. A name both defined AND mutated
+# here stays a definition (it isn't in `mutates`). Returns a fresh Set.
+cell_definitions(c::Cell) = setdiff(c.writes, c.mutates)
 
 # Markdown variable interpolation: `{{ expr }}` blocks are captured (rich) and
 # spliced into the rendered prose; the md cell reads their free variables so it
