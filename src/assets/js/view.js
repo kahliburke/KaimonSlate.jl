@@ -489,6 +489,15 @@ function updateChrome(state) {
     hb.style.display = 'none'; document.body.classList.remove('hydrating');
   }
   updateStaleBadge(state);
+  // Agent chat needs Kaimon's agent service — a standalone hub (slate --own / serve_notebook)
+  // doesn't have it. Disable the button up front instead of letting the first turn error out.
+  const ab = document.getElementById('agentbtn');
+  if (ab) {
+    const avail = state.agentAvailable !== false;   // absent (older server) → assume available
+    ab.disabled = !avail;
+    ab.title = avail ? 'agent chat'
+                     : 'agent chat needs Kaimon — this hub is running standalone. Start Kaimon and open the notebook from its hub.';
+  }
   // Undo/Redo menu items announce the next action ("↶ Undo cut 3 cells") and disable when empty.
   const ub = document.getElementById('undobtn');
   if (ub) { ub.textContent = '↶ Undo' + (state.undoLabel ? ' ' + state.undoLabel : ''); ub.disabled = !state.undoLabel; }

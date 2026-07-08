@@ -6,8 +6,17 @@
 let agentMsgs = [];   // {role:'user'|'assistant'|'tool'|'err', text, done?}
 let agentWorking = false, agentT0 = 0, _agentTick = null, _stopArmed = false;
 let _chatTarget = null;   // per-cell ✨: chat turns scoped to this cell id (+ its dep cone)
+// The agent service lives in Kaimon — a standalone hub (slate --own / serve_notebook) has none.
+// The topbar button is disabled via updateChrome; these guards cover every other entry point
+// (per-cell ✨, keyboard, palette) with an explanation instead of a dead panel.
+function agentAvailable() { return !(typeof nbState !== 'undefined' && nbState && nbState.agentAvailable === false); }
+function _agentUnavailableNotice() {
+  toast('Agent chat needs Kaimon — this hub is running standalone. Start Kaimon and open the notebook from its hub (the `slate` command attaches automatically).', 6500);
+}
 function toggleAgent() {
-  const p = document.getElementById('agentpanel'); p.classList.toggle('open');
+  const p = document.getElementById('agentpanel');
+  if (!p.classList.contains('open') && !agentAvailable()) { _agentUnavailableNotice(); return; }   // block opening only — closing always works
+  p.classList.toggle('open');
   const open = p.classList.contains('open');
   document.body.classList.toggle('agent-open', open);   // slide cells left of the panel
   if (open) { document.getElementById('apin').focus(); setWorking(agentWorking); }
@@ -34,6 +43,7 @@ applyThinkPref();   // apply saved preference at load (before the panel is first
 // Per-cell ✨ — scope chat turns to a cell; the server sends its source/output + upstream
 // dependency cone to the agent. Persists until cleared, so follow-ups stay focused.
 function askCell(id) {
+  if (!agentAvailable()) { _agentUnavailableNotice(); return; }
   _chatTarget = id;
   document.getElementById('agentpanel').classList.contains('open') || toggleAgent();
   _updateChatTarget();

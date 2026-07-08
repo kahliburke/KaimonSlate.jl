@@ -615,6 +615,7 @@ function state_json(nb::LiveNotebook)
     meta["slideRatio"] = get(nb.report.meta, "slideratio", "16:9")           # PDF deck aspect ratio
     meta["bibStyle"] = get(nb.report.meta, "bibstyle", "ieee")               # CSL citation/reference style
     meta["agentModel"] = get(nb.report.meta, "agentmodel", "")               # per-notebook agent-model override ("" = browser global)
+    meta["agentAvailable"] = _agent_available()   # false on a standalone hub (slate --own / serve_notebook) → the UI disables agent chat
     meta["publishRepo"] = get(nb.report.meta, "publishrepo", "")             # last GitHub publish target (owner/name); pre-fills the dialog
     meta["publishSlug"] = get(nb.report.meta, "publishslug", "")             # last publish slug ("" = home / default)
     meta["remoteWorker"] = get(nb.report.meta, "remoteworker", "")           # "port,stream" if running on a remote worker
