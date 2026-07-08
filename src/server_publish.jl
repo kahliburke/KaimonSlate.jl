@@ -107,7 +107,8 @@ function _doc_view(d)
 end
 
 _target_view(t) = Dict{String,Any}("name" => t.name, "kind" => t.kind, "config" => t.config)
-_site_view(s) = Dict{String,Any}("name" => s.name, "target" => s.target, "home" => s.home)
+_site_view(s) = Dict{String,Any}("name" => s.name, "targets" => copy(s.targets), "home" => s.home,
+                                 "docs" => site_docs(s.name))   # docs/order/sections from the local build
 
 # The authenticated GitHub login (for owner auto-fill so a new github-pages target only needs a repo
 # NAME). Best-effort + cached; "" when `gh` is absent/unauthed.
@@ -138,6 +139,18 @@ function publish_ledger_view()
     view = _ledger_view(PublishLedger.load(store))
     view["backend"] = store isa PublishLedger.GistStore ? "gist" : "local"
     return view
+end
+
+# Sites + targets ONLY, from the local write-through cache — NO network (no gist read, no `gh` call), so
+# the front page can paint the Sites section in its first frame. `nothing` before anything's been cached.
+# `_renderSites` reads only `sites`/`targets`, so this lean view is all the initial paint needs.
+function publish_ledger_view_cached()
+    led = PublishLedger.cached_ledger()
+    led === nothing && return nothing
+    return Dict{String,Any}(
+        "sites" => [_site_view(s) for s in values(led.sites)],
+        "targets" => [_target_view(t) for t in values(led.targets)],
+        "localSites" => list_local_sites())   # which sites have a local build → accurate "built?" on first paint
 end
 
 # ── target / secret / doc mutations (load → mutate → save; structure is authoritative) ─────────────
@@ -190,6 +203,71 @@ function publish_doc_set_targets!(nb::LiveNotebook, names)
     led.documents[di.docId].targets = collect(String, names)
     PublishLedger.save(store, led)
     return publish_doc_info(nb)
+end
+
+# ── Sites (logical portfolios: a canonical local build that syncs to a set of destination targets) ──
+"Create/update a site: its destination targets + home doc. Membership/order/sections live in its local build."
+function publish_site_set!(name::AbstractString, targets, home::AbstractString = "")
+    store = PublishLedger.default_store()
+    led = PublishLedger.load(store)
+    led.sites[String(name)] = PublishLedger.SiteGroup(String(name); targets = collect(String, targets), home = String(home))
+    PublishLedger.save(store, led)
+    return publish_ledger_view()
+end
+
+function publish_site_delete!(name::AbstractString)
+    store = PublishLedger.default_store()
+    led = PublishLedger.load(store)
+    delete!(led.sites, String(name))
+    PublishLedger.save(store, led)
+    return publish_ledger_view()
+end
+
+"""
+    sync_site!(name; on_event=nothing) -> summary
+
+Deploy a site's ONE canonical local build (`_site_dir(name)`) to every one of its destination targets,
+concurrently and identically. `on_event(i, phase, payload)` streams per-target progress. Throws if the
+site has no local build yet or no configured destinations. Zenodo/non-host targets report an error row.
+"""
+function sync_site!(name::AbstractString; on_event = nothing)
+    store = PublishLedger.default_store()
+    led = PublishLedger.load(store)
+    site = get(led.sites, String(name), nothing)
+    site === nothing && error("no site '$name'")
+    dir = _site_dir(String(name))
+    (dir === nothing || !isdir(dir)) && error("site '$name' has no local build yet — publish a notebook to it first")
+    tnames = [n for n in site.targets if haskey(led.targets, n)]
+    isempty(tnames) && error("site '$name' has no configured destinations — add some in the manager")
+    secrets = _secrets_load()
+    adapters = PublishTarget[target_from_ledger(led.targets[n]; secrets = secrets) for n in tnames]
+    results = Vector{PublishResult}(undef, length(adapters))
+    @sync for (i, a) in enumerate(adapters)
+        @async begin
+            on_event === nothing || on_event(i, :start, a)
+            r = try; deploy_dir(a, dir); catch e; PublishResult(; ok = false, log = sprint(showerror, e)); end
+            results[i] = r
+            on_event === nothing || on_event(i, :done, r)
+        end
+    end
+    return _publish_summary(tnames, results)
+end
+
+"""
+    publish_to_site!(nb, siteName; on_event=nothing, kwargs...) -> summary
+
+The site publish action: build `nb` into the site's canonical local dir (accumulating it as a member),
+then sync the whole build to every destination. `kwargs` are the site-build options (bundle/history/…).
+"""
+function publish_to_site!(nb::LiveNotebook, siteName::AbstractString; on_event = nothing, kwargs...)
+    built = export_to_site(nb, String(siteName); kwargs...)   # accumulate this doc into the canonical build
+    # A site with no live destinations is a local staging area — build it, but there's nothing to sync.
+    led = PublishLedger.load(PublishLedger.default_store())
+    site = get(led.sites, String(siteName), nothing)
+    tnames = site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
+    isempty(tnames) && return Dict{String,Any}("ok" => true, "localOnly" => true,
+        "url" => built.url, "docCount" => built.docCount, "results" => Any[])
+    return sync_site!(String(siteName); on_event = on_event)  # push the whole build to all destinations
 end
 
 # The ledger name to use for a github-pages `repo` — an existing target for that repo, else a fresh
@@ -327,6 +405,64 @@ function _sse_publish(stream::HTTP.Stream, h::Hub)
     return
 end
 
+# Shared SSE streamer: run `run_fn(on_event)` in a task feeding a channel, emit status/log/done/failed.
+function _sse_stream(stream::HTTP.Stream, run_fn)
+    HTTP.setheader(stream, "Content-Type" => "text/event-stream")
+    HTTP.setheader(stream, "Cache-Control" => "no-cache")
+    HTTP.startwrite(stream)
+    emit = function (ev::AbstractString, data::AbstractString)
+        io = IOBuffer(); println(io, "event: ", ev)
+        for ln in split(data, '\n'); println(io, "data: ", ln); end
+        println(io)
+        try; write(stream, String(take!(io))); return true; catch; return false; end
+    end
+    ch = Channel{Tuple{String,String}}(128)
+    task = @async begin
+        try
+            on_event = function (_i, phase, payload)
+                if phase === :start
+                    put!(ch, ("status", "Deploying to $(target_name(payload))…"))
+                else
+                    r = payload; tag = r.ok ? "✓" : "✗"
+                    detail = !isempty(r.doi) ? r.doi : !isempty(r.url) ? r.url : r.status
+                    put!(ch, ("log", "$tag $detail"))
+                    r.ok || isempty(strip(r.log)) || put!(ch, ("log", first(split(strip(r.log), '\n'))))
+                end
+            end
+            put!(ch, ("done", JSON.json(run_fn(on_event))))
+        catch e
+            put!(ch, ("failed", sprint(showerror, e)))
+        finally
+            close(ch)
+        end
+    end
+    for (ev, data) in ch; emit(ev, data) || break; end
+    try; wait(task); catch; end
+    return
+end
+
+# Build THIS notebook into a site's canonical local dir, then sync the whole build to its destinations.
+function _sse_site_publish(stream::HTTP.Stream, h::Hub)
+    uri = HTTP.URI(stream.message.target); q = HTTP.queryparams(uri)
+    m = match(r"^/api/([^/]+)/site-publish", uri.path); id = m === nothing ? "" : String(m.captures[1])
+    nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+    site = get(q, "site", "")
+    nb === nothing && return _sse_stream(stream, _oe -> error("no such notebook: $id"))
+    isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
+    bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
+             theme = get(q, "theme", "dark"), outputs = get(q, "outputs", "all"),
+             include_source = get(q, "source", "1") == "1", bundle = get(q, "bundle", "0") == "1",
+             history = get(q, "history", "0") == "1")
+    _sse_stream(stream, on_event -> publish_to_site!(nb, String(site); on_event = on_event, bopts...))
+end
+
+# Re-sync a site (deploy its current canonical build to all destinations) — no notebook needed.
+function _sse_site_sync(stream::HTTP.Stream, h::Hub)
+    site = get(HTTP.queryparams(HTTP.URI(stream.message.target)), "site", "")
+    isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
+    _sse_stream(stream, on_event -> sync_site!(String(site); on_event = on_event))
+end
+
 # ── HTTP routes (called from `_make_router`) ─────────────────────────────────────────────────────────
 function _register_publish_routes!(router, h::Hub)
     # Read the whole ledger (global — the manager's main view model).
@@ -385,6 +521,30 @@ function _register_publish_routes!(router, h::Hub)
             _json(Dict("ok" => r.ok, "changed" => r.changed, "url" => r.url, "commit" => r.commit))
         catch e
             HTTP.Response(500, "Reorder failed: " * sprint(showerror, e))
+        end
+    end)
+    # ── Sites: the logical publishing unit (a canonical build synced to many destinations) ──
+    # Create/update a site: its name, the destination targets it syncs to, and an optional home doc (global).
+    HTTP.register!(router, "POST", "/api/publish/site", req -> begin
+        b = _body(req)
+        name = strip(String(get(b, "name", "")))
+        isempty(name) && return HTTP.Response(400, "missing name")
+        targets = [String(t) for t in get(b, "targets", Any[])]
+        home = String(get(b, "home", ""))
+        try
+            _json(publish_site_set!(name, targets, home))
+        catch e
+            HTTP.Response(500, "Save site failed: " * sprint(showerror, e))
+        end
+    end)
+    # Delete a site definition (does not remove already-deployed builds) (global).
+    HTTP.register!(router, "POST", "/api/publish/site-delete", req -> begin
+        name = strip(String(get(_body(req), "name", "")))
+        isempty(name) && return HTTP.Response(400, "missing name")
+        try
+            _json(publish_site_delete!(name))
+        catch e
+            HTTP.Response(500, "Delete site failed: " * sprint(showerror, e))
         end
     end)
     return router

@@ -214,6 +214,39 @@ function preflight(t::NetlifyTarget)
     return (; ok = isempty(warnings), warnings = warnings)
 end
 
+# ── deploy a PREBUILT site dir (the site-sync primitive) ─────────────────────────────────────────────
+# A Site builds its ONE canonical dir, then deploys THAT dir to each destination — identical everywhere.
+# `deploy_dir(target, dir)` is the shared "push this exact dir" op (github force-push / CLI upload);
+# each host's `publish(nb)` also routes through it after building a single-doc dir.
+function deploy_dir(t::GithubPagesTarget, dir::AbstractString)
+    r = deploy_dir_to_gh_pages(t.repo, dir; private = t.private, create = t.create)
+    return PublishResult(; ok = r.ok, url = r.url, commit = r.commit, status = r.ok ? "ok" : "error", log = r.error)
+end
+function deploy_dir(t::GenericUploadTarget, dir::AbstractString)
+    ok, log = _upload_dir(t, dir); return PublishResult(; ok = ok, url = t.url, log = log)
+end
+function deploy_dir(t::CloudflarePagesTarget, dir::AbstractString)
+    wr = Sys.which("wrangler")
+    cmd = wr === nothing ? `npx --yes wrangler pages deploy $dir --project-name $(t.project)` :
+                           `$wr pages deploy $dir --project-name $(t.project)`
+    isempty(t.branch) || (cmd = `$cmd --branch $(t.branch)`)
+    env = Dict{String,String}()
+    isempty(t.token) || (env["CLOUDFLARE_API_TOKEN"] = t.token)
+    isempty(t.account_id) || (env["CLOUDFLARE_ACCOUNT_ID"] = t.account_id)
+    ok, log = _run_capture(cmd; env = env); return PublishResult(; ok = ok, url = t.url, log = log)
+end
+function deploy_dir(t::NetlifyTarget, dir::AbstractString)
+    nl = Sys.which("netlify")
+    cmd = nl === nothing ? `npx --yes netlify-cli deploy --prod --dir $dir` : `$nl deploy --prod --dir $dir`
+    env = Dict{String,String}()
+    isempty(t.token) || (env["NETLIFY_AUTH_TOKEN"] = t.token)
+    isempty(t.site_id) || (env["NETLIFY_SITE_ID"] = t.site_id)
+    ok, log = _run_capture(cmd; env = env); return PublishResult(; ok = ok, url = t.url, log = log)
+end
+# Fallback: kinds that aren't site hosts (e.g. Zenodo archives a bundle, never a site) can't deploy a dir.
+deploy_dir(t::PublishTarget, dir::AbstractString) =
+    PublishResult(; ok = false, status = "error", log = "this target kind can't host a site build")
+
 # ── multi-target fan-out ───────────────────────────────────────────────────────────────────────────
 """
     publish_to_targets(nb, targets; on_event=nothing, kwargs...) -> Vector{PublishResult}

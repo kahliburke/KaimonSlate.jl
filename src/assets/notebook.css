@@ -927,6 +927,14 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .publog { display:block; margin:10px 0; padding:8px 10px; background:var(--bg); border:1px solid var(--border); border-radius:8px; max-height:180px; overflow:auto; font-family:ui-monospace,monospace; font-size:.76rem; }
 .publogln { white-space:pre-wrap; line-height:1.45; color:var(--dim); }
 .publogln.st { color:var(--text); } .publogln.ok { color:var(--accent); } .publogln.err { color:var(--red); }
+.publogln.ok a { color:var(--accent); text-decoration:underline; }
+/* Publish button, in-flight: spinner + dimmed + progress cursor, so it plainly reads as working
+   (not a still-clickable "Publish"). The label text is swapped to "Publishing…" from JS. */
+#sitepublishbtn.busy { position:relative; opacity:.75; cursor:progress; padding-left:26px; }
+#sitepublishbtn.busy::before { content:""; position:absolute; left:9px; top:50%; width:11px; height:11px;
+  margin-top:-6px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%;
+  animation:pubspin .7s linear infinite; }
+@keyframes pubspin { to { transform:rotate(360deg); } }
 .pubsite { margin:6px 0; }
 .pubpages { margin-left:14px; }
 .pubrow.pubsub2 { font-size:.8rem; margin:2px 0; }

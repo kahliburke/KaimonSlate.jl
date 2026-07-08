@@ -250,9 +250,19 @@ function _inject_imports(html::AbstractString, imports)
     return replace(String(html), "\"imports\": {" => "\"imports\": {\n  " * entries; count = 1)
 end
 
+# Serve the front page with the last-known ledger (sites+targets, from the LOCAL cache — no gist round-
+# trip) inlined, so the Sites section paints in the first frame instead of popping in a second later
+# after the async /api/publish/ledger fetch. `null` on a fresh machine → the client falls back to fetch.
+function _index_html()
+    html = read(_INDEX_ASSET, String)
+    v = try; publish_ledger_view_cached(); catch; nothing; end
+    js = v === nothing ? "null" : replace(JSON.json(v), "</" => "<\\/")   # </script>-in-string guard
+    return replace(html, "window.__SLATE_LEDGER__=null;" => "window.__SLATE_LEDGER__=" * js * ";"; count = 1)
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
-    HTTP.register!(router, "GET", "/", _ -> _html(read(_INDEX_ASSET, String)))   # static asset; sessions render client-side from /api/notebooks
+    HTTP.register!(router, "GET", "/", _ -> _html(_index_html()))   # front page + inlined last-known ledger (see _index_html)
     HTTP.register!(router, "GET", "/assets/notebook.css", _ -> _asset(read(_CSS_ASSET, String), "text/css; charset=utf-8"))
     # Vendored third-party assets (offline cache, pinned in vendor.json). Greedy `**` so
     # nested paths work (CodeMirror modes/addons, KaTeX fonts). First hit fetches+caches.
@@ -923,6 +933,8 @@ end
 
 const _EVENTS_RE = r"^/api/([^/]+)/events$"
 const _PUBLISH_RE = r"^/api/([^/]+)/publish-run\b"
+const _SITE_PUBLISH_RE = r"^/api/([^/]+)/site-publish\b"
+const _SITE_SYNC_RE = r"^/api/publish/site-sync\b"
 
 """
     start_hub(; host="127.0.0.1", port=8765) -> Hub
@@ -944,6 +956,10 @@ function start_hub(; host = "127.0.0.1", port = 8765)
             _sse_import(stream, h)
         elseif occursin(_PUBLISH_RE, target)                  # multi-target publish; per-target SSE progress
             _sse_publish(stream, h)
+        elseif occursin(_SITE_PUBLISH_RE, target)             # build notebook into a site + sync all destinations
+            _sse_site_publish(stream, h)
+        elseif occursin(_SITE_SYNC_RE, target)                # re-sync a site's build to all destinations
+            _sse_site_sync(stream, h)
         else
             t0 = time()
             handle(stream)

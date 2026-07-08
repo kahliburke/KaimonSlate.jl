@@ -1,4 +1,5 @@
 <!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Kaimon Slate</title>
+<script>window.__SLATE_LEDGER__=null;/* server inlines the last-known ledger here → Sites paint in frame 1 */</script>
 <script src="/assets/js/platform.js"></script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23569cd6'/><text x='50' y='73' font-size='62' text-anchor='middle' fill='%23ffffff' font-family='monospace'>S</text></svg>"/>
 <style>html{background:#0d1120;color-scheme:dark;}
@@ -61,6 +62,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .loading.show{display:flex;}
 .spinner{width:38px;height:38px;border:3px solid #2a2e40;border-top-color:#569cd6;border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
+.siteload{color:#6a7090;font-size:.85rem;padding:10px 0;display:flex;align-items:center;gap:8px;}
+.spin-sm{display:inline-block;width:14px;height:14px;border:2px solid #2a2e40;border-top-color:#569cd6;border-radius:50%;animation:spin .8s linear infinite;}
 .loading .lmsg{color:#d4d8e8;font-size:.9rem;}
 .importmodal{max-width:640px;}
 .imrow{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
@@ -88,6 +91,13 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .sitecard .si{grid-row:1/3;font-size:1.3rem;opacity:.9;}
 .sitecard .sn{color:#e6ebf7;font-weight:600;font-size:.96rem;min-width:0;overflow-wrap:anywhere;}
 .sitecard .su{color:#6a7090;font-size:.73rem;font-family:Menlo,monospace;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sitecard-site{cursor:pointer;}
+.sitecard .scchev{color:#6a7090;margin-left:7px;display:inline-block;transition:transform .14s;}
+.sitecard.open .scchev{transform:rotate(90deg);}
+.sitecard .scdests{grid-column:1/3;display:none;flex-wrap:wrap;gap:8px;margin-top:11px;padding-top:11px;border-top:1px solid #2a2e40;}
+.sitecard.open .scdests{display:flex;}
+.pubdest{display:inline-flex;align-items:center;gap:5px;background:#10131f;border:1px solid #2a2e40;border-radius:7px;padding:5px 10px;color:#9aa3c0;font-size:.78rem;text-decoration:none;}
+.pubdest:hover{border-color:#569cd6;color:#569cd6;transform:none;}
 /* Publishing dashboard — full-screen global ledger surface (documents, targets, secrets, sites) */
 .herobtn{margin-left:auto;align-self:center;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.85rem;}
 .herobtn:hover{border-color:#569cd6;color:#569cd6;}
@@ -99,7 +109,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdsec{color:#8a90b0;font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin:16px 0 6px;} .pdsec:first-child{margin-top:0;}
 .pdrow{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:.84rem;color:#d4d8e8;flex-wrap:wrap;}
 .pdrow .pl{font-weight:600;color:#e6ebf7;} .pddim{color:#6a7090;font-size:.77rem;}
-.pdchip{font-size:.68rem;padding:1px 7px;border-radius:10px;border:1px solid #2a2e40;color:#9aa3c0;} .pdchip.ok{color:#56d364;border-color:#1e5a2e;}
+.pdchip{font-size:.68rem;padding:1px 7px;border-radius:10px;border:1px solid #2a2e40;color:#9aa3c0;} .pdchip.ok{color:#56d364;border-color:#1e5a2e;} .pdchip.warn{color:#e0a33a;border-color:#5a441e;}
+.pdsync-log{margin-top:10px;background:#0b0e18;border:1px solid #2a2e40;border-radius:6px;padding:8px 10px;font-family:ui-monospace,monospace;font-size:.74rem;color:#b8c0d8;white-space:pre-wrap;max-height:220px;overflow:auto;}
 .pdlink{color:#569cd6;font-size:.78rem;text-decoration:none;} .pdlink:hover{text-decoration:underline;}
 .pdbtn{background:#1a1e2e;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:.76rem;} .pdbtn:hover{border-color:#569cd6;color:#569cd6;}
 .pdbtn.primary{background:#569cd6;color:#0d1120;border-color:#569cd6;font-weight:600;} .pdmini{margin-left:auto;}
@@ -109,6 +120,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdtarget{border:1px solid #2a2e40;border-radius:9px;padding:9px 12px;margin:8px 0;background:#10131f;}
 .pdtdocs{margin-left:4px;margin-top:5px;border-left:2px solid #21253a;padding-left:11px;}
 .pdrow.pdsub2{font-size:.8rem;margin:3px 0;}
+.pdtiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;}
+.pdtile{border:1px solid #2a2e40;border-radius:9px;padding:11px 13px;background:#10131f;cursor:pointer;transition:border-color .12s,transform .12s;}
+.pdtile:hover{border-color:#569cd6;transform:translateY(-1px);}
+.pdtabs{display:flex;gap:2px;border-bottom:1px solid #2a2e40;}
+.pdtab{background:none;border:none;color:#8a90b0;padding:7px 15px;cursor:pointer;font-size:.85rem;border-bottom:2px solid transparent;margin-bottom:-1px;}
+.pdtab:hover{color:#d4d8e8;} .pdtab.on{color:#e6ebf7;border-bottom-color:#569cd6;}
 .pdarr-sec{border:1px solid #2a2e40;border-radius:8px;padding:8px 10px;margin:8px 0;background:#10131f;}
 .pdarr-hd{margin-bottom:5px;}
 .pdarr-name{background:#141828;border:1px solid #2a2e40;color:#e6ebf7;border-radius:5px;padding:3px 9px;font-size:.85rem;font-weight:600;}
@@ -129,7 +146,6 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div><h1>Kaimon Slate</h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
   <button id="pubdashbtn" class="herobtn" title="Manage publishing — targets, secrets, history">☁ Publishing</button>
 </div>
-<div id="localsites" class="sitesband"></div>
 <div id="published" class="sitesband"></div>
 <div class="cols">
 <div class="colL">
@@ -150,15 +166,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
 <div class="modal-bg" id="pubdashbg"><div class="modal pubdash">
-  <div class="pdhead"><strong>Publishing</strong><span class="pdsub" id="pdbackend"></span><button class="pdx" onclick="closePubDash()" title="Close">✕</button></div>
-  <div class="pdbody">
-    <div class="pdcol" style="flex:1.7">
-      <div class="pdsec">Targets &amp; their documents</div><div id="pdtargets"></div>
-    </div>
-    <div class="pdcol">
-      <div class="pdsec">Secrets</div><div id="pdsecrets"></div>
-    </div>
-  </div>
+  <div class="pdhead"><strong id="pdtitle">Publishing</strong><span class="pdsub" id="pdbackend"></span><button class="pdx" onclick="closePubDash()" title="Close">✕</button></div>
+  <div id="pdbody" class="pdbody" style="flex-direction:column;display:block"></div>
   <div class="row"><button class="primary" onclick="closePubDash()">Done</button></div>
 </div></div>
 <div class="modal-bg" id="pdarrangebg"><div class="modal pubdash" style="max-width:660px;max-height:86vh">
@@ -372,41 +381,52 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       renderRecents();   // recents marks (not hides) notebooks already open (reads .nb .p)
     }).catch(function(){});
   }
-  // Local export sites (Export → Save to local site), served by the hub at /sites/<name>/ — link each.
-  function loadLocalSites(){
-    return fetch('/api/sites').then(function(r){return r.json();}).then(function(d){
-      var box=document.getElementById('localsites'); if(!box) return;
-      var sites=(d&&d.sites)||[];
-      box.innerHTML = sites.length ? '<h2 class="sect">Sites</h2><div class="sitecards">'+sites.map(function(s){
-        var url='/sites/'+encodeURIComponent(s)+'/';
-        return '<a class="sitecard" href="'+esc(url)+'"><span class="si">🌐</span>'+
-          '<span class="sn">'+esc(s)+'</span><span class="su">'+esc(url)+'</span></a>';
-      }).join('')+'</div>' : '';
-    }).catch(function(){});
+  // SITES — one card per site (the ledger is authoritative). Shows doc/destination counts; click a card
+  // to reveal a local Preview link (/sites/<name>/, when built) plus its live web destinations (GitHub
+  // Pages, Cloudflare, Netlify, …), each opening its URL. Configure/publish from the ☁ Publishing manager.
+  function _pubSiteUrl(t){
+    if(t.kind==='github-pages'&&t.config.repo){var p=t.config.repo.split('/');return p.length===2?('https://'+p[0]+'.github.io/'+p[1]+'/'):'';}
+    if(t.kind==='cloudflare-pages')return t.config.url||(t.config.project?('https://'+t.config.project+'.pages.dev/'):'');
+    if(t.kind==='zenodo')return '';                    // DOI archive, not a live site
+    return t.config.url||'';
   }
-  // Published documents (the publish ledger): what's been published where, with live URLs / DOIs.
-  // Read-only here — configure + publish from a notebook's ☁ Publishing manager.
-  function pubLatest(d){ var e=(d.events&&d.events[0])||null; return e||{}; }   // events are newest-first
+  function _pubIcon(k){return k==='netlify'?'🔺':k==='cloudflare-pages'?'🟧':k==='github-pages'?'🌐':'🗄';}
+  function _destLabel(k){return k==='github-pages'?'GitHub Pages':k==='cloudflare-pages'?'Cloudflare':k==='netlify'?'Netlify':k;}
+  // Render the Sites section from a ledger view (sites+targets) and a set of names with a local build.
+  // Synchronous, so it can paint the server-inlined ledger in the first frame. Destination chips + the
+  // Preview link live in the collapsed .scdests, so a later refresh that fills them causes no shift.
+  function _renderSites(v, hasLocal){
+    var box=document.getElementById('published'); if(!box) return;
+    v=v||{}; hasLocal=hasLocal||{};
+    var sites=(v.sites)||[], byName={}; (v.targets||[]).forEach(function(t){byName[t.name]=t;});
+    var cards=sites.map(function(s){
+      var dests=(s.targets||[]).map(function(n){var t=byName[n];if(!t)return '';var u=_pubSiteUrl(t);
+        return '<a class="pubdest" href="'+esc(u||'#')+'"'+(u?' target="_blank" rel="noopener"':' onclick="return false"')+
+          ' onclick="event.stopPropagation()" title="'+esc(n)+(u?(' — '+esc(u)):' (no live URL)')+'">'+_pubIcon(t.kind)+' '+esc(_destLabel(t.kind))+(u?' ↗':'')+'</a>';
+      }).filter(Boolean).join('');
+      var preview=hasLocal[s.name]?('<a class="pubdest" href="/sites/'+encodeURIComponent(s.name)+'/" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="local build preview">👁 Preview ↗</a>'):'';
+      var body=preview+dests, nd=(s.docs||[]).length, ndest=(s.targets||[]).length;
+      return '<div class="sitecard sitecard-site" onclick="this.classList.toggle(\'open\')">'+
+        '<span class="si">🌐</span><span class="sn">'+esc(s.name)+'<span class="scchev">›</span></span>'+
+        '<span class="su">'+nd+' doc'+(nd===1?'':'s')+' · '+ndest+' destination'+(ndest===1?'':'s')+(hasLocal[s.name]?'':' · not built')+'</span>'+
+        '<div class="scdests">'+(body||'<span class="su">not built yet — publish a notebook into it</span>')+'</div></div>';
+    }).join('');
+    box.innerHTML = cards ? '<h2 class="sect">Sites</h2><div class="sitecards">'+cards+'</div>' : '';
+  }
   function loadPublished(){
-    return fetch('/api/publish/ledger').then(function(r){return r.json();}).then(function(v){
-      var box=document.getElementById('published'); if(!box) return;
-      var docs=(v&&v.documents)||[];
-      docs=docs.filter(function(d){return d.events&&d.events.length;});
-      box.innerHTML = docs.length ? '<h2 class="sect">Published</h2><div class="sitecards">'+docs.map(function(d){
-        var e=pubLatest(d); var url=e.url||''; var doi=e.doi||'';
-        var href=url||(doi?('https://doi.org/'+doi):'#');
-        return '<a class="sitecard" href="'+esc(href)+'" target="_blank" rel="noopener"><span class="si">'+(doi?'📄':'🌐')+'</span>'+
-          '<span class="sn">'+esc(d.title||d.slug)+'</span><span class="su">'+esc(doi?('DOI '+doi):url)+'</span></a>';
-      }).join('')+'</div>' : '';
+    return Promise.all([
+      fetch('/api/publish/ledger',{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return {};}),
+      fetch('/api/sites').then(function(r){return r.json();}).catch(function(){return {};})
+    ]).then(function(res){
+      var hasLocal={}; ((res[1]||{}).sites||[]).forEach(function(n){hasLocal[n]=true;});
+      _renderSites(res[0]||{}, hasLocal);
     }).catch(function(){});
   }
-  // ── Publishing dashboard: the global ledger (documents, targets, secrets, sites). Publishing a
-  // specific document hands off into its notebook (the build + SSE need the live notebook). ─────
+  // ── Publishing manager (master-detail): targets overview → drill into Content / Config / Policies ─
   var pubdashBg=document.getElementById('pubdashbg');
-  var _pdView={documents:[],targets:[],sites:[],secretRefs:[],availableKinds:[]};
+  var _pdView={documents:[],targets:[],secretRefs:[],availableKinds:[],ghUser:''};
+  var _pdSel=null, _pdTab='content';
   var _abs=function(p){return /^([A-Za-z]:[\\/]|\/)/.test(p||'');};
-  // Fetch + render into the (still-hidden) panel, THEN reveal it — so it never flashes empty while the
-  // ledger loads (the gist read is a network call). A spinner covers the wait.
   function openPubDash(){
     showLoading('Loading publishing…');
     loadPubDash(function(){ hideLoading(); pubdashBg.classList.add('show'); },
@@ -416,11 +436,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   window.openPubDash=openPubDash; window.closePubDash=closePubDash;
   function loadPubDash(done,fail){
     fetch('/api/publish/ledger',{cache:'no-store'}).then(function(r){return r.json();}).then(function(v){
-      _pdView=v; document.getElementById('pdbackend').textContent=v.backend?('— ledger: '+v.backend):'';
-      renderPdTargets(); renderPdSecrets();
-      if(done)done();
+      _pdView=v; document.getElementById('pdbackend').textContent=v.backend?('— '+v.backend):'';
+      pdRender(); if(done)done();
     }).catch(function(){ if(fail)fail(); });
   }
+  function pdRender(){ _pdSel?pdRenderDetail():pdRenderOverview(); }
+  function pdTargetByName(n){return (_pdView.targets||[]).filter(function(t){return t.name===n;})[0];}
   // Open a document's notebook by its stable docId (uses its absolute source path).
   function pdOpenDoc(docId){
     var d=(_pdView.documents||[]).filter(function(x){return x.docId===docId;})[0]; if(!d)return;
@@ -446,35 +467,178 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pdTargetSummary(t){
     if(t.kind==='github-pages')return t.config.repo||'';
     if(t.kind==='zenodo')return (t.config.secretRef?'secret:'+t.config.secretRef:'')+(t.config.sandbox?' sandbox':'');
-    return t.config.dest||t.config.url||'';
+    return t.config.dest||t.config.project||t.config.siteId||t.config.url||'';
   }
-  // TARGET-primary: each target card, with the documents published to it nested underneath.
-  function renderPdTargets(){
-    var ts=_pdView.targets||[], kinds=_pdView.availableKinds||['github-pages','s3','r2','rsync','zenodo'];
-    var cards = ts.length ? ts.map(function(t,i){
-      var live=pdTargetLive(t), docs=docsForTarget(t.name);
-      var drows = docs.length ? docs.map(function(x){
-        return '<div class="pdrow pdsub2"><span>'+esc(x.doc.title||x.doc.slug)+'</span>'+
-          '<span class="pdchip'+(x.latest.status==='ok'?' ok':'')+'">v'+x.version+'</span>'+
-          '<span class="pddim">'+esc((x.latest.ts||'').slice(0,10))+'</span>'+
-          (x.latest.url?' <a class="pdlink" href="'+esc(x.latest.url)+'" target="_blank" rel="noopener">page</a>':'')+
-          (x.latest.doi?' <span class="pddim">DOI '+esc(x.latest.doi)+'</span>':'')+
-          '<button class="pdbtn pdmini" onclick="pdOpenDoc(\''+esc(x.doc.docId)+'\')">open notebook</button></div>';
-      }).join('') : '<div class="pddim pdsub2">No documents published here yet.</div>';
-      var arr=(t.kind==='github-pages'&&t.config.repo)?'<button class="pdbtn" onclick="openArrange(\''+esc(t.config.repo)+'\',\''+esc(t.name)+'\')">⇅ arrange</button>':'';
-      return '<div class="pdtarget"><div class="pdrow"><span class="pl">'+esc(t.name)+'</span>'+
-        '<span class="pdchip">'+esc(t.kind)+'</span> <span class="pddim">'+esc(pdTargetSummary(t))+'</span>'+
-        (live?' <a class="pdlink" href="'+esc(live)+'" target="_blank" rel="noopener">live</a>':'')+
-        '<span style="margin-left:auto;display:inline-flex;gap:6px">'+arr+'<button class="pdbtn" onclick="pdDelTargetIdx('+i+')">✕</button></span></div>'+
-        '<div class="pdtdocs">'+drows+'</div></div>';
-    }).join('') : '<div class="pddim">No targets yet. Add one below, or publish a notebook (☰ → ☁ Publish…).</div>';
-    var owner=(_pdView.ghUser||'');
-    var form='<div class="pdform"><div class="pddim" style="font-size:.72rem">Add a destination — GitHub: just a repo NAME publishes under your account'+(owner?(' ('+esc(owner)+'/…)'):'')+'.</div>'+
-      '<input id="pdtname" class="pdinp" placeholder="label — optional (auto-named from the repo/bucket)"/>'+
+  // ── OVERVIEW — target tiles; drill in on click. Add + Secrets below. ──────────────────────────
+  function pdSiteByName(n){return (_pdView.sites||[]).filter(function(s){return s.name===n;})[0];}
+  // A site's destination chips (its configured targets, with kind + a warning if the target is gone).
+  function pdSiteChips(s){
+    return (s.targets||[]).map(function(n){var t=pdTargetByName(n);
+      return '<span class="pdchip'+(t?'':' warn')+'">'+esc(n)+(t?'':' ?')+'</span>';}).join(' ')||'<span class="pddim">no destinations</span>';
+  }
+  function pdRenderOverview(){
+    document.getElementById('pdtitle').textContent='Publishing';
+    var ts=_pdView.targets||[], sites=_pdView.sites||[];
+    // Sites: the logical unit you sync. Each has a name, destination targets, and member docs.
+    var siteTiles=sites.map(function(s){var nd=(s.docs||[]).length;
+      return '<div class="pdtile" onclick="pdEditSite(\''+esc(s.name)+'\')">'+
+        '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+
+          '<button class="pdbtn pdmini primary" style="margin-left:auto" onclick="event.stopPropagation();pdSyncSite(\''+esc(s.name)+'\')" title="Deploy to all destinations">▶ Sync</button></div>'+
+        '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
+        '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+(s.home?(' · home: '+esc(s.home)):'')+'</div></div>';
+    }).join('');
+    var tiles=ts.map(function(t){ var n=docsForTarget(t.name).length, live=pdTargetLive(t);
+      return '<div class="pdtile" onclick="pdOpen(\''+esc(t.name)+'\')">'+
+        '<div class="pdrow"><span class="pl">'+esc(t.name)+'</span><span class="pdchip">'+esc(t.kind)+'</span><span style="margin-left:auto;color:#6a7090">›</span></div>'+
+        '<div class="pddim pdcfg" style="max-width:100%">'+esc(pdTargetSummary(t))+'</div>'+
+        '<div class="pdrow" style="margin-top:4px"><span class="pddim">'+n+' doc'+(n===1?'':'s')+'</span>'+(live?'<a class="pdlink" style="margin-left:auto" href="'+esc(live)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()">live ↗</a>':'')+'</div></div>';
+    }).join('');
+    document.getElementById('pdbody').innerHTML=
+      '<div class="pdsec" style="margin-top:0">Sites</div>'+
+      '<div class="pdtiles">'+(siteTiles||'<div class="pddim">No sites yet.</div>')+'</div>'+
+      '<div class="pdrow" style="margin-top:10px"><button class="pdbtn primary" onclick="pdShowSite(\'\')">+ New site</button></div>'+
+      '<div class="pdsec">Publish targets</div>'+
+      '<div class="pdtiles">'+(tiles||'<div class="pddim">No targets yet. Add one, or publish a notebook (☰ → ☁ Publish…).</div>')+'</div>'+
+      '<div class="pdrow" style="margin-top:16px;gap:8px"><button class="pdbtn primary" onclick="pdShowAdd()">+ Add target</button><button class="pdbtn" onclick="pdShowSecrets()">⚙ Secrets</button></div>'+
+      '<div id="pdextra" style="margin-top:8px"></div>';
+  }
+  function pdOpen(n){_pdSel=n;_pdTab='content';pdRender();} window.pdOpen=pdOpen;
+  function pdBack(){_pdSel=null;pdRender();} window.pdBack=pdBack;
+  function pdShowAdd(){
+    var owner=(_pdView.ghUser||''), kinds=_pdView.availableKinds||['github-pages','cloudflare-pages','netlify','s3','r2','rsync','zenodo'];
+    document.getElementById('pdextra').innerHTML='<div class="pdform"><div class="pddim" style="font-size:.72rem">GitHub: just a repo NAME publishes under your account'+(owner?(' ('+esc(owner)+'/…)'):'')+'.</div>'+
+      '<input id="pdtname" class="pdinp" placeholder="label — optional (auto-named)"/>'+
       '<select id="pdtkind" class="pdinp" onchange="pdKindFields()">'+kinds.map(function(k){return '<option value="'+esc(k)+'">'+esc(k)+'</option>';}).join('')+'</select>'+
-      '<div id="pdtfields"></div><button class="pdbtn primary" onclick="pdAddTarget()">+ Add / update target</button></div>';
-    document.getElementById('pdtargets').innerHTML=cards+form; pdKindFields();
+      '<div id="pdtfields"></div><button class="pdbtn primary" onclick="pdAddTarget()">+ Add target</button></div>';
+    pdKindFields();
   }
+  window.pdShowAdd=pdShowAdd;
+  function pdShowSecrets(){
+    var refs=_pdView.secretRefs||[];
+    var rows=refs.length?refs.map(function(r){return '<div class="pdrow"><span class="pl">'+esc(r)+'</span><span class="pdchip ok">set</span><button class="pdbtn pdmini" onclick="pdDelSecret(\''+esc(r)+'\')">✕</button></div>';}).join(''):'<div class="pddim">None.</div>';
+    document.getElementById('pdextra').innerHTML='<div class="pdsec">Secrets</div>'+rows+
+      '<div class="pdform"><input id="pdsref" class="pdinp" placeholder="ref name (e.g. zenodo-token)"/>'+
+      '<div style="display:flex;gap:8px;align-items:center"><input id="pdsval" class="pdinp" type="text" placeholder="secret value" autocomplete="off" style="flex:1"/>'+
+      '<label class="pdtag" style="font-size:.74rem;white-space:nowrap"><input type="checkbox" id="pdsmask" onchange="pdToggleSecretMask()"/> hide</label></div>'+
+      '<button class="pdbtn primary" onclick="pdSetSecret()">Save secret</button></div>'+
+      '<div class="pddim" style="font-size:.72rem">Visible as you type; stored only in your config home (chmod 600) — never in the ledger/gist.</div>';
+  }
+  window.pdShowSecrets=pdShowSecrets;
+  // ── SITES — create/edit a site (name + which targets it deploys to + optional home), and Sync. ──
+  function pdEditSite(name){pdShowSite(name);} window.pdEditSite=pdEditSite;
+  function pdShowSite(name){
+    var s=name?pdSiteByName(name):null, ts=_pdView.targets||[];
+    var deployable=ts.filter(function(t){return t.kind!=='zenodo';});   // Zenodo mints DOIs — its own flow, not a live host
+    var chosen=s?(s.targets||[]):[];
+    var docs=s?(s.docs||[]):[];
+    var picks=deployable.length?deployable.map(function(t){
+      return '<label class="pdtag" style="display:flex;gap:8px;margin:5px 0"><input type="checkbox" class="pdst" value="'+esc(t.name)+'"'+(chosen.indexOf(t.name)>=0?' checked':'')+'/> '+esc(t.name)+' <span class="pdchip">'+esc(t.kind)+'</span></label>';
+    }).join(''):'<div class="pddim">No deployable targets yet — add one below first.</div>';
+    var homeOpts='<option value="">— none —</option>'+docs.map(function(d){var sl=d.slug||d.title;return '<option value="'+esc(sl)+'"'+(s&&s.home===sl?' selected':'')+'>'+esc(d.title||d.slug)+'</option>';}).join('');
+    var docList=docs.length?('<div class="pddim" style="margin-top:8px">Members: '+docs.map(function(d){return esc(d.title||d.slug);}).join(', ')+'</div>'):'<div class="pddim" style="margin-top:8px">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
+    document.getElementById('pdextra').innerHTML='<div class="pdform">'+
+      '<div class="pdsec" style="margin-top:0">'+(s?('Edit site “'+esc(s.name)+'”'):'New site')+'</div>'+
+      (s?'':'<input id="pdsitename" class="pdinp" placeholder="site name (e.g. portfolio)"/>')+
+      '<div class="pddim" style="font-size:.72rem">Deploy to these destinations:</div>'+picks+
+      (docs.length?('<div class="pddim" style="font-size:.72rem;margin-top:6px">Home page:</div><select id="pdsitehome" class="pdinp">'+homeOpts+'</select>'):'')+
+      docList+
+      '<div class="pdrow" style="margin-top:12px;gap:8px"><button class="pdbtn primary" onclick="pdSaveSite('+(s?('\''+esc(s.name)+'\''):'\'\'')+')">'+(s?'Save':'Create')+'</button>'+
+      (s?'<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\')">▶ Sync now</button><button class="pdbtn pdmini" style="margin-left:auto" onclick="pdDelSite(\''+esc(s.name)+'\')">✕ Delete site</button>':'')+'</div>'+
+      '<div id="pdsitelog" class="pdsync-log" style="display:none"></div></div>';
+  }
+  window.pdShowSite=pdShowSite;
+  function pdSaveSite(name){
+    var nm=name||((document.getElementById('pdsitename')||{}).value||'').trim();
+    if(!nm){alertDark('Give the site a name.');return;}
+    var targets=[].slice.call(document.querySelectorAll('.pdst:checked')).map(function(el){return el.value;});
+    var homeEl=document.getElementById('pdsitehome'), home=homeEl?homeEl.value:'';
+    fetch('/api/publish/site',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm,targets:targets,home:home})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(v){_pdView=v;pdRender();}).catch(function(e){alertDark('Save site failed: '+e);});
+  }
+  window.pdSaveSite=pdSaveSite;
+  function pdDelSite(name){
+    confirmDark('Delete site “'+name+'”? Already-deployed builds stay live; this only removes the definition.','Delete','danger').then(function(ok){if(!ok)return;
+      fetch('/api/publish/site-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
+        .then(function(r){return r.json();}).then(function(v){_pdView=v;pdRender();}).catch(function(){alertDark('Delete site failed');});});
+  }
+  window.pdDelSite=pdDelSite;
+  // Re-deploy a site's canonical build to all its destinations (SSE progress via EventSource).
+  function pdSyncSite(name){
+    var s=pdSiteByName(name); if(!s)return;
+    if(!(s.targets||[]).length){alertDark('“'+name+'” has no destinations yet — edit it and pick some.');return;}
+    pdShowSite(name);   // ensure the editor (with its log area) is open
+    var log=document.getElementById('pdsitelog'); if(log){log.style.display='block';log.textContent='Connecting…';}
+    var line=function(t){if(log){log.textContent=(log.textContent==='Connecting…'?'':log.textContent+'\n')+t;log.scrollTop=log.scrollHeight;}};
+    var es=new EventSource('/api/publish/site-sync?site='+encodeURIComponent(name));
+    es.addEventListener('status',function(e){line('… '+e.data);});
+    es.addEventListener('log',function(e){line(e.data);});
+    es.addEventListener('done',function(e){es.close();var d;try{d=JSON.parse(e.data);}catch(_){d={};}
+      line(d.ok?'✓ Synced to all destinations.':'⚠ Finished with errors.');loadPubDash();});
+    es.addEventListener('failed',function(e){es.close();line('✗ '+e.data);});
+    es.onerror=function(){es.close();line('✗ connection lost');};
+  }
+  window.pdSyncSite=pdSyncSite;
+  // ── DETAIL — back + Content / Config / Policies tabs. ─────────────────────────────────────────
+  function pdRenderDetail(){
+    var t=pdTargetByName(_pdSel); if(!t){pdBack();return;}
+    document.getElementById('pdtitle').textContent='Publishing › '+t.name;
+    var tabs=[['content','Content'],['config','Config'],['policies','Policies']];
+    var bar=tabs.map(function(x){return '<button class="pdtab'+(_pdTab===x[0]?' on':'')+'" onclick="pdTabSel(\''+x[0]+'\')">'+x[1]+'</button>';}).join('');
+    document.getElementById('pdbody').innerHTML=
+      '<div class="pdrow"><button class="pdbtn" onclick="pdBack()">← Targets</button>'+
+      '<span class="pl">'+esc(t.name)+'</span><span class="pdchip">'+esc(t.kind)+'</span>'+
+      (pdTargetLive(t)?'<a class="pdlink" style="margin-left:auto" href="'+esc(pdTargetLive(t))+'" target="_blank" rel="noopener">live ↗</a>':'<span style="margin-left:auto"></span>')+
+      '<button class="pdbtn pdmini" style="margin-left:8px" onclick="pdDelTarget(\''+esc(t.name)+'\')" title="delete target">✕</button></div>'+
+      '<div class="pdtabs">'+bar+'</div><div id="pdtab" style="margin-top:12px"></div>';
+    pdRenderTab(t);
+  }
+  function pdTabSel(tb){_pdTab=tb;pdRenderDetail();} window.pdTabSel=pdTabSel;
+  function pdRenderTab(t){ if(_pdTab==='config')pdRenderConfig(t); else if(_pdTab==='policies')pdRenderPolicies(t); else pdRenderContent(t); }
+  function pdRenderContent(t){
+    var docs=docsForTarget(t.name);
+    var list=docs.length?docs.map(function(x){
+      return '<div class="pdrow pdsub2"><span>'+esc(x.doc.title||x.doc.slug)+'</span>'+
+        '<span class="pdchip'+(x.latest.status==='ok'?' ok':'')+'">v'+x.version+'</span>'+
+        '<span class="pddim">'+esc((x.latest.ts||'').slice(0,10))+'</span>'+
+        (x.latest.url?' <a class="pdlink" href="'+esc(x.latest.url)+'" target="_blank" rel="noopener">page</a>':'')+
+        (x.latest.doi?' <span class="pddim">DOI '+esc(x.latest.doi)+'</span>':'')+
+        '<button class="pdbtn pdmini" onclick="pdOpenDoc(\''+esc(x.doc.docId)+'\')">open</button></div>';
+    }).join(''):'<div class="pddim">No documents published here yet.</div>';
+    var arrange=(t.kind==='github-pages'&&t.config.repo)?'<div class="pdrow" style="margin-top:14px"><button class="pdbtn primary" onclick="openArrange(\''+esc(t.config.repo)+'\',\''+esc(t.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag docs into ordered sections on the site index</span></div>':'';
+    document.getElementById('pdtab').innerHTML='<div class="pdsec" style="margin-top:0">Published documents</div>'+list+arrange;
+  }
+  function pdRenderConfig(t){
+    var c=t.config||{}, refs=_pdView.secretRefs||[], h='';
+    var f=function(id,label,val){return '<div class="pdrow"><label class="pddim" style="min-width:130px">'+esc(label)+'</label><input id="pdc_'+id+'" class="pdinp" style="flex:1" value="'+esc(val==null?'':val)+'"/></div>';};
+    var sel=function(id,label,val){return '<div class="pdrow"><label class="pddim" style="min-width:130px">'+esc(label)+'</label><select id="pdc_'+id+'" class="pdinp" style="flex:1"><option value="">— secret ref —</option>'+refs.map(function(r){return '<option value="'+esc(r)+'"'+(r===val?' selected':'')+'>'+esc(r)+'</option>';}).join('')+'</select></div>';};
+    if(t.kind==='github-pages')h=f('repo','GitHub repo',c.repo)+f('branch','Branch',c.branch)+f('subdir','Subdir',c.subdir);
+    else if(t.kind==='cloudflare-pages')h=f('project','Project',c.project)+f('accountId','Account id',c.accountId)+sel('secretRef','API token',c.secretRef)+f('url','Public URL',c.url);
+    else if(t.kind==='netlify')h=f('siteId','Site id',c.siteId)+sel('secretRef','Auth token',c.secretRef)+f('url','Public URL',c.url);
+    else if(t.kind==='s3'||t.kind==='r2')h=f('dest','Destination',c.dest)+(t.kind==='r2'?f('endpoint','R2 endpoint',c.endpoint):'')+f('url','Public URL',c.url);
+    else if(t.kind==='rsync')h=f('dest','Destination',c.dest)+f('url','Public URL',c.url);
+    else if(t.kind==='zenodo')h=sel('secretRef','API token',c.secretRef)+f('depositionId','Deposition id',c.depositionId);
+    document.getElementById('pdtab').innerHTML=h+'<div class="pdrow" style="margin-top:14px"><button class="pdbtn primary" onclick="pdSaveDetail()">Save config</button></div>';
+  }
+  function pdRenderPolicies(t){
+    var c=t.config||{}, h='';
+    var chk=function(id,label,on){return '<label class="pdtag" style="display:flex;margin:8px 0"><input type="checkbox" id="pdp_'+id+'" '+(on?'checked':'')+'/> '+esc(label)+'</label>';};
+    if(t.kind==='github-pages')h=chk('private','Private repo (Pages needs GitHub Pro)',c.private===true)+chk('create','Create the repo if it doesn\'t exist',c.create!==false);
+    else if(t.kind==='cloudflare-pages')h='<div class="pdrow"><label class="pddim" style="min-width:130px">Deploy branch</label><input id="pdp_branch" class="pdinp" style="flex:1" value="'+esc(c.branch||'')+'" placeholder="production"/></div>';
+    else if(t.kind==='s3'||t.kind==='r2'||t.kind==='rsync')h=chk('delete','Mirror deletes (remove files no longer in the build)',c['delete']!==false);
+    else if(t.kind==='zenodo')h=chk('sandbox','Use the Zenodo sandbox (test DOIs, not real)',c.sandbox===true);
+    else h='<div class="pddim">No policies for this target kind.</div>';
+    document.getElementById('pdtab').innerHTML=h+'<div class="pdrow" style="margin-top:14px"><button class="pdbtn primary" onclick="pdSaveDetail()">Save policies</button></div>';
+  }
+  function pdSaveDetail(){
+    var t=pdTargetByName(_pdSel); if(!t)return;
+    var cfg={}; for(var k in t.config)cfg[k]=t.config[k];
+    document.querySelectorAll('[id^=pdc_]').forEach(function(el){var key=el.id.slice(4),v=(el.value||'').trim();if(v)cfg[key]=v;else delete cfg[key];});
+    document.querySelectorAll('[id^=pdp_]').forEach(function(el){var key=el.id.slice(4);if(el.type==='checkbox')cfg[key]=el.checked;else{var v=(el.value||'').trim();if(v)cfg[key]=v;else delete cfg[key];}});
+    fetch('/api/publish/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:t.name,kind:t.kind,config:cfg})})
+      .then(function(r){return r.json();}).then(function(v){_pdView=v;pdRenderDetail();}).catch(function(){alertDark('Save failed');});
+  }
+  window.pdSaveDetail=pdSaveDetail;
   function pdFld(id,ph){return '<input id="pdf_'+id+'" class="pdinp" placeholder="'+esc(ph)+'"/>';}
   function pdChk(id,label,on){return '<label class="pdtag"><input type="checkbox" id="pdf_'+id+'" '+(on?'checked':'')+'/> '+esc(label)+'</label>';}
   function pdRefSel(id,refs){return '<select id="pdf_'+id+'" class="pdinp"><option value="">— secret ref —</option>'+(refs||[]).map(function(r){return '<option value="'+esc(r)+'">'+esc(r)+'</option>';}).join('')+'</select>';}
@@ -515,34 +679,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var name=(document.getElementById('pdtname').value||'').trim()||pdDeriveName(kind,config);
     if(!name){alertDark('Fill the repo/destination (or type a label)');return;}
     fetch('/api/publish/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,kind:kind,config:config})})
-      .then(function(r){return r.json();}).then(function(v){_pdView=v;renderPdTargets();}).catch(function(){alertDark('Save failed');});
+      .then(function(r){return r.json();}).then(function(v){_pdView=v;pdOpen(name);}).catch(function(){alertDark('Save failed');});
   }
   window.pdAddTarget=pdAddTarget;
-  function pdDelTargetIdx(i){var t=(_pdView.targets||[])[i];if(!t)return;
-    confirmDark('Delete target “'+t.name+'”? Published history is kept.','Delete','danger').then(function(ok){if(!ok)return;
-      fetch('/api/publish/target-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:t.name})})
-        .then(function(r){return r.json();}).then(function(v){_pdView=v;renderPdTargets();}).catch(function(){alertDark('Delete failed');});});}
-  window.pdDelTargetIdx=pdDelTargetIdx;
-  function renderPdSecrets(){
-    var refs=_pdView.secretRefs||[];
-    var rows=refs.length?refs.map(function(r,i){return '<div class="pdrow"><span class="pl">'+esc(r)+'</span><span class="pdchip ok">set</span><button class="pdbtn pdmini" onclick="pdDelSecretIdx('+i+')">✕</button></div>';}).join(''):'<div class="pddim">None.</div>';
-    var form='<div class="pdform"><input id="pdsref" class="pdinp" placeholder="ref name (e.g. zenodo-token)"/>'+
-      '<div style="display:flex;gap:8px;align-items:center"><input id="pdsval" class="pdinp" type="text" placeholder="secret value" autocomplete="off" style="flex:1"/>'+
-      '<label class="pdtag" style="font-size:.74rem;white-space:nowrap"><input type="checkbox" id="pdsmask" onchange="pdToggleSecretMask()"/> hide</label></div>'+
-      '<button class="pdbtn primary" onclick="pdSetSecret()">Save secret</button></div>'+
-      '<div class="pddim" style="font-size:.72rem">Visible as you type; stored only in your config home (chmod 600) — never in the ledger/gist.</div>';
-    document.getElementById('pdsecrets').innerHTML=rows+form;
-  }
+  function pdDelTarget(name){
+    confirmDark('Delete target “'+name+'”? Published history is kept.','Delete','danger').then(function(ok){if(!ok)return;
+      fetch('/api/publish/target-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
+        .then(function(r){return r.json();}).then(function(v){_pdView=v;pdBack();}).catch(function(){alertDark('Delete failed');});});}
+  window.pdDelTarget=pdDelTarget;
   function pdToggleSecretMask(){var e=document.getElementById('pdsval'); if(e)e.type=document.getElementById('pdsmask').checked?'password':'text';}
   window.pdToggleSecretMask=pdToggleSecretMask;
   function pdSecretPost(ref,value){
     fetch('/api/publish/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:ref,value:value})})
-      .then(function(r){return r.json();}).then(function(d){_pdView.secretRefs=d.refs||[];renderPdSecrets();pdKindFields();}).catch(function(){alertDark('Secret save failed');});
+      .then(function(r){return r.json();}).then(function(d){_pdView.secretRefs=d.refs||[];pdShowSecrets();}).catch(function(){alertDark('Secret save failed');});
   }
   function pdSetSecret(){var ref=(document.getElementById('pdsref').value||'').trim(),val=document.getElementById('pdsval').value;if(!ref){alertDark('Secret needs a ref name');return;}pdSecretPost(ref,val);}
   window.pdSetSecret=pdSetSecret;
-  function pdDelSecretIdx(i){var r=(_pdView.secretRefs||[])[i];if(!r)return;confirmDark('Delete secret “'+r+'”?','Delete','danger').then(function(ok){if(ok)pdSecretPost(r,'');});}
-  window.pdDelSecretIdx=pdDelSecretIdx;
+  function pdDelSecret(r){if(!r)return;confirmDark('Delete secret “'+r+'”?','Delete','danger').then(function(ok){if(ok)pdSecretPost(r,'');});}
+  window.pdDelSecret=pdDelSecret;
   // ── Arrange documents on a site: drag-reorder within/between sections → re-push the index ────────
   var _arrRepo='';
   function openArrange(repo,tname){
@@ -613,12 +767,23 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   pubdashBg.addEventListener('mousedown',function(e){if(e.target===pubdashBg)closePubDash();});
   document.addEventListener('keydown',function(e){if(e.key==='Escape'&&pubdashBg.classList.contains('show'))closePubDash();});
 
-  loadSessions(); loadLocalSites(); loadPublished();
+  // Paint the server-inlined ledger (sites+targets+local-build list, from the local cache — no network)
+  // in the first frame, so the async /api/publish/ledger fetch refreshes in place with identical output
+  // instead of shoving content down or flipping "not built". A spinner shows only with NO cache at all
+  // (a fresh machine) — there's genuinely nothing accurate to show until the fetch lands.
+  if(window.__SLATE_LEDGER__){
+    var _hl={}; (window.__SLATE_LEDGER__.localSites||[]).forEach(function(n){_hl[n]=true;});
+    _renderSites(window.__SLATE_LEDGER__, _hl);
+  } else {
+    var _pb=document.getElementById('published');
+    if(_pb) _pb.innerHTML='<div class="siteload"><span class="spin-sm"></span> Loading sites…</div>';
+  }
+  loadSessions(); loadPublished();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
   // from other tabs, agents, or MCP tools), and refresh immediately when the tab regains focus.
-  setInterval(function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); } }, 4000);   // not loadPublished — its ledger read can hit the network (gist)
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadLocalSites(); loadPublished(); } });
-  window.addEventListener('pageshow',function(){ loadSessions(); loadLocalSites(); loadPublished(); });   // back/forward cache restore
+  setInterval(function(){ if(!document.hidden){ loadSessions(); } }, 4000);   // not loadPublished — its ledger read can hit the network (gist)
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadPublished(); } });
+  window.addEventListener('pageshow',function(){ loadSessions(); loadPublished(); });   // back/forward cache restore
   // Prefill the last directory we opened from (but DON'T open the completion
   // dropdown on load — it would cover the open-sessions list; it opens when the
   // user types or Tabs).

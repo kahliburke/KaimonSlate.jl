@@ -70,14 +70,16 @@ end
 
 Target(name, kind; config = Dict{String,Any}()) = Target(name, kind, Dict{String,Any}(config))
 
-"An OPTIONAL grouping of documents into a site/portfolio (membership itself lives in the deployed manifest)."
+"A logical site/portfolio: a canonical build (the local site dir) that deploys to a set of destination
+targets. Its document membership + order + sections live in that build's `slate-site.json` manifest."
 struct SiteGroup
     name::String
-    target::String     # the site's default/output target
-    home::String       # docId of the home notebook, or ""
+    targets::Vector{String}   # the destination targets this site syncs to (references into Ledger.targets)
+    home::String              # slug/docId of the home notebook, or ""
 end
 
-SiteGroup(name; target = "", home = "") = SiteGroup(name, target, home)
+SiteGroup(name; targets = String[], target = "", home = "") =
+    SiteGroup(String(name), isempty(targets) && !isempty(target) ? [String(target)] : collect(String, targets), String(home))
 
 "The whole ledger: documents ↔ targets ↔ optional site groupings."
 mutable struct Ledger
@@ -226,8 +228,9 @@ function _target_from_dict(name, d)
     return Target(String(name), _str(d, "kind"); config = cfg)
 end
 
-_site_to_dict(s::SiteGroup) = Dict{String,Any}("target" => s.target, "home" => s.home)
-_site_from_dict(name, d) = SiteGroup(String(name); target = _str(d, "target"), home = _str(d, "home"))
+_site_to_dict(s::SiteGroup) = Dict{String,Any}("targets" => copy(s.targets), "home" => s.home)
+_site_from_dict(name, d) = SiteGroup(String(name);
+    targets = [String(t) for t in get(d, "targets", String[])], target = _str(d, "target"), home = _str(d, "home"))
 
 "Plain-`Dict` form of the ledger (the JSON shape)."
 function to_dict(l::Ledger)
@@ -284,7 +287,7 @@ LocalStore() = LocalStore(joinpath(SlateHome.ledger_dir(), "kaimonslate-ledger.j
 function load(s::LocalStore)::Ledger
     isfile(s.path) || return Ledger()
     try
-        return from_json(read(s.path, String))
+        return _write_cache(from_json(read(s.path, String)))
     catch e
         @warn "PublishLedger: could not parse ledger; starting empty" path = s.path exception = e
         return Ledger()
@@ -297,7 +300,7 @@ function save(s::LocalStore, ledger::Ledger)
     # events already on disk are rescued into surviving docs (see `_reconcile_for_save`).
     merged = isfile(s.path) ? _reconcile_for_save(load(s), ledger) : ledger
     _atomic_write(s.path, to_json(merged))
-    return merged
+    return _write_cache(merged)
 end
 
 locate(s::LocalStore) = isfile(s.path) ? s.path : nothing
@@ -475,7 +478,7 @@ function load(s::GistStore)::Ledger
     content = gist_read(s.client, id, s.filename)
     (content === nothing || isempty(strip(content))) && return Ledger()
     try
-        return from_json(content)
+        return _write_cache(from_json(content))
     catch e
         @warn "PublishLedger: could not parse gist ledger; starting empty" gist = id exception = e
         return Ledger()
@@ -489,12 +492,41 @@ function save(s::GistStore, ledger::Ledger)
         newid = gist_create(s.client, s.marker, s.filename, to_json(ledger))
         s.id = newid
         _write_pointer(s, newid)
-        return ledger
+        return _write_cache(ledger)
     end
     # fetch-before-write: reconcile against the current remote (our structure wins; rescue remote events).
     merged = _reconcile_for_save(load(s), ledger)
     gist_update(s.client, id, s.filename, to_json(merged))
+    _write_cache(merged)
     return merged
+end
+
+# ── Local write-through cache ─────────────────────────────────────────────────────────────────────
+# The gist store keeps only the gist *id* on disk, so every read hits the network (~1s). We also mirror
+# the last-known ledger JSON to a local cache file, so a UI can paint from it INSTANTLY (no round-trip)
+# and reconcile against the gist in the background. Best-effort: a cache read/write never breaks a
+# load/save, and the cache is a convenience only — the gist (or LocalStore) remains the source of truth.
+_ledger_cache_path() = joinpath(SlateHome.cache_home(), "ledger-cache.json")
+function _write_cache(ledger::Ledger)
+    try
+        p = _ledger_cache_path(); mkpath(dirname(p)); write(p, to_json(ledger))
+    catch
+    end
+    return ledger
+end
+"""
+    cached_ledger() -> Union{Ledger,Nothing}
+
+The last ledger written to the local write-through cache — a no-network snapshot for instant UI paint.
+`nothing` if nothing has been cached yet (a fresh machine, before the first load/save).
+"""
+function cached_ledger()
+    p = _ledger_cache_path(); isfile(p) || return nothing
+    try
+        return from_json(read(p, String))
+    catch
+        return nothing
+    end
 end
 
 # ── Store selection ──────────────────────────────────────────────────────────────────────────────

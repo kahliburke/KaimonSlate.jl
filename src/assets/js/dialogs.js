@@ -135,175 +135,8 @@ async function exportMarkdown(mode) {
     }
   } catch (e) { await alertDark('Markdown export failed: ' + e); }
 }
-// Publishable website (index.html + og-image.png) as a .tar.gz. Rendering the og:image (first figure,
-// or a Typst title card) can take a moment.
-async function exportSite() {
-  const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
-  const outv = (document.getElementById('exoutputs') || {}).value || 'all';
-  const parts = ['theme=' + theme]; if (outv !== 'all') parts.push('outputs=' + outv);
-  if (!(document.getElementById('sitesource') || { checked: true }).checked) parts.push('source=0');
-  if ((document.getElementById('siterunnable') || {}).checked) {
-    parts.push('bundle=1');
-    if ((document.getElementById('sitehistory') || {}).checked) parts.push('history=1');   // ship full git history
-  }
-  showLoading('Building site + preview image…');
-  try {
-    const r = await fetch(_apipath('/api/export.site?' + parts.join('&')));
-    if (!r.ok) { await alertDark('Site export failed:\n' + (await r.text())); return; }
-    _saveBlob(await r.blob(), '.site.tar.gz');
-  } catch (e) { await alertDark('Site export failed: ' + e); }
-  finally { hideLoading(); }
-}
-// Publish the site to GitHub Pages via the server's `gh` CLI. Prompts for the repo, pushes to
-// gh-pages, and reports the URL. Pages can take ~1 min to go live after the first publish.
-// A site hosts MANY documents: each notebook publishes to its own /<slug>/, and the repo's root
-// index.html is a generated blog page linking to all of them. Publishing is ADDITIVE — it adds/updates
-// just this doc and preserves the others already in the site.
+// Slugify a title/name into a URL-safe path segment (shared by the publish flow).
 function _slug(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
-async function publishSite() {
-  let repo = ((document.getElementById('siterepo') || {}).value || '').trim();
-  if (repo && !repo.includes('/') && _siteGhUser) repo = _siteGhUser + '/' + repo;   // bare name → under your account
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter a repo name (published under your account) or owner/name.'); return; }
-  const isPrivate = ((document.getElementById('sitevis') || {}).value || 'public') === 'private';
-  const create = !!(document.getElementById('sitecreate') || { checked: true }).checked;
-  const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
-  const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
-  const bundle = !!(document.getElementById('siterunnable') || {}).checked;
-  const history = bundle && !!(document.getElementById('sitehistory') || {}).checked;   // ship full git history
-  const outv = (document.getElementById('exoutputs') || {}).value || 'all';
-  const siteTitle = ((document.getElementById('sitetitle') || {}).value || '').trim();
-  const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim()) ||
-               _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
-  // A notebook tagged `home` is the site's FRONT PAGE (publishes to the root, not a /<slug>/ card).
-  const isHome = Array.isArray(nbState && nbState.cells) &&
-    nbState.cells.some(c => c && Array.isArray(c.tags) && c.tags.includes('home'));
-  // Preflight: additive publish — say whether this adds a new doc or updates one, and list the others.
-  let pf;
-  try {
-    const pr = await fetch(_apipath('/api/publish-check'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: repo }) });
-    pf = pr.ok ? await pr.json() : {};
-  } catch (_) { pf = {}; }
-  if (pf.gh === false) { await alertDark('The `gh` CLI was not found on the server. Install it and run `gh auth login`, then retry.'); return; }
-  const docs = Array.isArray(pf.docs) ? pf.docs : [];
-  const already = docs.find(d => d && d.slug === slug);
-  let msg, ok = 'Publish', cls = 'primary';
-  if (!pf.exists) {
-    if (!create) { await alertDark('Repo ' + repo + ' does not exist, and “Create the repo if it doesn’t exist” is off.\n\nEnable it, or create the repo first.'); return; }
-    msg = 'Create a NEW ' + (isPrivate ? 'private' : 'public') + ' repo ' + repo + ' as a site, and publish this notebook to /' + slug + '/.' +
-      (isPrivate ? '\n\n⚠ GitHub Pages needs a PUBLIC repo on the free plan (private Pages requires GitHub Pro), so a private repo may not serve.' : '');
-    ok = 'Create & publish';
-  } else if (isHome) {
-    msg = 'Publish the FRONT PAGE of the site ' + repo + ' (' + (pf.visibility || 'unknown') + '; visibility unchanged).\n\n' +
-      'This notebook is tagged `home` — it becomes the site root, and its `docindex` cell shows the document listing.' +
-      (docs.length ? '\n\n' + docs.length + ' document' + (docs.length === 1 ? '' : 's') + ' already in the site are preserved.' : '');
-    ok = 'Publish front page';
-  } else {
-    const others = docs.filter(d => d && d.slug !== slug);
-    msg = 'Publish to the site ' + repo + ' (' + (pf.visibility || 'unknown') + '; visibility unchanged).\n\n' +
-      (already ? '↻ Updates the existing document “' + (already.title || slug) + '” at /' + slug + '/.'
-               : '＋ Adds a new document at /' + slug + '/.') +
-      (others.length ? '\n\n' + others.length + ' other document' + (others.length === 1 ? '' : 's') + ' in this site are preserved:\n· ' +
-        others.slice(0, 6).map(d => d.title || d.slug).join('\n· ') + (others.length > 6 ? '\n· …' : '')
-        : (pf.hasGhPages ? '' : '\n\nA gh-pages branch will be created and Pages enabled.'));
-    if (already) { ok = 'Update & publish'; }
-  }
-  if (!await confirmDark(msg, ok, cls)) return;
-  showLoading('Building + pushing to GitHub Pages…');
-  let result = null, err = null;
-  try {
-    const r = await fetch(_apipath('/api/publish'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: repo, slug: slug, siteTitle: siteTitle, private: isPrivate, create: create, theme: theme, outputs: outv, source: source, bundle: bundle, history: history }) });
-    result = r.ok ? await r.json() : { error: await r.text() };
-  } catch (e) { err = e; }
-  hideLoading();                                          // drop the spinner BEFORE the result dialog
-  if (err) { await alertDark('Publish failed: ' + err); return; }
-  if (result.error) { await alertDark('Publish failed:\n' + result.error); return; }
-  localStorage.setItem('slate_siterepo', repo);
-  if (siteTitle) localStorage.setItem('slate_sitetitle', siteTitle);
-  const docUrl = result.docUrl || result.url;
-  const dlink = '<a href="' + _escHtml(docUrl) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(docUrl) + '</a>';
-  const slink = '<a href="' + _escHtml(result.url) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(result.url) + '</a>';
-  if (result.pagesEnabled === false) {
-    // The site was pushed, but GitHub Pages isn't serving it (usually: private repo on the free plan).
-    await dlg('⚠ Pushed to <code>gh-pages</code>, but GitHub Pages could not be enabled:<br><br>' +
-      _escHtml(result.pagesError || 'unknown reason') + '<br><br>Once Pages is available this document will serve at ' + dlink + '.',
-      [{ label: 'OK', value: true, cls: 'primary' }], { html: true });
-    return;
-  }
-  const count = result.docCount ? (result.docCount + ' document' + (result.docCount === 1 ? '' : 's') + ' in the site.') : '';
-  const headline = result.home ? 'Front page published ✓<br><br>Site: ' + slink
-                               : 'Published ✓<br><br>This document: ' + dlink + '<br>Site index: ' + slink;
-  const v = await dlg(headline + '<br><br>' + (result.created ? 'Repo created. ' : '') + count +
-    '<br>GitHub Pages may take ~1 minute to go live on the first publish.',
-    [{ label: 'Close', value: false }, { label: result.home ? 'Open site' : 'Open document', value: 'open', cls: 'primary' }], { html: true });
-  if (v === 'open') window.open(result.home ? result.url : docUrl, '_blank', 'noopener');
-}
-// Export this notebook into a PERSISTENT local site, served by the hub at /sites/<name>/ — the local
-// mirror of publishSite (no git/GitHub). Additive: export other notebooks into the same name to build
-// a multi-doc site, then publish it to GitHub when ready. Served over HTTP, so the card index refreshes.
-async function publishLocalSite() {
-  const name = ((document.getElementById('sitelocal') || {}).value || '').trim();
-  if (!name) { await alertDark('Enter a local site name (e.g. “portfolio”).'); return; }
-  const theme = (document.getElementById('sitetheme') || {}).value || 'dark';
-  const source = (document.getElementById('sitesource') || { checked: true }).checked ? '1' : '0';
-  const bundle = !!(document.getElementById('siterunnable') || {}).checked;
-  const history = bundle && !!(document.getElementById('sitehistory') || {}).checked;   // ship full git history
-  const outv = (document.getElementById('exoutputs') || {}).value || 'all';
-  const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim());
-  showLoading('Building the local site…');
-  let result = null, err = null;
-  try {
-    const r = await fetch(_apipath('/api/export-to-site'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, slug: slug, bundle: bundle, theme: theme, outputs: outv, source: source, history: history }) });
-    result = r.ok ? await r.json() : { error: await r.text() };
-  } catch (e) { err = e; }
-  hideLoading();
-  if (err) { await alertDark('Local site export failed: ' + err); return; }
-  if (result.error) { await alertDark('Local site export failed:\n' + result.error); return; }
-  localStorage.setItem('slate_sitelocal', name);
-  const url = result.url;                                 // hub-relative, e.g. /sites/<name>/<slug>/
-  const link = '<a href="' + _escHtml(url) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + _escHtml(url) + '</a>';
-  const count = result.docCount ? (result.docCount + ' document' + (result.docCount === 1 ? '' : 's') + ' in the site.') : '';
-  const headline = (result.home ? 'Front page saved to local site “' : 'Saved to local site “') + _escHtml(result.site) + '” ✓';
-  const v = await dlg(headline + '<br><br>' + link + '<br>' + count,
-    [{ label: 'Close', value: false }, { label: 'Open', value: 'open', cls: 'primary' }], { html: true });
-  if (v === 'open') window.open(url, '_blank', 'noopener');
-}
-// ── Local-site page management (unexport) ─────────────────────────────────────
-// List the pages already saved to the local site named in #sitelocal, each a chip with a ✕ that
-// removes it (deletes its folder + manifest entry, regenerates the index). Hidden when the site is
-// empty/absent — so it only appears once you've saved pages to that name.
-async function refreshSiteDocs() {
-  const row = document.getElementById('siteunexrow'), list = document.getElementById('siteunexlist');
-  if (!row || !list) return;
-  const name = ((document.getElementById('sitelocal') || {}).value || '').trim();
-  let docs = [];
-  // Only the Website format has this "remove a page" picker — skip the fetch (and stay hidden) for
-  // any other format, else it forces itself visible under e.g. Standalone. `/api/site-docs` is a
-  // GLOBAL endpoint (not notebook-scoped) — fetch it directly, NOT via api(), which would rewrite it
-  // to `/api/<id>/site-docs` and 404. (Mirrors the front page's /api/sites.)
-  if (name && _exFormat() === 'website') { try { const r = await (await fetch('/api/site-docs?name=' + encodeURIComponent(name), { cache: 'no-store' })).json(); docs = (r && r.docs) || []; } catch (_) {} }
-  if (!docs.length) { row.style.display = 'none'; list.innerHTML = ''; return; }
-  row.style.display = '';
-  list.innerHTML = docs.map(d => {
-    const slug = String(d.slug || ''), title = String(d.title || slug);
-    return `<span class="sitepage" data-slug="${_escHtml(slug)}" data-title="${_escHtml(title)}"` +
-      ` style="display:inline-flex;align-items:center;gap:5px;background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:2px 4px 2px 10px;font-size:.78rem">` +
-      `${_escHtml(title)}<button class="sitepagex" title="remove this page" style="border:none;background:transparent;color:var(--dim);cursor:pointer;padding:0 4px;line-height:1">✕</button></span>`;
-  }).join('');
-}
-document.getElementById('siteunexlist') && document.getElementById('siteunexlist').addEventListener('click', async e => {
-  const b = e.target.closest('.sitepagex'); if (!b) return;
-  const chip = b.closest('.sitepage'); if (!chip) return;
-  const name = ((document.getElementById('sitelocal') || {}).value || '').trim();
-  const slug = chip.dataset.slug, title = chip.dataset.title || slug;
-  if (!await confirmDark('Remove “' + title + '” from the local site “' + name + '”?\nIts page folder is deleted and the site index updated.', 'Remove', 'danger')) return;
-  try {
-    const r = await fetch(_apipath('/api/site-unexport'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, slug }) });
-    if (!r.ok) { await alertDark('Remove failed:\n' + (await r.text())); return; }
-  } catch (err) { await alertDark('Remove failed: ' + err); return; }
-  refreshSiteDocs();
-});
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
 async function exportStandalone() {
@@ -363,22 +196,21 @@ function _exSyncRows() {
 // re-pushable multiselect; ZENODO is a distinct "mint a permanent DOI version" action (immutable —
 // you can't edit/delete it), so it's split out with its own warning below.
 const _STATIC_KINDS = ['github-pages', 's3', 'r2', 'rsync', 'cloudflare-pages', 'netlify'];
-let _siteTargets = [], _siteGhUser = '';
-async function _loadSiteTargets() {
-  const host = document.getElementById('sitetargets'); if (!host) return;
+const _NEW_SITE = '__new_site__';
+let _siteTargets = [], _sitePickList = [];
+// Populate the "Into site" picker from saved sites, plus available destinations (for a new site) and
+// Zenodo archive targets (a separate permanent-DOI flow). Site-first: you publish INTO a site, and the
+// site's one canonical build is what syncs to its destinations.
+async function _loadSitePicker() {
+  const sel = document.getElementById('sitepick'); if (!sel) return;
   try {
     const v = await (await fetch('/api/publish/ledger', { cache: 'no-store' })).json();
-    _siteTargets = v.targets || []; _siteGhUser = v.ghUser || '';
-  } catch (e) { _siteTargets = []; _siteGhUser = ''; }
-  const remembered = (nbState && nbState.publishRepo) || localStorage.getItem('slate_siterepo') || '';
-  const statics = _siteTargets.filter(t => _STATIC_KINDS.indexOf(t.kind) >= 0);
-  host.innerHTML = statics.length ? statics.map(t => {
-    const dest = t.kind === 'github-pages' ? (t.config.repo || '') : (t.config.dest || t.config.url || '');
-    const pre = t.kind === 'github-pages' && (t.config.repo || '') === remembered;
-    return '<label class="pubpick"><input type="checkbox" class="sitetgt" value="' + _escHtml(t.name) + '"' + (pre ? ' checked' : '') + '/>' +
-      '<span class="publ">' + _escHtml(t.name) + '</span> <span class="pubdim">' + _escHtml(t.kind) + '</span>' +
-      ' <span class="pubdim" style="font-family:monospace;font-size:.76rem">' + _escHtml(dest) + '</span></label>';
-  }).join('') : '<div class="pubdim" style="font-size:.8rem">No live-site targets yet — check "New GitHub repo" below, or add targets in the Publishing manager (☰ → 🗂).</div>';
+    _siteTargets = v.targets || []; _sitePickList = v.sites || [];
+  } catch (e) { _siteTargets = []; _sitePickList = []; }
+  const remembered = localStorage.getItem('slate_site') || '';
+  sel.innerHTML = _sitePickList.map(s =>
+    '<option value="' + _escHtml(s.name) + '"' + (s.name === remembered ? ' selected' : '') + '>' + _escHtml(s.name) + '</option>').join('') +
+    '<option value="' + _NEW_SITE + '"' + (_sitePickList.length ? '' : ' selected') + '>＋ New site…</option>';
   // Zenodo archive targets (separate, permanent)
   const zhost = document.getElementById('sitezenodo');
   if (zhost) {
@@ -388,53 +220,119 @@ async function _loadSiteTargets() {
       '<span class="publ">' + _escHtml(t.name) + '</span> <span class="pubdim">' + (t.config.sandbox ? 'sandbox' : 'zenodo') + '</span></label>').join('')
       : '<div class="pubdim" style="font-size:.78rem">No Zenodo target — add one in the manager (with your token in Secrets) to mint a citable DOI.</div>';
   }
-  const owner = document.getElementById('siterepo-owner'); if (owner) owner.textContent = _siteGhUser ? _siteGhUser + '/' : '';
-  const repoIn = document.getElementById('siterepo');
-  if (repoIn && !repoIn._wired) { repoIn._wired = true; repoIn.addEventListener('input', () => { const c = document.getElementById('sitenewrepo'); if (c) c.checked = !!repoIn.value.trim(); }); }
+  _onSitePick();
 }
+// Chip markup for a destination name (inline-styled — no extra CSS needed).
+function _destChip(n) { return '<span style="display:inline-block;padding:1px 8px;border-radius:10px;border:1px solid var(--border);color:var(--dim);font-size:.72rem;margin:0 4px 4px 0">' + _escHtml(n) + '</span>'; }
+// React to the site selection: a NEW site reveals the name field + a destination checklist; an EXISTING
+// site shows its configured destinations (read-only — edit them in the manager).
+function _onSitePick() {
+  const sel = document.getElementById('sitepick'); if (!sel) return;
+  const isNew = sel.value === _NEW_SITE;
+  const nr = document.getElementById('sitenewrow'); if (nr) nr.style.display = isNew ? '' : 'none';
+  const dest = document.getElementById('sitedests'); if (!dest) return;
+  if (isNew) {
+    const deployable = _siteTargets.filter(t => _STATIC_KINDS.indexOf(t.kind) >= 0);
+    dest.innerHTML = deployable.length ? deployable.map(t => {
+      const d = t.kind === 'github-pages' ? (t.config.repo || '') : (t.config.dest || t.config.url || t.config.project || t.config.siteId || '');
+      return '<label class="pubpick"><input type="checkbox" class="sitedest" value="' + _escHtml(t.name) + '"/>' +
+        '<span class="publ">' + _escHtml(t.name) + '</span> <span class="pubdim">' + _escHtml(t.kind) + '</span>' +
+        ' <span class="pubdim" style="font-family:monospace;font-size:.76rem">' + _escHtml(d) + '</span></label>';
+    }).join('') : '<div class="pubdim" style="font-size:.8rem">No destinations yet — leave empty for a local-only site, or add targets in the manager (☰ → 🗂).</div>';
+  } else {
+    const s = _sitePickList.filter(x => x.name === sel.value)[0] || { targets: [] };
+    dest.innerHTML = (s.targets || []).length
+      ? (s.targets.map(_destChip).join('') + '<span class="pubdim" style="font-size:.76rem">— edit destinations in the manager</span>')
+      : '<span class="pubdim" style="font-size:.8rem">Local-only (no destinations). Add some in the manager, then ▶ Sync.</span>';
+  }
+}
+window._onSitePick = _onSitePick;
 
 // Shared SSE runner for /api/{id}/publish-run — streams per-target progress into the dialog log.
+// Used by the Zenodo archive flow (a direct per-target publish, not a site build).
 let _pubDone = false;
 function _streamPublish(names, buildOpts) {
   const q = new URLSearchParams(Object.assign({ targets: names.join(',') }, buildOpts || {}));
+  _streamSSE(_apipath('/api/publish-run') + '?' + q.toString());
+}
+// SSE runner for /api/{id}/site-publish?site=… — build into the site + sync all destinations.
+function _streamSite(site, buildOpts) {
+  const q = new URLSearchParams(Object.assign({ site: site }, buildOpts || {}));
+  _streamSSE(_apipath('/api/site-publish') + '?' + q.toString());
+}
+// Publish-button + Cancel-label lifecycle, so the dialog always looks honest about what's happening.
+// 'busy' disables Publish with a spinner + "Publishing…"; 'done'/'retry' re-enable it with a clear
+// next-step label — never a plain, re-clickable "Publish" mid-run, nor an ambiguous state once it
+// finishes. On success Cancel becomes "Close" (nothing left to cancel). `_resetPubUi` restores idle.
+function _setPubBtn(state) {
+  const btn = document.getElementById('sitepublishbtn'); if (!btn) return;
+  if (!btn.dataset.idle) btn.dataset.idle = btn.textContent;      // remember "☁ Publish into site"
+  btn.disabled = state === 'busy';
+  btn.classList.toggle('busy', state === 'busy');
+  btn.textContent = state === 'busy' ? 'Publishing…' : state === 'done' ? '☁ Publish again'
+    : state === 'retry' ? '↻ Retry publish' : (btn.dataset.idle || btn.textContent);
+}
+function _setCancelLabel(txt) { const c = document.getElementById('excancel'); if (c) c.textContent = txt; }
+function _resetPubUi() {
+  _setPubBtn('idle'); _setCancelLabel('Cancel');
+  const row = document.getElementById('sitepubrow'); if (row) row.style.display = 'none';
+}
+
+// The actual EventSource plumbing shared by both: stream status/log into the dialog log panel, and
+// drive the button lifecycle — immediate feedback the moment it starts (spinner + a "Starting…" line
+// so the panel is never blank), and a clear terminal state (a clickable site link) when it finishes.
+function _streamSSE(url) {
   const row = document.getElementById('sitepubrow'), log = document.getElementById('sitepublog');
-  const btn = document.getElementById('sitepublishbtn');
-  row.style.display = ''; log.innerHTML = ''; if (btn) btn.disabled = true; _pubDone = false;
+  row.style.display = ''; log.innerHTML = ''; _pubDone = false;
+  _setPubBtn('busy');                                             // immediate: disabled + spinner + "Publishing…"
   try { row.scrollIntoView({ block: 'center' }); } catch (e) {}   // bring the log into view in the tall dialog
-  const line = (t, c) => { const d = document.createElement('div'); d.className = 'publogln ' + (c || ''); d.textContent = t; log.appendChild(d); log.scrollTop = log.scrollHeight; };
-  const es = new EventSource(_apipath('/api/publish-run') + '?' + q.toString());
+  const line = (t, c) => { const d = document.createElement('div'); d.className = 'publogln ' + (c || ''); d.textContent = t; log.appendChild(d); log.scrollTop = log.scrollHeight; return d; };
+  line('Starting…', 'st');                                        // instant status so nothing looks stuck
+  const linkLine = u => { if (!u) return; const d = line('↗ ', 'ok'); const a = document.createElement('a'); a.href = u; a.target = '_blank'; a.rel = 'noopener'; a.textContent = u; d.appendChild(a); log.scrollTop = log.scrollHeight; };
+  const es = new EventSource(url);
   es.addEventListener('status', e => line(e.data, 'st'));
   es.addEventListener('log', e => line(e.data));
   es.addEventListener('done', e => {
-    _pubDone = true; es.close(); if (btn) btn.disabled = false;
+    _pubDone = true; es.close();
     let d = {}; try { d = JSON.parse(e.data); } catch (_) {}
-    line(d.ok ? '✓ Done' : 'Finished with errors', d.ok ? 'ok' : 'err');
-    toast(d.ok ? 'Done' : 'Finished with errors', 4500, d.ok ? '' : 'warn');
+    const ok = d.ok || d.localOnly;
+    line(d.localOnly ? '✓ Built locally (no destinations to sync)' : d.ok ? '✓ Done' : 'Finished with errors', ok ? 'ok' : 'err');
+    if (ok) linkLine(d.url || ((d.results || []).map(r => r && r.url).filter(Boolean))[0]);
+    _setPubBtn(ok ? 'done' : 'retry'); if (ok) _setCancelLabel('Close');
+    toast(ok ? 'Done' : 'Finished with errors', 4500, ok ? '' : 'warn');
   });
-  es.addEventListener('failed', e => { _pubDone = true; es.close(); if (btn) btn.disabled = false; line('✗ ' + e.data, 'err'); });
-  es.onerror = () => { if (_pubDone) return; _pubDone = true; if (btn) btn.disabled = false; line('✗ connection lost', 'err'); try { es.close(); } catch (_) {} };
+  es.addEventListener('failed', e => { _pubDone = true; es.close(); line('✗ ' + e.data, 'err'); _setPubBtn('retry'); });
+  es.onerror = () => { if (_pubDone) return; _pubDone = true; line('✗ connection lost', 'err'); _setPubBtn('retry'); try { es.close(); } catch (_) {} };
 }
 
-// LIVE SITES — fan out to every checked static host (+ an optional new GitHub repo). Re-pushable.
-async function publishTargets() {
-  const names = Array.from(document.querySelectorAll('.sitetgt:checked')).map(c => c.value);
-  if ((document.getElementById('sitenewrepo') || {}).checked) {
-    const raw = ((document.getElementById('siterepo') || {}).value || '').trim();
-    let repo = raw.includes('/') ? raw : (_siteGhUser ? _siteGhUser + '/' + raw : raw);
-    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { await alertDark('Enter a repo name (published under your account) or owner/name.'); return; }
-    const tname = repo.split('/').pop();
+// SITE-FIRST publish — render this notebook into the chosen site's canonical build, then sync that
+// build to every destination the site deploys to (create the site first if it's new).
+async function publishToSite() {
+  const sel = document.getElementById('sitepick'); if (!sel) return;
+  let site = sel.value;
+  let dests;
+  if (site === _NEW_SITE) {
+    site = ((document.getElementById('sitenewname') || {}).value || '').trim();
+    if (!site) { await alertDark('Name the new site (e.g. “portfolio”).'); return; }
+    dests = Array.from(document.querySelectorAll('.sitedest:checked')).map(c => c.value);
     try {
-      await fetch('/api/publish/target', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: tname, kind: 'github-pages', config: { repo: repo,
-          create: (document.getElementById('sitecreate') || {}).checked !== false,
-          private: ((document.getElementById('sitevis') || {}).value === 'private') } }) });
-      if (names.indexOf(tname) < 0) names.push(tname);
-    } catch (e) { await alertDark('Could not save the new GitHub target.'); return; }
+      await fetch('/api/publish/site', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: site, targets: dests }) });
+    } catch (e) { await alertDark('Could not create the site.'); return; }
+  } else {
+    const existing = _sitePickList.filter(x => x.name === site)[0] || { targets: [] };
+    dests = existing.targets || [];
   }
-  if (!names.length) { await alertDark('Check at least one live-site destination (or add a New GitHub repo).'); return; }
-  if (!await confirmDark('Publish “' + ((nbState && nbState.title) || 'this notebook') + '” to:\n· ' + names.join('\n· '), 'Publish')) return;
+  const where = dests.length ? ('\n\nDeploys to:\n· ' + dests.join('\n· ')) : '\n\n(local-only staging — no destinations yet; add some in the manager, then ▶ Sync)';
+  if (!await confirmDark('Publish “' + ((nbState && nbState.title) || 'this notebook') + '” into site “' + site + '”.' + where, 'Publish')) return;
+  localStorage.setItem('slate_site', site);
+  // Remember the publish options so the dialog reopens with the same choices (openExport reads these).
+  const _stt = document.getElementById('sitetheme'); if (_stt) localStorage.setItem('slate_sitetheme', _stt.value);
+  localStorage.setItem('slate_sitesource', (document.getElementById('sitesource') || {}).checked ? '1' : '0');
+  localStorage.setItem('slate_siterunnable', (document.getElementById('siterunnable') || {}).checked ? '1' : '0');
+  localStorage.setItem('slate_sitehistory', (document.getElementById('sitehistory') || {}).checked ? '1' : '0');
   const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim()) || _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
-  _streamPublish(names, {
+  _streamSite(site, {
     slug: slug, siteTitle: ((document.getElementById('sitetitle') || {}).value || '').trim(),
     theme: (document.getElementById('sitetheme') || {}).value || 'dark',
     outputs: (document.getElementById('exoutputs') || {}).value || 'all',
@@ -443,7 +341,7 @@ async function publishTargets() {
     history: (document.getElementById('sitehistory') || {}).checked ? '1' : '0'
   });
 }
-window.publishTargets = publishTargets;
+window.publishToSite = publishToSite;
 
 // ZENODO — deliberate, permanent: mint a citable DOI version (immutable; can't edit/delete).
 async function archiveZenodo() {
@@ -475,10 +373,6 @@ function openExport(preset) {
   const hh = document.getElementById('htmlhistory'); if (hh) hh.checked = localStorage.getItem('slate_htmlhistory') === '1';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
-  // Pre-fill the publish target from what this notebook last published to (state_json → publishRepo),
-  // falling back to the last-used repo. Same for the local-site name.
-  const sr = document.getElementById('siterepo'); if (sr && !sr.value) sr.value = (nbState && nbState.publishRepo) || localStorage.getItem('slate_siterepo') || '';
-  const sl = document.getElementById('sitelocal'); if (sl && !sl.value) sl.value = localStorage.getItem('slate_sitelocal') || '';
   const stt = document.getElementById('sitetitle'); if (stt && !stt.value) stt.value = localStorage.getItem('slate_sitetitle') || '';
   // Auto-fill this document's slug from the notebook title (editable). Pre-filled so publishing "just works".
   const ssl = document.getElementById('siteslug');
@@ -486,15 +380,11 @@ function openExport(preset) {
   const ss = document.getElementById('sitesource'); if (ss) ss.checked = localStorage.getItem('slate_sitesource') !== '0';
   const srn = document.getElementById('siterunnable'); if (srn) srn.checked = localStorage.getItem('slate_siterunnable') === '1';
   const sh = document.getElementById('sitehistory'); if (sh) sh.checked = localStorage.getItem('slate_sitehistory') === '1';
-  ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
+  ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
-  // Local-site pages (unexport UI): wire the input once, then list the named site's current pages.
-  const _sl = document.getElementById('sitelocal');
-  if (_sl && !_sl._unexWired) { _sl._unexWired = true; _sl.addEventListener('input', () => { clearTimeout(_sl._unexT); _sl._unexT = setTimeout(refreshSiteDocs, 300); }); }
-  refreshSiteDocs();
-  _loadSiteTargets();            // populate the "Publish to" dropdown from saved targets
+  _loadSitePicker();             // populate the "Into site" picker from saved sites + destinations
   _exSyncRows();
   // Publish mode (opened via ☁ Publish…): focus the dialog on the Website flow — retitle it and hide
   // the format picker, so it reads as "put this online", clearly distinct from Export's format menu.
@@ -502,7 +392,7 @@ function openExport(preset) {
   document.getElementById('exhdr').textContent = _pub ? 'Publish' : 'Export';
   document.getElementById('exsub').textContent = _pub ? '— publish this notebook to the web' : '— render or package this notebook';
   document.getElementById('exfmtrow').style.display = _pub ? 'none' : '';
-  const _pr = document.getElementById('sitepubrow'); if (_pr) _pr.style.display = 'none';   // no empty log until a publish runs
+  _resetPubUi();   // idle button + "Cancel" label + no empty log, so a reopened dialog isn't stuck on a prior run's state
   document.getElementById('exportbg').classList.add('show');
 }
 // `go`: false = cancel, true = primary export, 'copy' = Markdown-to-clipboard.
@@ -524,13 +414,7 @@ function closeExport(go) {
     const mi = document.getElementById('mdimg'); if (mi) localStorage.setItem('slate_mdimg', mi.value);
     return exportMarkdown(go === 'copy' ? 'copy' : 'file');
   }
-  if (fmt === 'website') {
-    ['sitetheme', 'sitevis'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
-    const ss = document.getElementById('sitesource'); if (ss) localStorage.setItem('slate_sitesource', ss.checked ? '1' : '0');
-    const srn = document.getElementById('siterunnable'); if (srn) localStorage.setItem('slate_siterunnable', srn.checked ? '1' : '0');
-    const sh = document.getElementById('sitehistory'); if (sh) localStorage.setItem('slate_sitehistory', sh.checked ? '1' : '0');
-    return go === 'publish' ? publishSite() : go === 'localsite' ? publishLocalSite() : exportSite();
-  }
+  if (fmt === 'website') return;   // publishing runs via the ☁ button → publishToSite(), not through closeExport
   if (fmt === 'standalone') return exportStandalone();
   return _runPdfExport();
 }

@@ -1232,6 +1232,46 @@ function reorder_published_site(repo::AbstractString, ordering)
     end
 end
 
+"""
+    deploy_dir_to_gh_pages(repo, dir; private=false, create=true, wait_deploy=true) -> (; ok, url, commit, error)
+
+Force-push an already-built site directory `dir` to `repo`'s `gh-pages` in one shot (the whole site —
+no per-doc clone/merge). The "deploy a prebuilt dir" primitive a SITE uses to push its one canonical
+build to GitHub, mirroring what the S3/Cloudflare/Netlify upload adapters do with the same dir. Creates
+the repo + enables Pages if needed. Operates on a copy so the canonical local build stays git-free.
+"""
+function deploy_dir_to_gh_pages(repo::AbstractString, dir::AbstractString; private::Bool = false,
+                                create::Bool = true, wait_deploy::Bool = true)
+    gh = Sys.which("gh"); gh === nothing && error("`gh` CLI not found")
+    occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be owner/name")
+    token = strip(read(`$gh auth token`, String)); isempty(token) && error("`gh auth token` empty — run `gh auth login`")
+    owner, name = split(repo, "/")
+    pushurl = "https://x-access-token:$token@github.com/$repo.git"
+    work = mktempdir()
+    try
+        wdir = joinpath(work, "site"); cp(dir, wdir)                 # copy: don't add .git/workflow to the cache
+        if !_gh_ok(`$gh repo view $repo`)
+            create || error("repo $repo doesn't exist and “create” is off")
+            _git_run(work, `$gh repo create $repo $(private ? "--private" : "--public")`)[1] || error("gh repo create failed")
+        end
+        mkpath(joinpath(wdir, dirname(_PAGES_WF_FILE)))
+        write(joinpath(wdir, _PAGES_WF_FILE), _PAGES_WF_YAML)
+        pok, plog = _ensure_pages_workflow!(gh, repo)
+        _git_run(wdir, `git init -q -b gh-pages`)
+        _git_run(wdir, `git add -A`)
+        okc, logc = _git_run(wdir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish site"`)
+        okc || error("git commit failed: $logc")
+        sha = strip(_git_run(wdir, `git rev-parse HEAD`)[2])
+        ok, log = _git_run(wdir, `git push --force $pushurl gh-pages`)
+        ok || error("git push failed: $(replace(log, token => "***"))")
+        dep = wait_deploy ? _await_pages_deploy(gh, repo, sha) : (; ok = true, conclusion = "success", done = true, url = "")
+        return (; ok = pok && dep.ok, url = "https://$owner.github.io/$name/", commit = sha,
+                error = pok ? (dep.ok ? "" : "Pages deploy: $(dep.conclusion)") : strip(replace(plog, r"\s+" => " ")))
+    finally
+        rm(work; recursive = true, force = true)
+    end
+end
+
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
 function _existing_site_docs(gh, repo::AbstractString)
     # Interpolate the path + header as whole variables so the `?`/`:`/space reach gh literally
