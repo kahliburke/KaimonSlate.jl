@@ -273,7 +273,8 @@ function _spawn_worker!(k::GateKernel)
                !isempty(WORKER_THREADS[])  ? WORKER_THREADS[] :
                get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
-    cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas)
+    cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas,
+                 "KAIMON_SESSION_LABEL" => k.label)   # worker reports this as its gate-session name (notebook filename)
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
     # each chunk, so the log is tailable in real time. A plain `stdout=<file>`
     # redirect is block-buffered and only lands on disk when the worker exits —
