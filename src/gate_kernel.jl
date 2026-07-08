@@ -87,9 +87,10 @@ mutable struct GateKernel <: Kernel
     threads::String  # per-notebook worker thread override ("<compute>,<interactive>"); "" = use the global
     remote::Bool     # attached to a PRE-RUNNING worker (e.g. remote, forwarded to 127.0.0.1:port over
                      # an SSH tunnel) — `prepare!` CONNECTS, never spawns/reconstructs locally.
+    label::String    # gate-session display label (the notebook's filename) — names the session in `ping`/TUI
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
-               pending::Vector = Any[], threads::AbstractString = "") =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false)
+               pending::Vector = Any[], threads::AbstractString = "", label::AbstractString = "") =
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label))
 end
 
 """
@@ -304,7 +305,8 @@ function _connect!(k::GateKernel)
     while time() < deadline
         try
             k.conn = K.connect_tcp!(mgr, "127.0.0.1", k.port;
-                                    name = "slate-$(k.port)", stream_port = k.stream_port)
+                                    name = "slate-$(k.port)", stream_port = k.stream_port,
+                                    label = k.label)
             return k
         catch e
             last = sprint(showerror, e); sleep(0.5)

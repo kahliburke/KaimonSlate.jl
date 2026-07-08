@@ -118,23 +118,24 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
         # Per-notebook worker-thread override: explicit `threads` arg wins, else a persisted
         # meta["threads"] (set at a prior open / footer), else "" → the kernel falls back to the global.
         th = isempty(threads) ? String(get(report.meta, "threads", "")) : String(threads)
+        lbl = basename(abspath(path))   # gate-session display label: the notebook's filename
         if !env_exists && !isempty(delta)
             # The `.jl` records package adds but the env dir is gone (e.g. a fresh git clone):
             # reconstruct it from the footer on first use (pending). Only `mkdir` here — the
             # Project.toml is written by the reconstruction itself, so a worker that never ran
             # leaves the env "absent" and reconstruction retries on the next open.
             mkpath(envdir)
-            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta, threads = th)
+            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta, threads = th, label = lbl)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
             ReportEngine.ensure_notebook_env!(envdir)
-            return GateKernel(envdir; parent = "", envdir = envdir, threads = th)
+            return GateKernel(envdir; parent = "", envdir = envdir, threads = th, label = lbl)
         elseif env_exists
             # Already has its own packages → run in the forked env (extends the parent).
-            return GateKernel(envdir; parent = parent, envdir = envdir, threads = th)
+            return GateKernel(envdir; parent = parent, envdir = envdir, threads = th, label = lbl)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.
-            return GateKernel(parent; parent = parent, envdir = envdir, threads = th)
+            return GateKernel(parent; parent = parent, envdir = envdir, threads = th, label = lbl)
         end
     end
     return InProcessKernel()
@@ -214,7 +215,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
     try
         rc = _reconstruct_bundle!(path)
         rc.fresh && _instantiate_env!(rc.envdir)
-        kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir)
+        kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir, label = basename(abspath(path)))
         lock(nb.lock) do
             nb.kernel = kernel
             # A durable INSTALL (SLATE_INSTALL_DIR) → serve the notebook FROM the installed project, so
