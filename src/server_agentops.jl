@@ -454,15 +454,45 @@ namespace (a bare `x = …` leaks, like a REPL), so `ephemeral=true` wraps the c
 via the notebook's eval mutex, so it never races a parallel batch. `memo_*` mirror the cell memo
 options for parity with the low-level worker eval.
 """
+# ── Scratchpad cells ────────────────────────────────────────────────────────────────────────────
+# slate.eval runs surface as VISIBLE, in-memory scratch cells (never in report.cells, so never in the
+# dep graph, the `.jl`, or an export). A bounded ring keeps the most recent N; each run pushes the cell
+# RUNNING, then updates it FRESH/ERRORED — streamed to the browser's Scratchpad panel over SSE.
+const _SCRATCH_MAX = 24
+const _SCRATCH_CELL_SEQ = Threads.Atomic{Int}(0)
+_scratch_id() = "scratch:" * string(Threads.atomic_add!(_SCRATCH_CELL_SEQ, 1) + 1)
+_broadcast_scratch(nb::LiveNotebook, cell::Cell) =
+    (try; _broadcast(nb, "scratch:" * JSON.json(cell_json(cell))); catch; end; nothing)
+function _push_scratch!(nb::LiveNotebook, cell::Cell)
+    lock(nb.lock) do
+        push!(nb.scratch, cell)
+        length(nb.scratch) > _SCRATCH_MAX && deleteat!(nb.scratch, 1:(length(nb.scratch) - _SCRATCH_MAX))
+    end
+    _broadcast_scratch(nb, cell)
+    return cell
+end
+"Empty the notebook's scratchpad and tell the browser to clear its panel."
+function clear_scratch!(nb::LiveNotebook)
+    lock(nb.lock) do; empty!(nb.scratch); end
+    try; _broadcast(nb, "scratchclear:"); catch; end
+    return nothing
+end
+
 function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
                              ephemeral::Bool = false, memo_key::AbstractString = "",
                              memo_names = String[], memo_threshold::Real = 0.0)
     src = ephemeral ? "let\n" * String(source) * "\nend" : String(source)
     memo = isempty(memo_key) ? nothing :
         (; key = String(memo_key), names = collect(String, memo_names), threshold = Float64(memo_threshold))
+    cell = Cell(_scratch_id(), CODE, String(source))   # display the ORIGINAL source, not the let-wrap
+    cell.state = RUNNING
+    _push_scratch!(nb, cell)                            # surface it immediately (running) in the panel
     out = lock(_eval_mutex(nb)) do
         ReportEngine.eval_capture(nb.kernel, nb.report, src, "scratch", memo)
     end
+    cell.output = out
+    cell.state = (out !== nothing && out.exception !== nothing) ? ERRORED : FRESH
+    _broadcast_scratch(nb, cell)                        # push the finished cell (result / error)
     return _output_result_text(out)
 end
 

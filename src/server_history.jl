@@ -643,6 +643,8 @@ function state_json(nb::LiveNotebook)
     figidx = figure_index(nb.report)            # caption numbering + [@fig:] cross-ref labels
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
         cited = cited, bibctx = bibctx, figidx = figidx) for c in nb.report.cells]
+    # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
+    isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
     let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])

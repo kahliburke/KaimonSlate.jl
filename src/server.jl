@@ -47,6 +47,11 @@ mutable struct LiveNotebook
     agent_id::String                     # default/solo agent (crew "") — back-compat alias of agents[""]
     agent_busy::Bool                     # true while ANY bound agent has a turn in flight (history attribution)
     agents::Dict{String,String}          # crew label → Kaimon agent id (multi-agent crew; "" = default)
+    scratch::Vector{Cell}                # in-memory scratchpad cells (slate.eval) — never persisted/exported/graphed
+    # Inner constructor takes the original 13 fields and starts an empty scratchpad, so every existing
+    # positional call site (server + tests) is unchanged; scratch is populated at runtime by slate.eval.
+    LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
+        new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents, Cell[])
 end
 
 # Wire/unwire the engine's out-of-band callback registry (eval.jl) for one notebook — the seam
