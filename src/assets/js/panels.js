@@ -397,9 +397,10 @@ function _scCellHtml(c) {
 }
 function _scRender() {
   const b = document.getElementById('scratchbody'); if (!b) return;
+  const atBottom = (b.scrollHeight - b.scrollTop - b.clientHeight) < 48;   // were we pinned to newest?
   b.innerHTML = _scratchCells.length ? _scratchCells.map(_scCellHtml).join('')
     : '<div class="scempty">No scratch evals yet. Agents use <code>slate.eval</code> for throwaway diagnostics — they land here, out of the document.</div>';
-  b.scrollTop = b.scrollHeight;                                   // newest at the bottom, keep it visible
+  if (atBottom) b.scrollTop = b.scrollHeight;   // sticky: follow new output only if already at the bottom — don't yank a scrolled-up reader down
   _scWireImages(b);
   _scUpdateChrome();
 }
@@ -413,7 +414,7 @@ function _scUpdateChrome() {
     ind.classList.toggle('sc-running', running > 0);                 // pulse the dot only while actually running
     const _lbl = ind.querySelector('.scrlabel');
     if (_lbl) _lbl.textContent = running ? 'scratch' : (_scUnread + ' new');
-    const n = ind.querySelector('.scrn'); if (n) n.textContent = running > 1 ? (' ×' + running) : ''; }
+  }
   const btn = document.getElementById('scratchbtn');
   if (btn) btn.dataset.count = _scUnread ? String(_scUnread) : '';   // NEW since last viewed, not the total
 }
