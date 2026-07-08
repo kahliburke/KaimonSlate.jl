@@ -46,6 +46,18 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         end
     end
 
+    @testset "@reactive sugar: name is a definer, init is read" begin
+        c = Cell("c", CODE, "@reactive level = base + 1"); infer_bindings!(c)
+        @test :level in c.writes          # `@reactive x = …` DEFINES x (the reactive producer)
+        @test !(:level in c.mutates)      # a definition, not a mutation → no false multidef
+        @test :base in c.reads            # init free vars are reads (edge to their writer)
+        # a reader of the reactive gets a dep edge to the `@reactive` cell (reactivity wires up)
+        r = parse_report("#%% code id=p\n@reactive level = 0\n#%% code id=r\n\"v=\$(level[])\"")
+        build_dependencies!(r)
+        @test "p" in r.cells[2].deps
+        @test !("level" in get(r.meta, "multidef", Set{String}()))   # single definer, no collision
+    end
+
     @testset "graph: most-recent-prior-writer" begin
         r = parse_report("#%% code id=a\nx = 1\n#%% code id=b\ny = x\n" *
                          "#%% code id=c\nx = 2\n#%% code id=d\nz = x")

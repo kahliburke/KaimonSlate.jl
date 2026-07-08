@@ -298,10 +298,18 @@ function _infer_bindings_uncached!(cell::Cell)
             end
             continue
         end
-        bm = _bind_macrocall(s)
-        om = bm === nothing ? _onclick_macrocall(s) : nothing
-        cm = (bm === nothing && om === nothing) ? _onchange_macrocall(s) : nothing
-        if bm !== nothing
+        rm = _reactive_macrocall(s)
+        bm = rm === nothing ? _bind_macrocall(s) : nothing
+        om = (rm === nothing && bm === nothing) ? _onclick_macrocall(s) : nothing
+        cm = (rm === nothing && bm === nothing && om === nothing) ? _onchange_macrocall(s) : nothing
+        if rm !== nothing
+            push!(cell.writes, rm[1])            # `@reactive x = init` DEFINES x (the reactive producer)
+            try
+                union!(cell.reads, EE.compute_reactive_node(Expr(:block, rm[2])).references)
+            catch e
+                @debug "deps: @reactive init analysis failed" cell = cell.id exception = e
+            end
+        elseif bm !== nothing
             push!(cell.writes, bm[1])
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, bm[2])).references)

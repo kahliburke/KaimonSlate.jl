@@ -406,6 +406,15 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const pause = $pause))
     # `reactive(:name, init)` — a live value bound to THIS notebook's slate_refresh.
     Core.eval(m, :(const reactive = $((nm, init) -> Reactive(nm, init, slate_refresh))))
+    # `@reactive name = init` — sugar for `name = reactive(:name, init)`. Derives the reactive's NAME
+    # from the binding, so the name (which routes the refresh to the cells that read `name`) can never
+    # drift from the variable — removing the `reactive(:name, …)` double-spell footgun.
+    Core.eval(m, :(macro reactive(ex)
+        (ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol) ||
+            error("@reactive expects `name = init` (e.g. `@reactive level = 0`)")
+        nm = ex.args[1]
+        esc(Expr(:(=), nm, Expr(:call, :reactive, QuoteNode(nm), ex.args[2])))
+    end))
     # `@onclick`/`@onchange` REGISTER `body` as the handler for a control (they do NOT read the
     # control, so a change doesn't recompute this cell — see __slate_set_bind for the dispatch).
     # Re-running the cell just re-registers (capturing the latest closure); it never fires.
@@ -465,6 +474,16 @@ function _bind_macrocall(ex)
     length(real) >= 2 || return nothing
     real[1] isa Symbol || return nothing
     return (real[1], real[2])
+end
+
+# (name::Symbol, init_expr) if `ex` is `@reactive name = init`, else nothing. Lets the dependency
+# analysis see through the sugar: `name` is a WRITE (this cell DEFINES the reactive producer — readers
+# depend on it and its refresh routes here by that name); `init`'s free vars are reads.
+function _reactive_macrocall(ex)
+    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@reactive")) || return nothing
+    real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
+    (length(real) == 1 && real[1] isa Expr && real[1].head === :(=) && real[1].args[1] isa Symbol) || return nothing
+    return (real[1].args[1], real[1].args[2])
 end
 
 # (button::Symbol, body_expr) if `ex` is `@onclick btn body`, else nothing. Like `_bind_macrocall`,

@@ -160,9 +160,12 @@ const SLATE_API = SlateApiEntry[
         `frames[t]` / `\"t=\$t\"`. Playback never waits on Julia; updates are throttled."""),
 
     # ── Live / reactive ────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("reactive", "Live", "reactive(:name, init) -> live value",
+    SlateApiEntry("reactive", "Live", "reactive(:name, init) -> live value  ·  @reactive name = init",
         """A live value you push to over time: `level = reactive(:level, 0)`; `level[]` reads,
-        `level[] = v` pushes to every cell that reads it (re-renders live, no manual refresh)."""),
+        `level[] = v` pushes to every cell that reads it (re-renders live, no manual refresh). The
+        `:name` MUST match the variable — it routes the refresh to the cells that read `name`. Prefer
+        the sugar `@reactive level = 0` (= `level = reactive(:level, 0)`), which derives the name from
+        the binding so it can never drift."""),
     SlateApiEntry("@onclick", "Live", "@onclick button begin … end",
         """Run a body when a Button is clicked (a NEW click cancels the still-running prior run). The
         cell does NOT recompute — the handler fires directly.
