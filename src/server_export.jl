@@ -58,7 +58,22 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-run-row button{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 14px;cursor:pointer;font-family:inherit;}
 .exp-md table,.exp-table{border-collapse:collapse;margin:8px 0;font-size:.84rem;}
 .exp-md td,.exp-md th,.exp-table td,.exp-table th{border:1px solid var(--border);padding:4px 10px;text-align:left;}
-.exp-table th{background:var(--bg3);color:var(--dim);} .exp-table td{font-variant-numeric:tabular-nums;}
+.exp-table th{background:var(--bg3);color:var(--dim);} .exp-table td.num{font-variant-numeric:tabular-nums;}
+/* per-column alignment (from ColumnDef.align) — after the base rule so an override wins */
+.exp-table td.align-right,.exp-table th.align-right{text-align:right;}
+.exp-table td.align-center,.exp-table th.align-center{text-align:center;}
+.exp-table tbody tr:nth-child(even){background:rgba(127,127,127,.06);}
+/* interactive enhancer (hydrated client-side): sortable headers, filter, paging, CSV */
+.exp-tblwrap{margin:8px 0;}
+.exp-table th{cursor:pointer;user-select:none;} .exp-table th::after{content:attr(data-arr);color:var(--accent);}
+.exp-tbl-bar{display:flex;align-items:center;gap:10px;margin-bottom:4px;}
+.exp-tbl-filter{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:.78rem;min-width:150px;}
+.exp-tbl-filter:focus{outline:none;border-color:var(--accent);}
+.exp-tbl-info{color:var(--dim);font-size:.74rem;}
+.exp-tbl-csv,.exp-tbl-pg button{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 9px;font-size:.74rem;cursor:pointer;font-family:inherit;}
+.exp-tbl-csv{margin-left:auto;} .exp-tbl-csv:hover,.exp-tbl-pg button:hover{border-color:var(--accent);}
+.exp-tbl-pg{display:flex;align-items:center;gap:8px;margin-top:4px;} .exp-tbl-pg span{color:var(--dim);font-size:.74rem;}
+.exp-tblnote{color:var(--dim);font-size:.74rem;margin-top:3px;font-style:italic;}
 .exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
 .exp-code{margin:14px 0;border:1px solid var(--border);border-radius:8px;background:var(--bg2);overflow:hidden;}
 .exp-src{margin:0;padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);overflow-x:auto;}
@@ -73,24 +88,82 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 """
 end
 
+# Self-contained (no CDN, no server) enhancer for the static export's `.exp-table`s: it hydrates each
+# into a sortable / filterable / client-paged table with a CSV download. All rows are already in the
+# DOM; numeric columns carry their raw value in `data-v` so sorting is numeric, not lexical. Emitted
+# ONCE into the page's `<script>` and run immediately (tables precede the script in the body).
+const _EXPORT_TABLE_JS = raw"""(function(){
+function esc(s){s=String(s);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;}
+function enh(table){
+  var thead=table.tHead,tb=table.tBodies[0];if(!thead||!tb)return;
+  var ths=[].slice.call(thead.rows[0].cells),allRows=[].slice.call(tb.rows);
+  var wrap=table.closest('.exp-tblwrap')||table.parentNode;
+  var st={sort:-1,dir:1,filter:'',page:0,pageSize:allRows.length>25?25:0};
+  var bar=document.createElement('div');bar.className='exp-tbl-bar';
+  var fi=document.createElement('input');fi.type='text';fi.placeholder='filter…';fi.className='exp-tbl-filter';
+  var info=document.createElement('span');info.className='exp-tbl-info';
+  var csv=document.createElement('button');csv.className='exp-tbl-csv';csv.textContent='⬇ CSV';
+  bar.appendChild(fi);bar.appendChild(info);bar.appendChild(csv);wrap.insertBefore(bar,table);
+  var pg=document.createElement('div');pg.className='exp-tbl-pg';
+  if(table.nextSibling)wrap.insertBefore(pg,table.nextSibling);else wrap.appendChild(pg);
+  ths.forEach(function(th){th.setAttribute('data-label',th.textContent);});
+  function val(tr,ci){var td=tr.cells[ci];if(!td)return '';var dv=td.getAttribute('data-v');return dv!==null?parseFloat(dv):td.textContent;}
+  function cmp(a,b){if(typeof a==='number'&&typeof b==='number')return a-b;return String(a).localeCompare(String(b),undefined,{numeric:true});}
+  function view(){var f=st.filter.trim().toLowerCase();
+    var rows=allRows.filter(function(tr){return !f||[].some.call(tr.cells,function(td){return td.textContent.toLowerCase().indexOf(f)>=0;});});
+    if(st.sort>=0)rows=rows.slice().sort(function(x,y){return cmp(val(x,st.sort),val(y,st.sort))*st.dir;});
+    return rows;}
+  function render(){var rows=view(),total=rows.length,ps=st.pageSize||total,pages=Math.max(1,Math.ceil(total/ps));
+    if(st.page>pages-1)st.page=pages-1;if(st.page<0)st.page=0;var start=st.page*ps;
+    ths.forEach(function(th,ci){th.setAttribute('data-arr',st.sort===ci?(st.dir<0?' ▾':' ▴'):'');});
+    tb.innerHTML='';rows.slice(start,ps?start+ps:undefined).forEach(function(tr){tb.appendChild(tr);});
+    info.textContent=total?(start+1)+'–'+Math.min(start+ps,total)+' of '+total:'0';
+    pg.innerHTML='';
+    if(pages>1){var mk=function(t,to,d){var b=document.createElement('button');b.textContent=t;b.disabled=d;b.addEventListener('click',function(){st.page=to;render();});return b;};
+      pg.appendChild(mk('‹ prev',st.page-1,st.page<=0));var s=document.createElement('span');s.textContent='page '+(st.page+1)+' / '+pages;pg.appendChild(s);pg.appendChild(mk('next ›',st.page+1,st.page>=pages-1));}}
+  ths.forEach(function(th,ci){th.addEventListener('click',function(){if(st.sort===ci)st.dir=-st.dir;else{st.sort=ci;st.dir=1;}st.page=0;render();});});
+  fi.addEventListener('input',function(){st.filter=fi.value;st.page=0;render();});
+  csv.addEventListener('click',function(){var lines=[ths.map(function(th){return esc(th.getAttribute('data-label'));}).join(',')];
+    view().forEach(function(tr){lines.push([].map.call(tr.cells,function(td){return esc(td.textContent);}).join(','));});
+    var blob=new Blob([lines.join('\n')],{type:'text/csv'}),u=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=u;a.download='table.csv';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);});
+  render();
+}
+[].forEach.call(document.querySelectorAll('table.exp-table'),enh);
+})();"""
+
 function _export_table_html(spec)
     cols = get(spec, "columns", Any[])
     rows = get(spec, "rows", Any[])
+    opts = get(spec, "opts", Dict{String,Any}())
+    _cname(c)   = c isa AbstractDict ? string(get(c, "name", "")) : string(c)
+    _calign(c)  = c isa AbstractDict ? string(get(c, "align", "left")) : "left"
+    _cnumeric(c) = c isa AbstractDict && (t = string(get(c, "type", "")); t == "int" || t == "float")
+    _cfmt(c)    = c isa AbstractDict ? get(c, "format", nothing) : nothing
     io = IOBuffer()
-    print(io, "<table class=\"exp-table\"><thead><tr>")
+    print(io, "<div class=\"exp-tblwrap\"><table class=\"exp-table\"><thead><tr>")
     for c in cols
-        nm = c isa AbstractDict ? get(c, "name", "") : c
-        print(io, "<th>", _esc(string(nm)), "</th>")
+        print(io, "<th class=\"", _cnumeric(c) ? "num " : "", "align-", _calign(c), "\">", _esc(_cname(c)), "</th>")
     end
     print(io, "</tr></thead><tbody>")
     for r in rows
         print(io, "<tr>")
-        for v in r
-            print(io, "<td>", v === nothing ? "" : _esc(string(v)), "</td>")
+        for (ci, v) in enumerate(r)
+            c = ci <= length(cols) ? cols[ci] : nothing
+            num = c !== nothing && _cnumeric(c)
+            al = c === nothing ? "left" : _calign(c)
+            txt = ReportEngine._format_cell(v, c === nothing ? nothing : _cfmt(c))
+            # numeric cells carry the RAW value in data-v so the interactive enhancer sorts numerically
+            dv = (num && v isa Real && !(v isa Bool)) ? string(" data-v=\"", v, "\"") : ""
+            print(io, "<td class=\"", num ? "num " : "", "align-", al, "\"", dv, ">", _esc(txt), "</td>")
         end
         print(io, "</tr>")
     end
     print(io, "</tbody></table>")
+    # Never silently truncate: a capped eager table / a paged table's page-1-only spec says how much is hidden.
+    nrows = Int(get(opts, "nrows", length(rows)))
+    length(rows) < nrows && print(io, "<div class=\"exp-tblnote\">Showing ", length(rows), " of ", nrows, " rows</div>")
+    print(io, "</div>")
     return String(take!(io))
 end
 
@@ -314,6 +387,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # ECharts: render each embedded spec client-side (real, interactive charts with data). The specs
         # are emitted as a JS array; a resize handler keeps them responsive.
         print(io, "<script>")
+        print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
         if !isempty(charts)
             echtheme = theme == "dark" ? "'dark'" : "null"   # echarts.init(el, theme) — dark palette or default
             print(io, "var _slateCharts=[", join(("['" * id * "'," * opt * "]" for (id, opt) in charts), ","), "];",
