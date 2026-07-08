@@ -808,6 +808,9 @@ function _upsert_doc!(manifest, entry)
         push!(docs, entry)
     else
         entry["date"] = get(docs[i], "date", entry["date"])     # keep first-published date on re-publish
+        for k in ("order", "section")                            # keep the manager-set position/section
+            haskey(docs[i], k) && (entry[k] = docs[i][k])
+        end
         docs[i] = entry
     end
     manifest["docs"] = docs
@@ -837,16 +840,24 @@ _doc_cards_css() = """
 # group are newest-first. No series anywhere ⇒ a single `"" => all` group ⇒ the plain flat grid.
 function _series_groups(docs)
     _date(d) = String(get(d, "date", ""))
+    _grp(d) = strip(String(get(d, "section", get(d, "series", ""))))   # manager-set section, else the config series
+    _ord(d) = (o = get(d, "order", nothing); o isa Number ? Float64(o) : Inf)   # explicit order, else "unset" (Inf)
     buckets = Dict{String,Vector{Any}}(); order = String[]
     for d in docs
         d isa AbstractDict || continue
-        s = strip(String(get(d, "series", "")))
+        s = _grp(d)
         haskey(buckets, s) || push!(order, s)
         push!(get!(buckets, s, Any[]), d)
     end
-    for v in values(buckets); sort!(v; by = _date, rev = true); end
-    labels = sort(String[s for s in order if !isempty(s)];
-                  by = s -> maximum(_date, buckets[s]; init = ""), rev = true)
+    # within a section: explicit `order` ascending, ties fall back to date (newest first)
+    for v in values(buckets)
+        sort!(v; by = _date, rev = true)
+        sort!(v; by = _ord, alg = Base.Sort.MergeSort)   # stable → same-order docs keep date-desc
+    end
+    # sections: by lowest `order` in the section, ties fall back to newest doc
+    labels = String[s for s in order if !isempty(s)]
+    sort!(labels; by = s -> maximum(_date, buckets[s]; init = ""), rev = true)
+    sort!(labels; by = s -> minimum(_ord, buckets[s]; init = Inf), alg = Base.Sort.MergeSort)
     groups = Pair{String,Vector{Any}}[]
     haskey(buckets, "") && push!(groups, "" => buckets[""])
     for s in labels; push!(groups, s => buckets[s]); end
@@ -917,13 +928,17 @@ function _cards_refresh_script()
           return h+'</div></div></a>';
         };
         var grid=function(list){return '<div class="slate-cards">'+list.map(card).join('')+'</div>';};
-        // Bucket by series, mirroring _series_groups: ungrouped ('') first, then series by newest doc desc.
+        // Bucket by section (else series), mirroring _series_groups: ungrouped ('') first, then sections
+        // by lowest order (ties: newest doc). Within a section: explicit order asc, ties by date desc.
+        var grp=function(d){return ((d.section!=null?d.section:(d.series||''))+'').trim();};
+        var ord=function(d){return (typeof d.order==='number')?d.order:Infinity;};
         var buckets={},order=[];
-        ds.forEach(function(d){var s=((d.series||'')+'').trim();if(!buckets[s]){buckets[s]=[];order.push(s);}buckets[s].push(d);});
-        var byDate=function(a,b){return String(b.date||'').localeCompare(String(a.date||''));};
+        ds.forEach(function(d){var s=grp(d);if(!buckets[s]){buckets[s]=[];order.push(s);}buckets[s].push(d);});
+        var byDateDesc=function(a,b){return String(b.date||'').localeCompare(String(a.date||''));};
+        Object.keys(buckets).forEach(function(s){buckets[s].sort(function(a,b){var oa=ord(a),ob=ord(b);return oa!==ob?oa-ob:byDateDesc(a,b);});});
+        var minOrd=function(s){return buckets[s].reduce(function(x,d){return Math.min(x,ord(d));},Infinity);};
         var newest=function(s){return buckets[s].reduce(function(x,d){var v=String(d.date||'');return v>x?v:x;},'');};
-        Object.keys(buckets).forEach(function(s){buckets[s].sort(byDate);});
-        var labels=order.filter(function(s){return s;}).sort(function(a,b){return newest(b).localeCompare(newest(a));});
+        var labels=order.filter(function(s){return s;}).sort(function(a,b){var ma=minOrd(a),mb=minOrd(b);return ma!==mb?ma-mb:newest(b).localeCompare(newest(a));});
         var h=buckets['']?grid(buckets['']):'';
         labels.forEach(function(s){h+='<h2 class="series-hd">'+esc(s)+'</h2>'+grid(buckets[s]);});
         root.innerHTML=h;
@@ -1050,14 +1065,14 @@ function build_site!(dir::AbstractString, nb::LiveNotebook; site_url::AbstractSt
     return _assemble_site!(dir, nb; site_url = site_url, slug = slg, bundle = bundle, kwargs...)
 end
 
-# ── Local site host: depot-backed named sites, served by the hub over HTTP ─────────────────────────
+# ── Local site host: cache-home-backed named sites, served by the hub over HTTP ────────────────────
 # The local mirror of the GitHub publish flow: build a `home`/portfolio front page and export OTHER
 # notebooks into it, served at /sites/<name>/ so the client-side index's `fetch('slate-site.json')`
-# works (it can't over file://). Persistent (depot-backed) — a site is a staging area you accrete over
+# works (it can't over file://). Persistent — a site is a staging area you accrete over
 # time, then push to GitHub when ready. Same `build_site!` primitive, a different destination — the
-# seed of a hosted "Slate cloud". Relocatable via KAIMONSLATE_SITES_DIR (also lets tests use a temp).
-_sites_dir() = get(ENV, "KAIMONSLATE_SITES_DIR",
-                   joinpath(first(Base.DEPOT_PATH), "scratchspaces", "kaimonslate", "sites"))
+# seed of a hosted "Slate cloud". Lives under KaimonSlate's OWN cache home (was the GC-able depot
+# scratchspace — see SlateHome); relocatable via KAIMONSLATE_SITES_DIR (also lets tests use a temp).
+_sites_dir() = SlateHome.sites_dir()
 
 # The build dir for a named site (name → URL/filesystem-safe slug). `nothing` for an empty name.
 function _site_dir(name::AbstractString)
@@ -1135,6 +1150,15 @@ function site_docs(name::AbstractString)
     return docs isa AbstractVector ? docs : Any[]
 end
 
+# The site's front page: whether a `home`-tagged notebook was built into it (renders to the root) and
+# the site title (which, for a home page, is that notebook's title) — for the manager to name it.
+function site_frontpage(name::AbstractString)
+    dir = _site_dir(name)
+    (dir === nothing || !isdir(dir)) && return (; home = false, title = "")
+    man = _read_site_manifest(dir)
+    return (; home = get(man, "home", false) === true, title = String(get(man, "title", "")))
+end
+
 """
     unexport_from_site(name, slug) -> (; removed, docCount)
 
@@ -1155,6 +1179,135 @@ function unexport_from_site(name::AbstractString, slug::AbstractString)
     write(joinpath(dir, "index.html"),
           isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
     return (; removed, docCount = length(docs))
+end
+
+"""
+    reorder_site!(name, ordering) -> (; ok, docCount)
+
+Apply a new `section`/`order` to the LOCAL site `name`'s docs and regenerate its index — no git, no
+deploy (Sync pushes the result to the destinations). `ordering` is an iterable of `{slug, section, order}`.
+"""
+function reorder_site!(name::AbstractString, ordering)
+    dir = _site_dir(name)
+    (dir === nothing || !isdir(dir)) && error("site '$name' has no local build")
+    manifest = _read_site_manifest(dir)
+    docs = get(manifest, "docs", Any[])
+    omap = Dict{String,Any}(String(get(o, "slug", "")) => o for o in ordering)
+    for d in docs
+        d isa AbstractDict || continue
+        o = get(omap, String(get(d, "slug", "")), nothing); o === nothing && continue
+        d["section"] = String(get(o, "section", ""))
+        ordv = get(o, "order", nothing); ordv === nothing || (d["order"] = Float64(ordv))
+    end
+    manifest["docs"] = docs
+    write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
+    htmpl = joinpath(dir, ".slate-home.html")
+    write(joinpath(dir, "index.html"),
+          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+    return (; ok = true, docCount = length(docs))
+end
+
+# The docs on `repo`'s published site (manifest entries incl. section/order) — for the manager's
+# reorder view. `[]` when unpublished/unreachable.
+function published_site_docs(repo::AbstractString)
+    gh = Sys.which("gh"); gh === nothing && return Any[]
+    apipath = "repos/$repo/contents/$_SITE_MANIFEST?ref=gh-pages"
+    accept = "Accept: application/vnd.github.raw"
+    raw = try; read(pipeline(`$gh api $apipath -H $accept`; stderr = devnull), String); catch; return Any[]; end
+    m = try; JSON.parse(raw); catch; return Any[]; end
+    return Any[Dict{String,Any}("slug" => String(get(d, "slug", "")),
+                                "title" => String(get(d, "title", get(d, "slug", ""))),
+                                "date" => String(get(d, "date", "")),
+                                "section" => String(get(d, "section", get(d, "series", ""))),
+                                "order" => get(d, "order", nothing))
+               for d in get(m, "docs", Any[]) if d isa AbstractDict]
+end
+
+"""
+    reorder_published_site(repo, ordering) -> (; ok, changed, url, commit)
+
+Apply a new `section`/`order` to `repo`'s published-site docs and re-push ONLY the manifest + regenerated
+index to `gh-pages` (no doc rebuild). `ordering` is an iterable of dicts `{slug, section, order}`.
+"""
+function reorder_published_site(repo::AbstractString, ordering)
+    gh = Sys.which("gh"); gh === nothing && error("`gh` CLI not found")
+    occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be owner/name")
+    token = strip(read(`$gh auth token`, String)); isempty(token) && error("`gh auth token` empty — run `gh auth login`")
+    pushurl = "https://x-access-token:$token@github.com/$repo.git"
+    owner, name = split(repo, "/")
+    work = mktempdir(); dir = joinpath(work, "site")
+    try
+        _git_run(work, `git clone --depth 1 --branch gh-pages --single-branch $pushurl site`)[1] ||
+            error("couldn't clone $repo gh-pages — is the site published?")
+        manifest = _read_site_manifest(dir)
+        docs = get(manifest, "docs", Any[])
+        omap = Dict{String,Any}(String(get(o, "slug", "")) => o for o in ordering)
+        for d in docs
+            d isa AbstractDict || continue
+            o = get(omap, String(get(d, "slug", "")), nothing); o === nothing && continue
+            d["section"] = String(get(o, "section", ""))
+            ordv = get(o, "order", nothing)
+            ordv === nothing || (d["order"] = Float64(ordv))
+        end
+        manifest["docs"] = docs
+        write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
+        htmpl = joinpath(dir, ".slate-home.html")
+        write(joinpath(dir, "index.html"),
+              isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+        _git_run(dir, `git add -A`)
+        okc, logc = _git_run(dir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Reorder site"`)
+        if !okc
+            (occursin("nothing to commit", logc) || occursin("working tree clean", logc)) &&
+                return (; ok = true, changed = false, url = "https://$owner.github.io/$name/", commit = "")
+            error("commit failed: $logc")
+        end
+        sha = strip(_git_run(dir, `git rev-parse HEAD`)[2])
+        ok, log = _git_run(dir, `git push $pushurl gh-pages`)
+        ok || error("push failed: $(replace(log, token => "***"))")
+        return (; ok = true, changed = true, url = "https://$owner.github.io/$name/", commit = sha)
+    finally
+        rm(work; recursive = true, force = true)
+    end
+end
+
+"""
+    deploy_dir_to_gh_pages(repo, dir; private=false, create=true, wait_deploy=true) -> (; ok, url, commit, error)
+
+Force-push an already-built site directory `dir` to `repo`'s `gh-pages` in one shot (the whole site —
+no per-doc clone/merge). The "deploy a prebuilt dir" primitive a SITE uses to push its one canonical
+build to GitHub, mirroring what the S3/Cloudflare/Netlify upload adapters do with the same dir. Creates
+the repo + enables Pages if needed. Operates on a copy so the canonical local build stays git-free.
+"""
+function deploy_dir_to_gh_pages(repo::AbstractString, dir::AbstractString; private::Bool = false,
+                                create::Bool = true, wait_deploy::Bool = true)
+    gh = Sys.which("gh"); gh === nothing && error("`gh` CLI not found")
+    occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be owner/name")
+    token = strip(read(`$gh auth token`, String)); isempty(token) && error("`gh auth token` empty — run `gh auth login`")
+    owner, name = split(repo, "/")
+    pushurl = "https://x-access-token:$token@github.com/$repo.git"
+    work = mktempdir()
+    try
+        wdir = joinpath(work, "site"); cp(dir, wdir)                 # copy: don't add .git/workflow to the cache
+        if !_gh_ok(`$gh repo view $repo`)
+            create || error("repo $repo doesn't exist and “create” is off")
+            _git_run(work, `$gh repo create $repo $(private ? "--private" : "--public")`)[1] || error("gh repo create failed")
+        end
+        mkpath(joinpath(wdir, dirname(_PAGES_WF_FILE)))
+        write(joinpath(wdir, _PAGES_WF_FILE), _PAGES_WF_YAML)
+        pok, plog = _ensure_pages_workflow!(gh, repo)
+        _git_run(wdir, `git init -q -b gh-pages`)
+        _git_run(wdir, `git add -A`)
+        okc, logc = _git_run(wdir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish site"`)
+        okc || error("git commit failed: $logc")
+        sha = strip(_git_run(wdir, `git rev-parse HEAD`)[2])
+        ok, log = _git_run(wdir, `git push --force $pushurl gh-pages`)
+        ok || error("git push failed: $(replace(log, token => "***"))")
+        dep = wait_deploy ? _await_pages_deploy(gh, repo, sha) : (; ok = true, conclusion = "success", done = true, url = "")
+        return (; ok = pok && dep.ok, url = "https://$owner.github.io/$name/", commit = sha,
+                error = pok ? (dep.ok ? "" : "Pages deploy: $(dep.conclusion)") : strip(replace(plog, r"\s+" => " ")))
+    finally
+        rm(work; recursive = true, force = true)
+    end
 end
 
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
@@ -1341,7 +1494,7 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
             if occursin("nothing to commit", logc) || occursin("working tree clean", logc)
                 _cmd_out(`$gh workflow run $(basename(_PAGES_WF_FILE)) --repo $repo --ref gh-pages`)
                 return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
-                        slug = home ? "" : slg, home, created,
+                        slug = home ? "" : slg, home, created, commit = "",
                         pagesEnabled = pok, pagesError = pok ? "" : strip(replace(plog, r"\s+" => " ")),
                         deployStatus = "unchanged", docCount = built.docCount)
             end
@@ -1363,17 +1516,58 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
             dep.done ? "GitHub Pages deploy failed (workflow: $(dep.conclusion))" * (isempty(dep.url) ? "" : " — see $(dep.url)") :
             "GitHub Pages deploy still $(dep.conclusion) after $(round(Int, 120))s — the live site may lag; check the repo's Actions tab."
         return (; url = "https://$owner.github.io/$name/", docUrl, repo = String(repo),
-                slug = home ? "" : slg, home,
+                slug = home ? "" : slg, home, commit = sha,
                 created, pagesEnabled, pagesError, deployStatus = dep.conclusion, docCount = built.docCount)
     finally
         rm(work; recursive = true, force = true)
     end
 end
 
-# First ~`n` words of `text` as a plain one-liner (markdown punctuation stripped) — for the OG/meta
-# description. Adds an ellipsis when truncated.
+# Inline LaTeX from an abstract (e.g. `$r(\theta)=1+\varepsilon\cos 2\theta$`) would otherwise reach
+# every PLAIN-TEXT consumer verbatim — the index-card blurb, the `og:`/`twitter:description` unfurl,
+# the manifest `description`. None of those render maths (and the 40-word cut can split a `$…$` pair),
+# so `_demath` collapses it to readable Unicode: drop the `$`/`\(`/`\[` delimiters (robust even to a
+# truncation that left an unbalanced `$`), map the common macros (Greek, operators, function names) to
+# glyphs, fold super/subscripts, and strip the rest. Full rendered maths still lives in the notebook body.
+const _TEX_MACRO = Dict(
+    "alpha"=>"α","beta"=>"β","gamma"=>"γ","delta"=>"δ","epsilon"=>"ε","varepsilon"=>"ε","zeta"=>"ζ",
+    "eta"=>"η","theta"=>"θ","vartheta"=>"ϑ","iota"=>"ι","kappa"=>"κ","lambda"=>"λ","mu"=>"μ","nu"=>"ν",
+    "xi"=>"ξ","pi"=>"π","varpi"=>"ϖ","rho"=>"ρ","varrho"=>"ϱ","sigma"=>"σ","varsigma"=>"ς","tau"=>"τ",
+    "upsilon"=>"υ","phi"=>"φ","varphi"=>"φ","chi"=>"χ","psi"=>"ψ","omega"=>"ω","Gamma"=>"Γ","Delta"=>"Δ",
+    "Theta"=>"Θ","Lambda"=>"Λ","Xi"=>"Ξ","Pi"=>"Π","Sigma"=>"Σ","Upsilon"=>"Υ","Phi"=>"Φ","Psi"=>"Ψ",
+    "Omega"=>"Ω","times"=>"×","cdot"=>"·","pm"=>"±","mp"=>"∓","leq"=>"≤","le"=>"≤","geq"=>"≥","ge"=>"≥",
+    "neq"=>"≠","approx"=>"≈","sim"=>"∼","simeq"=>"≃","equiv"=>"≡","propto"=>"∝","infty"=>"∞","partial"=>"∂",
+    "nabla"=>"∇","int"=>"∫","sum"=>"∑","prod"=>"∏","sqrt"=>"√","angle"=>"∠","rightarrow"=>"→","to"=>"→",
+    "leftarrow"=>"←","Rightarrow"=>"⇒","mapsto"=>"↦","langle"=>"⟨","rangle"=>"⟩","ldots"=>"…","cdots"=>"⋯",
+    "in"=>"∈","notin"=>"∉","forall"=>"∀","exists"=>"∃","hbar"=>"ℏ","ell"=>"ℓ","circ"=>"∘","cap"=>"∩",
+    "cup"=>"∪",  # function names keep their letters (drop only the backslash); unknown macros are dropped
+    "cos"=>"cos","sin"=>"sin","tan"=>"tan","sec"=>"sec","csc"=>"csc","cot"=>"cot","sinh"=>"sinh",
+    "cosh"=>"cosh","tanh"=>"tanh","log"=>"log","ln"=>"ln","exp"=>"exp","lim"=>"lim","min"=>"min",
+    "max"=>"max","sup"=>"sup","inf"=>"inf","det"=>"det","dim"=>"dim","arg"=>"arg")
+const _TEX_SUP = Dict{Char,Char}(zip("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ"))
+const _TEX_SUB = Dict{Char,Char}(zip("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎"))
+# `^{…}`/`^x` (or `_…`) → Unicode only when EVERY char maps, else the bare body (e.g. `x^{2θ}` → `x2θ`).
+_tex_script(m, sub) = (b = replace(m, r"^[\^_]\{?" => "", "}" => "");
+                       (!isempty(b) && all(c -> haskey(sub, c), b)) ? String([sub[c] for c in b]) : b)
+function _demath(s::AbstractString)
+    t = String(s)
+    ('$' in t || occursin("\\(", t) || occursin("\\[", t)) || return t   # no inline maths → untouched
+    t = replace(t, "\$\$" => " ", "\$" => " ", "\\(" => " ", "\\)" => " ", "\\[" => " ", "\\]" => " ",
+                   "\\left" => "", "\\right" => "", "\\," => " ", "\\;" => " ", "\\!" => "", "\\ " => " ",
+                   "\\quad" => " ", "\\qquad" => " ")
+    t = replace(t, r"\\(?:text|mathrm|mathbf|mathit|mathcal|operatorname)\{([^{}]*)\}" => s"\1")
+    t = replace(t, r"\\frac\{([^{}]*)\}\{([^{}]*)\}" => s"(\1)/(\2)")
+    t = replace(t, r"\\[A-Za-z]+" => m -> get(_TEX_MACRO, String(m)[2:end], " "))  # macro → glyph, else drop
+    t = replace(t, r"\^\{[^{}]*\}|\^\S" => m -> _tex_script(m, _TEX_SUP))
+    t = replace(t, r"_\{[^{}]*\}|_\S" => m -> _tex_script(m, _TEX_SUB))
+    t = replace(t, r"\\([^A-Za-z])" => s"\1")   # `\{` `\}` `\%` `\_` … → the literal char
+    return replace(t, r"[{}]" => "")            # drop any leftover grouping braces
+end
+
+# First ~`n` words of `text` as a plain one-liner (markdown punctuation + inline LaTeX stripped) —
+# for the OG/meta + manifest description. Adds an ellipsis when truncated.
 function _first_words(text, n::Int)
-    s = replace(strip(String(text)), r"[#*_`>\[\]]" => "", r"\s+" => " ")
+    s = replace(_demath(strip(String(text))), r"[#*_`>\[\]]" => "", r"\s+" => " ")
     w = split(s)
     isempty(w) && return ""
     return join(w[1:min(n, length(w))], " ") * (length(w) > n ? "…" : "")

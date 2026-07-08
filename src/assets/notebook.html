@@ -63,6 +63,8 @@
       <button id="redobtn" onclick="redoNb();closeTopMenu()">↷ Redo</button>
       <button onclick="openPalette();closeTopMenu()">⌘K Command palette</button>
       <hr>
+      <button onclick="openPublish();closeTopMenu()">☁ Publish…</button>
+      <button onclick="window.open('/#publishing','_blank');closeTopMenu()" title="Manage all publishing targets & see what's published where">🗂 Publishing manager…</button>
       <button onclick="openExport();closeTopMenu()">⬆ Export…</button>
       <hr>
       <button onclick="resetAll();closeTopMenu()">↻ Rebuild (fresh namespace)</button>
@@ -209,14 +211,34 @@
   <div class="setrow sethint"><span></span>Per-notebook settings (threads, parallel, slides, agent-model override…) live in <strong>☰ → 🎚 Notebook config</strong>.</div>
   <div class="row"><button class="primary" onclick="closeSettings()">Done</button></div>
 </div></div>
+<div class="modal-bg" id="pubbg"><div class="modal setmodal pubmodal">
+  <div class="pubhead"><strong>Publish</strong><span class="pubsub" id="pubdoctitle"></span>
+    <button class="pubx" onclick="closePublishing()" title="Close">✕</button></div>
+  <div class="pubbody">
+    <div class="pubcol">
+      <div class="setsec">Publish to</div>
+      <div id="pubtargetpick" class="pubpicks"></div>
+      <div id="pubplacement" class="pubdim" style="margin-top:10px"></div>
+      <div class="pubrow" style="margin-top:14px"><button class="primary" id="pubrunbtn" onclick="runPublish()">☁ Publish</button></div>
+      <div id="pubprogress" class="publog" style="display:none"></div>
+    </div>
+    <div class="pubcol">
+      <div class="setsec">Already published</div>
+      <div id="pubhistory"></div>
+      <div class="pubdim" style="margin-top:16px;font-size:.74rem">Manage all targets, portfolios &amp; history in the
+        <a class="publink" href="/" target="_blank" rel="noopener">Publishing manager</a>.</div>
+    </div>
+  </div>
+  <div class="row"><button class="primary" onclick="closePublishing()">Done</button></div>
+</div></div>
 <div class="modal-bg" id="exportbg"><div class="modal setmodal">
-  <div class="msg"><strong>Export</strong> <span style="color:var(--dim);font-weight:400">— render or package this notebook</span></div>
-  <div class="setrow"><label>Format</label>
+  <div class="msg"><strong id="exhdr">Export</strong> <span id="exsub" style="color:var(--dim);font-weight:400">— render or package this notebook</span></div>
+  <div class="setrow" id="exfmtrow"><label>Format</label>
     <select id="exfmt">
       <option value="html">HTML — self-contained page</option>
       <option value="pdf">PDF — publication (Typst)</option>
       <option value="markdown">Markdown — file or clipboard</option>
-      <option value="website">Website — publishable page (+ og:image)</option>
+      <option value="website" hidden>Website — publishable page (+ og:image)</option>
       <option value="standalone">Standalone .jl — reproducible bundle</option>
     </select></div>
   <div class="setrow exrow fmt-pdf fmt-html fmt-website fmt-markdown"><label title="Filter which cell outputs appear">Outputs</label>
@@ -303,32 +325,30 @@
   <div class="setrow exrow fmt-website"><label title="Include the project's FULL git history in the runnable bundle so a visitor can branch & PR with matching commits. Off = ship the current source only (a runnable snapshot) — your commit history is NOT published. Off is safer for a PUBLIC site.">Git history</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="sitehistory"> Ship full git history in the bundle (else source-only snapshot)</label></div>
-  <div class="setrow exrow fmt-website"><label title="For Publish to GitHub Pages — the target repo (a whole SITE; created if missing). Publishing ADDS this notebook to the site alongside any already there.">GitHub repo (site)</label>
-    <input id="siterepo" type="text" placeholder="owner/name" autocomplete="off" spellcheck="false"
+  <div class="setrow exrow fmt-website"><label title="The site (portfolio/blog) this notebook publishes into. Its one build lands locally at /sites/<name>/ and syncs to the site's destinations. Manage sites + destinations in the Publishing manager (☰ → 🗂).">Into site</label>
+    <select id="sitepick" onchange="_onSitePick()" style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-size:.82rem"></select></div>
+  <div class="setrow exrow fmt-website" id="sitenewrow" style="display:none"><label>New site name</label>
+    <input id="sitenewname" type="text" placeholder="e.g. portfolio" autocomplete="off" spellcheck="false"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
+  <div class="setrow exrow fmt-website" id="sitedestrow" style="align-items:flex-start"><label title="Where this site deploys. For an existing site these are set in the manager (shown here); for a new site, tick the destinations to sync to. Leave empty for a local-only staging site.">Deploys to</label>
+    <div id="sitedests" class="pubpicks" style="flex:1"></div></div>
+  <div class="setrow exrow fmt-website" id="sitezenodorow" style="align-items:flex-start;border-top:1px dashed var(--border);padding-top:12px;margin-top:6px">
+    <label title="Zenodo is a permanent ARCHIVE — each publish mints an immutable, citable DOI version you can't edit or delete. Do this at milestones (a release, a paper), not for every tweak.">Archive a version<br><span style="font-weight:400;color:var(--dim);font-size:.72rem">Zenodo · permanent DOI</span></label>
+    <div style="flex:1"><div id="sitezenodo" class="pubpicks"></div>
+      <button class="exrow fmt-website" style="margin-top:8px" onclick="archiveZenodo()">📄 Archive → mint DOI</button></div></div>
   <div class="setrow exrow fmt-website"><label title="Title shown on the site's blog front page (index). Set once — re-publishing another notebook keeps it unless you change it.">Site title</label>
     <input id="sitetitle" type="text" placeholder="e.g. My Notebooks" autocomplete="off"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-size:.82rem"/></div>
-  <div class="setrow exrow fmt-website"><label title="URL path for THIS document under the site (/<slug>/). Auto-filled from the title; edit to rename. Re-publishing the same slug updates it in place.">Document path</label>
+  <div class="setrow exrow fmt-website" id="siteslugrow"><label title="URL path for THIS document under the site (/<slug>/). Auto-filled from the title; edit to rename. Re-publishing the same slug updates it in place.">Document path</label>
     <input id="siteslug" type="text" placeholder="auto from title" autocomplete="off" spellcheck="false"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
-  <div class="setrow exrow fmt-website"><label title="Visibility for a repo we CREATE (an existing repo is left as-is). GitHub Pages needs Public on the free plan.">New repo visibility</label>
-    <select id="sitevis"><option value="public">Public (required for Pages on free plans)</option><option value="private">Private (Pages needs GitHub Pro)</option></select></div>
-  <div class="setrow exrow fmt-website"><label>If missing</label>
-    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
-      <input type="checkbox" id="sitecreate" checked> Create the repo if it doesn't exist</label></div>
-  <div class="setrow exrow fmt-website"><label title="Save this notebook into a PERSISTENT local site served by the hub at /sites/&lt;name&gt;/ — the local mirror of Publish, no GitHub needed. Export other notebooks into the same name to build up a multi-doc site.">Local site</label>
-    <input id="sitelocal" type="text" placeholder="e.g. portfolio" autocomplete="off" spellcheck="false"
-      style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
-  <div class="setrow exrow fmt-website" id="siteunexrow" style="display:none"><label title="Remove a page already saved to this local site (deletes its folder and updates the index).">Pages in site</label>
-    <div id="siteunexlist" style="flex:1;display:flex;flex-wrap:wrap;gap:6px;align-items:center"></div></div>
-  <div class="setrow exrow fmt-website sethint"><span></span><b>Publish</b> adds this notebook to a <b>site</b> (a blog): it lands at <code>/&lt;path&gt;/</code> and a generated front-page index links to every document you've published to that repo — the others are preserved. Pushes to <code>gh-pages</code> via your <code>gh</code> CLI (must be installed + <code>gh auth login</code>). <b>Save to local site</b> does the same on THIS machine, served at <code>/sites/&lt;name&gt;/</code> (no GitHub) — a staging area you can publish later. <b>Export</b> downloads this one page as a self-contained <code>.tar.gz</code>.</div>
+  <div class="setrow exrow fmt-website sethint" id="sitehint"><span></span>Renders this notebook into the site at <code>/&lt;path&gt;/</code> (the site's index links to every document in it — others are preserved), then syncs the whole build to the site's destinations. A site with no destinations just stages locally at <code>/sites/&lt;name&gt;/</code> — add destinations in the Publishing manager, then hit <b>▶ Sync</b>.</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
-  <div class="row"><button onclick="closeExport(false)">Cancel</button>
+  <div class="setrow" id="sitepubrow" style="display:none"><div id="sitepublog" class="publog" style="flex:1;margin:0"></div></div>
+  <div class="row"><button id="excancel" onclick="closeExport(false)">Cancel</button>
     <button class="exrow fmt-markdown" onclick="closeExport('copy')">Copy to clipboard</button>
-    <button class="exrow fmt-website" onclick="closeExport('localsite')">Save to local site</button>
-    <button class="exrow fmt-website" onclick="closeExport('publish')">Publish to GitHub Pages</button>
-    <button class="primary" onclick="closeExport(true)">Export</button></div>
+    <button class="exrow fmt-website primary" id="sitepublishbtn" onclick="publishToSite()">☁ Publish into site</button>
+    <button class="exrow fmt-pdf fmt-html fmt-markdown fmt-standalone primary" onclick="closeExport(true)">Export</button></div>
 </div></div>
 <div class="palette-bg" id="cmdbg"><div class="cmdpal">
   <input id="cmdin" placeholder="Type a command…" autocomplete="off" spellcheck="false"/>
@@ -354,6 +374,7 @@
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/keyboard.js"></script>
 <script src="/assets/js/settings.js"></script>
+<script src="/assets/js/publishing.js"></script>
 <script src="/assets/js/palette.js"></script>
 <script src="/assets/js/outputs.js"></script>
 <script src="/assets/js/agent.js"></script>

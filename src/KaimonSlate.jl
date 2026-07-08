@@ -28,7 +28,9 @@ import JSON
 
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
-include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRender)
+include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
+include("ledger.jl")    # module PublishLedger — the publish ledger + LedgerStore backends
+include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRender, ..SlateHome)
 
 using .ReportEngine
 using .ReportRender
@@ -184,7 +186,7 @@ end
 # A small JSON file alongside the extension registry. Currently holds the worker Julia-thread spec —
 # more compute threads enable true multi-core CPU parallelism for independent cells. Read at init into
 # ReportEngine.WORKER_THREADS[] (which `_spawn_worker!` consumes), and editable live from the panel.
-_slate_config_path() = joinpath(_kaimon_dir(), "slate.json")   # XDG-aware (see _kaimon_dir)
+_slate_config_path() = SlateHome.config_file()   # our OWN XDG config home (off Kaimon's dir; see SlateHome)
 
 _slate_config() = (f = _slate_config_path(); isfile(f) ?
     (try; JSON.parsefile(f); catch; Dict{String,Any}(); end) : Dict{String,Any}())
@@ -204,7 +206,7 @@ function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
     ReportEngine.WORKER_THREADS[] = s
     cfg = _slate_config(); cfg["worker_threads"] = s
     try
-        isdir(_kaimon_dir()) && write(_slate_config_path(), JSON.json(cfg, 2))
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
     catch e
         @warn "slate: could not persist worker-threads setting" exception = e
     end
@@ -230,7 +232,7 @@ per-notebook Settings toggle still overrides for a specific notebook.
 function set_parallel_default!(on::Bool)
     NotebookServer.PARALLEL_DEFAULT[] = on
     cfg = _slate_config(); cfg["parallel"] = on
-    try; isdir(_kaimon_dir()) && write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
+    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
     return on
 end
 
@@ -713,6 +715,97 @@ function create_tools(GateTool::Type)
             "❌ $op $name failed: $(get(res, "message", "?"))"
     end
 
+    """
+        publish(notebook; targets="") -> String
+
+    Publish THIS notebook's document to its configured publish TARGETS — GitHub Pages, S3/Cloudflare
+    R2, rsync, or a Zenodo DOI — recording each result in the publish ledger (what/when/where).
+    `targets` is a comma-separated list of target names as configured in the Publishing manager
+    (`slate.publish_targets`); empty ⇒ the targets already assigned to this document. Publishing only
+    ever touches OUTPUT (a `gh-pages`-style branch / bucket / archive), never a source repo.
+    """
+    function publish_tool(notebook::String; targets::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        names = String[String(strip(t)) for t in split(targets, ',') if !isempty(strip(t))]
+        if isempty(names)
+            info = NotebookServer.publish_doc_info(nb)
+            names = String[String(t) for t in get(info, "assignedTargets", String[])]
+        end
+        isempty(names) && return "No publish targets. Configure one with slate.publish_targets(op=\"add\", …), then pass targets=\"name1,name2\" (or assign them in the Publishing manager)."
+        res = try
+            NotebookServer.run_publish(nb, names)
+        catch e
+            return _surfaced(nb, "publish", Dict{String,Any}("targets" => join(names, ",")),
+                             "⛔ Publish failed: " * sprint(showerror, e))
+        end
+        lines = ["$(r["ok"] ? "✅" : "❌") $(r["target"]) — $(r["status"])" *
+                 (isempty(r["url"]) ? "" : " → " * r["url"]) *
+                 (isempty(r["doi"]) ? "" : " (DOI $(r["doi"]))") for r in res["results"]]
+        msg = (res["ok"] ? "Published" : "Publish completed with errors") * ":\n" * join(lines, "\n")
+        return _surfaced(nb, "publish", Dict{String,Any}("targets" => join(names, ",")), msg)
+    end
+
+    """
+        publish_history(notebook="") -> String
+
+    The publish ledger — a durable record of what was published where, and when. Pass `notebook` for
+    just that document's history (timestamped events with live URLs / DOIs / commit SHAs); leave it
+    empty for a summary across all documents and the configured targets.
+    """
+    function publish_history_tool(notebook::String = "")::String
+        if !isempty(strip(notebook))
+            nb, err = _nb(notebook); nb === nothing && return err
+            info = NotebookServer.publish_doc_info(nb)
+            evs = get(info, "events", Any[])
+            isempty(evs) && return string("No publish history for '", get(info, "slug", ""), "' yet.")
+            lines = ["  $(e["ts"])  $(e["target"])  $(e["status"])" *
+                     (isempty(e["url"]) ? "" : "  " * e["url"]) *
+                     (isempty(e["doi"]) ? "" : "  DOI " * e["doi"]) for e in evs]
+            return "History for $(get(info, "title", "")) [$(get(info, "docId", ""))]:\n" * join(lines, "\n")
+        end
+        view = NotebookServer.publish_ledger_view()
+        docs = get(view, "documents", Any[]); tgts = get(view, "targets", Any[])
+        dl = isempty(docs) ? "  (nothing published yet)" :
+             join(["  $(d["title"]) [$(length(d["events"])) events] → $(join(d["targets"], ", "))" for d in docs], "\n")
+        tl = isempty(tgts) ? "  (no targets configured)" :
+             join(["  $(t["name"]) ($(t["kind"]))" for t in tgts], "\n")
+        return "Publish ledger (backend: $(get(view, "backend", "?"))):\nDocuments:\n$dl\nTargets:\n$tl"
+    end
+
+    """
+        publish_targets(op="list"; name="", kind="", config="") -> String
+
+    Manage the named publish TARGETS in the ledger (shared across notebooks). `op="list"` shows them;
+    `op="add"` upserts target `name` of `kind` ("github-pages" | "s3" | "r2" | "rsync" | "zenodo") with
+    a JSON `config` (e.g. `{"repo":"me/site"}`, `{"dest":"s3://bucket","endpoint":"…"}`, or
+    `{"secretRef":"zenodo-token"}`); `op="rm"` deletes it. Secret VALUES are never set here — put a
+    `secretRef` in the config and store the token in the manager's secret store.
+    """
+    function publish_targets_tool(; op::String = "list", name::String = "", kind::String = "",
+                                  config::String = "")::String
+        if op == "list"
+            tgts = get(NotebookServer.publish_ledger_view(), "targets", Any[])
+            isempty(tgts) && return "No publish targets configured. Add one, e.g.\n  slate.publish_targets(op=add, name=site, kind=github-pages, config={\"repo\":\"me/site\"})."
+            rows = [string("  ", t["name"], "  (", t["kind"], ")  ", JSON.json(t["config"])) for t in tgts]
+            return "Publish targets:\n" * join(rows, "\n")
+        elseif op == "add"
+            (isempty(strip(name)) || isempty(strip(kind))) && return "op=add needs name= and kind=."
+            cfg = try
+                isempty(strip(config)) ? Dict{String,Any}() : JSON.parse(config)
+            catch e
+                return "bad config JSON: " * sprint(showerror, e)
+            end
+            NotebookServer.publish_target_set!(String(name), String(kind), cfg)
+            return string("✅ target '", name, "' (", kind, ") saved.")
+        elseif op == "rm"
+            isempty(strip(name)) && return "op=rm needs name=."
+            NotebookServer.publish_target_delete!(String(name))
+            return string("✅ target '", name, "' removed.")
+        else
+            return string("bad op '", op, "' — use list|add|rm.")
+        end
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -751,6 +844,9 @@ function create_tools(GateTool::Type)
         GateTool("index_docs", index_docs),
         GateTool("search_docs", search_docs_tool),
         GateTool("pkg", pkg),
+        GateTool("publish", publish_tool),
+        GateTool("publish_history", publish_history_tool),
+        GateTool("publish_targets", publish_targets_tool),
     ]
 end
 
