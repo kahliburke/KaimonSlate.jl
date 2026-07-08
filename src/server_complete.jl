@@ -1001,6 +1001,11 @@ function close_notebook!(h::Hub, id::AbstractString)
     removed = lock(h.lock) do
         nb = get(h.notebooks, id, nothing)
         nb === nothing && return false
+        # Tell open tabs the close is DELIBERATE before draining their SSE. Without this the
+        # client's disconnect recovery reads the ensuing 404 as a crashed server and re-opens
+        # the notebook by path — respawning it seconds after every close. The queued message
+        # still reaches each tab: a closed Channel drains its buffered items first.
+        _broadcast(nb, "closed:hub")
         _close_listeners(nb)
         _close_agent!(nb)
         _unwire_callbacks!(nb)

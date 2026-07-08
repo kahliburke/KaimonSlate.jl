@@ -270,10 +270,36 @@ function showSrcError(msg) {
 // refreshes badges/outputs/controls; the user's unsaved source stays put, ready to re-run.
 const _GRACE_MS = 1200, _PROBE_MS = 1500;
 let _es = null, _connDown = false, _modalShown = false, _graceTimer = null, _probeTimer = null;
+let _closedByHub = false;   // a deliberate close (SSE "closed:") — no reconnect, no auto-reopen
+// A deliberate close from the hub (slate.close / the TUI's [c]): back up in-flight edits,
+// stand down ALL recovery (the auto-reopen would respawn the notebook), and show the
+// closed overlay. Reopening restores the backed-up edits via the normal reconcile path.
+function _notebookClosed() {
+  if (_closedByHub) return;
+  _closedByHub = true;
+  window.backupEdits && window.backupEdits();
+  if (_es) { try { _es.close(); } catch (_) {} _es = null; }
+  clearTimeout(_graceTimer); clearInterval(_probeTimer); _graceTimer = _probeTimer = null;
+  _connDown = false;
+  const dm = document.getElementById('disconnmodal'); if (dm) dm.style.display = 'none';
+  const m = document.getElementById('closedmodal'); if (m) m.style.display = 'flex';
+}
+// The overlay's button: ask the server to re-open the file we remember, then reload —
+// the boot path re-syncs and reconcileBackup() restores any backed-up unsaved edits.
+async function reopenClosed() {
+  let path = null;
+  try { path = localStorage.getItem('slate:path:' + NB_ID); } catch (_) {}
+  if (path) {
+    try {
+      await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+    } catch (_) {}
+  }
+  location.reload();
+}
 // Trouble detected. Arm a grace timer (show the modal only if we don't bounce back quickly)
 // and start actively polling for recovery. Idempotent while already handling a drop.
 function _onConnTrouble() {
-  if (_connDown) return;
+  if (_connDown || _closedByHub) return;
   _connDown = true;
   window.backupEdits && window.backupEdits();     // snapshot in-flight edits immediately, before any reload/restart loses them
   _graceTimer = setTimeout(() => { if (_connDown) { _modalShown = true; const m = document.getElementById('disconnmodal'); if (m) m.style.display = 'flex'; } }, _GRACE_MS);
@@ -286,7 +312,7 @@ function _setConnStatus(text) { const el = document.getElementById('dm-status');
 // Probe the server and report the phase. We only DISMISS once the server answers AND the worker is
 // live — a fresh start has to re-open the notebook and spin up its kernel, and we surface each step.
 async function _probe() {
-  if (!_connDown) return;
+  if (!_connDown || _closedByHub) return;
   let r;
   try { r = await fetch(_apipath('/api/state')); }
   catch (_) { _setConnStatus('Waiting for the server to come back online…'); return; }   // no response — still down
@@ -344,6 +370,7 @@ function connectLive() {
   es.onopen = () => { if (_connDown) _probe(); };   // SSE back → confirm via state + dismiss
   es.onerror = () => { if (es.readyState !== EventSource.OPEN) _onConnTrouble(); };   // dropped
   es.onmessage = async (e) => {
+    if (e.data.startsWith('closed:')) { _notebookClosed(); return; }   // deliberate close — overlay, no auto-reopen
     if (e.data.startsWith('agent:')) { try { agentEvent(JSON.parse(e.data.slice(6))); } catch (_) {} return; }
     if (e.data.startsWith('refresh:')) { try { patchCells(JSON.parse(e.data.slice(8)).cells); } catch (_) {} return; }   // targeted: only the changed cells, inline
     if (e.data.startsWith('runbatch:')) { window.onRunBatch && window.onRunBatch(parseInt(e.data.slice(9), 10) || 0); return; }   // N cells about to run → stable k/N
