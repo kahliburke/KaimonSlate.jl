@@ -1445,10 +1445,51 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
     end
 end
 
-# First ~`n` words of `text` as a plain one-liner (markdown punctuation stripped) — for the OG/meta
-# description. Adds an ellipsis when truncated.
+# Inline LaTeX from an abstract (e.g. `$r(\theta)=1+\varepsilon\cos 2\theta$`) would otherwise reach
+# every PLAIN-TEXT consumer verbatim — the index-card blurb, the `og:`/`twitter:description` unfurl,
+# the manifest `description`. None of those render maths (and the 40-word cut can split a `$…$` pair),
+# so `_demath` collapses it to readable Unicode: drop the `$`/`\(`/`\[` delimiters (robust even to a
+# truncation that left an unbalanced `$`), map the common macros (Greek, operators, function names) to
+# glyphs, fold super/subscripts, and strip the rest. Full rendered maths still lives in the notebook body.
+const _TEX_MACRO = Dict(
+    "alpha"=>"α","beta"=>"β","gamma"=>"γ","delta"=>"δ","epsilon"=>"ε","varepsilon"=>"ε","zeta"=>"ζ",
+    "eta"=>"η","theta"=>"θ","vartheta"=>"ϑ","iota"=>"ι","kappa"=>"κ","lambda"=>"λ","mu"=>"μ","nu"=>"ν",
+    "xi"=>"ξ","pi"=>"π","varpi"=>"ϖ","rho"=>"ρ","varrho"=>"ϱ","sigma"=>"σ","varsigma"=>"ς","tau"=>"τ",
+    "upsilon"=>"υ","phi"=>"φ","varphi"=>"φ","chi"=>"χ","psi"=>"ψ","omega"=>"ω","Gamma"=>"Γ","Delta"=>"Δ",
+    "Theta"=>"Θ","Lambda"=>"Λ","Xi"=>"Ξ","Pi"=>"Π","Sigma"=>"Σ","Upsilon"=>"Υ","Phi"=>"Φ","Psi"=>"Ψ",
+    "Omega"=>"Ω","times"=>"×","cdot"=>"·","pm"=>"±","mp"=>"∓","leq"=>"≤","le"=>"≤","geq"=>"≥","ge"=>"≥",
+    "neq"=>"≠","approx"=>"≈","sim"=>"∼","simeq"=>"≃","equiv"=>"≡","propto"=>"∝","infty"=>"∞","partial"=>"∂",
+    "nabla"=>"∇","int"=>"∫","sum"=>"∑","prod"=>"∏","sqrt"=>"√","angle"=>"∠","rightarrow"=>"→","to"=>"→",
+    "leftarrow"=>"←","Rightarrow"=>"⇒","mapsto"=>"↦","langle"=>"⟨","rangle"=>"⟩","ldots"=>"…","cdots"=>"⋯",
+    "in"=>"∈","notin"=>"∉","forall"=>"∀","exists"=>"∃","hbar"=>"ℏ","ell"=>"ℓ","circ"=>"∘","cap"=>"∩",
+    "cup"=>"∪",  # function names keep their letters (drop only the backslash); unknown macros are dropped
+    "cos"=>"cos","sin"=>"sin","tan"=>"tan","sec"=>"sec","csc"=>"csc","cot"=>"cot","sinh"=>"sinh",
+    "cosh"=>"cosh","tanh"=>"tanh","log"=>"log","ln"=>"ln","exp"=>"exp","lim"=>"lim","min"=>"min",
+    "max"=>"max","sup"=>"sup","inf"=>"inf","det"=>"det","dim"=>"dim","arg"=>"arg")
+const _TEX_SUP = Dict{Char,Char}(zip("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ"))
+const _TEX_SUB = Dict{Char,Char}(zip("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎"))
+# `^{…}`/`^x` (or `_…`) → Unicode only when EVERY char maps, else the bare body (e.g. `x^{2θ}` → `x2θ`).
+_tex_script(m, sub) = (b = replace(m, r"^[\^_]\{?" => "", "}" => "");
+                       (!isempty(b) && all(c -> haskey(sub, c), b)) ? String([sub[c] for c in b]) : b)
+function _demath(s::AbstractString)
+    t = String(s)
+    ('$' in t || occursin("\\(", t) || occursin("\\[", t)) || return t   # no inline maths → untouched
+    t = replace(t, "\$\$" => " ", "\$" => " ", "\\(" => " ", "\\)" => " ", "\\[" => " ", "\\]" => " ",
+                   "\\left" => "", "\\right" => "", "\\," => " ", "\\;" => " ", "\\!" => "", "\\ " => " ",
+                   "\\quad" => " ", "\\qquad" => " ")
+    t = replace(t, r"\\(?:text|mathrm|mathbf|mathit|mathcal|operatorname)\{([^{}]*)\}" => s"\1")
+    t = replace(t, r"\\frac\{([^{}]*)\}\{([^{}]*)\}" => s"(\1)/(\2)")
+    t = replace(t, r"\\[A-Za-z]+" => m -> get(_TEX_MACRO, String(m)[2:end], " "))  # macro → glyph, else drop
+    t = replace(t, r"\^\{[^{}]*\}|\^\S" => m -> _tex_script(m, _TEX_SUP))
+    t = replace(t, r"_\{[^{}]*\}|_\S" => m -> _tex_script(m, _TEX_SUB))
+    t = replace(t, r"\\([^A-Za-z])" => s"\1")   # `\{` `\}` `\%` `\_` … → the literal char
+    return replace(t, r"[{}]" => "")            # drop any leftover grouping braces
+end
+
+# First ~`n` words of `text` as a plain one-liner (markdown punctuation + inline LaTeX stripped) —
+# for the OG/meta + manifest description. Adds an ellipsis when truncated.
 function _first_words(text, n::Int)
-    s = replace(strip(String(text)), r"[#*_`>\[\]]" => "", r"\s+" => " ")
+    s = replace(_demath(strip(String(text))), r"[#*_`>\[\]]" => "", r"\s+" => " ")
     w = split(s)
     isempty(w) && return ""
     return join(w[1:min(n, length(w))], " ") * (length(w) > n ? "…" : "")
