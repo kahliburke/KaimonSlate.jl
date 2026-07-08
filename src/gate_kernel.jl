@@ -177,7 +177,12 @@ function _ensure_poller!()
                 # latency than a timer). The ceiling self-heals a park left stale if the health
                 # task recreates a SUB socket. (Was: drain + sleep(0.05) → ~28% idle CPU on -t auto.)
                 for m in _stream_messages(K, _manager())
-                    rid = get(_GATE_SESSION, m.session_name, nothing)
+                    # Route on the STABLE connect-time `conn_name`, NOT `session_name`. `_GATE_SESSION`
+                    # is keyed by `k.conn.name` ("slate-<port>"), but a message's `session_name` is the
+                    # human DISPLAY label (`display_name`) — once a session carries a notebook-filename
+                    # label, display_name diverges from name and a `session_name` lookup silently misses,
+                    # dropping every slate_refresh/progress/hot-reload event (dead reactivity).
+                    rid = get(_GATE_SESSION, m.conn_name, nothing)
                     rid === nothing && continue
                     if m.channel == "slate_refresh"
                         s = get!(pending, rid, Set{String}())
