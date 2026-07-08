@@ -339,10 +339,10 @@
   <div class="setrow exrow fmt-website"><label title="Title shown on the site's blog front page (index). Set once — re-publishing another notebook keeps it unless you change it.">Site title</label>
     <input id="sitetitle" type="text" placeholder="e.g. My Notebooks" autocomplete="off"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-size:.82rem"/></div>
-  <div class="setrow exrow fmt-website"><label title="URL path for THIS document under the site (/<slug>/). Auto-filled from the title; edit to rename. Re-publishing the same slug updates it in place.">Document path</label>
+  <div class="setrow exrow fmt-website" id="siteslugrow"><label title="URL path for THIS document under the site (/<slug>/). Auto-filled from the title; edit to rename. Re-publishing the same slug updates it in place.">Document path</label>
     <input id="siteslug" type="text" placeholder="auto from title" autocomplete="off" spellcheck="false"
       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:4px 8px;color:var(--text);font-family:monospace;font-size:.82rem"/></div>
-  <div class="setrow exrow fmt-website sethint"><span></span>Renders this notebook into the site at <code>/&lt;path&gt;/</code> (the site's index links to every document in it — others are preserved), then syncs the whole build to the site's destinations. A site with no destinations just stages locally at <code>/sites/&lt;name&gt;/</code> — add destinations in the Publishing manager, then hit <b>▶ Sync</b>.</div>
+  <div class="setrow exrow fmt-website sethint" id="sitehint"><span></span>Renders this notebook into the site at <code>/&lt;path&gt;/</code> (the site's index links to every document in it — others are preserved), then syncs the whole build to the site's destinations. A site with no destinations just stages locally at <code>/sites/&lt;name&gt;/</code> — add destinations in the Publishing manager, then hit <b>▶ Sync</b>.</div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>Packages the whole environment (Project + Manifest + source; a git bundle when the project is a repo) into ONE <code>.jl</code>. Reopen it with the Open box or <code>KaimonSlate.expand</code>.</div>
   <div class="setrow" id="sitepubrow" style="display:none"><div id="sitepublog" class="publog" style="flex:1;margin:0"></div></div>
   <div class="row"><button id="excancel" onclick="closeExport(false)">Cancel</button>

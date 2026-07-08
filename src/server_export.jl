@@ -1169,6 +1169,32 @@ function unexport_from_site(name::AbstractString, slug::AbstractString)
     return (; removed, docCount = length(docs))
 end
 
+"""
+    reorder_site!(name, ordering) -> (; ok, docCount)
+
+Apply a new `section`/`order` to the LOCAL site `name`'s docs and regenerate its index — no git, no
+deploy (Sync pushes the result to the destinations). `ordering` is an iterable of `{slug, section, order}`.
+"""
+function reorder_site!(name::AbstractString, ordering)
+    dir = _site_dir(name)
+    (dir === nothing || !isdir(dir)) && error("site '$name' has no local build")
+    manifest = _read_site_manifest(dir)
+    docs = get(manifest, "docs", Any[])
+    omap = Dict{String,Any}(String(get(o, "slug", "")) => o for o in ordering)
+    for d in docs
+        d isa AbstractDict || continue
+        o = get(omap, String(get(d, "slug", "")), nothing); o === nothing && continue
+        d["section"] = String(get(o, "section", ""))
+        ordv = get(o, "order", nothing); ordv === nothing || (d["order"] = Float64(ordv))
+    end
+    manifest["docs"] = docs
+    write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
+    htmpl = joinpath(dir, ".slate-home.html")
+    write(joinpath(dir, "index.html"),
+          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+    return (; ok = true, docCount = length(docs))
+end
+
 # The docs on `repo`'s published site (manifest entries incl. section/order) — for the manager's
 # reorder view. `[]` when unpublished/unreachable.
 function published_site_docs(repo::AbstractString)

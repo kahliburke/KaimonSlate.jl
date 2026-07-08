@@ -547,5 +547,32 @@ function _register_publish_routes!(router, h::Hub)
             HTTP.Response(500, "Delete site failed: " * sprint(showerror, e))
         end
     end)
+    # Site content management — the docs in a site's LOCAL canonical build (with section/order); reorder
+    # + section them; remove one. All edit _site_dir(name) only — Sync afterward pushes to destinations.
+    HTTP.register!(router, "GET", "/api/publish/site-content", req -> begin
+        site = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "site", "")))
+        isempty(site) && return HTTP.Response(400, "missing site")
+        _json(Dict("site" => site, "docs" => site_docs(String(site))))
+    end)
+    HTTP.register!(router, "POST", "/api/publish/site-arrange", req -> begin
+        b = _body(req); site = strip(String(get(b, "site", ""))); ordering = get(b, "ordering", Any[])
+        isempty(site) && return HTTP.Response(400, "missing site")
+        try
+            r = reorder_site!(String(site), ordering)
+            _json(Dict("ok" => r.ok, "docCount" => r.docCount))
+        catch e
+            HTTP.Response(500, "Arrange failed: " * sprint(showerror, e))
+        end
+    end)
+    HTTP.register!(router, "POST", "/api/publish/site-remove", req -> begin
+        b = _body(req); site = strip(String(get(b, "site", ""))); slug = strip(String(get(b, "slug", "")))
+        (isempty(site) || isempty(slug)) && return HTTP.Response(400, "missing site/slug")
+        try
+            r = unexport_from_site(String(site), String(slug))
+            _json(Dict("ok" => true, "removed" => r.removed, "docCount" => r.docCount))
+        catch e
+            HTTP.Response(500, "Remove failed: " * sprint(showerror, e))
+        end
+    end)
     return router
 end

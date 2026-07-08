@@ -392,8 +392,24 @@ function openExport(preset) {
   document.getElementById('exhdr').textContent = _pub ? 'Publish' : 'Export';
   document.getElementById('exsub').textContent = _pub ? '— publish this notebook to the web' : '— render or package this notebook';
   document.getElementById('exfmtrow').style.display = _pub ? 'none' : '';
+  // A notebook tagged `home` becomes the site's FRONT PAGE (renders to the root, not a /<slug>/ doc), so
+  // the Document-path field is irrelevant and the instructions differ. Detect it and adjust the dialog.
+  const _home = _isHomeNotebook();
+  const _slugRow = document.getElementById('siteslugrow'); if (_slugRow) _slugRow.style.display = _home ? 'none' : '';
+  const _hint = document.getElementById('sitehint');
+  if (_hint) {
+    if (!_hint.dataset.doc) _hint.dataset.doc = _hint.innerHTML;   // capture the default (per-document) hint once
+    _hint.innerHTML = _home
+      ? 'This notebook is tagged <code>home</code>, so it becomes the site’s <b>front page</b> — it renders to the site root (its <code>docindex</code> cell lists the other documents), not a <code>/&lt;path&gt;/</code> page. Publishing then syncs the whole build to the site’s destinations.'
+      : _hint.dataset.doc;
+  }
   _resetPubUi();   // idle button + "Cancel" label + no empty log, so a reopened dialog isn't stuck on a prior run's state
   document.getElementById('exportbg').classList.add('show');
+}
+// A notebook is the site's front page when any cell is tagged `home` (matches the server's _home_notebook).
+function _isHomeNotebook() {
+  return Array.isArray(nbState && nbState.cells) &&
+    nbState.cells.some(c => c && Array.isArray(c.tags) && c.tags.includes('home'));
 }
 // `go`: false = cancel, true = primary export, 'copy' = Markdown-to-clipboard.
 function closeExport(go) {

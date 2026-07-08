@@ -453,13 +453,17 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       .catch(function(e){hideLoading();alertDark('Open failed: '+e);});
   }
   window.pdOpenDoc=pdOpenDoc;
-  // Documents with ≥1 event to target `tname` → {doc, version(count), latest(newest event)}.
+  // Documents with ≥1 event to target `tname` → {doc, version(count), latest(newest event)}. Legacy
+  // per-notebook tracking — used only for Zenodo archives now (site publishes don't write these events).
   function docsForTarget(tname){
     return (_pdView.documents||[]).map(function(d){
       var evs=(d.events||[]).filter(function(e){return e.target===tname;});
       return evs.length?{doc:d,version:evs.length,latest:evs[0]}:null;
     }).filter(Boolean);
   }
+  // Site-first: a target's content is the sites that deploy to it (each carries its own doc build).
+  function pdSitesForTarget(tname){ return (_pdView.sites||[]).filter(function(s){return (s.targets||[]).indexOf(tname)>=0;}); }
+  function pdTargetDocCount(tname){ return pdSitesForTarget(tname).reduce(function(a,s){return a+((s.docs||[]).length);},0); }
   function pdTargetLive(t){
     if(t.kind==='github-pages'&&t.config.repo){var p=t.config.repo.split('/');return p.length===2?('https://'+p[0]+'.github.io/'+p[1]+'/'):'';}
     return t.config.url||'';
@@ -485,13 +489,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+
           '<button class="pdbtn pdmini primary" style="margin-left:auto" onclick="event.stopPropagation();pdSyncSite(\''+esc(s.name)+'\')" title="Deploy to all destinations">▶ Sync</button></div>'+
         '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
-        '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+(s.home?(' · home: '+esc(s.home)):'')+'</div></div>';
+        '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+'</div></div>';
     }).join('');
-    var tiles=ts.map(function(t){ var n=docsForTarget(t.name).length, live=pdTargetLive(t);
+    var tiles=ts.map(function(t){ var host=t.kind!=='zenodo', live=pdTargetLive(t);
+      var slist=host?pdSitesForTarget(t.name):[], n=host?pdTargetDocCount(t.name):docsForTarget(t.name).length;
+      var meta=host?(n+' doc'+(n===1?'':'s')+' · '+slist.length+' site'+(slist.length===1?'':'s')):(n+' archived');
       return '<div class="pdtile" onclick="pdOpen(\''+esc(t.name)+'\')">'+
         '<div class="pdrow"><span class="pl">'+esc(t.name)+'</span><span class="pdchip">'+esc(t.kind)+'</span><span style="margin-left:auto;color:#6a7090">›</span></div>'+
         '<div class="pddim pdcfg" style="max-width:100%">'+esc(pdTargetSummary(t))+'</div>'+
-        '<div class="pdrow" style="margin-top:4px"><span class="pddim">'+n+' doc'+(n===1?'':'s')+'</span>'+(live?'<a class="pdlink" style="margin-left:auto" href="'+esc(live)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()">live ↗</a>':'')+'</div></div>';
+        '<div class="pdrow" style="margin-top:4px"><span class="pddim">'+meta+'</span>'+(live?'<a class="pdlink" style="margin-left:auto" href="'+esc(live)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()">live ↗</a>':'')+'</div></div>';
     }).join('');
     document.getElementById('pdbody').innerHTML=
       '<div class="pdsec" style="margin-top:0">Sites</div>'+
@@ -534,14 +540,24 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var picks=deployable.length?deployable.map(function(t){
       return '<label class="pdtag" style="display:flex;gap:8px;margin:5px 0"><input type="checkbox" class="pdst" value="'+esc(t.name)+'"'+(chosen.indexOf(t.name)>=0?' checked':'')+'/> '+esc(t.name)+' <span class="pdchip">'+esc(t.kind)+'</span></label>';
     }).join(''):'<div class="pddim">No deployable targets yet — add one below first.</div>';
-    var homeOpts='<option value="">— none —</option>'+docs.map(function(d){var sl=d.slug||d.title;return '<option value="'+esc(sl)+'"'+(s&&s.home===sl?' selected':'')+'>'+esc(d.title||d.slug)+'</option>';}).join('');
-    var docList=docs.length?('<div class="pddim" style="margin-top:8px">Members: '+docs.map(function(d){return esc(d.title||d.slug);}).join(', ')+'</div>'):'<div class="pddim" style="margin-top:8px">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
+    // Documents in the site's canonical build: list with section badge + remove; drag-order via Arrange.
+    // (The front page is set by tagging a cell `home` in that notebook — it renders to the site root and
+    // isn't a card here, so there's no separate "home" picker.)
+    var docMgmt='';
+    if(s){
+      var rows=docs.length?docs.map(function(d){var sl=d.slug||d.title;
+        return '<div class="pdrow pdsub2"><span>'+esc(d.title||d.slug)+'</span>'+
+          (d.section?'<span class="pdchip" style="margin-left:6px">'+esc(d.section)+'</span>':'')+
+          '<button class="pdbtn pdmini" onclick="pdRemoveSiteDoc(\''+esc(s.name)+'\',\''+esc(sl)+'\')" title="remove from site">✕</button></div>';
+      }).join(''):'<div class="pddim">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
+      docMgmt='<div class="pdsec">Documents</div>'+rows+
+        (docs.length?'<div class="pdrow" style="margin-top:8px"><button class="pdbtn" onclick="openSiteArrange(\''+esc(s.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag to order + group into sections</span></div>':'');
+    }
     document.getElementById('pdextra').innerHTML='<div class="pdform">'+
       '<div class="pdsec" style="margin-top:0">'+(s?('Edit site “'+esc(s.name)+'”'):'New site')+'</div>'+
       (s?'':'<input id="pdsitename" class="pdinp" placeholder="site name (e.g. portfolio)"/>')+
       '<div class="pddim" style="font-size:.72rem">Deploy to these destinations:</div>'+picks+
-      (docs.length?('<div class="pddim" style="font-size:.72rem;margin-top:6px">Home page:</div><select id="pdsitehome" class="pdinp">'+homeOpts+'</select>'):'')+
-      docList+
+      docMgmt+
       '<div class="pdrow" style="margin-top:12px;gap:8px"><button class="pdbtn primary" onclick="pdSaveSite('+(s?('\''+esc(s.name)+'\''):'\'\'')+')">'+(s?'Save':'Create')+'</button>'+
       (s?'<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\')">▶ Sync now</button><button class="pdbtn pdmini" style="margin-left:auto" onclick="pdDelSite(\''+esc(s.name)+'\')">✕ Delete site</button>':'')+'</div>'+
       '<div id="pdsitelog" class="pdsync-log" style="display:none"></div></div>';
@@ -551,12 +567,20 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var nm=name||((document.getElementById('pdsitename')||{}).value||'').trim();
     if(!nm){alertDark('Give the site a name.');return;}
     var targets=[].slice.call(document.querySelectorAll('.pdst:checked')).map(function(el){return el.value;});
-    var homeEl=document.getElementById('pdsitehome'), home=homeEl?homeEl.value:'';
-    fetch('/api/publish/site',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm,targets:targets,home:home})})
+    fetch('/api/publish/site',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm,targets:targets})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
       .then(function(v){_pdView=v;pdRender();}).catch(function(e){alertDark('Save site failed: '+e);});
   }
   window.pdSaveSite=pdSaveSite;
+  // Remove a document from a site's local build (Sync afterward to update the destinations).
+  function pdRemoveSiteDoc(site,slug){
+    confirmDark('Remove this document from “'+site+'”?\nIt\'s deleted from the local build — hit ▶ Sync to update the destinations.','Remove','danger').then(function(ok){if(!ok)return;
+      fetch('/api/publish/site-remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:site,slug:slug})})
+        .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+        .then(function(){loadPubDash(function(){pdShowSite(site);});})   // refresh docs, reopen the editor
+        .catch(function(e){alertDark('Remove failed: '+e);});});
+  }
+  window.pdRemoveSiteDoc=pdRemoveSiteDoc;
   function pdDelSite(name){
     confirmDark('Delete site “'+name+'”? Already-deployed builds stay live; this only removes the definition.','Delete','danger').then(function(ok){if(!ok)return;
       fetch('/api/publish/site-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
@@ -596,17 +620,27 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pdTabSel(tb){_pdTab=tb;pdRenderDetail();} window.pdTabSel=pdTabSel;
   function pdRenderTab(t){ if(_pdTab==='config')pdRenderConfig(t); else if(_pdTab==='policies')pdRenderPolicies(t); else pdRenderContent(t); }
   function pdRenderContent(t){
-    var docs=docsForTarget(t.name);
-    var list=docs.length?docs.map(function(x){
-      return '<div class="pdrow pdsub2"><span>'+esc(x.doc.title||x.doc.slug)+'</span>'+
-        '<span class="pdchip'+(x.latest.status==='ok'?' ok':'')+'">v'+x.version+'</span>'+
-        '<span class="pddim">'+esc((x.latest.ts||'').slice(0,10))+'</span>'+
-        (x.latest.url?' <a class="pdlink" href="'+esc(x.latest.url)+'" target="_blank" rel="noopener">page</a>':'')+
-        (x.latest.doi?' <span class="pddim">DOI '+esc(x.latest.doi)+'</span>':'')+
-        '<button class="pdbtn pdmini" onclick="pdOpenDoc(\''+esc(x.doc.docId)+'\')">open</button></div>';
-    }).join(''):'<div class="pddim">No documents published here yet.</div>';
-    var arrange=(t.kind==='github-pages'&&t.config.repo)?'<div class="pdrow" style="margin-top:14px"><button class="pdbtn primary" onclick="openArrange(\''+esc(t.config.repo)+'\',\''+esc(t.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag docs into ordered sections on the site index</span></div>':'';
-    document.getElementById('pdtab').innerHTML='<div class="pdsec" style="margin-top:0">Published documents</div>'+list+arrange;
+    if(t.kind==='zenodo'){   // Zenodo archives: legacy per-notebook events carry the minted DOI.
+      var docs=docsForTarget(t.name);
+      var zlist=docs.length?docs.map(function(x){
+        return '<div class="pdrow pdsub2"><span>'+esc(x.doc.title||x.doc.slug)+'</span>'+
+          '<span class="pdchip'+(x.latest.status==='ok'?' ok':'')+'">v'+x.version+'</span>'+
+          (x.latest.doi?' <span class="pddim">DOI '+esc(x.latest.doi)+'</span>':'')+
+          '<button class="pdbtn pdmini" onclick="pdOpenDoc(\''+esc(x.doc.docId)+'\')">open</button></div>';
+      }).join(''):'<div class="pddim">No versions archived here yet.</div>';
+      document.getElementById('pdtab').innerHTML='<div class="pdsec" style="margin-top:0">Archived versions</div>'+zlist;
+      return;
+    }
+    // Host target: its content is the sites that deploy here — each carries its own doc build. Manage
+    // docs/order from the site itself (Sites → edit), not per-target.
+    var slist=pdSitesForTarget(t.name), live=pdTargetLive(t);
+    var list=slist.length?slist.map(function(s){var nd=(s.docs||[]).length;
+      return '<div class="pdrow pdsub2"><span>🌐 '+esc(s.name)+'</span>'+
+        '<span class="pddim" style="margin-left:6px">'+nd+' doc'+(nd===1?'':'s')+'</span>'+
+        '<button class="pdbtn pdmini" onclick="pdBack();pdEditSite(\''+esc(s.name)+'\')">manage</button></div>';
+    }).join(''):'<div class="pddim">No sites deploy here yet — add this target to a site (Sites → edit → Deploy to).</div>';
+    document.getElementById('pdtab').innerHTML='<div class="pdsec" style="margin-top:0">Sites deploying here</div>'+list+
+      (live?'<div class="pdrow" style="margin-top:10px"><a class="pdlink" href="'+esc(live)+'" target="_blank" rel="noopener">live ↗ '+esc(live)+'</a></div>':'');
   }
   function pdRenderConfig(t){
     var c=t.config||{}, refs=_pdView.secretRefs||[], h='';
@@ -697,18 +731,20 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   window.pdSetSecret=pdSetSecret;
   function pdDelSecret(r){if(!r)return;confirmDark('Delete secret “'+r+'”?','Delete','danger').then(function(ok){if(ok)pdSecretPost(r,'');});}
   window.pdDelSecret=pdDelSecret;
-  // ── Arrange documents on a site: drag-reorder within/between sections → re-push the index ────────
-  var _arrRepo='';
-  function openArrange(repo,tname){
-    _arrRepo=repo;
-    document.getElementById('pdarrsub').textContent='— '+tname+' · '+repo;
-    document.getElementById('pdarrbody').innerHTML='<div class="pddim">Loading published site…</div>';
+  // ── Arrange documents: drag-reorder within/between sections. Works on a SITE's local build ('site',
+  // then Sync) or directly on a published gh repo ('repo', re-pushes the index). ──────────────────────
+  var _arrMode='site', _arrTarget='';
+  function openSiteArrange(name){ _arrMode='site'; _arrTarget=name; _openArrange('/api/publish/site-content?site='+encodeURIComponent(name), '— site “'+name+'”'); }
+  function openArrange(repo,tname){ _arrMode='repo'; _arrTarget=repo; _openArrange('/api/publish/site-docs?repo='+encodeURIComponent(repo), '— '+tname+' · '+repo); }
+  function _openArrange(url,sub){
+    document.getElementById('pdarrsub').textContent=sub;
+    document.getElementById('pdarrbody').innerHTML='<div class="pddim">Loading…</div>';
     document.getElementById('pdarrangebg').classList.add('show');
-    fetch('/api/publish/site-docs?repo='+encodeURIComponent(repo),{cache:'no-store'})
+    fetch(url,{cache:'no-store'})
       .then(function(r){return r.json();}).then(function(d){renderArrange((d&&d.docs)||[]);})
-      .catch(function(){document.getElementById('pdarrbody').innerHTML='<div class="pddim">Could not load the site (is it published?).</div>';});
+      .catch(function(){document.getElementById('pdarrbody').innerHTML='<div class="pddim">Could not load the site.</div>';});
   }
-  window.openArrange=openArrange;
+  window.openSiteArrange=openSiteArrange; window.openArrange=openArrange;
   function closeArrange(){document.getElementById('pdarrangebg').classList.remove('show');}
   window.closeArrange=closeArrange;
   function _arrRow(d){return '<div class="pdarr-row" draggable="true" data-slug="'+esc(d.slug)+'"><span class="pdarr-grip">⠿</span><span>'+esc(d.title||d.slug)+'</span> <span class="pddim">'+esc(d.date||'')+'</span></div>';}
@@ -752,10 +788,17 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       sec.querySelectorAll('.pdarr-row').forEach(function(row){ordering.push({slug:row.getAttribute('data-slug'),section:section,order:(idx++)*10});});
     });
     if(!ordering.length){alertDark('Nothing to arrange.');return;}
-    var btn=document.getElementById('pdarrapply');if(btn)btn.disabled=true;showLoading('Re-pushing the site index…');
-    fetch('/api/publish/site-reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo:_arrRepo,ordering:ordering})})
+    var btn=document.getElementById('pdarrapply');if(btn)btn.disabled=true;
+    var site=(_arrMode==='site');
+    showLoading(site?'Updating the site index…':'Re-pushing the site index…');
+    var url=site?'/api/publish/site-arrange':'/api/publish/site-reorder';
+    var payload=site?{site:_arrTarget,ordering:ordering}:{repo:_arrTarget,ordering:ordering};
+    fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(d){hideLoading();if(btn)btn.disabled=false;closeArrange();alertDark(d.changed?('Re-pushed — the new order goes live at '+d.url+' shortly (Pages deploy).'):'No changes to push.');})
+      .then(function(d){hideLoading();if(btn)btn.disabled=false;closeArrange();
+        if(site){ loadPubDash(function(){pdShowSite(_arrTarget);}); alertDark('Order updated — hit ▶ Sync to push it to the destinations.'); }
+        else { alertDark(d.changed?('Re-pushed — the new order goes live at '+d.url+' shortly (Pages deploy).'):'No changes to push.'); }
+      })
       .catch(function(e){hideLoading();if(btn)btn.disabled=false;alertDark('Reorder failed: '+e);});
   }
   window.applyArrange=applyArrange;
