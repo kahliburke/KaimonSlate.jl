@@ -413,9 +413,15 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         cell.state = RUNNING
         _broadcast_progress(nb, cell)
         s = (:trace in cell.flags) ? string("@trace begin ", cell.source, "\nend") : cell.source
+        frc = let ids = get(_FORCE_RUN, nb.id, nothing)   # consume a one-shot ▶ force marker
+            ids !== nothing && cell.id in ids ?
+                (delete!(ids, cell.id); isempty(ids) && delete!(_FORCE_RUN, nb.id); true) : false
+        end
         m = (key = ReportEngine._memo_key(nb.report, cell),
              names = String[string(w) for w in cell.writes],
-             threshold = ReportEngine._MEMO_THRESHOLD_MS)
+             threshold = ReportEngine._MEMO_THRESHOLD_MS,
+             force = frc,
+             always = (:cache in cell.flags))   # `cache` tag → persist regardless of runtime
         (s, cell.src_hash, m)
     end
     out = try
@@ -525,6 +531,13 @@ end
 # yet (in-flight cells are interrupted via the worker's __slate_cancel). Keyed by nb.id.
 const _PARALLEL_CANCEL = Dict{String,Bool}()
 
+# Cell ids whose NEXT eval must skip the memo restore (nb.id → ids). The explicit ▶ play button is a
+# re-evaluation request — restoring the cached result there reads as "the button does nothing" — but
+# the fresh result is still STORED, so the entry stays warm. Registered by edit_cell!(force=true),
+# consumed (under nb.lock) by _eval_one!'s memo build. Dependents are NOT registered: they restale
+# normally and may restore when their inputs are unchanged.
+const _FORCE_RUN = Dict{String,Set{String}}()
+
 # Build the parallel-batch scheduler specs for `code` cells (document order). Plotting cells share
 # Makie's non-thread-safe globals (theme / current-figure / display stack), invisible to dataflow
 # analysis — so they get a synthetic shared write (`_GRAPHICS_SENTINEL`), making par_blockers serialise
@@ -613,6 +626,17 @@ end
 
 function _run_loop!(nb::LiveNotebook)
     try
+        # Resolve bare-`using` exports BEFORE the first eval of a session, so the dependency graph —
+        # and every memo key derived from it — is precise from the FIRST run. Otherwise the post-drain
+        # barrier→precise flip (refine_usings!) changed downstream cells' memo keys between the first
+        # and second run of each session, and the durable cache missed exactly on cold opens. Phased:
+        # the import round-trip (a possible worker spawn + package load, seconds) runs OUTSIDE nb.lock
+        # so UI state requests stay live; only the graph rebuild takes the lock. No-op after the first
+        # drain that sees each module.
+        paths = lock(nb.lock) do; ReportEngine.unresolved_using_paths(nb.report); end
+        if !isempty(paths) && ReportEngine.resolve_usings!(nb.report, nb.kernel, paths)
+            lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+        end
         while true
             # Parallel fast-path: hand all stale code cells to the worker at once (opt-in). Falls through
             # to the serial step for markdown, reactive restales, and the 0/1-code-cell case. Held under

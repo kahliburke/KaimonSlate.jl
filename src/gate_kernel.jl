@@ -498,7 +498,12 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
             "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
-            "memo_threshold" => Float64(memo.threshold)); timeout = _eval_timeout())
+            "memo_threshold" => Float64(memo.threshold),
+            # ▶ force: skip the restore (an explicit play must re-evaluate) but still store the fresh
+            # result. `always`: the `cache` tag — persist regardless of runtime. Both hasproperty-guarded
+            # so older 3-field memo tuples (agent scratch evals) still work.
+            "memo_force" => (hasproperty(memo, :force) && memo.force === true),
+            "memo_always" => (hasproperty(memo, :always) && memo.always === true)); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end

@@ -22,6 +22,21 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :K in c.writes
     end
 
+    @testset "anonymous functions never enter writes (synthetic __ExprExpl_anon__ names)" begin
+        # ExpressionExplorer reports an anonymous function as a definition named
+        # `__ExprExpl_anon__<rand>` — synthetic AND random per analysis. If one leaks into `writes`
+        # it becomes a phantom memo name (undefined post-run), which used to block caching for any
+        # cell containing a lambda or do-block.
+        for src in ("vals = map(x -> x^2, 1:10)",
+                    "s = open(io -> read(io, String), \"f\")",
+                    "t = map(1:3) do i\n    i + 1\nend")
+            c = Cell("c", CODE, src); infer_bindings!(c)
+            @test !any(w -> startswith(String(w), "__ExprExpl_anon__"), c.writes)
+        end
+        c = Cell("c", CODE, "vals = map(x -> x^2, 1:10)"); infer_bindings!(c)
+        @test :vals in c.writes              # the real write is still there
+    end
+
     @testset "_BIND_CACHE is bounded (no unbounded growth on a long-lived server)" begin
         empty!(ReportEngine._BIND_CACHE)
         # Fill past the cap with distinct cell ids; correctness survives the eviction sweep —

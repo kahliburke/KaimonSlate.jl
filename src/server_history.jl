@@ -698,9 +698,15 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         if force
             i = findfirst(c -> c.id == id, nb.report.cells)
             if i !== nothing
+                frc = get!(Set{String}, _FORCE_RUN, nb.id)
                 for did in dependents_of(nb.report, Set([id]))   # closure includes `id` itself
                     j = findfirst(c -> c.id == did, nb.report.cells)
                     j === nothing || (nb.report.cells[j].state = STALE)
+                    # ▶ means "actually re-evaluate" — for the WHOLE cascade, not just this cell.
+                    # The memo key digests upstream SOURCES, so if the played cell is impure (a data
+                    # fetch — the main reason to press ▶), its dependents' keys don't change and a
+                    # restore would serve results computed from the PREVIOUS data. Force them all.
+                    push!(frc, String(did))
                 end
             end
         end

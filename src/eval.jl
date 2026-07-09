@@ -295,6 +295,9 @@ const _MEMO_THRESHOLD_MS = 400.0    # only cells slower than this are worth pers
 function _memoizable(cell::Cell)
     cell.kind == CODE || return false
     (:opaque in cell.flags || :nocache in cell.flags || :volatile in cell.flags) && return false
+    # A refined `using`/`import` cell is no longer :opaque, but restoring cached export BINDINGS is
+    # not the same as executing the `using` (method-table effects, load order) — never memoize it.
+    isempty(cell.provides) || return false
     return isempty(cell.binds)
 end
 
@@ -308,6 +311,15 @@ function _memo_key(report::Report, cell::Cell)
     while !isempty(stack)
         id = pop!(stack); (id in closure || !haskey(byid, id)) && continue
         push!(closure, id); union!(stack, byid[id].deps)
+    end
+    # Impurity propagates: the key digests upstream SOURCES, so it's only total if every upstream
+    # value is a function of its source. A `nocache`/`volatile` upstream (impure by declaration —
+    # re-runs produce fresh values from the same source) or an :opaque barrier (include(): effects
+    # from outside the source) breaks that — restoring downstream against a re-run impure producer
+    # would silently resurrect results computed from the PREVIOUS run's values. Unkeyable → no memo.
+    for id in closure
+        f = byid[id].flags
+        (:nocache in f || :volatile in f || :opaque in f) && return ""
     end
     depsrc = sort!([(id, byid[id].src_hash) for id in closure])
     readnames = copy(cell.reads); for id in closure; union!(readnames, byid[id].reads); end
@@ -357,7 +369,11 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     # (`begin ` is on the cell's line 1), so the recorded line numbers stay 1:1 with the source.
     memo = (key = _memo_key(report, cell),
             names = String[string(w) for w in cell.writes],
-            threshold = _MEMO_THRESHOLD_MS)
+            threshold = _MEMO_THRESHOLD_MS,
+            force = false,
+            # `cache` tag: a pipeline stage whose result must persist REGARDLESS of runtime — the
+            # explicit opposite of `nocache` (auto-caching only catches cells over the threshold).
+            always = (:cache in cell.flags))
     cell.output = eval_capture(kernel, report, src, "cell:" * cell.id, memo)
     cell.binds = cell.output.binds
     cell.state = cell.output.exception === nothing ? FRESH : ERRORED
@@ -375,6 +391,7 @@ full rebuild in a fresh namespace first. (No dependency pruning here — that's
 function eval_report!(report::Report; reset::Bool = false, kernel::Kernel = InProcessKernel())
     reset && reset!(kernel, report)
     prepare!(kernel, report)
+    prewarm_usings!(report, kernel)   # precise graph BEFORE keys are computed → stable memo keys
     for cell in report.cells
         eval_cell!(report, cell, kernel)
     end

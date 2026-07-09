@@ -9,7 +9,7 @@
 
 import ExpressionExplorer as EE
 
-export infer_bindings!, build_dependencies!, dependents_of, update_source!, eval_stale!, refine_usings!
+export infer_bindings!, build_dependencies!, dependents_of, update_source!, eval_stale!, refine_usings!, prewarm_usings!
 
 # ── Binding inference ────────────────────────────────────────────────────────
 
@@ -245,6 +245,12 @@ function infer_bindings!(cell::Cell)
     end
     return cell
 end
+# ExpressionExplorer names an anonymous function `__ExprExpl_anon__<rand(UInt64)>` and reports it
+# among a cell's definitions. That name is synthetic — never a real global, and RANDOM on every
+# re-analysis — so letting it into `writes` poisons everything keyed off the write-set (most visibly
+# the memo store guard, which then never caches a cell containing `x -> …` or a do-block). Strip them.
+_strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_anon__"), names)
+
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
     delete!(cell.flags, :opaque)
@@ -327,7 +333,7 @@ function _infer_bindings_uncached!(cell::Cell)
             try
                 node = EE.compute_reactive_node(lam)
                 union!(cell.reads, node.references)
-                union!(cell.writes, node.definitions)
+                union!(cell.writes, _strip_anon(node.definitions))
                 _record_global_mutations!(cell, body, node.references)
             catch e
                 @debug "deps: @onclick/@onchange handler reactive-node analysis failed" cell = cell.id exception = e
@@ -341,8 +347,8 @@ function _infer_bindings_uncached!(cell::Cell)
         try
             node = EE.compute_reactive_node(blk)
             union!(cell.reads, node.references)
-            union!(cell.writes, node.definitions)
-            union!(cell.writes, node.funcdefs_without_signatures)
+            union!(cell.writes, _strip_anon(node.definitions))
+            union!(cell.writes, _strip_anon(node.funcdefs_without_signatures))
             _record_global_mutations!(cell, blk, node.references)
         catch e
             @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell = cell.id exception = e
@@ -507,6 +513,7 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     nbatch = count(c -> c.state == STALE, report.cells)   # cells about to run → UI shows a stable k/N
     nbatch > 0 && _emit_run_batch(report.id, nbatch)
     prepare!(kernel, report)
+    prewarm_usings!(report, kernel)   # precise graph BEFORE keys are computed → stable memo keys
     # Static markdown (no `{{ }}` interpolations ⇒ no reads) depends on nothing, so render it FIRST.
     # Otherwise it sits STALE behind slow code cells for the whole run — prose looks "unrun" until the
     # end, which reads as broken now that runs stream cell-by-cell.
@@ -578,9 +585,72 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
             isempty(syms) || (_USING_EXPORTS[p] = syms; newly = true)   # cache only a real export set
         end
     end
-    if newly
-        lock(_BIND_CACHE_LOCK) do; empty!(_BIND_CACHE); end   # drop memoized :opaque verdicts → re-infer precise
-        build_dependencies!(report)
+    newly && rebuild_precise!(report)
+    return newly
+end
+
+# Drop memoized :opaque verdicts and rebuild the graph so newly-resolved exports take effect.
+function rebuild_precise!(report::Report)
+    lock(_BIND_CACHE_LOCK) do; empty!(_BIND_CACHE); end
+    build_dependencies!(report)
+    return report
+end
+
+# ── Pre-eval `using` resolution (stable memo keys) ────────────────────────────
+# The bare-`using` module paths in barrier cells whose exports aren't resolved (nor attempted) yet.
+# Pure read — callers that share `report` with a live server take their lock around it.
+function unresolved_using_paths(report::Report)
+    pending = String[]
+    for c in report.cells
+        (c.kind == CODE && :opaque in c.flags) || continue
+        top = try; Meta.parseall(c.source); catch; continue; end
+        stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+        for s in stmts
+            s isa LineNumberNode && continue
+            _import_names(s) === nothing && append!(pending, _using_module_paths(s))
+        end
+    end
+    return lock(_USING_LOCK) do
+        [p for p in unique!(pending) if !haskey(_USING_EXPORTS, p) && !(p in _USING_TRIED)]
+    end
+end
+
+# Load each module WHERE the cells run and cache its export set — `refine_usings!`'s resolution step
+# made available BEFORE the run. The barrier `using` cell is about to load the package anyway, so the
+# `import` here is front-loaded work, not new work. A failed import (package not installed) leaves the
+# path unresolved AND un-TRIED, so a later drain retries once the package exists. Round-trips to the
+# kernel (including a possible worker spawn + package load) — call it OUTSIDE any lock a UI state
+# request needs. Returns `true` iff a module was newly resolved.
+function resolve_usings!(report::Report, kernel::Kernel, paths::Vector{String})
+    newly = false
+    for p in paths
+        out = try; eval_capture(kernel, report, "import " * p, "prewarm:" * p); catch; nothing; end
+        (out === nothing || out.exception !== nothing) && continue
+        syms = _module_exports(kernel, report, p)
+        isempty(syms) && continue
+        lock(_USING_LOCK) do
+            push!(_USING_TRIED, p); _USING_EXPORTS[p] = syms
+        end
+        newly = true
     end
     return newly
+end
+
+"""
+    prewarm_usings!(report, kernel=InProcessKernel()) -> Bool
+
+Pre-eval counterpart of [`refine_usings!`](@ref): resolve bare-`using` exports BEFORE a run, so the
+dependency graph — and every memo key derived from its upstream closures — is computed in precise
+form from the very first eval of a session. Without this, a fresh session analysed `using X` as an
+:opaque barrier, keyed the first run's memo entries against that conservative graph, then flipped to
+the precise graph post-drain (`refine_usings!`) — so every cell below a `using` changed memo keys
+between the first and second run of each session and MISSED the durable cache exactly when it
+mattered most (cold open). Returns `true` iff a module was newly resolved (deps rebuilt).
+"""
+function prewarm_usings!(report::Report, kernel::Kernel = InProcessKernel())
+    paths = unresolved_using_paths(report)
+    isempty(paths) && return false
+    resolve_usings!(report, kernel, paths) || return false
+    rebuild_precise!(report)
+    return true
 end

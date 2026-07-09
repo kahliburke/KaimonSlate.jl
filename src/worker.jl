@@ -177,18 +177,19 @@ function _memo_gc()
 end
 
 # Restore {bindings, wire} for `cellkey`: assign the cell's globals into the namespace, return the wire.
-# COMPLETENESS GUARD: only restore if EVERY global the cell is expected to define (`names`) is present
-# in the stored entry. A partial/empty entry — e.g. one written before its globals were visible — would
-# restore the cached OUTPUT but leave downstream cells with `UndefVarError`; treat that as a cache miss
-# so the cell genuinely re-runs (and re-stores a complete entry). Returns nothing (miss) or the wire.
-function _memo_restore(cellkey::String, names::Vector{String})
+# An entry snapshots exactly the globals the original run left defined (`_memo_store`), so assigning
+# them all reproduces the post-run namespace faithfully — a declared write ABSENT from the entry was
+# equally absent after the genuine run (a conditional assignment whose branch didn't fire). `fmt == 2`
+# gates out entries from before that contract existed (they could be partial for other reasons — e.g.
+# written while the world-age bug hid fresh bindings); those miss once, re-run, and re-store as fmt 2.
+# Returns nothing (miss) or the wire.
+const _MEMO_FMT = 2
+function _memo_restore(cellkey::String)
     _MEMO_OK || return nothing
     f = _memo_file(cellkey); isfile(f) || return nothing
     data = try; Serialization.deserialize(f); catch; return nothing; end
-    (data isa NamedTuple && hasproperty(data, :bindings) && hasproperty(data, :wire)) || return nothing
-    for nm in names
-        haskey(data.bindings, nm) || return nothing      # missing a declared global → don't restore a partial state
-    end
+    (data isa NamedTuple && hasproperty(data, :fmt) && data.fmt === _MEMO_FMT &&
+     hasproperty(data, :bindings) && hasproperty(data, :wire)) || return nothing
     m = _NS[]
     for (nm, v) in data.bindings
         try; Core.eval(m, :($(Symbol(nm)) = $v)); catch; return nothing; end
@@ -198,8 +199,10 @@ function _memo_restore(cellkey::String, names::Vector{String})
 end
 
 # Persist {the cell's defined globals, its wire} — guarded: a value that won't serialize → skip (warn).
-# If a DECLARED write isn't actually defined in the namespace (e.g. the value never became visible),
-# skip caching entirely rather than writing a partial entry that would restore output without state.
+# Snapshots exactly the declared writes that ARE defined post-run. One that isn't (a conditional
+# assignment whose branch didn't fire, or static over-approximation by the dataflow pass) is simply
+# left out — a genuine re-run would leave it equally undefined, so the entry stays faithful. (The old
+# refuse-to-cache guard here meant one phantom write silenced the cache for the whole cell.)
 function _memo_store(cellkey::String, names::Vector{String}, wire)
     _MEMO_OK || return false
     m = _NS[]
@@ -214,14 +217,14 @@ function _memo_store(cellkey::String, names::Vector{String}, wire)
     for nm in names
         s = Symbol(nm)
         if !Base.invokelatest(isdefined, m, s)
-            @info "slate memo: not cached (a declared global is undefined post-run)" cell = cellkey name = nm
-            return false
+            @info "slate memo: a declared write is undefined post-run — cached without it" key = cellkey name = nm
+            continue
         end
         binds[nm] = Base.invokelatest(getglobal, m, s)
     end
     f = _memo_file(cellkey); tmp = f * ".tmp"
     try
-        Serialization.serialize(tmp, (bindings = binds, wire = wire))   # throws on an unserializable value
+        Serialization.serialize(tmp, (fmt = _MEMO_FMT, bindings = binds, wire = wire))   # throws on an unserializable value
         mv(tmp, f; force = true)
         _memo_gc()
         return true
@@ -240,10 +243,13 @@ end
 # unavoidable shared-state write — the scheduler (`par_blockers`) guarantees two cells that read/write the
 # same global are never in flight at once, so concurrent evals only ever touch disjoint globals.
 function _eval_one(source::String, filename::String, memo_key::String,
-                   memo_names::Vector{String}, memo_threshold::Float64)
+                   memo_names::Vector{String}, memo_threshold::Float64,
+                   memo_force::Bool = false, memo_always::Bool = false)
     cid = replace(filename, r"^cell:" => "")
-    if !isempty(memo_key)
-        w = _memo_restore(memo_key, memo_names)
+    # `memo_force` (the ▶ play button): an explicit run request — never satisfy it from the cache.
+    # The fresh result still stores below, replacing the entry.
+    if !isempty(memo_key) && !memo_force
+        w = _memo_restore(memo_key)
         if w !== nothing
             @info "slate memo: restored (no recompute)" cell = cid
             return w
@@ -270,8 +276,11 @@ function _eval_one(source::String, filename::String, memo_key::String,
     end
     isempty(r.overflow) ||
         @info "slate eval: output truncated for display — full result saved" cell = cid items = [(String(e.kind), Int(e.bytes)) for e in r.overflow]
-    # Cache only expensive, error-free runs (cheap cells never pay the serialize cost).
-    if !isempty(memo_key) && r.exception === nothing && memo_threshold > 0 && r.duration_ms >= memo_threshold
+    # Cache error-free runs that are expensive (over the threshold) — or explicitly `cache`-tagged
+    # (memo_always: a pipeline stage persisted regardless of runtime; cheap untagged cells never pay
+    # the serialize cost).
+    if !isempty(memo_key) && r.exception === nothing &&
+       (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
         _memo_store(memo_key, memo_names, r) &&
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
     end
@@ -284,13 +293,14 @@ kwarg — GateTool drops optional positionals) becomes the parse/backtrace locat
 persist it after a run that exceeds `memo_threshold` ms."
 function __slate_eval(source::String; filename::String = "string",
                      memo_key::String = "", memo_names::Vector{String} = String[],
-                     memo_threshold::Float64 = 0.0)
+                     memo_threshold::Float64 = 0.0, memo_force::Bool = false,
+                     memo_always::Bool = false)
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
     lock(_CANCEL_LOCK) do; _RUNNING_TASKS[cid] = current_task(); end
     try
-        return _eval_one(source, filename, memo_key, memo_names, memo_threshold)
+        return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force, memo_always)
     finally
         lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
     end
@@ -376,7 +386,9 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
                   String(_cell_get(c, "filename", "cell:" * id)),
                   String(_cell_get(c, "memo_key", "")),
                   Vector{String}(String[String(x) for x in _cell_get(c, "memo_names", String[])]),
-                  Float64(_cell_get(c, "memo_threshold", 0.0)))
+                  Float64(_cell_get(c, "memo_threshold", 0.0)),
+                  _cell_get(c, "memo_force", false) === true,
+                  _cell_get(c, "memo_always", false) === true)
     end
     # Track each task so __slate_cancel can interrupt it; drop it once it finishes.
     onspawn = (id, t) -> lock(_CANCEL_LOCK) do; _RUNNING_TASKS[id] = t; end

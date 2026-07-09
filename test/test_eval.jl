@@ -224,6 +224,24 @@ end
         @test ReportEngine._memo_key(nc, nc.cells[1]) == ""
         @test occursin("nocache", serialize_report(nc))
         @test :nocache in parse_report(serialize_report(nc)).cells[1].flags
+        # impurity PROPAGATES: a cell downstream of a nocache/volatile producer is unkeyable — the key
+        # digests upstream SOURCES, but an impure upstream's VALUE isn't a function of its source, so a
+        # restore would silently resurrect results computed from a PREVIOUS run's values.
+        imp = parse_report("#%% code id=src nocache\ndata = rand(3)\n\n#%% code id=fit\nm = sum(data)\n\n#%% code id=leaf\nm2 = m + 1")
+        build_dependencies!(imp)
+        @test ReportEngine._memo_key(imp, imp.cells[2]) == ""        # direct dependent of impure
+        @test ReportEngine._memo_key(imp, imp.cells[3]) == ""        # transitive dependent of impure
+        pure = parse_report("#%% code id=src\ndata = [1,2,3]\n\n#%% code id=fit\nm = sum(data)")
+        build_dependencies!(pure)
+        @test !isempty(ReportEngine._memo_key(pure, pure.cells[2]))  # pure upstream stays keyable
+        # the `cache` tag opts IN regardless of runtime: the cell stays keyable, the flag round-trips,
+        # and downstream cells are unaffected (a cache-tagged stage is still pure by declaration)
+        ca = parse_report("#%% code id=stage cache\ncleaned = [1,2,3]\n\n#%% code id=use\nsum(cleaned)")
+        build_dependencies!(ca)
+        @test :cache in ca.cells[1].flags
+        @test !isempty(ReportEngine._memo_key(ca, ca.cells[1]))
+        @test !isempty(ReportEngine._memo_key(ca, ca.cells[2]))
+        @test :cache in parse_report(serialize_report(ca)).cells[1].flags
     end
 
     @testset "@asset file deps: static extraction + memo invalidation" begin

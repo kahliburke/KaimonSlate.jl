@@ -90,6 +90,7 @@ const TAG_INFO = [
   ['hidecode', 'hide the editor — show only the output'],
   ['trace', 'trace — inspect each value (re-runs the cell)'],
   ['nocache', "don't cache this cell (impure / side-effecting)"],
+  ['cache', "always persist this cell's result (pipeline stage — no time threshold)"],
 ];
 function _curTags(id) { const c = _cellById(id); return (c && c.tags) ? c.tags.slice() : []; }
 function _knownTagSet() { return new Set(TAG_INFO.map(t => t[0])); }
