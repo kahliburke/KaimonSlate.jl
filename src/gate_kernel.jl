@@ -301,6 +301,9 @@ function _spawn_worker!(k::GateKernel)
     port, stream_port = _next_ports()
     k.port = port; k.stream_port = stream_port
     logdir = joinpath(tempdir(), "kaimonslate"); mkpath(logdir)
+    # Worker stdout/stderr can carry notebook data — keep the shared tmp dir private (0700) so
+    # other local users can't read the logs; the file itself is locked to 0600 when opened below.
+    Sys.isunix() && (try; chmod(logdir, 0o700); catch; end)
     k.logpath = joinpath(logdir, "worker-$port.log")
     # Thread config. OpenBLAS spawns a pool of ~ncores whose IDLE threads busy-spin (polling the
     # clock against a park timeout) — for an interactive notebook firing many tiny BLAS ops they
@@ -339,6 +342,7 @@ function _spawn_worker!(k::GateKernel)
     close(out.in)
     Threads.@spawn begin
         io = open(k.logpath, "w")
+        Sys.isunix() && (try; chmod(k.logpath, 0o600); catch; end)
         try
             while !eof(out)
                 write(io, readavailable(out)); flush(io)

@@ -59,8 +59,11 @@ function entries(path)
     return out
 end
 
-# Full serialized source for a recorded hash (nothing if unknown).
+# Full serialized source for a recorded hash (nothing if unknown). Objects are
+# SHA-256-named, so a hash that isn't 64 hex chars is invalid — reject it outright
+# rather than let `../…` escape the object dir (arbitrary file read / overwrite).
 function content(path, hash::AbstractString)
+    occursin(r"^[0-9a-f]{64}$", String(hash)) || return nothing
     p = joinpath(_objdir(_dir(path)), String(hash))
     isfile(p) ? read(p, String) : nothing
 end

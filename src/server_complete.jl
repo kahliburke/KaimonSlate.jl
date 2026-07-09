@@ -536,8 +536,20 @@ function _make_router(h::Hub)
         name = get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")
         (isempty(name) || !endswith(lowercase(name), ".bib")) && return HTTP.Response(400, "expected a .bib name")
         nbdir = dirname(abspath(nb.path))
-        path = isabspath(name) ? String(name) : normpath(joinpath(nbdir, name))
-        (isfile(path) && (isabspath(name) || startswith(path, nbdir))) || return HTTP.Response(404, "not found")
+        path = normpath(isabspath(name) ? String(name) : joinpath(nbdir, name))
+        # Only serve a .bib the notebook actually DECLARES in a bibliography cell — resolved the
+        # same way bibliography_index does. Prevents this route reading an arbitrary file off disk
+        # while still honoring a legitimately-declared absolute bib path.
+        declared = Set{String}()
+        for c in nb.report.cells
+            (:bibliography in c.flags) || continue
+            occursin(r"@\w+\s*\{", c.source) && continue
+            for ln in split(c.source, '\n')
+                p = strip(ln); isempty(p) && continue
+                push!(declared, normpath(isabspath(p) ? String(p) : joinpath(nbdir, p)))
+            end
+        end
+        (path in declared && isfile(path)) || return HTTP.Response(404, "not found")
         HTTP.Response(200, ["Content-Type" => "text/plain; charset=utf-8"], read(path))
     end))
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
@@ -938,6 +950,51 @@ const _PUBLISH_RE = r"^/api/([^/]+)/publish-run\b"
 const _SITE_PUBLISH_RE = r"^/api/([^/]+)/site-publish\b"
 const _SITE_SYNC_RE = r"^/api/publish/site-sync\b"
 
+# ── Cross-origin defense (CSRF / DNS-rebinding) ───────────────────────────────
+# The API evaluates arbitrary Julia by design, so a browser page from ANY origin
+# must not be able to drive it. Two header checks (mirroring Jupyter's model):
+#   • Host allowlist — the `Host` a rebinding attacker's page carries is their own
+#     domain, not a loopback name, so pinning Host defeats DNS rebinding.
+#   • Origin allowlist — a cross-site fetch carries the attacker's Origin; reject it.
+# Loopback names pass by default; add LAN/tunnel names via KAIMONSLATE_ALLOWED_HOSTS
+# (comma-separated host or host:port). No Origin (a top-level navigation) is fine.
+function _allowed_hosts(h::Hub)
+    hosts = Set{String}(["127.0.0.1", "localhost", "::1"])
+    push!(hosts, h.host)
+    for x in split(get(ENV, "KAIMONSLATE_ALLOWED_HOSTS", ""), ','; keepempty = false)
+        s = _hostonly(strip(x))
+        isempty(s) || push!(hosts, s)
+    end
+    return hosts
+end
+
+# Strip an optional `:port` (and IPv6 brackets) from a Host/authority, leaving the bare host.
+function _hostonly(hp::AbstractString)
+    s = strip(String(hp))
+    isempty(s) && return ""
+    if startswith(s, "[")                       # [::1] or [::1]:8765
+        j = findfirst(']', s)
+        return j === nothing ? s : s[2:prevind(s, j)]
+    end
+    i = findlast(':', s)
+    (i !== nothing && i < lastindex(s) && all(isdigit, s[nextind(s, i):end])) && return s[1:prevind(s, i)]
+    return s
+end
+
+# Allow the request iff its Host is loopback/allowlisted AND its Origin (when present)
+# resolves to an allowlisted host. Returns false to reject with 403.
+function _request_allowed(h::Hub, msg)::Bool
+    allowed = _allowed_hosts(h)
+    host = _hostonly(HTTP.header(msg, "Host", ""))
+    (isempty(host) || host in allowed) || return false
+    origin = strip(HTTP.header(msg, "Origin", ""))
+    if !isempty(origin) && origin != "null"
+        ohost = try; _hostonly(HTTP.URI(origin).host); catch; ""; end
+        (ohost in allowed) || return false
+    end
+    return true
+end
+
 """
     start_hub(; host="127.0.0.1", port=8765) -> Hub
 
@@ -948,6 +1005,10 @@ function start_hub(; host = "127.0.0.1", port = 8765)
     h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock())
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
+        # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.
+        if !_request_allowed(h, stream.message)
+            HTTP.setstatus(stream, 403); HTTP.startwrite(stream); return
+        end
         target = stream.message.target
         m = match(_EVENTS_RE, target)
         if m !== nothing

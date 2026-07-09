@@ -57,8 +57,12 @@ _worker_port(nb::LiveNotebook) =
 _file_mtime(path::AbstractString) = try; round(Int, mtime(abspath(path))); catch; 0; end
 
 
-_html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store"], body)
-_asset(body, ctype) = HTTP.Response(200, ["Content-Type" => ctype, "Cache-Control" => "no-store"], body)
+# `frame-ancestors 'none'` / X-Frame-Options: DENY — the notebook UI must never be framed by another
+# page (clickjacking: the origin guard allows same-origin clicks, so a redressed frame could drive it).
+# A stricter CSP is deliberately NOT set: cell output is allowed to render arbitrary HTML/JS by design.
+const _FRAME_GUARD = ["X-Frame-Options" => "DENY", "Content-Security-Policy" => "frame-ancestors 'none'"]
+_html(body) = HTTP.Response(200, ["Content-Type" => "text/html", "Cache-Control" => "no-store", _FRAME_GUARD...], body)
+_asset(body, ctype) = HTTP.Response(200, ["Content-Type" => ctype, "Cache-Control" => "no-store", _FRAME_GUARD...], body)
 
 # ── Front-end vendor cache (offline support) ──────────────────────────────────
 # Third-party assets (CodeMirror, ECharts, KaTeX, Preact/signals/htm) are pinned in

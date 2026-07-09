@@ -843,7 +843,10 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
     if quiet
         try
             mkpath(dirname(logpath))
+            # Private perms: the hub log records request/worker detail; keep other local users out.
+            Sys.isunix() && (try; chmod(dirname(logpath), 0o700); catch; end)
             logio = open(logpath, "a")
+            Sys.isunix() && (try; chmod(logpath, 0o600); catch; end)
             println(logio, "── serve_notebook  $(Dates.now())  $path ──")
             prevlogger = Logging.global_logger(_FileDemuxLogger(logio, Logging.global_logger()))
         catch

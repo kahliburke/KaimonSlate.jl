@@ -819,6 +819,14 @@ end
 
 _gh_ok(cmd::Cmd) = success(pipeline(ignorestatus(cmd); stdout = devnull, stderr = devnull))
 
+# Authenticate git↔GitHub through gh's own credential helper rather than baking the OAuth token into
+# the remote URL — so the token never lands on the git process command line (where any other local
+# user could read it via `ps`/`/proc`). `credential.helper=` first clears any inherited helper; the
+# `!gh …` line delegates auth to gh. Wrap a clone/push whose URL is a plain https://github.com/… (no
+# token). Requires gh to be on PATH (the callers already resolve it with Sys.which).
+const _GH_CRED = "credential.helper=!gh auth git-credential"
+_gh_git(sub::Cmd) = `git -c credential.helper= -c $_GH_CRED $sub`
+
 # ── Multi-document site (blog) ────────────────────────────────────────────────────────────────────
 # A published repo is a SITE: many notebooks, each served from its own `/<slug>/`, with a generated
 # blog-style `index.html` at the root driven by `slate-site.json` (the doc manifest). Publishing a
@@ -1346,12 +1354,11 @@ index to `gh-pages` (no doc rebuild). `ordering` is an iterable of dicts `{slug,
 function reorder_published_site(repo::AbstractString, ordering)
     gh = Sys.which("gh"); gh === nothing && error("`gh` CLI not found")
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be owner/name")
-    token = strip(read(`$gh auth token`, String)); isempty(token) && error("`gh auth token` empty — run `gh auth login`")
-    pushurl = "https://x-access-token:$token@github.com/$repo.git"
+    url = "https://github.com/$repo.git"
     owner, name = split(repo, "/")
     work = mktempdir(); dir = joinpath(work, "site")
     try
-        _git_run(work, `git clone --depth 1 --branch gh-pages --single-branch $pushurl site`)[1] ||
+        _git_run(work, _gh_git(`clone --depth 1 --branch gh-pages --single-branch $url site`))[1] ||
             error("couldn't clone $repo gh-pages — is the site published?")
         manifest = _read_site_manifest(dir)
         docs = get(manifest, "docs", Any[])
@@ -1376,8 +1383,8 @@ function reorder_published_site(repo::AbstractString, ordering)
             error("commit failed: $logc")
         end
         sha = strip(_git_run(dir, `git rev-parse HEAD`)[2])
-        ok, log = _git_run(dir, `git push $pushurl gh-pages`)
-        ok || error("push failed: $(replace(log, token => "***"))")
+        ok, log = _git_run(dir, _gh_git(`push $url gh-pages`))
+        ok || error("push failed: $log")
         return (; ok = true, changed = true, url = "https://$owner.github.io/$name/", commit = sha)
     finally
         rm(work; recursive = true, force = true)
@@ -1396,9 +1403,8 @@ function deploy_dir_to_gh_pages(repo::AbstractString, dir::AbstractString; priva
                                 create::Bool = true, wait_deploy::Bool = true)
     gh = Sys.which("gh"); gh === nothing && error("`gh` CLI not found")
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be owner/name")
-    token = strip(read(`$gh auth token`, String)); isempty(token) && error("`gh auth token` empty — run `gh auth login`")
     owner, name = split(repo, "/")
-    pushurl = "https://x-access-token:$token@github.com/$repo.git"
+    url = "https://github.com/$repo.git"
     work = mktempdir()
     try
         wdir = joinpath(work, "site"); cp(dir, wdir)                 # copy: don't add .git/workflow to the cache
@@ -1414,8 +1420,8 @@ function deploy_dir_to_gh_pages(repo::AbstractString, dir::AbstractString; priva
         okc, logc = _git_run(wdir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Publish site"`)
         okc || error("git commit failed: $logc")
         sha = strip(_git_run(wdir, `git rev-parse HEAD`)[2])
-        ok, log = _git_run(wdir, `git push --force $pushurl gh-pages`)
-        ok || error("git push failed: $(replace(log, token => "***"))")
+        ok, log = _git_run(wdir, _gh_git(`push --force $url gh-pages`))
+        ok || error("git push failed: $log")
         dep = wait_deploy ? _await_pages_deploy(gh, repo, sha) : (; ok = true, conclusion = "success", done = true, url = "")
         return (; ok = pok && dep.ok, url = "https://$owner.github.io/$name/", commit = sha,
                 error = pok ? (dep.ok ? "" : "Pages deploy: $(dep.conclusion)") : strip(replace(plog, r"\s+" => " ")))
@@ -1562,11 +1568,9 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
     gh === nothing && error("`gh` CLI not found on PATH. Install it and run `gh auth login`, then retry.")
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || error("repo must be \"owner/name\" (got \"$repo\")")
     owner, name = split(repo, "/")
-    token = strip(read(`$gh auth token`, String))                 # push auth without touching git config
-    isempty(token) && error("`gh auth token` returned nothing — run `gh auth login` first.")
     slg = isempty(strip(slug)) ? doc_slug(nb) : _slugify(slug)
     isempty(slg) && (slg = _slugify(nb.id))
-    pushurl = "https://x-access-token:$token@github.com/$repo.git"
+    url = "https://github.com/$repo.git"                           # push auth comes from gh's credential helper
 
     work = mktempdir()
     dir = joinpath(work, "site")
@@ -1581,7 +1585,7 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
             created = true
         end
         # Start from the EXISTING gh-pages so other documents survive; a fresh repo / no branch → init clean.
-        cloned = !created && _git_run(work, `git clone --depth 1 --branch gh-pages --single-branch $pushurl site`)[1]
+        cloned = !created && _git_run(work, _gh_git(`clone --depth 1 --branch gh-pages --single-branch $url site`))[1]
         cloned || (mkpath(dir); (ok = _git_run(dir, `git init -q -b gh-pages`)[1]) || error("git init failed"))
 
         # A `home` notebook renders to the site ROOT as a custom front page; any other notebook builds
@@ -1616,8 +1620,8 @@ function publish_site(nb::LiveNotebook, repo::AbstractString; slug::AbstractStri
         end
         sha = strip(_git_run(dir, `git rev-parse HEAD`)[2])
         # Cloned → fast-forward push; fresh → force (creates/overwrites the empty-or-absent gh-pages).
-        ok, log = _git_run(dir, cloned ? `git push $pushurl gh-pages` : `git push --force $pushurl gh-pages`)
-        ok || error("git push failed: $(replace(log, token => "***"))")
+        ok, log = _git_run(dir, cloned ? _gh_git(`push $url gh-pages`) : _gh_git(`push --force $url gh-pages`))
+        ok || error("git push failed: $log")
         # The push triggered the deploy workflow — WAIT for it and report the REAL result, so a stuck or
         # failed GitHub deploy is no longer mistaken for a successful publish (the whole point of this).
         dep = _await_pages_deploy(gh, repo, sha)
