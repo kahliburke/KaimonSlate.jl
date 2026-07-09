@@ -835,6 +835,11 @@ function create_tools(GateTool::Type)
       `using VideoIO` lights up, and record it in the footer so the notebook stays reproducible.
       Add SEVERAL at once — `name="VideoIO, ColorTypes, ImageMorphology"` (whitespace/comma
       separated) — to resolve + precompile them together and re-run the notebook just once.
+      Each add-spec can be a registry name (`Foo` or `Foo@1.2.3` for a pinned version), a **git URL**
+      (`https://github.com/u/Y.jl`, optionally `…#rev` where rev is a tag/release, branch, or commit
+      SHA → `Pkg.add(url=…, rev=…)`), or a **local path** (`~/dev/MyPkg`, `/abs/path`, `./rel`) which is
+      `develop`ed (mutable, hot-reloadable). Registry + git specs stay reproducible and travel to a
+      remote worker via the notebook's Manifest; a develop'd local checkout is rsync'd to the remote.
     - `op="rm", name="VideoIO"`: remove it (also accepts several).
 
     Adding may precompile (can take a while). The parent project's deps are never touched.
@@ -843,8 +848,10 @@ function create_tools(GateTool::Type)
         nb, err = _nb(notebook); nb === nothing && return err
         if op == "list"
             e = NotebookServer._notebook_adds(nb)
+            _prov(p) = get(p, "source", "registry") == "path" ? "  [dev: $(get(p, "origin", ""))]" :
+                       get(p, "source", "registry") == "git" ? "  [git: $(get(p, "origin", ""))]" : ""
             adds = isempty(e.adds) ? "  (none yet)" :
-                   join(["  $(get(p, "name", "")) $(get(p, "version", ""))" for p in e.adds], "\n")
+                   join(["  $(get(p, "name", "")) $(get(p, "version", ""))$(_prov(p))" for p in e.adds], "\n")
             parent = isempty(e.parent) ? "" :
                      "\nInherited from parent ($(basename(e.parentpath))) — read-only:\n  " *
                      join([string(get(p, "name", "")) for p in e.parent], ", ")

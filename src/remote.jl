@@ -95,11 +95,12 @@ struct RemoteTarget <: RunTarget
     project::String              # remote parent-project path (provisioned + synced)
     port::Int                    # pinned remote main/REP port (0 ⇒ auto via _next_ports)
     stream_port::Int             # pinned remote stream/PUB port (0 ⇒ port+1)
+    origin_env::String           # LOCAL project dir whose exact env to replicate on the remote ("" ⇒ none)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
              project::AbstractString = "~/.cache/kaimonslate/remote",
-             port::Int = 0, stream_port::Int = 0) =
-    RemoteTarget(String(ssh_host), transport, String(project), port, stream_port)
+             port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "") =
+    RemoteTarget(String(ssh_host), transport, String(project), port, stream_port, String(origin_env))
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -294,23 +295,109 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     else
         _rlog("provision [2/3] KaimonGate env already built on $host (skip)")
     end
-    # 3. parent project (Project.toml + /src) → t.project, then instantiate
-    if !isempty(parent_project) && isdir(parent_project)
-        _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate")
+    # 3. Environment — reproduce the notebook's LOCAL env on the remote so packages match EXACTLY:
+    #    ship the origin project's Project.toml + Manifest.toml (the Manifest pins registry versions and
+    #    records git deps by url+tree-hash → they clone), rsync any dev'd deps' local sources + rewrite
+    #    their Manifest paths to the remote copies, then instantiate. Covers registry, GitHub, and dev'd
+    #    packages + the project's own /src. (Data files are out of scope for now.)
+    if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
+        _replicate_env!(t)
+    elseif !isempty(parent_project) && isdir(parent_project)
+        _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)")
         _rsync!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
             error("provision: rsync parent project → $host failed")
-        rel = startswith(t.project, "~/") ? t.project[3:end] : t.project   # homedir()-join in the script; ~ won't expand under ssh
-        code = """
-        import Pkg
-        Pkg.activate(joinpath(homedir(), raw"$rel"))
-        Pkg.instantiate()
-        """
-        _ssh_julia!(host, code, "instantiate parent project on $host")
+        rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+        first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.instantiate()",
+                          "instantiate parent project on $host"))
     else
-        _rlog("provision [3/3] no parent project (detached notebook) — skip")
+        _rlog("provision [3/3] no origin env (bare notebook) — skip")
     end
     _rlog("provision DONE host=$host")
     return nothing
+end
+
+# Dev'd dependencies in a Manifest = entries carrying a `path` (a local checkout, `Pkg.develop`). Returns
+# name => absolute-local-path. Registry deps have no path; git deps have a `repo-url` (they clone on the
+# remote straight from the Manifest, so need no special handling). Paths may be relative to the env dir.
+# A line-scan of the stable `[[deps.Name]]` … `path = "…"` format — no TOML dep needed on the hub side.
+function _dev_deps(manifest::AbstractString, envdir::AbstractString)
+    out = Pair{String,String}[]
+    isfile(manifest) || return out
+    curname = ""
+    for line in eachline(manifest)
+        m = match(r"^\[\[deps\.(.+?)\]\]\s*$", line)
+        if m !== nothing; curname = String(m.captures[1]); continue; end
+        startswith(strip(line), "[") && (curname = "")           # entered some other table → out of a deps block
+        isempty(curname) && continue
+        pm = match(r"^\s*path\s*=\s*\"(.*)\"\s*$", line)
+        pm === nothing && continue
+        p = String(pm.captures[1])
+        push!(out, curname => (isabspath(p) ? p : abspath(joinpath(envdir, p))))
+        curname = ""
+    end
+    return out
+end
+
+const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # rsync'd sources for dev'd deps (Pkg.develop targets)
+
+"""
+    _replicate_env!(t::RemoteTarget) -> nothing
+
+Reproduce `t.origin_env` (the notebook's local project) on the remote at `t.project`: rsync it wholesale
+(Project.toml + Manifest.toml + any /src), rsync each dev'd dep's source into `devsrc/<name>` and rewrite
+the Manifest to point there, then instantiate. The Manifest makes registry versions exact and clones git
+deps from their recorded urls; the dev-source rsync makes local checkouts resolve on the host.
+"""
+function _replicate_env!(t::RemoteTarget)
+    host = t.ssh_host
+    origin = t.origin_env
+    _rlog("env: replicating origin env → $host:$(t.project)  (from $origin)")
+    # 1. the origin project WHOLESALE, INCLUDING the Manifest (exact versions) + its own /src.
+    _rsync!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"]) ||
+        error("env: rsync origin project → $host failed")
+    # 2. dev'd deps: rsync each local source into devsrc/<name>; collect (name → $HOME-relative remote path).
+    devs = _dev_deps(joinpath(origin, "Manifest.toml"), origin)
+    rewrites = Tuple{String,String}[]
+    for (name, lpath) in devs
+        if !isdir(lpath)
+            _rlog("env: dev dep '$name' source missing locally ($lpath) — skipping (its Manifest path will dangle)")
+            continue
+        end
+        rp = "$_REMOTE_DEVSRC/$name"
+        _rsync!(host, lpath, rp; excludes = [".git", "*.cov"]) ||
+            (_rlog("env: rsync dev dep '$name' → $host failed"); continue)
+        push!(rewrites, (name, rp))
+        _rlog("env: dev dep '$name' → $host:$rp")
+    end
+    # 3. rewrite the remote Manifest's dev paths to the rsync'd locations, then instantiate.
+    projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites), "instantiate replicated env on $host")
+    ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
+    return nothing
+end
+
+# The remote script: rewrite each dev dep's Manifest `path` to its rsync'd remote source, then instantiate
+# the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
+function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}})
+    io = IOBuffer()
+    println(io, "import Pkg, TOML")
+    println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
+    println(io, "mf = joinpath(proj, \"Manifest.toml\")")
+    if !isempty(rewrites)
+        println(io, "if isfile(mf)")
+        println(io, "  data = TOML.parsefile(mf)")
+        println(io, "  deps = get(data, \"deps\", Dict{String,Any}())")
+        for (name, rp) in rewrites
+            println(io, "  if haskey(deps, raw\"$name\")")
+            println(io, "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\")); end")
+            println(io, "  end")
+        end
+        println(io, "  open(mf, \"w\") do _io; TOML.print(_io, data); end")
+        println(io, "end")
+    end
+    println(io, "Pkg.activate(proj)")
+    println(io, "Pkg.instantiate()")
+    return String(take!(io))
 end
 
 # ── continuous sync ────────────────────────────────────────────────────────────
@@ -341,8 +428,10 @@ function _sync_loop(t::RemoteTarget, parent_project::AbstractString, key::String
         try
             FileWatching.watch_folder(watchdir, 2.0)          # block until a change (or 2s tick)
             sleep(0.15)                                        # coalesce a burst of saves
+            # Sync /src (project code) only — NEVER the env files, or we'd clobber the replicated
+            # Project/Manifest (the exact env `_replicate_env!` set up) on every save.
             _rsync!(t.ssh_host, parent_project, t.project;
-                    excludes = ["Manifest.toml", ".git", "*.cov"])
+                    excludes = ["Manifest.toml", "Project.toml", ".git", "*.cov"])
         catch e
             @warn "slate remote: sync loop error" host = t.ssh_host exception = (e,) maxlog = 3
             sleep(1.0)

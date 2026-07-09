@@ -57,8 +57,15 @@ async function loadPackages() {
     nb.length + ' notebook' + (parent.length ? ' · ' + parent.length + ' from parent' : (r.detached ? ' · detached' : '')) +
     (_pkgManageable ? '' : ' · read-only (no project)');
   const inp = document.getElementById('pkgin'); inp.disabled = !_pkgManageable;
+  // Provenance badge: flag a dep that points at something machine-specific rather than a pinned
+  // registry release — a dev'd local checkout ("dev", won't resolve elsewhere unless the source
+  // travels) or a git URL ("git", pinned to a rev). Registry deps show just their version.
+  const srcBadge = p =>
+    p.source === 'path' ? `<span class="pkgsrc path" title="local dev checkout — ${_esc(p.origin || '')}\n(machine-specific: won't resolve on another machine unless the source travels)">dev</span>`
+    : p.source === 'git' ? `<span class="pkgsrc git" title="git — ${_esc(p.origin || '')}">git</span>`
+    : '';
   const row = (p, removable) =>
-    `<div class="pkgrow"><span class="pkgname">${_esc(p.name)}</span><span class="pkgver">${_esc(p.version || '')}</span>` +
+    `<div class="pkgrow"><span class="pkgname">${_esc(p.name)}</span>${srcBadge(p)}<span class="pkgver">${_esc(p.version || '')}</span>` +
     (removable ? `<button class="cdel" onclick="pkgRm('${_esc(p.name)}')" title="remove">✕</button>` : '') + '</div>';
   let html = '';
   html += `<div class="pkggrouphdr">Notebook${r.detached ? ' (detached — all deps)' : ' adds'}</div>`;

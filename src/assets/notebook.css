@@ -806,6 +806,12 @@ body.modkey .cm-content { cursor: pointer; }
 .pkgname { font-family:'Cascadia Code',monospace; color:var(--text); font-size:.84rem; }
 .pkgver { color:var(--dim); font-size:.74rem; margin-left:auto; font-family:monospace; }
 .pkgrow .cdel { margin-left:4px; }
+.pkgsrc { font-size:.6rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+  padding:1px 6px; border-radius:20px; cursor:help; flex:0 0 auto; }
+.pkgsrc.path { color:var(--gold); background:color-mix(in srgb, var(--gold) 12%, transparent);
+  border:1px solid color-mix(in srgb, var(--gold) 40%, transparent); }
+.pkgsrc.git { color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, transparent);
+  border:1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
 /* Per-cell live progress bars (slate_progress / @progress / @withprogress), atop a running cell.
    One .cellprogrow per active bar id, so nested scopes stack. */
 .cellprog { display:flex; flex-direction:column; gap:3px; padding:4px 10px 6px; font-size:.76rem; }

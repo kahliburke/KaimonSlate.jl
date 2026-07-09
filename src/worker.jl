@@ -453,7 +453,10 @@ function __slate_module_help(name::String)
     return module_help(m, name)
 end
 
-"The worker project's direct dependencies as `{name, version}` (for eager docs auto-index)."
+"The worker project's direct dependencies as `{name, version, uuid, source, origin}` (for eager docs
+auto-index + the package viewer). `source` = \"registry\" | \"path\" (a dev'd local checkout) | \"git\"
+(added from a URL); `origin` carries the path or `url#rev` for the non-registry ones — so the UI can flag
+that a dep points at something machine-specific rather than a pinned registry release."
 function __slate_project_deps()
     out = Dict{String,Any}[]
     try
@@ -462,7 +465,23 @@ function __slate_project_deps()
         for (name, uuid) in proj.dependencies
             pi = get(info, uuid, nothing)
             ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
-            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid)))
+            source = "registry"; origin = ""
+            if pi !== nothing
+                try
+                    if getfield(pi, :is_tracking_path)
+                        source = "path"; origin = String(something(getfield(pi, :source), ""))
+                    elseif getfield(pi, :is_tracking_repo)
+                        source = "git"
+                        url = ""; rev = ""
+                        try; url = String(something(getfield(pi, :git_source), "")); catch; end
+                        try; rev = String(something(getfield(pi, :git_revision), "")); catch; end
+                        origin = isempty(rev) ? url : (isempty(url) ? rev : url * "#" * rev)
+                    end
+                catch
+                end
+            end
+            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid),
+                                        "source" => source, "origin" => origin))
         end
     catch
     end
@@ -628,18 +647,50 @@ function __slate_bundle_info()
 end
 
 "Add or remove package(s) in the worker's OWN active project (the notebook's deps).
-`op` is \"add\" or \"rm\". `name` is one package, or several separated by whitespace/commas —
-all applied in a single resolve (one precompile). Returns `{ok, message}`."
+`op` is \"add\" or \"rm\". `name` is one spec, or several separated by whitespace/commas — all applied
+in a single resolve (one precompile). Each add-spec may be a registry name (`Foo` or `Foo@1.2`), a git
+URL (`https://…​[.git][#rev]`, `git@…`) → `Pkg.add(url=…)`, or a LOCAL path (`/…`, `~/…`, `./…`, or an
+existing dir) → `Pkg.develop(path=…)` (so it's a dev'd dep, hot-reloadable + carried to remote workers).
+Returns `{ok, message}`."
 function __slate_pkg(op, name)
-    names = filter(!isempty, split(String(name), r"[\s,]+"))
-    isempty(names) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    tokens = filter(!isempty, split(String(name), r"[\s,]+"))
+    isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    o = String(op)
     try
-        o = String(op)
-        o == "add" ? Pkg.add(names) :
-        o == "rm"  ? Pkg.rm(names) :
-        return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
-        return Dict{String,Any}("ok" => true,
-                                "message" => "$(o == "add" ? "added" : "removed") $(join(names, ", "))")
+        if o == "rm"
+            Pkg.rm(String.(tokens))
+            return Dict{String,Any}("ok" => true, "message" => "removed $(join(tokens, ", "))")
+        elseif o == "add"
+            adds = Pkg.PackageSpec[]      # registry names + git urls → Pkg.add
+            devs = Pkg.PackageSpec[]      # local checkouts → Pkg.develop
+            labels = String[]
+            for tok in tokens
+                t = String(tok)
+                if occursin(r"^(https?://|git://|git@|ssh://)"i, t) || endswith(t, ".git") || endswith(t, ".git/")
+                    # url or url#rev  (rev = branch/tag/sha)
+                    parts = split(t, '#'; limit = 2)
+                    url = String(parts[1]); rev = length(parts) == 2 ? String(parts[2]) : ""
+                    push!(adds, isempty(rev) ? Pkg.PackageSpec(url = url) : Pkg.PackageSpec(url = url, rev = rev))
+                    push!(labels, t)
+                elseif startswith(t, "/") || startswith(t, "~/") || startswith(t, "./") ||
+                       startswith(t, "../") || isdir(expanduser(t))
+                    push!(devs, Pkg.PackageSpec(path = abspath(expanduser(t))))
+                    push!(labels, t)
+                elseif occursin('@', t)                       # name@version
+                    nm, ver = split(t, '@'; limit = 2)
+                    push!(adds, Pkg.PackageSpec(name = String(nm), version = String(ver)))
+                    push!(labels, t)
+                else
+                    push!(adds, Pkg.PackageSpec(name = t))
+                    push!(labels, t)
+                end
+            end
+            isempty(adds) || Pkg.add(adds)
+            isempty(devs) || Pkg.develop(devs)
+            return Dict{String,Any}("ok" => true, "message" => "added $(join(labels, ", "))")
+        else
+            return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
+        end
     catch e
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
