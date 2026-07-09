@@ -29,61 +29,94 @@ lines(1:n, sin.(range(0, 4π, n)))
 | `ColorPicker(default)` | color picker | hex `String` |
 | `DateField()` / `TimeField()` | date / time picker | `String` |
 | `Button(label)` | action button | click count |
+| `TableSelect(data)` | clickable [table](tables.md) | clicked row as a `NamedTuple` (or `nothing`) |
+| `playhead(anim)` | [animation](animation.md) player (driven) | current frame index |
+
+`Button` pairs with [`@onclick`](live-updates.md) to run an action on click. `TableSelect` renders
+any [`slate_table`](tables.md)-compatible data and binds the row you click; `playhead` is a
+*driven* control that receives an animation's current frame so another cell can react to playback.
 
 All accept a `label` keyword. The value **reconciles** across re-runs: re-running a bind cell
 updates the widget's range/options but keeps the user's current value (unless its type or
 domain changed).
 
-::: tip Insert a control fast
-Press **⌘K** and type "bind" to insert any of these as a snippet — at the cursor of the
-selected code cell, or into a fresh cell.
-:::
+!!! tip "Insert a control fast"
+    Press **⌘K** and type "bind" to insert any of these as a snippet — at the cursor of the
+    selected code cell, or into a fresh cell.
 
 ## Gallery
 
-Each control as it renders in a cell:
+Each control as it renders in a cell.
 
-**`Slider(0:100; default = 42, label = "samples")`**
+#### Slider
+`Slider(0:100; default = 42, label = "samples")`
+
 ![widget: Slider](./assets/widget-slider.png)
 
-**`NumberField(0, 100, 12; label = "count")`**
+#### NumberField
+`NumberField(0, 100, 12; label = "count")`
+
 ![widget: NumberField](./assets/widget-numberfield.png)
 
-**`Checkbox(true; label = "I agree")`**
+#### Checkbox
+`Checkbox(true; label = "I agree")`
+
 ![widget: Checkbox](./assets/widget-checkbox.png)
 
-**`Toggle(true; label = "stream", on = "Live", off = "Paused")`**
+#### Toggle
+`Toggle(true; label = "stream", on = "Live", off = "Paused")`
+
 ![widget: Toggle](./assets/widget-toggle.png)
 
-**`TextField("Ada"; label = "name")`**
+#### TextField
+`TextField("Ada"; label = "name")`
+
 ![widget: TextField](./assets/widget-textfield.png)
 
-**`TextArea("…"; label = "notes")`**
+#### TextArea
+`TextArea("…"; label = "notes")`
+
 ![widget: TextArea](./assets/widget-textarea.png)
 
-**`Select(["red", "green", "blue"], "green"; label = "color")`** — the default is the second
+#### Select
+`Select(["red", "green", "blue"], "green"; label = "color")` — the default is the second
 *positional* argument (as with `Radio`/`MultiSelect`); `label` is a keyword.
+
 ![widget: Select](./assets/widget-select.png)
 
-**`Radio(["S", "M", "L"], "M"; label = "size")`**
+#### Radio
+`Radio(["S", "M", "L"], "M"; label = "size")`
+
 ![widget: Radio](./assets/widget-radio.png)
 
-**`MultiSelect(["x", "y", "z"], ["x", "z"]; label = "tags")`**
+#### MultiSelect
+`MultiSelect(["x", "y", "z"], ["x", "z"]; label = "tags")`
+
 ![widget: MultiSelect](./assets/widget-multiselect.png)
 
-**`MultiCheckBox(["a", "b", "c"], ["b"]; label = "flags")`**
+#### MultiCheckBox
+`MultiCheckBox(["a", "b", "c"], ["b"]; label = "flags")`
+
 ![widget: MultiCheckBox](./assets/widget-multicheckbox.png)
 
-**`ColorPicker("#56d364"; label = "tint")`**
+#### ColorPicker
+`ColorPicker("#56d364"; label = "tint")`
+
 ![widget: ColorPicker](./assets/widget-colorpicker.png)
 
-**`DateField("2026-06-05"; label = "date")`**
+#### DateField
+`DateField("2026-06-05"; label = "date")`
+
 ![widget: DateField](./assets/widget-datefield.png)
 
-**`TimeField("09:30"; label = "time")`**
+#### TimeField
+`TimeField("09:30"; label = "time")`
+
 ![widget: TimeField](./assets/widget-timefield.png)
 
-**`Button("Run")`**
+#### Button
+`Button("Run")`
+
 ![widget: Button](./assets/widget-button.png)
 
 ## Mixed cells

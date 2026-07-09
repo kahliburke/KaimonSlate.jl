@@ -27,7 +27,7 @@ const LOGO_SRC = 'assets/slate-logo.svg'
 const SHOT_WIDTHS: Record<string, number> = {
   'agent-panel.png': 380, 'packages-panel.png': 480, 'history-panel.png': 420,
   'controls-palette.png': 300, 'command-palette.png': 560, 'export-dialog.png': 520,
-  'settings.png': 520,
+  'settings.png': 520, 'publish-panel.png': 480,
 }
 function slateAssetsPlugin(md: MarkdownIt, assetBase: string) {
   md.renderer.rules.image = function (
@@ -114,13 +114,20 @@ export default withMermaid(defineConfig({
         text: 'Guide',
         items: [
           { text: 'Notebook Basics', link: '/notebook-basics' },
+          { text: 'Cell Tags & Caching', link: '/cell-tags' },
           { text: 'Command Palette & Help', link: '/palette-and-help' },
           { text: 'Reactive Cells', link: '/reactivity' },
+          { text: 'Live Updates', link: '/live-updates' },
           { text: 'Widgets & @bind', link: '/widgets' },
-          { text: 'Charts & Tables', link: '/visualization' },
+          { text: 'Charts', link: '/visualization' },
+          { text: 'Tables', link: '/tables' },
+          { text: 'Animation', link: '/animation' },
+          { text: 'Documents & Citations', link: '/documents' },
+          { text: 'Slides & Present', link: '/slides' },
           { text: 'The AI Agent', link: '/agent' },
           { text: 'Timeline', link: '/history' },
           { text: 'Export', link: '/export' },
+          { text: 'Publishing', link: '/publishing' },
           { text: 'Packages', link: '/packages' },
           { text: 'Configuration', link: '/configuration' },
         ],

@@ -1,84 +1,111 @@
 # Installation
 
-KaimonSlate is a Julia package designed to run as a **[Kaimon](https://github.com/kahliburke/Kaimon.jl)
-extension** — that's the full experience, and the recommended way to install it. Each notebook
-evaluates in its own gate worker (clean namespace, package management, a tailable log) and the
-**AI agent** can drive the notebook through the `slate.*` tools. A lighter **standalone** mode
-is also available for a quick look without Kaimon.
+KaimonSlate runs best as a **[Kaimon](https://github.com/kahliburke/Kaimon.jl) extension** —
+that's the full experience: each notebook evaluates in its own gate worker (clean namespace,
+package management, a tailable log) and the **AI agent** can drive the notebook through the
+`slate.*` tools. A lighter **standalone** mode works without Kaimon for a quick look.
+
+Either way, you drive it with the **`slate` app** — a small launcher, installed with Julia's app
+system, that starts (or attaches to) the notebook hub and shows a status TUI.
 
 ## Requirements
 
-- Julia 1.10 or newer.
+- **Julia 1.12 or newer** — the `slate` app uses Julia's app system.
 - A browser (any modern Chromium/Firefox/Safari).
-- **[Kaimon](https://github.com/kahliburke/Kaimon.jl)** — for the gate workers and the AI agent.
-  For the agent's models: a logged-in `claude` CLI (Claude models) and/or a running
+- **[Kaimon](https://github.com/kahliburke/Kaimon.jl)** (recommended) — for the gate workers and
+  the AI agent. For the agent's models: a logged-in `claude` CLI (Claude models) and/or a running
   [Ollama](https://ollama.com) (local models).
 
-## Recommended: as a Kaimon extension
+## Recommended path
 
-This is the path most users want, and it's **zero-setup** — you don't hand-edit any config or
-type `serve_notebook` at a REPL. Kaimon manages the KaimonSlate subprocess, starts the server,
-gives each notebook its own worker, and exposes the notebook to the agent.
+### 1. Install Kaimon
 
-1. **Install Kaimon** and make sure it runs (see the Kaimon docs). Log in the `claude` CLI
-   and/or start Ollama if you want the agent.
+Install Kaimon and make sure it runs (see the Kaimon docs). Log in the `claude` CLI and/or start
+Ollama if you want the agent. This gives KaimonSlate its gate workers and the agent runtime.
 
-2. **Install KaimonSlate** into an environment Kaimon can see:
+### 2. Install the `slate` app
 
-   ```julia
-   using Pkg
-   Pkg.add(url = "https://github.com/kahliburke/KaimonSlate.jl")
-   using KaimonSlate   # on load, it registers itself with Kaimon if Kaimon is installed
-   ```
+From the Pkg REPL (press `]`), add KaimonSlate as an **app** — this puts a `slate` launcher on
+your `PATH`:
 
-   On load KaimonSlate **auto-registers** — it adds itself to Kaimon's extension list
-   (`~/.config/kaimon/extensions.json`) so there's nothing to wire up by hand. (It's
-   idempotent; opt out with `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`, or register a specific
-   checkout explicitly with [`register_extension`](@ref).)
+```julia-repl
+pkg> app add KaimonSlate
+```
 
-3. **Launch Kaimon.** It loads the `slate` namespace, **auto-starts the notebook server**, and
-   the agent gains the `slate.*` tools (`slate.open` / `slate.list` / `slate.close`, plus the
-   per-notebook `slate_add_cell` / `slate_edit_cell` / `slate_run` / `slate_view` / …).
+(For an unregistered checkout, point at the repo:
+`pkg> app add https://github.com/kahliburke/KaimonSlate.jl`.) The launcher lands in Julia's app
+bin — if `slate` isn't found, add that directory (printed by `app add`) to your `PATH`.
 
-4. **Open the browser** to the server's index — `http://127.0.0.1:8765` by default
-   (configurable with `KAIMONSLATE_PORT`). The index lists open notebooks and lets you open
-   more by path; click one to start working. Or just **ask the agent** to open a notebook for
-   you (`slate.open`) — the **💬 agent** chat pane is right there in the UI.
+### 3. Run `slate`
 
-You normally never call `serve_notebook` or `start_server` yourself — those are for the
-standalone path below. See [The AI Agent](agent.md) for the full tool surface and the model /
-permission options.
+```sh
+slate                 # start (or attach to) the hub + status TUI
+slate my_analysis.jl  # also open that notebook in the browser (created if missing)
+```
+
+The **first time** you run it with Kaimon installed, `slate` offers to register itself as a
+Kaimon extension:
+
+```
+Register Slate as a Kaimon extension now?  [Y]es · [n]o · [d]on't ask again
+```
+
+Say **yes** and (re)start Kaimon. Now your agents have the `slate.*` tools and **Kaimon serves
+your notebooks from its own hub — no extra process** — and running `slate` again **attaches** to
+that hub as a live status viewer.
+
+!!! tip "Consented, not automatic"
+    Registration is a one-time prompt you approve — it replaces the old silent auto-register on
+    package load. Nothing wires itself into Kaimon behind your back;
+    `KaimonSlate.register_extension()` registers manually, and `slate` never overwrites a
+    registration you removed.
+
+### 4. Open the browser
+
+`slate` opens your notebook automatically. Otherwise browse the hub index at
+**`http://127.0.0.1:8765`** (set `KAIMONSLATE_PORT` to move it) — it lists open notebooks and
+opens more by path — or just **ask the 💬 agent** to open one (`slate.open`). See
+[The AI Agent](agent.md) for the full tool surface.
 
 ## Standalone (without Kaimon)
 
-For a quick look — cells evaluate, widgets and figures work, and the [Timeline](history.md)
-records history. The AI agent is unavailable (it needs Kaimon), and notebooks evaluate
-**in-process** rather than in a per-notebook worker.
+`slate --own` runs the hub **in-process**, without Kaimon (also the default when Kaimon isn't
+installed):
 
-```julia
-using KaimonSlate
-
-# Open one notebook and block, serving at http://127.0.0.1:8765
-KaimonSlate.serve_notebook("analysis.jl")
+```sh
+slate --own                 # own the hub locally, even if a Kaimon extension is registered
+slate --own analysis.jl
 ```
 
-Or start a non-blocking hub you can add notebooks to:
+Cells evaluate, widgets and figures work, and the [Timeline](history.md) records history. The AI
+agent is unavailable (it needs Kaimon), and notebooks evaluate in-process rather than in a
+per-notebook worker.
 
-```julia
-h = KaimonSlate.start_server("analysis.jl"; port = 8765)
-# ... later ...
-KaimonSlate.stop_server(h)
-```
+## The status TUI
 
-If the notebook file does not exist it is created with a starter cell. Open the printed URL;
-the index page lists open notebooks and lets you open more.
+However you start it, `slate` shows a terminal dashboard:
 
-::: tip In-process vs. gate worker
-Even standalone, a notebook gets its own **gate worker** when it sits inside a Julia project
-and Kaimon's gate is available — giving it a clean namespace, a tailable log, package
-management, and isolation from the server. Otherwise it evaluates in-process. See
-[Architecture](architecture.md).
-:::
+![The slate status TUI: server state, the hub URL, Kaimon-extension status, and a live table of open notebooks with their cell / running / stale / error counts](./assets/slate-tui.gif)
+
+- **Server** — whether the hub is *up* (this process owns it), *attached* (an external
+  Kaimon-extension hub), or *waiting* for the extension to come up — plus the hub URL and whether
+  Slate is registered with Kaimon.
+- **Notebooks** — a live table of every open notebook: cells, running / stale / errored counts,
+  its worker port, and URL.
+- **Keys** — `↑↓`/`enter` open the selected notebook, `o` opens the hub index, `r` restarts the
+  hub you own, `s` starts a local hub (when waiting on the extension), `q` quits.
+
+## Embedding (programmatic)
+
+To drive the hub from your own script instead of the app, the REPL API is still available —
+`serve_notebook` / `start_server` / `stop_server` — see [Configuration](configuration.md#serving)
+and the [API Reference](api.md).
+
+!!! tip "In-process vs. gate worker"
+    Even standalone, a notebook gets its own **gate worker** when it sits inside a Julia project
+    and Kaimon's gate is available — giving it a clean namespace, a tailable log, package
+    management, and isolation from the server. Otherwise it evaluates in-process. See
+    [Architecture](architecture.md).
 
 ## Next steps
 

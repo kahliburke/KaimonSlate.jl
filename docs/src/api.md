@@ -1,7 +1,8 @@
 # API Reference
 
-KaimonSlate is normally used through its UI and the agent's `slate.*` tools, but the serving
-layer is a small public Julia API. Most users only need [`serve_notebook`](#).
+KaimonSlate is normally used through the [`slate` app](installation.md), its UI, and the agent's
+`slate.*` tools. The serving layer below is a small public Julia API for **embedding** the hub in
+your own scripts — the app is the everyday entry point.
 
 ## Serving a notebook
 

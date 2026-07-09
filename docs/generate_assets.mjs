@@ -25,7 +25,7 @@ const PORT = Number(process.env.SLATE_DOCS_PORT || 8799)
 const BASE = `http://127.0.0.1:${PORT}`
 const SCALE = 2
 const FIRST = 'demo'                                          // serve_notebook opens this one
-const EXTRA = ['widgets', 'charts']                          // opened over /api/open
+const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables'] // opened over /api/open
 
 mkdirSync(OUT, { recursive: true })
 const VIDTMP = mkdtempSync(join(tmpdir(), 'slate-vid-'))
@@ -42,6 +42,9 @@ const CELL_SHOTS = {
     .map((w) => [w, `widget-${w}.png`])),
   charts: Object.fromEntries(['line', 'bar', 'area', 'scatter', 'pie', 'heatmap', 'candlestick',
     'radar', 'boxplot', 'composable'].map((c) => [c, `chart-${c}.png`])),
+  anim: { anim: 'animate.png' },                 // the WebGL animation player (heatmap frames)
+  docs: { bib: 'references-card.png' },          // the bibliography cell → live references card
+  tables: { formatted: 'table-formatted.png' },  // formatting + in-cell bar/heat viz
 }
 
 // ── server ──────────────────────────────────────────────────────────────────────────────────
@@ -120,6 +123,47 @@ async function panelShot(page, selector, name, growSel = null) {
     if (growSel) { const g = el.querySelector(growSel); if (g) g.style.flex = g.dataset._f || '' }
   }, { selector, growSel })
 }
+// Screenshot an on-screen element CROPPED to its content (its top-left down to `bottomSel`'s
+// bottom + pad). Used for the fixed/transform side panels (agent/packages) where panelShot's
+// height:auto trick mis-crops into an off-screen capture; a plain clip is robust.
+async function shotCropped(page, sel, name, bottomSel = null, pad = 16) {
+  try {
+    const clip = await page.evaluate(({ sel, bottomSel, pad }) => {
+      const el = document.querySelector(sel); if (!el) return null
+      const r = el.getBoundingClientRect()
+      const b = bottomSel ? el.querySelector(bottomSel) : null
+      const bottom = b ? b.getBoundingClientRect().bottom : r.bottom
+      return { x: Math.max(0, Math.floor(r.x)), y: Math.max(0, Math.floor(r.y)),
+               width: Math.ceil(r.width), height: Math.ceil(bottom - r.y + pad) }
+    }, { sel, bottomSel, pad })
+    if (!clip) { log(`! ${name} skipped: no ${sel}`); return }
+    await page.screenshot({ path: join(OUT, name), clip }); log(`✓ ${name}`)
+  } catch (e) { log(`! ${name} skipped: ${e.message.split('\n')[0]}`) }
+}
+// Synthetic publish ledger — clean demo content in the REAL JSON shape, so the publishing UI
+// (manager dashboard, Sites strip, Publish panel) renders without any real targets/sites/secrets.
+// Wire it with `mockPublish(page)` BEFORE navigating (route interception + /api/sites).
+const PUB_LEDGER = {
+  backend: 'gist', ghUser: 'ada',
+  availableKinds: ['github-pages', 'cloudflare-pages', 'netlify', 's3', 'r2', 'rsync', 'zenodo'],
+  documents: [], secretRefs: ['cloudflare-token', 'netlify-token', 'zenodo-token'],
+  sites: [{ name: 'portfolio', hasHome: true, homeTitle: "Ada's Notebooks", targets: ['pages', 'cloudflare'],
+    docs: [
+      { slug: '', title: "Ada's Notebooks", description: 'Reactive Julia notebooks on numerical methods.', date: '2026-07-01', image: '', runnable: false, section: '', order: 0 },
+      { slug: 'gram-schmidt', title: 'Gram–Schmidt, visualized', description: 'Orthogonalizing a basis, one projection at a time.', date: '2026-07-02', image: '', runnable: true, section: '', order: 1 },
+      { slug: 'fft', title: 'FFT from scratch', description: 'A radix-2 transform, built up and benchmarked.', date: '2026-07-03', image: '', runnable: true, section: '', order: 2 },
+      { slug: 'heat', title: 'The heat equation', description: 'Spectral vs finite-difference, side by side.', date: '2026-07-05', image: '', runnable: false, section: '', order: 3 },
+    ] }],
+  targets: [
+    { name: 'pages', kind: 'github-pages', config: { repo: 'ada/notebooks', url: 'https://ada.github.io/notebooks/' } },
+    { name: 'cloudflare', kind: 'cloudflare-pages', config: { project: 'ada-notebooks', accountId: '', secretRef: 'cloudflare-token', url: 'https://ada-notebooks.pages.dev/' } },
+    { name: 'zenodo', kind: 'zenodo', config: { secretRef: 'zenodo-token' } },
+  ],
+}
+async function mockPublish(page) {
+  await page.route('**/api/publish/ledger*', (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify(PUB_LEDGER) }))
+  await page.route('**/api/sites', (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ sites: ['portfolio'] }) }))
+}
 
 async function main() {
   const server = startServer()
@@ -136,6 +180,15 @@ async function main() {
       const page = await (await newContext(browser)).newPage()
       await runNotebook(page, id)
       if (id === 'demo') { await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: join(OUT, 'overview.png') }); log('✓ overview.png') }   // viewport, not the giant full page
+      // Seek the animation player to a mid-frame so the shot shows a live "N / total" counter and a
+      // representative frame (not the idle 0/0 first frame). Player registers at window._animPlayers[cellId].
+      if (id === 'anim') {
+        try {
+          await page.waitForFunction(() => { const a = window._animPlayers && window._animPlayers['anim']; return a && a[0] && a[0].N > 1 }, { timeout: 15_000 })
+          await page.evaluate(() => { const p = window._animPlayers['anim'][0]; p.pause(); p.layer = Math.floor((p.N - 1) * 0.4); p._draw(); p._tick() })
+          await sleep(400)
+        } catch (e) { log('! anim seek skipped:', e.message.split('\n')[0]) }
+      }
       for (const [cid, name] of Object.entries(shots)) await cellShot(page, cid, name)
 
       // driven captures, per notebook
@@ -224,8 +277,8 @@ async function main() {
               row('DataFrames', '1.6.1', false) + row('Distributions', '0.25.109', false) +
               row('JSON3', '1.14.0', false) + row('StatsBase', '0.34.3', false) + row('Tables', '1.11.1', false)
           })
-          await sleep(500)
-          await panelShot(page, '#pkgpanel', 'packages-panel.png')
+          await sleep(900)   // settle the open transition before the cropped element shot
+          await shotCropped(page, '#pkgpanel', 'packages-panel.png', '#pkglist')
           await page.evaluate(() => document.getElementById('pkgpanel').classList.remove('open'))
         } catch (e) { log('! packages-panel skipped:', e.message.split('\n')[0]) }
 
@@ -234,21 +287,42 @@ async function main() {
         try {
           await page.evaluate(() => {
             agentMsgs = [
-              { role: 'user', text: 'Plot a sine wave with an adjustable frequency.' },
-              { role: 'think', text: 'A slider for the frequency, then a chart cell that reads it.' },
-              { role: 'assistant', text: "I'll add a frequency slider and a chart cell below it." },
-              { role: 'tool', text: '➕ add cell', code: '@bind freq Slider(1:20; default = 3, label = "frequency")' },
-              { role: 'tool', text: '➕ add cell', code: 'echart(line(0:0.1:2π, sin.(freq .* (0:0.1:2π))))' },
-              { role: 'tool', text: '🖼 view figure' },
-              { role: 'assistant', text: 'Done — drag the slider and the wave recomputes live.' },
+              { role: 'user', text: 'Plot a sine wave with an adjustable frequency.', done: true },
+              { role: 'think', text: 'A slider for the frequency, then a chart cell that reads it.', done: true },
+              { role: 'assistant', text: "I'll add a frequency slider and a chart cell below it.", done: true },
+              { role: 'tool', text: '➕ add cell', code: '@bind freq Slider(1:20; default = 3, label = "frequency")', cid: 'freq', done: true },
+              { role: 'tool', text: '➕ add cell', code: 'echart(:line, 0:0.1:2π, sin.(freq .* (0:0.1:2π)))', cid: 'wave', done: true },
+              { role: 'tool', text: '🖼 view figure', done: true },
+              { role: 'assistant', text: 'Done — drag the slider and the wave recomputes live.', done: true },
             ]
             renderAgentMsgs()
             if (!document.getElementById('agentpanel').classList.contains('open')) toggleAgent()
           })
-          await sleep(700)
-          await panelShot(page, '#agentpanel', 'agent-panel.png', '.apmsgs')
+          // Settle the open transition, then a DIRECT element shot. (panelShot's height-collapse
+          // trick mis-crops the agent panel's flex/transform layout → an off-screen capture.)
+          await sleep(900)
+          await elShot(page, '#agentpanel', 'agent-panel.png')
           await page.evaluate(() => { if (document.getElementById('agentpanel').classList.contains('open')) toggleAgent() })
         } catch (e) { log('! agent-panel skipped:', e.message.split('\n')[0]) }
+
+        // cell tag editor (🏷) — open the popover on a cell and shoot it
+        try {
+          await page.locator('.cell[data-cid="highlight"]').scrollIntoViewIfNeeded()
+          await sleep(200)
+          await page.locator('.cell[data-cid="highlight"] .tagbtn').first().click()
+          await page.waitForSelector('#tagpop.show', { timeout: 4000 })
+          await sleep(300)
+          await elShot(page, '#tagpop', 'tag-editor.png')
+          await page.keyboard.press('Escape')
+        } catch (e) { log('! tag-editor skipped:', e.message.split('\n')[0]) }
+
+        // present mode (▶ Present / ⌘⇧P) — full-screen slide deck; capture the title slide
+        try {
+          await page.evaluate(() => window.enterPresent && window.enterPresent())
+          await sleep(900)
+          await page.screenshot({ path: join(OUT, 'present-slide.png') }); log('✓ present-slide.png')
+          await page.keyboard.press('Escape'); await sleep(300)
+        } catch (e) { log('! present-slide skipped:', e.message.split('\n')[0]) }
       }
 
       if (id === 'widgets') {
@@ -261,6 +335,40 @@ async function main() {
       }
       await page.context().close()
     }
+
+    // ── publishing UI (mocked ledger — no real targets/sites/secrets needed) ─────────────────
+    // Route-intercept /api/publish/ledger + /api/sites with synthetic demo data (mockPublish), so
+    // the Publish panel, the front-page manager dashboard, and the Sites strip all render clean
+    // demo content — reproducible in CI without configuring any real publish target.
+    try {
+      // Publish panel — notebook ☰ → ☁ Publish… (Export dialog in Website mode)
+      const p1 = await (await newContext(browser)).newPage()
+      await mockPublish(p1)
+      await p1.goto(`${BASE}/n/demo`, { waitUntil: 'domcontentloaded' })
+      await p1.waitForSelector('.cell', { timeout: 30_000 })
+      await p1.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+      await sleep(700)
+      await p1.evaluate(() => window.openPublish && window.openPublish())
+      await sleep(600)
+      // pick the existing "portfolio" site so the destinations show
+      await p1.evaluate(() => { const s = document.getElementById('sitepick'); if (s) { for (const o of s.options) { if (o.value === 'portfolio' || o.textContent.includes('portfolio')) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); break } } } })
+      await sleep(500)
+      await elShot(p1, '#exportbg .modal', 'publish-panel.png')
+      await p1.context().close()
+
+      // Manager dashboard + Sites strip — the hub front page
+      const p2 = await (await newContext(browser)).newPage()
+      await mockPublish(p2)
+      await p2.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+      await sleep(1600)                                        // let loadPublished() refresh the strip
+      await p2.evaluate(() => { const c = document.querySelector('#published .sitecard'); if (c) c.click() })
+      await sleep(500)
+      await shotCropped(p2, '#published', 'sites-strip.png', null, 6)
+      await p2.evaluate(() => window.openPubDash && window.openPubDash())
+      await sleep(1000)
+      await elShot(p2, '#pubdashbg .pubdash', 'publishing-manager.png')
+      await p2.context().close()
+    } catch (e) { log('! publishing shots skipped:', e.message.split('\n')[0]) }
 
     // ── webm: drag the slider → the chart re-renders live (reactivity) ───────────────────────
     // Frame the slider AND the chart together (slider is the cell right above the chart) so the

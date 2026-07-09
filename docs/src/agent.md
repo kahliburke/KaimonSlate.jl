@@ -29,11 +29,10 @@ notebook's SSE so the chat pane updates live (streaming text, tool calls, and fi
 Tool calls are shown in the chat with friendly labels (e.g. `➕ add cell`, `🖼 view
 figure`) rather than raw `mcp__kaimon__…` names.
 
-::: tip The agent can see your plots
-`slate_view` returns the cell's figure as an image — CairoMakie rasters and ECharts canvas
-snapshots both flow through one interface — so the agent can inspect a chart it made and fix
-it.
-:::
+!!! tip "The agent can see your plots"
+    `slate_view` returns the cell's figure as an image — CairoMakie rasters and ECharts canvas
+    snapshots both flow through one interface — so the agent can inspect a chart it made and fix
+    it.
 
 ## Scoping a turn to a cell — ✨
 
@@ -49,6 +48,9 @@ expands each `@id` mention into that cell's source and current result, so you ca
 agent at specific cells without it reading everything.
 
 ## Models and permissions
+
+Today the in-browser agent runs on **Claude** (via the `claude` CLI) or a **locally-configured
+model** (Ollama); support for more agents through **ACP** (the Agent Client Protocol) is planned.
 
 In **⚙ Settings**:
 

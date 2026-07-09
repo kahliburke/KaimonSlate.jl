@@ -19,3 +19,5 @@ src/public/assets/*.mp4
 src/public/assets/*.webm
 src/public/assets/*.png
 src/public/assets/*.jpg
+src/assets/*.tach
+src/public/assets/*.tach

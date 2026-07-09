@@ -5,17 +5,19 @@ a task to the AI agent.
 
 ## Open a notebook
 
-Under **Kaimon** (the [recommended setup](installation.md)) the notebook server is already
-running — just open your browser to **`http://127.0.0.1:8765`**. The index page lists open
-notebooks; click one to enter it, or type a path to open (or create) another. You can also
-ask the **💬 agent** to open one for you.
+Run the **`slate` app** (installed with `pkg> app add KaimonSlate` — see
+[Installation](installation.md)):
 
-*Standalone* (no Kaimon)? Start the server yourself, then open the printed URL:
-
-```julia
-using KaimonSlate
-KaimonSlate.serve_notebook("intro.jl")   # serves at http://127.0.0.1:8765
+```sh
+slate intro.jl
 ```
+
+It starts (or attaches to) the notebook hub, opens `intro.jl` in your browser (creating it if
+new), and shows a status TUI — server state, the hub URL, and every open notebook. Under
+**Kaimon** it attaches to Kaimon's hub, so the **💬 agent** is available; standalone
+(`slate --own`) it owns the hub itself. Plain `slate` with no file just shows the TUI — open
+notebooks from the browser index at **`http://127.0.0.1:8765`**, with `slate <file>`, or by asking
+the agent.
 
 ![A KaimonSlate notebook: code, a slider widget, an inline ECharts chart, a table, and an error cell](./assets/overview.png)
 
@@ -69,10 +71,9 @@ Drag the slider — the figure re-renders live. You can surface the control into
 cell's *control strip* by dragging it, or open the **🎛 Controls palette** to see every
 declared `@bind`. See [Widgets & @bind](widgets.md).
 
-::: tip Insert a control fast
-Press **⌘K** and type "bind" to insert any widget snippet (Slider, Toggle, Select, …) at
-the cursor.
-:::
+!!! tip "Insert a control fast"
+    Press **⌘K** and type "bind" to insert any widget snippet (Slider, Toggle, Select, …) at
+    the cursor.
 
 ## Markdown and math
 
@@ -100,3 +101,11 @@ When you're done, export from the **☰** menu: a self-contained **HTML** docume
 publication-quality **PDF** (typeset server-side with Typst — themes, columns, vector
 figures), **Print HTML** for a quick browser PDF, or a fully reproducible **self-contained
 `.jl`** (cells + environment + source). See [Export](export.md).
+
+## Publish
+
+To share it on the web, **☰ → ☁ Publish…** renders the notebook into a personal **site** — each
+document at its own URL behind a generated front page. One build deploys to GitHub Pages,
+Cloudflare, Netlify, or your own server, and you can mint a citable **Zenodo DOI** at milestones.
+Manage every site and target from the hub's **☁ Publishing** manager. See
+[Publishing](publishing.md).

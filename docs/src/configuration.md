@@ -21,9 +21,22 @@ new setting (the transcript is kept).
 
 ## Serving
 
+The [`slate` app](installation.md) is the normal way to run the hub:
+
+```sh
+slate                 # start (or attach to) the hub + status TUI
+slate notebook.jl     # also open a notebook
+slate --own           # force a standalone hub even if a Kaimon extension is registered
+```
+
+The hub port is `KAIMONSLATE_PORT` (default 8765); set `KAIMONSLATE_NO_OPEN=1` to never open a
+browser.
+
+To drive the hub from your own script instead, the programmatic API is still available:
+
 ```julia
 KaimonSlate.serve_notebook(path; host = "127.0.0.1", port = 8765)   # blocking
-h = KaimonSlate.start_server(path; host = "127.0.0.1", port = 8765) # non-blocking → Hub
+h = KaimonSlate.start_server(path; port = 8765)                     # non-blocking → Hub
 KaimonSlate.stop_server(h)
 ```
 
@@ -55,5 +68,7 @@ Driving a local model requires Kaimon's Ollama agent backend. Selecting a model 
 
 | Variable | Used for |
 | --- | --- |
+| `KAIMONSLATE_PORT` | Hub port for the `slate` app / server (default `8765`). |
+| `KAIMONSLATE_NO_OPEN` | `=1` → never open a browser when the `slate` app starts. |
 | `OLLAMA_HOST` | Ollama API endpoint for the model list (default `http://127.0.0.1:11434`). |
 | `KAIMONSLATE_ASSET_BASE` | **Docs build only** — points the site at the docs-assets GitHub Release for generated demo media. Unset locally → served from `public/assets/`. |

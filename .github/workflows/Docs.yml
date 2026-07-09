@@ -63,7 +63,7 @@ jobs:
             docs/src/assets/*.mp4
             docs/src/assets/*.webm
             docs/.render_cache.json
-          key: doc-assets-${{ hashFiles('docs/generate_assets.mjs', 'src/assets/notebook.html') }}
+          key: doc-assets-${{ hashFiles('docs/generate_assets.mjs', 'docs/generate_tui_assets.jl', 'src/assets/notebook.html', 'src/app.jl') }}
           restore-keys: |
             doc-assets-
 
@@ -83,6 +83,20 @@ jobs:
             node generate_assets.mjs
           else
             echo "No docs/generate_assets.mjs yet — skipping asset generation."
+          fi
+
+      # ── TUI asset (terminal dashboard) ──────────────────────────────────────
+      # Pure Julia: records the `slate` status TUI with Tachikoma into an animated
+      # GIF (docs/src/assets/slate-tui.gif). No browser needed. Needs a monospace
+      # font for the GIF rasterizer (FreeTypeAbstraction).
+      - name: Generate TUI assets
+        working-directory: docs
+        run: |
+          if [ -f generate_tui_assets.jl ]; then
+            sudo apt-get update && sudo apt-get install -y fonts-jetbrains-mono || true
+            julia --project=. generate_tui_assets.jl
+          else
+            echo "No docs/generate_tui_assets.jl yet — skipping TUI asset generation."
           fi
 
       - name: Upload assets to docs-assets release

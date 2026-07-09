@@ -1,7 +1,9 @@
-# Charts & Tables
+# Charts
 
-Return a chart or a table from a cell and it renders inline — interactive, and **animating in
-place** on reactive updates (no image swap). Both are Slate helpers injected into every cell.
+Return a chart from a cell and it renders inline — interactive, and **animating in place** on
+reactive updates (no image swap). `echart` is a Slate helper injected into every cell. For
+interactive tables, see [Tables](tables.md); for frame-by-frame playback, see
+[Animation](animation.md).
 
 ## `echart` — the ECharts DSL
 
@@ -58,16 +60,11 @@ echart(series(:line, x, sin.(x); name = "sin", smooth = true),
 
 ![A composable ECharts chart mixing a line and bar series](./assets/chart-composable.png)
 
-## `slate_table` — interactive tables
-
-`slate_table(df)` renders any table (a `DataFrame`, a vector of `NamedTuple`s, …) as a sortable,
-filterable, paged table:
-
-```julia
-slate_table([(x = round(x; digits = 2), sinx = round(sin(x); digits = 3)) for x in range(0, π; length = 7)])
-```
-
-![An interactive slate_table with sortable, filterable columns](./assets/table.png)
-
-Both charts and tables also work inside markdown cells via double-brace interpolation — see
+Charts also work inside markdown cells via double-brace interpolation — see
 [Notebook Basics](notebook-basics.md#markdown-interpolation).
+
+## Tables
+
+Interactive tables are a feature in their own right — sorting, filtering, paging, currency /
+percent / bytes formatting, in-cell bar & heat viz, clickable rows, and server-paging for large
+data. They have their own page: **[Tables](tables.md)**.
