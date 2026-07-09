@@ -656,14 +656,18 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
                      :' <span style="opacity:.65">(source notebook not recorded — republish it once to link it here)</span>')+'</div>')
         :'<div class="pddim" style="margin:2px 0">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
       docMgmt='<div class="pdsec">Front page</div>'+fp+'<div class="pdsec">Documents</div>'+rows+
-        (docs.length?'<div class="pdrow" style="margin-top:8px"><button class="pdbtn" onclick="openSiteArrange(\''+esc(s.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag to order + group into sections</span></div>':'');
+        (docs.length?'<div class="pdrow" style="margin-top:8px"><button class="pdbtn" onclick="openSiteArrange(\''+esc(s.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag to order + group into sections</span></div>':'')+
+        // Add content WITHOUT opening a notebook first — pick from open/recent and publish it in.
+        '<div class="pdrow" style="margin-top:10px"><button class="pdbtn" onclick="pdPickNotebook(this,\''+esc(s.name)+'\')">＋ Add a notebook to this site</button></div>'+
+        '<div id="pdaddnb"></div>';
     }
     // name = the site's IDENTIFIER (part of the URL, fixed once created); title = what readers SEE.
-    var lbl=function(txt,hint){return '<label class="pddim" style="display:block;margin:10px 0 3px;font-size:.74rem">'+txt+' <span style="opacity:.7">— '+hint+'</span></label>';};
+    // Escapes both parts (raw text in) — same contract as pdFldLbl, so entities never double-escape.
+    var lbl=function(txt,hint){return '<label class="pddim" style="display:block;margin:10px 0 3px;font-size:.74rem">'+esc(txt)+' <span style="opacity:.7">— '+esc(hint)+'</span></label>';};
     document.getElementById('pdbody').innerHTML='<div class="pdnarrow"><div class="pdform">'+
-      (s?'':lbl('Site name','its identifier: becomes the URL, /sites/&lt;name&gt;/; can\'t change later')+
+      (s?'':lbl('Site name','its identifier: becomes the URL, /sites/<name>/; can\'t change later')+
            '<input id="pdsitename" class="pdinp" placeholder="portfolio"/>')+
-      lbl('Display title','the front-page heading &amp; browser-tab title readers see; empty = the site name')+
+      lbl('Display title','the front-page heading & browser-tab title readers see; empty = the site name')+
       '<input id="pdsitetitle" class="pdinp" placeholder="'+(s?esc(s.name):'e.g. “Stat Mech Notebooks”')+'" value="'+esc((s&&s.title)||'')+'"/>'+
       '<div class="pdsec">Deploys to</div>'+picks+
       docMgmt+
@@ -754,6 +758,63 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     else _syncBanner('err','⚠ <b>Finished with '+bad+' issue'+(bad===1?'':'s')+'</b> — '+(res.length-bad)+' of '+res.length+' deployed. See the failed target'+(bad===1?'':'s')+' below.');
     _syncRunning(false);
   }
+  // ── Add a notebook to a site without opening it first ──────────────────────────────────────────
+  // Combine OPEN notebooks (have a live worker, from /api/notebooks) with RECENT ones (ledger docs
+  // that carry a source path). Publishing streams through the same Sync-occasion modal.
+  function pdPickNotebook(btn,site){
+    var host=document.getElementById('pdaddnb'); if(!host)return;
+    if(host.dataset.open==='1'){host.innerHTML='';host.dataset.open='';return;}   // toggle closed
+    host.dataset.open='1'; host.innerHTML='<div class="pddim" style="margin:8px 0">Loading notebooks…</div>';
+    fetch('/api/notebooks',{cache:'no-store'}).then(function(r){return r.json();}).then(function(open){
+      open=open||[];
+      var openPaths={}; open.forEach(function(n){if(n.path)openPaths[n.path]=true;});
+      // Recent = ledger documents with a local source path not already open.
+      var recent=(_pdView.documents||[]).filter(function(d){return d.sourcePath&&_abs(d.sourcePath)&&!openPaths[d.sourcePath];});
+      var row=function(label,sub,attr){return '<div class="pdrow pdsub2"><span>'+esc(label)+'</span>'+
+        (sub?'<span class="pddim" style="margin-left:6px;font-size:.72rem">'+esc(sub)+'</span>':'')+
+        '<button class="pdbtn pdmini primary" style="margin-left:auto" onclick="pdPublishInto(this,\''+esc(site)+'\','+attr+')">publish →</button></div>';};
+      var h='';
+      if(open.length){h+='<div class="pdsec">Open notebooks</div>'+open.map(function(n){
+        return row(n.title||n.id,'live worker'+(n.running?' · running':''),'{id:\''+esc(n.id)+'\',label:\''+esc((n.title||n.id).replace(/'/g,''))+'\'}');}).join('');}
+      if(recent.length){h+='<div class="pdsec">Recent notebooks</div>'+recent.map(function(d){
+        return row(d.title||d.slug||d.sourcePath,d.sourcePath,'{path:\''+esc(d.sourcePath)+'\',label:\''+esc((d.title||d.slug||'notebook').replace(/'/g,''))+'\'}');}).join('');}
+      if(!open.length&&!recent.length)h='<div class="pddim" style="margin:8px 0">No open or recent notebooks. Open a notebook first, then it appears here.</div>';
+      host.innerHTML=h;
+    }).catch(function(){host.innerHTML='<div class="pddim" style="margin:8px 0">Could not load notebooks.</div>';});
+  }
+  window.pdPickNotebook=pdPickNotebook;
+  // Publish the chosen notebook into `site` (build it in + sync all destinations), streamed in the
+  // Sync modal. `ref` = {id} for an open notebook or {path} for a recent one (opened on demand).
+  function pdPublishInto(btn,site,ref){
+    var s=pdSiteByName(site); if(!s)return;
+    var done=pdBusy(btn);
+    var url=ref.id ? ('/api/'+encodeURIComponent(ref.id)+'/site-publish?site='+encodeURIComponent(site))
+                   : ('/api/_/site-publish?site='+encodeURIComponent(site)+'&path='+encodeURIComponent(ref.path));
+    document.getElementById('pdsynctitle').textContent='Publishing “'+(ref.label||'notebook')+'” → “'+site+'”';
+    document.getElementById('pdsyncsub').textContent='';
+    var tgs=s.targets||[];
+    _syncBanner('run','<span class="pdspin"></span> Building the notebook into “'+esc(site)+'”'+(tgs.length?', then deploying to '+tgs.length+' destination'+(tgs.length===1?'':'s'):' (local-only — no destinations)')+'…');
+    document.getElementById('pdsyncrows').innerHTML=tgs.map(function(n){var t=pdTargetByName(n)||{kind:''};
+      return '<div class="pdsyncrow"><div class="r1"><span class="st"><span class="pdspin"></span></span>'+
+        '<span class="pl">'+esc(n)+'</span>'+(t.kind?'<span class="pdchip">'+esc(t.kind)+'</span>':'')+
+        '<span class="pddim" id="syncst-'+_slugId(n)+'" style="margin-left:6px">waiting for build…</span></div></div>';}).join('')
+      ||'<div class="pddim" style="margin:6px 0">Local-only site — the build lands under /sites/'+esc(site)+'/ with nothing to deploy.</div>';
+    _syncRunning(true);
+    document.getElementById('pdsyncbg').classList.add('show');
+    if(_syncES){try{_syncES.close();}catch(_){}}
+    var es=_syncES=new EventSource(url);
+    es.addEventListener('status',function(e){var m=/(?:Deploying|Publishing) to (.+)…/.exec(e.data);
+      if(m){var st=document.getElementById('syncst-'+_slugId(m[1]));if(st)st.textContent='deploying…';}});
+    es.addEventListener('done',function(e){es.close();_syncES=null;done();var d;try{d=JSON.parse(e.data);}catch(_){d={results:[]};}
+      if(d.localOnly){_syncBanner('ok','✓ <b>Built “'+esc(ref.label||'notebook')+'” into “'+esc(site)+'”.</b> Local-only — add destinations to deploy it.');
+        document.getElementById('pdsyncrows').innerHTML='';_syncRunning(false);}
+      else _syncResults(site,d);
+      loadPubDash();});
+    es.addEventListener('failed',function(e){es.close();_syncES=null;done();
+      _syncBanner('err','✗ <b>Publish failed.</b><div class="pdsyncdetail">'+esc(e.data)+'</div>');_syncRunning(false);});
+    es.onerror=function(){es.close();_syncES=null;done();_syncBanner('err','✗ <b>Connection lost</b> before publishing finished.');_syncRunning(false);};
+  }
+  window.pdPublishInto=pdPublishInto;
   function pdSyncSite(name,btn){
     var s=pdSiteByName(name); if(!s)return;
     if(!(s.targets||[]).length){alertDark('“'+name+'” has no destinations yet — edit it and pick some.');return;}
@@ -877,7 +938,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       pdChk('private','Private repo (Pages needs GitHub Pro)')+pdChk('create','Create the repo if it doesn\'t exist',true);
     else if(k==='cloudflare-pages')h=
       pdFld('project','Pages project','the Cloudflare Pages project name','my-site')+
-      pdFld('accountId','Account id','from the Cloudflare dashboard (Workers &amp; Pages)','')+
+      pdFld('accountId','Account id','from the Cloudflare dashboard (Workers & Pages)','')+
       pdRefSel('secretRef',refs,'API token','a secret ref holding a token with Pages:Edit')+
       pdFld('url','Public URL','the live link shown in the manager (optional)','https://my-site.pages.dev/');
     else if(k==='netlify')h=
@@ -895,7 +956,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       pdChk('delete','Mirror deletes (remove remote files no longer in the build)',true);
     else if(k==='rsync-serve')h=
       pdFld('dest','Destination','rsync target AND the served root — a tiny Julia server is installed there','user@host:/srv/site')+
-      pdFld('url','Public URL','how readers reach it — blank auto-derives http://&lt;host&gt;:&lt;port&gt;/','')+
+      pdFld('url','Public URL','how readers reach it — blank auto-derives http://<host>:<port>/','')+
       pdFld('bind','Bind address','0.0.0.0 = reachable at the host (default); 127.0.0.1 = private, front it yourself','0.0.0.0')+
       pdFld('port','Port','the server\'s port on the host','8080')+
       pdChk('delete','Mirror deletes (remove remote files no longer in the build)',true);
