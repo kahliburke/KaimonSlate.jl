@@ -663,8 +663,20 @@ end
 # Add/remove a package in the notebook's own env. Adding the FIRST package while in base
 # mode forks the notebook off its parent (seed + activate a single extended env) before the
 # add, so the parent's `Project.toml` is never touched and there's one consistent resolution.
-function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::AbstractString)
+function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::AbstractString;
+               target::AbstractString = "notebook")
     prepare!(k, report)
+    # "project" target: add to the SHARED parent project (no fork), then re-resolve the notebook env.
+    if String(target) == "project"
+        isempty(k.parent) && return Dict{String,Any}("ok" => false, "message" => "this notebook has no parent project")
+        r = try
+            _tool(k, "__slate_pkg_parent", Dict{String,Any}("op" => String(op), "name" => String(name), "parent" => k.parent); timeout = 900.0)
+        catch e
+            return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+        end
+        r === nothing && return Dict{String,Any}("ok" => false, "message" => "no response from worker")
+        return Dict{String,Any}(String(kk) => v for (kk, v) in r)
+    end
     if String(op) == "add" && _base_mode(k)
         r = try
             _tool(k, "__slate_fork", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent))
@@ -677,7 +689,9 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
         _write_parent_marker!(k)                    # record the parent baseline we seeded from
     end
     try
-        r = _tool(k, "__slate_pkg", Dict{String,Any}("op" => String(op), "name" => String(name)))
+        # Generous timeout — Pkg.add of a heavy package (a full Makie stack, etc.) resolves + precompiles
+        # well past the 120s default, especially on a fresh remote env.
+        r = _tool(k, "__slate_pkg", Dict{String,Any}("op" => String(op), "name" => String(name)); timeout = 900.0)
         r === nothing && return Dict{String,Any}("ok" => false, "message" => "no response from worker")
         return Dict{String,Any}(String(kk) => v for (kk, v) in r)
     catch e

@@ -300,17 +300,23 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     #    records git deps by url+tree-hash → they clone), rsync any dev'd deps' local sources + rewrite
     #    their Manifest paths to the remote copies, then instantiate. Covers registry, GitHub, and dev'd
     #    packages + the project's own /src. (Data files are out of scope for now.)
+    # In every case the worker's env (t.project) ends up with KaimonGate — plus Revise IF the user uses it
+    # locally — resolved TOGETHER with whatever else is there (one env, no stacked-env skew).
+    rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
+    infra = _local_has_revise() ? "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"Revise\")]" :
+                                  "[Pkg.PackageSpec(name=\"KaimonGate\")]"
     if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
-        _replicate_env!(t)
+        _replicate_env!(t)                                    # notebook env + worker infra
     elseif !isempty(parent_project) && isdir(parent_project)
         _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)")
         _rsync!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
             error("provision: rsync parent project → $host failed")
-        rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-        first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.instantiate()",
-                          "instantiate parent project on $host"))
+        first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()",
+                          "instantiate parent project on $host")) || error("provision: parent env build → $host failed")
     else
-        _rlog("provision [3/3] no origin env (bare notebook) — skip")
+        _rlog("provision [3/3] bare notebook — worker env = worker infra only")
+        first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); Pkg.instantiate()",
+                          "bare worker env on $host")) || error("provision: could not build the worker env on $host")
     end
     _rlog("provision DONE host=$host")
     return nothing
@@ -371,14 +377,30 @@ function _replicate_env!(t::RemoteTarget)
     end
     # 3. rewrite the remote Manifest's dev paths to the rsync'd locations, then instantiate.
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites), "instantiate replicated env on $host")
+    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise()), "instantiate replicated env on $host")
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
     return nothing
 end
 
+# Does the USER use Revise locally (it's in their global default env)? If so we mirror it onto the remote
+# worker so hot-reload matches their setup; if they don't use Revise, we don't force it into the worker env.
+function _local_has_revise()
+    mf = joinpath(first(Base.DEPOT_PATH), "environments", "v$(VERSION.major).$(VERSION.minor)", "Manifest.toml")
+    isfile(mf) || return false
+    try
+        for line in eachline(mf)
+            occursin(r"^\[\[deps\.Revise\]\]\s*$", line) && return true
+        end
+    catch
+    end
+    return false
+end
+
 # The remote script: rewrite each dev dep's Manifest `path` to its rsync'd remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
-function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}})
+function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool)
+    infra = add_revise ? "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"Revise\")]" :
+                         "[Pkg.PackageSpec(name=\"KaimonGate\")]"
     io = IOBuffer()
     println(io, "import Pkg, TOML")
     println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
@@ -396,6 +418,13 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
         println(io, "end")
     end
     println(io, "Pkg.activate(proj)")
+    # Add the worker infra INTO this same env so it resolves against the notebook's exact dependency
+    # versions (no stacked-env skew). KaimonGate is always needed (the gate); Revise only if the user
+    # uses it locally (see `_local_has_revise` at the call site) — mirror their setup, don't force it.
+    # preserve=PRESERVE_ALL keeps the notebook's EXACT pins so the infra can't bump a shared dep and
+    # invalidate the notebook's (very expensive, e.g. Makie) precompile cache — that doubles the build.
+    # Fall back to a normal add only if the infra genuinely can't be satisfied against those pins.
+    println(io, "try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end")
     println(io, "Pkg.instantiate()")
     return String(take!(io))
 end
@@ -461,10 +490,13 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     bind = t.transport === :direct ? "0.0.0.0" : "127.0.0.1"
     curve = t.transport === :direct                       # tunnel = SSH-encrypted, CURVE redundant
     allow = curve ? "String[raw\"$client_pub\"]" : "String[]"
+    # ONE environment: the worker runs with --project=<rproj>, which provisioning has populated with the
+    # notebook's own packages PLUS KaimonGate + Revise — all resolved together. We deliberately do NOT
+    # stack a separate KaimonGate env on the LOAD_PATH: that caused Revise (precompiled against its env's
+    # deps) to skew against the notebook env's versions of shared deps (OrderedCollections, …) and crash
+    # its package-load callback. One consistent resolve = no skew.
     return """
-    _kg = joinpath(homedir(), raw"$_REMOTE_KGATE_ENV")
     _wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
-    insert!(LOAD_PATH, 1, _kg)
     import KaimonGate
     try; @eval using Revise; catch; end
     include(_wk)

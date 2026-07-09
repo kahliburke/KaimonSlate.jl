@@ -44,6 +44,10 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
     return nb
 end
 
+# Infra packages the remote provisioner adds INTO the worker's env (the single-env fix) — filtered out
+# of the notebook's package view + footer so they don't masquerade as the user's own deps.
+const _WORKER_INFRA_PKGS = Set(["KaimonGate", "Revise"])
+
 # The notebook's OWN packages (the delta beyond the parent project) as sorted
 # `{name, version, uuid}` — the set difference active − parent − parent-package. Shared by
 # the package viewer's "notebook" group and the `.jl` reproducibility footer.
@@ -56,6 +60,9 @@ function _notebook_adds(nb::LiveNotebook)
     pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
     pnames = Set(string(get(d, "name", "")) for d in pdeps)
     info.parent === nothing || push!(pnames, info.parent.name)
+    # Worker infra injected into a REMOTE worker's env (one-env fix) — not the user's notebook deps, so
+    # hide them from the package viewer + the reproducibility footer (the remote provisioner adds them).
+    union!(pnames, _WORKER_INFRA_PKGS)
     adds = sort([d for d in info.notebook.deps if !(string(get(d, "name", "")) in pnames)];
                 by = d -> string(get(d, "name", "")))
     return (adds = adds, parent = pdeps,
@@ -85,10 +92,11 @@ end
 # code cells so a `using` lights up, sync the `.jl` Slate.env footer, and refresh docs/agent view.
 # The single source of truth for the browser package panel (`POST /api/{id}/package`) AND the
 # `slate.pkg` agent tool — so both paths behave identically. `op` is "add" or "rm".
-function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractString)
+function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractString;
+                          target::AbstractString = "notebook")
     (op in ("add", "rm")) || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
     res = lock(nb.lock) do
-        r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name)
+        r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name; target = target)
         if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
             for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
             _eval!(nb)

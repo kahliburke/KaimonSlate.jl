@@ -80,9 +80,13 @@ async function pkgAdd() {
   if (!_pkgManageable) return;
   const inp = document.getElementById('pkgin'), name = inp.value.trim(); if (!name) return;
   if (!await confirmDark('Add package “' + name + '” to this notebook’s project? It is installed (may precompile) and the notebook re-runs.', 'Add')) return;
-  inp.value = ''; document.getElementById('pkgstatus').textContent = 'adding ' + name + '…';
+  inp.value = '';
+  // Block the notebook with the shared install modal — the worker is frozen while it resolves/precompiles.
+  const stop = window.startPkgInstall ? window.startPkgInstall('Installing <b>' + _esc(name) + '</b> → notebook') : () => {};
   const r = await api('POST', '/api/package', { op: 'add', name });
-  if (r && r.ok === false) await alertDark('Add failed:\n' + (r.message || '?'));
+  stop();
+  if (r && r.ok === false) { window._pkgInstallFail ? window._pkgInstallFail(r.message) : await alertDark('Add failed:\n' + (r.message || '?')); }
+  else window.hidePkgInstalling && window.hidePkgInstalling();
   loadPackages();
 }
 async function pkgRm(name) {

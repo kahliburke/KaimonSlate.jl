@@ -652,6 +652,30 @@ in a single resolve (one precompile). Each add-spec may be a registry name (`Foo
 URL (`https://…​[.git][#rev]`, `git@…`) → `Pkg.add(url=…)`, or a LOCAL path (`/…`, `~/…`, `./…`, or an
 existing dir) → `Pkg.develop(path=…)` (so it's a dev'd dep, hot-reloadable + carried to remote workers).
 Returns `{ok, message}`."
+# Classify each add-token into a registry/git spec (→ Pkg.add) or a local-path spec (→ Pkg.develop),
+# with a human label. Shared by the notebook-env add and the parent-project add.
+function _pkg_add_specs(tokens)
+    adds = Pkg.PackageSpec[]; devs = Pkg.PackageSpec[]; labels = String[]
+    for tok in tokens
+        t = String(tok)
+        if occursin(r"^(https?://|git://|git@|ssh://)"i, t) || endswith(t, ".git") || endswith(t, ".git/")
+            parts = split(t, '#'; limit = 2)                      # url or url#rev (branch/tag/sha)
+            url = String(parts[1]); rev = length(parts) == 2 ? String(parts[2]) : ""
+            push!(adds, isempty(rev) ? Pkg.PackageSpec(url = url) : Pkg.PackageSpec(url = url, rev = rev))
+        elseif startswith(t, "/") || startswith(t, "~/") || startswith(t, "./") ||
+               startswith(t, "../") || isdir(expanduser(t))
+            push!(devs, Pkg.PackageSpec(path = abspath(expanduser(t))))
+        elseif occursin('@', t)                                   # name@version
+            nm, ver = split(t, '@'; limit = 2)
+            push!(adds, Pkg.PackageSpec(name = String(nm), version = String(ver)))
+        else
+            push!(adds, Pkg.PackageSpec(name = t))
+        end
+        push!(labels, t)
+    end
+    return (adds = adds, devs = devs, labels = labels)
+end
+
 function __slate_pkg(op, name)
     tokens = filter(!isempty, split(String(name), r"[\s,]+"))
     isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
@@ -661,37 +685,49 @@ function __slate_pkg(op, name)
             Pkg.rm(String.(tokens))
             return Dict{String,Any}("ok" => true, "message" => "removed $(join(tokens, ", "))")
         elseif o == "add"
-            adds = Pkg.PackageSpec[]      # registry names + git urls → Pkg.add
-            devs = Pkg.PackageSpec[]      # local checkouts → Pkg.develop
-            labels = String[]
-            for tok in tokens
-                t = String(tok)
-                if occursin(r"^(https?://|git://|git@|ssh://)"i, t) || endswith(t, ".git") || endswith(t, ".git/")
-                    # url or url#rev  (rev = branch/tag/sha)
-                    parts = split(t, '#'; limit = 2)
-                    url = String(parts[1]); rev = length(parts) == 2 ? String(parts[2]) : ""
-                    push!(adds, isempty(rev) ? Pkg.PackageSpec(url = url) : Pkg.PackageSpec(url = url, rev = rev))
-                    push!(labels, t)
-                elseif startswith(t, "/") || startswith(t, "~/") || startswith(t, "./") ||
-                       startswith(t, "../") || isdir(expanduser(t))
-                    push!(devs, Pkg.PackageSpec(path = abspath(expanduser(t))))
-                    push!(labels, t)
-                elseif occursin('@', t)                       # name@version
-                    nm, ver = split(t, '@'; limit = 2)
-                    push!(adds, Pkg.PackageSpec(name = String(nm), version = String(ver)))
-                    push!(labels, t)
-                else
-                    push!(adds, Pkg.PackageSpec(name = t))
-                    push!(labels, t)
-                end
-            end
-            isempty(adds) || Pkg.add(adds)
-            isempty(devs) || Pkg.develop(devs)
-            return Dict{String,Any}("ok" => true, "message" => "added $(join(labels, ", "))")
+            s = _pkg_add_specs(tokens)
+            isempty(s.adds) || Pkg.add(s.adds)
+            isempty(s.devs) || Pkg.develop(s.devs)
+            return Dict{String,Any}("ok" => true, "message" => "added $(join(s.labels, ", "))")
         else
             return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
         end
     catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
+"Add/remove package(s) in the notebook's PARENT PROJECT (shared) rather than its own env, then
+re-resolve the active notebook env so the change is visible. `parent` is the parent project dir.
+Restores the active project even on error. Returns `{ok, message}`."
+function __slate_pkg_parent(op, name, parent)
+    isempty(String(parent)) && return Dict{String,Any}("ok" => false, "message" => "no parent project")
+    tokens = filter(!isempty, split(String(name), r"[\s,]+"))
+    isempty(tokens) && return Dict{String,Any}("ok" => false, "message" => "empty package name")
+    cur = try; dirname(Pkg.project().path); catch; ""; end
+    try
+        Pkg.activate(String(parent))
+        o = String(op)
+        if o == "add"
+            s = _pkg_add_specs(tokens)
+            isempty(s.adds) || Pkg.add(s.adds)
+            isempty(s.devs) || Pkg.develop(s.devs)
+            msg = "added $(join(s.labels, ", ")) to the project"
+        elseif o == "rm"
+            Pkg.rm(String.(tokens)); msg = "removed $(join(tokens, ", ")) from the project"
+        else
+            isempty(cur) || Pkg.activate(cur)
+            return Dict{String,Any}("ok" => false, "message" => "unknown op '$o'")
+        end
+        # Back to the notebook env and re-resolve so it picks up the parent's change (the fork dev-refs
+        # the parent, so a resolve pulls the new dep through). Best-effort — the add already succeeded.
+        if !isempty(cur)
+            Pkg.activate(cur)
+            try; Pkg.resolve(); catch; end
+        end
+        return Dict{String,Any}("ok" => true, "message" => msg)
+    catch e
+        isempty(cur) || (try; Pkg.activate(cur); catch; end)
         return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
     end
 end
@@ -864,6 +900,7 @@ function tools()
         KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
         KaimonGate.GateTool("__slate_bundle_info", __slate_bundle_info),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
+        KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
         KaimonGate.GateTool("__slate_revise", __slate_revise),
     ]
 end

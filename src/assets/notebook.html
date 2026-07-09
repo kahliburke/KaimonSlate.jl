@@ -108,6 +108,17 @@
 </div></div>
 <div id="hydbanner" class="hydbanner" style="display:none"></div>
 <div id="srcbanner" class="srcbanner" style="display:none"></div>
+<!-- Blocking overlay while the worker installs + precompiles a package (the notebook is frozen meanwhile). -->
+<div id="pkginstallbg" class="pkginstall-bg">
+  <div class="pkginstall-card">
+    <span class="pkginstall-spin hydspin" id="pkginstallspin"></span>
+    <div class="pkginstall-title" id="pkginstalltitle">Installing…</div>
+    <div class="pkginstall-status" id="pkginstallstatus">preparing…</div>
+    <div class="pkginstall-note">The notebook is paused while the worker resolves &amp; precompiles this
+      package. Large packages (a full Makie stack, etc.) can take several minutes the first time on a host.</div>
+    <div class="pkginstall-actions" id="pkginstallactions" style="display:none"></div>
+  </div>
+</div>
 <div id="closedmodal" class="disconnmodal" style="display:none">
   <div class="dm-card">
     <div class="dm-title">📕 Notebook closed</div>

@@ -241,6 +241,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     const out = el.querySelector('.output');
     if (!_conflicted && out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
+    window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference
     // compare, since a selection click or live-state tick re-renders with the SAME nbState (same cell
     // objects). Without this, every such re-render re-ran setOption on EVERY chart in the notebook

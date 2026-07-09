@@ -200,7 +200,8 @@ end
 # (which drives prepare!→provision+spawn on the new host).
 function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :session)
     remotehost = ""
-    lock(nb.lock) do
+    unchanged = lock(nb.lock) do
+        before = strip(String(_effective_runon(nb.report)))   # where it runs NOW
         s = strip(String(spec))
         if scope === :clear
             delete!(nb.report.meta, "runon_session"); delete!(nb.report.meta, "runon")
@@ -209,6 +210,13 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
             delete!(nb.report.meta, "runon_session")       # a durable choice supersedes a session temp
         else  # :session
             isempty(s) ? delete!(nb.report.meta, "runon_session") : (nb.report.meta["runon_session"] = String(s))
+        end
+        # If the EFFECTIVE destination is identical (e.g. "save the current remote to the notebook" — only
+        # the layer that owns the choice changed), the worker stays exactly as-is: no teardown, no re-run.
+        # Just bump the version so the source badge refreshes; the footer persist happens below.
+        if strip(String(_effective_runon(nb.report))) == before
+            nb.version += 1
+            return true
         end
         try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → tunnel/sync torn down
         nb.kernel = _select_kernel(nb.path, nb.report)
@@ -225,8 +233,13 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
         isempty(remotehost) ? delete!(nb.report.meta, "hydratingKind") :
             (nb.report.meta["hydratingKind"] = "remote"; nb.report.meta["hydratingHost"] = remotehost)
         nb.version += 1
+        return false
     end
     scope === :session || _persist!(nb)     # notebook/clear change the durable footer → write the .jl
+    if unchanged
+        try; _broadcast(nb, string(nb.version)); catch; end    # refresh state (source badge) — worker untouched
+        return nb
+    end
     _broadcast(nb, "restart")
     @async begin
         try
@@ -252,6 +265,23 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
         end
     end
     return nb
+end
+
+# The version of `name` in the user's GLOBAL default env (~/.julia/environments/v#.#) — where a notebook
+# resolves a package it doesn't carry itself. "" if absent. Line-scans the Manifest (no TOML dep).
+function _global_pkg_version(name::AbstractString)
+    mf = joinpath(first(Base.DEPOT_PATH), "environments", "v$(VERSION.major).$(VERSION.minor)", "Manifest.toml")
+    isfile(mf) || return ""
+    cur = ""
+    for line in eachline(mf)
+        m = match(r"^\[\[deps\.(.+?)\]\]\s*$", line)
+        if m !== nothing; cur = String(m.captures[1]); continue; end
+        startswith(strip(line), "[") && (cur = "")
+        cur == String(name) || continue
+        vm = match(r"^\s*version\s*=\s*\"(.*)\"\s*$", line)
+        vm === nothing || return String(vm.captures[1])
+    end
+    return ""
 end
 
 # The gate worker's stdout/stderr log (eval output, prints, errors, package loads)
@@ -815,6 +845,13 @@ function _make_router(h::Hub)
         q = get(HTTP.queryparams(HTTP.URI(req.target)), "q", "")
         _json(Dict("names" => _pkg_complete(String(q))))
     end))
+    # What version of a package the user's GLOBAL default env has — the version a notebook that resolves
+    # the package from the global env is actually using. Lets the missing-package prompt SHOW it and
+    # install THAT version (not blindly latest, which could break the notebook).
+    HTTP.register!(router, "GET", "/api/{id}/pkg-info", req -> _withnb(h, req, _ -> begin
+        name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "name", "")))
+        _json(Dict("name" => name, "globalVersion" => isempty(name) ? "" : _global_pkg_version(name)))
+    end))
     HTTP.register!(router, "GET", "/api/{id}/packages", req -> _withnb(h, req, nb -> begin
         e = _notebook_adds(nb)
         _json(Dict("notebook" => e.adds,
@@ -825,7 +862,8 @@ function _make_router(h::Hub)
     end))
     HTTP.register!(router, "POST", "/api/{id}/package", req -> _withnb(h, req, nb -> begin
         b = _body(req)
-        _json(notebook_pkg_op!(nb, String(get(b, "op", "")), String(get(b, "name", ""))))
+        tgt = String(get(b, "target", "notebook")); tgt in ("notebook", "project") || (tgt = "notebook")
+        _json(notebook_pkg_op!(nb, String(get(b, "op", "")), String(get(b, "name", "")); target = tgt))
     end))
     # The worker's stdout/stderr log — what the kernel is doing when evaluating cells.
     HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb ->
