@@ -126,6 +126,21 @@ function cancel_run!(nb::LiveNotebook)
     return restart_kernel!(nb)
 end
 
+# Interrupt whatever is evaluating RIGHT NOW, without restarting or clearing the namespace — used just
+# before we tear the kernel down for a run-location / worker switch. `shutdown!` grabs the kernel lock
+# and an in-flight `eval_batch` blocks in its gate round-trip, so WITHOUT this the switch waits for the
+# current cell to finish; `cancel_eval` lands while the batch is in flight and makes it return promptly.
+# No restart fallback (unlike `cancel_run!`) — the caller re-picks the kernel next. Must be called
+# OUTSIDE nb.lock (it does a gate round-trip). Returns the number of cells interrupted.
+function _interrupt_inflight!(nb::LiveNotebook)
+    _PARALLEL_CANCEL[nb.id] = true            # stop the scheduler starting not-yet-run cells
+    k = nb.kernel
+    hasrunning = lock(nb.lock) do; any(c -> c.state == RUNNING, nb.report.cells); end
+    (k isa ReportEngine.GateKernel && hasrunning) || return 0
+    n = ReportEngine.cancel_eval(k)
+    return n < 0 ? 0 : n
+end
+
 function restart_kernel!(nb::LiveNotebook)
     # Tear down + reset synchronously (fast), mark a background re-run underway, and RETURN — the
     # full re-eval (which respawns the worker on prepare! and streams cells back) runs async, so the
@@ -164,6 +179,7 @@ end
 # Tears down the current kernel, RE-PICKS the kernel type (remote attach vs local) via _select_kernel,
 # and re-runs — async, same "instant" pattern as restart_kernel!. Runtime-only (not written to the .jl).
 function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
+    _interrupt_inflight!(nb)   # switching workers stops the current evaluation immediately (don't drain)
     lock(nb.lock) do
         s = strip(String(spec))
         isempty(s) ? delete!(nb.report.meta, "remoteworker") : (nb.report.meta["remoteworker"] = String(s))
@@ -200,6 +216,9 @@ end
 # (which drives prepare!→provision+spawn on the new host).
 function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :session)
     remotehost = ""
+    # Phase 1 (locked): apply the layer change and decide switch vs no-op. We do NOT tear the kernel down
+    # here — a switch first interrupts the in-flight run OUTSIDE the lock (a gate round-trip mustn't hold
+    # nb.lock), so changing where the notebook runs stops the current evaluation immediately.
     unchanged = lock(nb.lock) do
         before = strip(String(_effective_runon(nb.report)))   # where it runs NOW
         s = strip(String(spec))
@@ -218,6 +237,16 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
             nb.version += 1
             return true
         end
+        return false
+    end
+    scope === :session || _persist!(nb)     # notebook/clear change the durable footer → write the .jl
+    if unchanged
+        try; _broadcast(nb, string(nb.version)); catch; end    # refresh state (source badge) — worker untouched
+        return nb
+    end
+    # Actually switching → stop the current evaluation NOW (don't drain it), then tear down + re-pick.
+    _interrupt_inflight!(nb)
+    lock(nb.lock) do
         try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → tunnel/sync torn down
         nb.kernel = _select_kernel(nb.path, nb.report)
         remotehost = (nb.kernel isa ReportEngine.GateKernel && nb.kernel.target isa ReportEngine.RemoteTarget) ?
@@ -233,12 +262,6 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
         isempty(remotehost) ? delete!(nb.report.meta, "hydratingKind") :
             (nb.report.meta["hydratingKind"] = "remote"; nb.report.meta["hydratingHost"] = remotehost)
         nb.version += 1
-        return false
-    end
-    scope === :session || _persist!(nb)     # notebook/clear change the durable footer → write the .jl
-    if unchanged
-        try; _broadcast(nb, string(nb.version)); catch; end    # refresh state (source badge) — worker untouched
-        return nb
     end
     _broadcast(nb, "restart")
     @async begin
@@ -248,6 +271,18 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
             # (the hydrate-error banner) instead of the identical error stamped onto every cell. Only once
             # the worker is really connected do we run the cells.
             isempty(remotehost) || ReportEngine.prepare!(nb.kernel, nb.report)
+            # Worker is connected now — the "provisioning & connecting…" bring-up is DONE, so drop that
+            # banner before the cells run (it otherwise lingers through the whole run, still implying we're
+            # spinning the host up). The normal k/N run pill takes over as cells stream in.
+            if !isempty(remotehost)
+                lock(nb.lock) do
+                    delete!(nb.report.meta, "hydrating")
+                    delete!(nb.report.meta, "hydratingKind")
+                    delete!(nb.report.meta, "hydratingHost")
+                    nb.version += 1
+                end
+                try; _broadcast(nb, string(nb.version)); catch; end
+            end
             _drain!(nb)
         catch e
             msg = sprint(showerror, e)
