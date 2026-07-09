@@ -11,9 +11,10 @@
 .*.swp
 .*.swo
 
-# personal scratch / interim planning docs (not part of the repo)
-TODO.md
-VISION.md
+# Only README.md belongs at the repo root; every other root-level *.md is scratch
+# (planning / design / handoff / spec docs). Real documentation lives under docs/.
+/*.md
+!/README.md
 
 # CM6 bundle build (node deps; the built artifact is committed under src/assets/js/)
 build/cm6/node_modules/
