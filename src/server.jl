@@ -95,6 +95,7 @@ end
 # the depot cache), so this only handles ordinary notebooks: base / forked / detached.
 function _select_kernel(path::AbstractString, report; threads::AbstractString = "")
     if ReportEngine.gate_available()
+        ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) runon=[$(get(report.meta, "runon", ""))] remoteworker=[$(get(report.meta, "remoteworker", ""))]")
         # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
         # 127.0.0.1:<port> (e.g. on another machine, forwarded over an SSH tunnel). Set as
         # meta["remoteworker"] = "port,stream_port". Machine-specific (the ports/tunnel are local),
@@ -107,6 +108,25 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             (port !== nothing && sp !== nothing) &&
                 return ReportEngine.attach_gate_kernel(port, sp)
             @warn "slate: ignoring malformed remoteworker spec (want \"port,stream_port\")" spec = rw
+        end
+        # Remote-SPAWN, PER NOTEBOOK: PROVISION + run THIS notebook's worker on an SSH host, connecting
+        # over CURVE (:direct) or a supervised SSH tunnel (:ssh_tunnel). Set via `slate.run_on` →
+        # meta["runon"] = "ssh_host[,transport]" (transport = tunnel|direct, default tunnel). Each notebook
+        # picks its own destination independently. Machine-specific (ssh alias/tunnel) → runtime-only meta,
+        # never the `.jl` footer. `prepare!` provisions + spawns + connects, keeping the parent synced.
+        ro = strip(String(get(report.meta, "runon", "")))
+        if !isempty(ro)
+            parts = split(ro, ','; limit = 2)
+            rhost = String(strip(parts[1]))
+            transport = length(parts) == 2 ? Symbol(strip(parts[2])) : :tunnel
+            proj = Base.current_project(dirname(abspath(path)))
+            parent = proj === nothing ? "" : dirname(proj)
+            report.meta["assetbase"] = parent
+            # per-host remote project dir keyed by the local parent's basename (avoid cross-notebook clash)
+            rproj = "~/.cache/kaimonslate/remote/" * (isempty(parent) ? "detached" : basename(parent))
+            target = ReportEngine.RemoteTarget(rhost; transport = transport, project = rproj)
+            ReportEngine._rlog("_select_kernel → REMOTE kernel host=$rhost transport=$transport rproj=$rproj parent=$parent")
+            return ReportEngine.GateKernel(rproj; parent = parent, threads = threads, target = target)
         end
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)

@@ -170,6 +170,9 @@ function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
         try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → just disconnected
         nb.kernel = _select_kernel(nb.path, nb.report)         # remote attach vs local, per the meta
         build_dependencies!(nb.report)
+        # New worker → empty namespace → re-run every cell (this is what drives prepare!→attach). Cells
+        # left FRESH would give the runner nothing to do and the worker would never be reached. See reset!.
+        for c in nb.report.cells; c.state = STALE; c.output = nothing; end
         nb.report.meta["hydrating"] = true
         nb.version += 1
     end
@@ -187,11 +190,54 @@ function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
     return nb
 end
 
+# Move this notebook's worker onto (or off) an SSH host, PROVISIONING + spawning there and connecting
+# over CURVE/tunnel. `spec` = "ssh_host[,transport]" (transport = tunnel|direct); "" ⇒ back to a local
+# worker. Same tear-down → re-pick (`_select_kernel` reads meta["runon"]) → async re-run as
+# `set_remote_worker!`. Runtime-only (never written to the `.jl`).
+function set_run_on!(nb::LiveNotebook, spec::AbstractString)
+    lock(nb.lock) do
+        s = strip(String(spec))
+        isempty(s) ? delete!(nb.report.meta, "runon") : (nb.report.meta["runon"] = String(s))
+        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → tunnel/sync torn down
+        nb.kernel = _select_kernel(nb.path, nb.report)
+        build_dependencies!(nb.report)
+        # The new worker has an EMPTY namespace → every cell must re-run on it. Invalidate all cells so
+        # `_drain!` actually re-evaluates them (which is what triggers prepare!→spawn on the new host);
+        # without this, cells left FRESH from the previous worker leave the runner with nothing to do and
+        # the remote worker is never even spawned. Mirrors ReportEngine.reset!.
+        for c in nb.report.cells; c.state = STALE; c.output = nothing; end
+        nb.report.meta["hydrating"] = true
+        nb.version += 1
+    end
+    _broadcast(nb, "restart")
+    @async begin
+        try
+            _drain!(nb)                                        # first eval → prepare! provisions + spawns + connects
+        catch e
+            @warn "KaimonSlate: run-on switch re-run failed" exception = (e, catch_backtrace())
+        finally
+            lock(nb.lock) do; delete!(nb.report.meta, "hydrating"); nb.version += 1; end
+            try; _broadcast(nb, string(nb.version)); catch; end
+        end
+    end
+    return nb
+end
+
 # The gate worker's stdout/stderr log (eval output, prints, errors, package loads)
 # — the debugging surface for "what is the worker doing". In-process kernels have
 # no separate log (cells eval in the extension process).
 function worker_log(nb::LiveNotebook; maxbytes::Int = 100_000)
-    if nb.kernel isa GateKernel                          # real subprocess → tail its raw log
+    if nb.kernel isa GateKernel && nb.kernel.target isa ReportEngine.RemoteTarget
+        # Remote worker: the raw log lives on the SSH host. Show the LOCAL orchestration log
+        # (provision/spawn/connect steps + failures) followed by the ssh-fetched remote worker log,
+        # so "what happened" is answerable from one place even when the remote never came up.
+        io = IOBuffer()
+        println(io, "═══ local orchestration log (", ReportEngine._REMOTE_LOG, ") ═══")
+        println(io, ReportEngine.remote_log(; maxbytes = maxbytes ÷ 2))
+        println(io, "\n═══ remote worker log (", nb.kernel.target.ssh_host, ") ═══")
+        println(io, ReportEngine.fetch_remote_worker_log(nb.kernel; maxbytes = maxbytes ÷ 2))
+        return String(take!(io))
+    elseif nb.kernel isa GateKernel                      # real subprocess → tail its raw log
         path = nb.kernel.logpath
         (isempty(path) || !isfile(path)) && return "(worker not started yet)"
         s = read(path, String)

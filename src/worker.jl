@@ -823,16 +823,21 @@ end
 Run the worker gate over TCP, exposing the capture tools. Blocks (this is the
 worker process's main loop).
 """
-function start(; host::String = "127.0.0.1", port::Int, stream_port::Int)
+function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
+               curve::Bool = false, allowed_clients::Vector{String} = String[])
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
     # all cell capture in this process MUST use DemuxCapture (RedirectCapture's restore can't redirect
     # back to the custom IO).
     try; install_demux!(); pushdisplay(_DemuxDisplay()); catch e; @warn "slate: demux install failed" exception = e; end
+    # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
+    # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
+    # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
-                     allow_restart = false, spawned_by = "slate")
+                     allow_restart = false, spawned_by = "slate",
+                     curve = curve, allowed_clients = allowed_clients)
     _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
     # `serve` runs the message loop on a spawned thread and returns — but this is

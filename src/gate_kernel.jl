@@ -131,9 +131,12 @@ mutable struct GateKernel <: Kernel
     remote::Bool     # attached to a PRE-RUNNING worker (e.g. remote, forwarded to 127.0.0.1:port over
                      # an SSH tunnel) — `prepare!` CONNECTS, never spawns/reconstructs locally.
     label::String    # gate-session display label (the notebook's filename) — names the session in `ping`/TUI
+    target::Any      # RunTarget: nothing ⇒ local spawn; RemoteTarget ⇒ provision + spawn on a host, connect over CURVE/tunnel
+    tunnel::Any      # supervised SSH Tunnel for a :ssh_tunnel RemoteTarget (closed on teardown), else nothing
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
-               pending::Vector = Any[], threads::AbstractString = "", label::AbstractString = "") =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label))
+               pending::Vector = Any[], threads::AbstractString = "", label::AbstractString = "",
+               target = nothing) =
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing)
 end
 
 """
@@ -378,6 +381,9 @@ end
 # drop its routing entry, and clear conn/proc. Killing the process EOFs its stdout pipe, which
 # ends the log-pump task (no leak). Shared by respawn (prepare!) and shutdown!.
 function _kill_worker!(k::GateKernel)
+    # Remote target: close the supervised tunnel, stop the /src sync, and best-effort kill the
+    # remote worker so nothing is orphaned (no local proc to reap in that case).
+    (k.target isa RemoteTarget || k.tunnel !== nothing) && teardown_remote!(k)
     if k.conn !== nothing
         try; delete!(_GATE_SESSION, k.conn.name); catch; end
         # Tear the client connection DOWN, not just drop the reference: `disconnect!` closes the
@@ -402,7 +408,16 @@ end
 
 function prepare!(k::GateKernel, report::Report)
     lock(k.lock) do                               # serialize: concurrent callers must not double-spawn
-        if k.remote
+        if k.target isa RemoteTarget
+            # Provision (idempotent) + spawn the worker on the host + connect over CURVE (:direct) or a
+            # supervised SSH tunnel (:ssh_tunnel), keeping the parent project synced. A dropped
+            # connection reconnects on the next prepare (gate on `conn === nothing`).
+            if k.conn === nothing
+                k.conn, k.tunnel = spawn_and_connect_remote!(k, k.target, k.parent)
+                _GATE_SESSION[k.conn.name] = report.id
+                _ensure_poller!()
+            end
+        elseif k.remote
             # Attached to a pre-running (e.g. tunneled remote) worker: connect ONCE, never spawn or
             # reconstruct locally — the worker owns its process + environment. A dropped connection
             # reconnects (we can't respawn someone else's worker), so gate on `conn === nothing`.

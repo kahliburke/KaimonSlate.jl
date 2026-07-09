@@ -35,7 +35,7 @@ include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRe
 using .ReportEngine
 using .ReportRender
 using .NotebookServer: serve_notebook, start_server, LiveNotebook,
-                      Hub, start_hub, open_notebook!, close_notebook!, stop_hub,
+                      Hub, start_hub, open_notebook!, close_notebook!, stop_hub, set_run_on!,
                       find_live, notebook_digest,
                       agent_add_cell!, agent_edit_cell!, agent_run!, agent_delete_cell!, agent_delete_cells!, agent_rename_cell!, agent_scratch_eval!, agent_scratch_eval_bg!, scratch_check, agent_surface_controls!,
                       acquire_floor!, release_floor!, floor_status,
@@ -365,6 +365,24 @@ function create_tools(GateTool::Type)
         nb = find_live(h, notebook)
         nb === nothing && return (nothing, "No open notebook '$notebook' (use slate.list).")
         return (nb, "")
+    end
+
+    """
+        run_on(notebook::String, host::String) -> String
+
+    Choose WHERE this notebook's worker runs — per notebook. `host=""` runs it LOCALLY.
+    `host="ssh_host"` (or `"ssh_host,transport"`, transport = tunnel|direct, default tunnel) PROVISIONS
+    + spawns the worker on that SSH host and connects over an SSH tunnel or CURVE; the notebook then
+    behaves exactly as if local (reactivity, hot-reload, streaming all transparent). The host must be an
+    SSH target you've already set up (a `Host` in ~/.ssh/config with key auth). Different notebooks can
+    target different hosts/envs independently. Switches a live notebook and re-runs.
+    """
+    function run_on(notebook::String, host::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        set_run_on!(nb, host)
+        return isempty(strip(host)) ?
+               "✅ $(basename(nb.path)) → LOCAL worker." :
+               "✅ $(basename(nb.path)) → provisioning + spawning on '$host'; watch `slate.diag` or the worker log for progress."
     end
 
     """
@@ -995,6 +1013,7 @@ function create_tools(GateTool::Type)
         GateTool("open", nb_open),
         GateTool("list", nb_list),
         GateTool("close", nb_close),
+        GateTool("run_on", run_on),
         GateTool("read", read_cells),
         GateTool("add_cell", add_cell),
         GateTool("edit_cell", edit_cell),
