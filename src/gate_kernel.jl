@@ -31,6 +31,49 @@ const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
 # the notebook project on LOAD_PATH so the notebook's own deps always win.
 const _REVISE_ENV = joinpath(@__DIR__, "worker_revise")
 
+# ── Worker KaimonGate env ──────────────────────────────────────────────────────
+# The worker imports KaimonGate (the ZMQ bridge) from LOAD_PATH[1]. Pointing that at
+# Kaimon's lib/KaimonGate PROJECT DIR only works when the dir carries an instantiated
+# Manifest — true for a dev checkout, FALSE for a registry install of Kaimon (read-only,
+# shipped without a Manifest): there KaimonGate failed to precompile ("ZMQ … is required
+# but does not seem to be installed") and the worker died — the standalone run.jl path
+# lost all interactivity. So materialise a slate-owned env ONCE per KaimonGate version
+# (`Pkg.develop(path) + instantiate` in a subprocess — never Pkg.activate in-process) and
+# put THAT on the worker's LOAD_PATH. Falls back to the raw dir (the old behaviour, fine
+# for a dev checkout) when the build fails; the build log stays in the env dir.
+const _KGATE_ENV_ROOT = joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia")),
+                                 "scratchspaces", "kaimonslate-kgate")
+const _KGATE_ENV_LOCK = ReentrantLock()
+
+function _kgate_env()::String
+    kgate = joinpath(Base.pkgdir(_kaimon()), "lib", "KaimonGate")
+    proj = joinpath(kgate, "Project.toml")
+    isfile(proj) || return kgate
+    # Key by source path + declared deps + Julia version: a Kaimon upgrade (new pkgdir or
+    # changed deps) or a Julia bump rebuilds; source edits in a dev checkout need no rebuild
+    # (develop(path) tracks them live).
+    key = string(hash((kgate, read(proj, String), string(VERSION))); base = 16)
+    dir = joinpath(_KGATE_ENV_ROOT, key)
+    lock(_KGATE_ENV_LOCK) do
+        isfile(joinpath(dir, ".ready")) && return dir
+        @info "slate: preparing the worker's KaimonGate environment (once per Kaimon version)…" dir
+        buildlog = joinpath(dir, "build.log")
+        try
+            mkpath(dir)
+            code = "using Pkg; Pkg.develop(path = ARGS[1]); Pkg.instantiate()"
+            open(buildlog, "w") do io
+                run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code $kgate`;
+                             stdout = io, stderr = io))
+            end
+            write(joinpath(dir, ".ready"), kgate)
+            return dir
+        catch e
+            @warn "slate: could not materialise the KaimonGate worker env — falling back to the raw project dir (the worker may fail if its deps aren't installed)" kgate buildlog exception = e
+            return kgate
+        end
+    end
+end
+
 # Per-worker TCP ports. A simple counter (no Sockets dep); collisions are unlikely
 # and surface as a worker bind error rather than silent crosstalk.
 const _GATE_PORT = Ref(9100)
@@ -227,14 +270,16 @@ function _ensure_poller!()
     return nothing
 end
 
-# Worker boot: put KaimonGate on LOAD_PATH (via Kaimon's env), load the SlateWorker
+# Worker boot: put KaimonGate on LOAD_PATH (via the slate-owned env), load the SlateWorker
 # capture payload, and serve its tools over TCP. Pinned to the notebook's project.
 function _worker_script(port::Int, stream_port::Int, parent::AbstractString = "")
     # Put ONLY KaimonGate (the ZMQ bridge) on the worker's LOAD_PATH — from its own
     # minimal project (ZMQ/Serialization/…, no HTTP), NOT Kaimon's full env. Kaimon's
     # Manifest pins the custom HTTP 2.0 (Reseau); prepending it would shadow a notebook
     # project's standard HTTP v1 and break packages that need it (WGLMakie→Bonito, …).
-    kgate_dir = joinpath(Base.pkgdir(_kaimon()), "lib", "KaimonGate")
+    # `_kgate_env()` hands back an INSTANTIATED env for it (see above) — the raw
+    # lib/KaimonGate dir only resolves from a dev checkout.
+    kgate_dir = _kgate_env()
     # No LOAD_PATH stacking: the notebook runs in a SINGLE active env (`@`, set by
     # `--project`) — either the parent directly (base mode) or a forked env that already
     # contains the parent's deps (forked mode). `PARENT_PROJECT` is recorded only so the
