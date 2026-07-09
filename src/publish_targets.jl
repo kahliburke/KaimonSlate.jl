@@ -92,6 +92,8 @@ end
 
 # Run the upload CLI for the target's kind over a built dir; returns (ok, combined-output).
 function _upload_dir(t::GenericUploadTarget, dir::AbstractString)
+    # A dest beginning `-` would be read as a CLI flag by aws/rsync (argument injection).
+    startswith(strip(t.dest), "-") && return (false, "unsafe destination \"$(t.dest)\" (leading dash)")
     if t.kind === :s3
         args = String["s3", "sync", dir, t.dest]
         t.delete && push!(args, "--delete")
@@ -194,6 +196,8 @@ function deploy_dir(t::RsyncServeTarget, dir::AbstractString)
     host, remote_dir = _split_ssh_dest(t.dest)
     isempty(host) && return PublishResult(; ok = false, status = "error",
         log = "rsync-serve dest must be user@host:/path (got \"$(t.dest)\")")
+    derr = _rsync_serve_dest_error(host, remote_dir, t.bind)
+    isempty(derr) || return PublishResult(; ok = false, status = "error", log = derr)
     slug = _serve_slug(t.name)
     ctrl = ".local/share/slate-serve/$slug"
     io = IOBuffer()
@@ -220,7 +224,12 @@ function preflight(t::RsyncServeTarget)
     for tool in ("rsync", "ssh", "scp")
         Sys.which(tool) === nothing && push!(warnings, "`$tool` not found on PATH")
     end
-    isempty(first(_split_ssh_dest(t.dest))) && push!(warnings, "dest must be user@host:/path (with a colon)")
+    host, remote_dir = _split_ssh_dest(t.dest)
+    isempty(host) && push!(warnings, "dest must be user@host:/path (with a colon)")
+    if !isempty(host)
+        derr = _rsync_serve_dest_error(host, remote_dir, t.bind)
+        isempty(derr) || push!(warnings, derr)
+    end
     (1 <= t.port <= 65535) || push!(warnings, "port $(t.port) is out of range")
     return (; ok = isempty(warnings), warnings = warnings)
 end
@@ -268,6 +277,8 @@ purge_deployed!(t::PublishTarget) = (; ok = false,
 function purge_deployed!(t::RsyncServeTarget)
     host, remote_dir = _split_ssh_dest(t.dest)
     isempty(host) && return (; ok = false, log = "rsync-serve dest must be user@host:/path (got \"$(t.dest)\")")
+    derr = _rsync_serve_dest_error(host, remote_dir, t.bind)
+    isempty(derr) || return (; ok = false, log = derr)
     slug = _serve_slug(t.name)
     script = join([
         "systemctl --user disable --now slate-serve-$slug.service 2>/dev/null || true",

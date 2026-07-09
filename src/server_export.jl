@@ -1323,6 +1323,8 @@ end
 # reorder view. `[]` when unpublished/unreachable.
 function published_site_docs(repo::AbstractString)
     gh = Sys.which("gh"); gh === nothing && return Any[]
+    # Same owner/name guard the other gh-api paths use — keep `repo` from reaching other API routes.
+    occursin(r"^[\w.-]+/[\w.-]+$", String(repo)) || return Any[]
     apipath = "repos/$repo/contents/$_SITE_MANIFEST?ref=gh-pages"
     accept = "Accept: application/vnd.github.raw"
     raw = try; read(pipeline(`$gh api $apipath -H $accept`; stderr = devnull), String); catch; return Any[]; end
