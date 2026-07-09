@@ -551,7 +551,9 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         script = _remote_worker_script(t, port, stream_port, t.project, _hub_client_pubkey())
 
         # Ship the worker script as a FILE (verified: `-e` + nested-ssh quoting mangles it) and launch it
-        # detached with `setsid` so it outlives the ssh exec. Paths are $HOME-relative (ssh login cwd).
+        # detached so it outlives the ssh exec. `setsid` gives a clean new session but is Linux-only
+        # (absent on macOS), so we fall back to plain `nohup … &`, which — with stdio redirected to the
+        # log file — also survives the ssh channel closing. Paths are $HOME-relative (ssh login cwd).
         remote_script = "$_REMOTE_WORKER/worker-$port.jl"
         logf = "$_REMOTE_WORKER/worker-$port.log"
         tmp = tempname()
@@ -563,7 +565,8 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         end
         threads = effective_worker_threads(k.threads)
         proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
-        launch = "cd \$HOME && setsid nohup julia --project=$proj --startup-file=no --threads=$threads $remote_script > $logf 2>&1 &"
+        jl = "julia --project=$proj --startup-file=no --threads=$threads $remote_script"
+        launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
         _rlog("spawn: launching worker on $host  (port=$port stream=$stream_port threads=$threads)\n    remote log: $host:$logf")
         # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
         # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
@@ -613,11 +616,27 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
 end
 
 # The routable address of `host` for a :direct dial. An ssh alias (~/.ssh/config Host) may not
-# resolve as a plain hostname, so ask ssh to echo the connected peer; fall back to the alias.
+# resolve as a plain hostname (and ZMQ can't dial it), so ask the remote — over the already-
+# authenticated ssh channel — for the address it saw US arrive on: SSH_CONNECTION field 3 (the
+# server IP), which is exactly what the hub can dial back. We read it with `printenv` (NOT
+# `echo $VAR`): ssh flattens argv and the remote login shell re-parses it, so `${VAR%% *}` there
+# both mis-globs and — as seen live — comes back empty; `printenv SSH_CONNECTION` needs no remote-
+# shell expansion and survives the flattening. Loopback (ssh over ::1 or 127.*) is forced to IPv4
+# 127.0.0.1 because the worker binds 0.0.0.0 (IPv4-only). Falls back to the host string on failure.
 function _remote_ip(host::AbstractString)
-    ok, out = _ssh_capture(host, `sh -c "echo \${SSH_CONNECTION%% *}"`)
-    ip = ok ? strip(first(split(strip(out), '\n'); init = "")) : ""
-    return isempty(ip) ? String(host) : String(ip)
+    h = lowercase(strip(String(host)))
+    (h in ("localhost", "127.0.0.1", "::1")) && return "127.0.0.1"
+    ok, out = _ssh_capture(host, `printenv SSH_CONNECTION`)
+    if ok
+        # SSH_CONNECTION = "<client_ip> <client_port> <server_ip> <server_port>"
+        parts = split(strip(out))
+        if length(parts) >= 3
+            ip = String(parts[3])
+            (ip == "::1" || startswith(ip, "127.")) && return "127.0.0.1"
+            return ip
+        end
+    end
+    return String(host)
 end
 
 # Fetch the remote gate's CURVE server pubkey over SSH and pin it in Kaimon's trust store.
