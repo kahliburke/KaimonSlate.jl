@@ -331,7 +331,11 @@ function _spawn_worker!(k::GateKernel)
     # useless for watching a live worker (the worker also flushes its own buffer
     # periodically; see SlateWorker.start).
     out = Pipe()
-    k.proc = run(pipeline(cmd; stdout = out, stderr = out); wait = false)
+    # stdin = devnull is LOAD-BEARING: an inherited terminal stdin lets the child Julia
+    # re-initialise the tty's termios, silently knocking the standalone server's raw mode
+    # (its Ctrl-C-as-byte quit; see serve_notebook) back to cooked — ^C became an ignored
+    # SIGINT again. Workers must never touch the operator's terminal.
+    k.proc = run(pipeline(cmd; stdin = devnull, stdout = out, stderr = out); wait = false)
     close(out.in)
     Threads.@spawn begin
         io = open(k.logpath, "w")

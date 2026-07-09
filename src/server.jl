@@ -773,7 +773,7 @@ function _print_ready_banner(url::AbstractString; logpath::AbstractString = "")
     printstyled("  ✓  Your Kaimon Slate notebook is live\n\n"; color = :green, bold = true)
     print("      →  ")
     printstyled(url; color = :cyan, bold = true, underline = true)
-    print("\n\n  Open the link above in a browser. Press Ctrl-C here to stop the server.\n")
+    print("\n\n  Open the link above in a browser. Press q or Ctrl-C here to stop the server.\n")
     if !isempty(logpath)
         print("  Detailed server log: ")
         printstyled(logpath, "\n"; color = :light_black)
@@ -879,10 +879,10 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
         return
     end
     if !isinteractive() && stdin isa Base.TTY
-        _wait_for_ctrl_c()                   # ^C (or ^Q / stdin EOF) as a raw byte
+        _wait_for_ctrl_c()                   # ^C / q (or ^Q / stdin EOF) as a raw byte
         println("\n  Stopping the notebook server…")
         cleanup()
-        ccall(:_exit, Cvoid, (Cint,), 0)
+        _hard_exit(0)
     end
     try
         wait(h.server)
@@ -895,14 +895,32 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
     return h
 end
 
-# Block until the operator presses Ctrl-C (0x03) or Ctrl-Q (0x11), read as raw bytes
-# with ISIG off — the reliable stand-in for SIGINT (never delivered to this process;
-# see serve_notebook). Mirrors Kaimon's `_wait_for_quit_key`. EOF (stdin closed) also
-# returns — a detached operator can stop the server by closing the input.
+# Immediate process exit that SKIPS Julia's threaded exit machinery (which wedges or
+# crashes in this process; see serve_notebook): POSIX `_exit`, or `ExitProcess` on
+# Windows (the bare CRT `_exit` symbol isn't reliably resolvable there).
+_hard_exit(code::Integer) = @static if Sys.iswindows()
+    ccall((:ExitProcess, "kernel32"), stdcall, Cvoid, (UInt32,), UInt32(code))
+else
+    ccall(:_exit, Cvoid, (Cint,), Cint(code))
+end
+
+# Block until the operator presses Ctrl-C (0x03), q, or Ctrl-Q (0x11), read as raw
+# bytes with ISIG off — the reliable stand-in for SIGINT (never delivered to this
+# process; see serve_notebook). Raw mode is the same libuv tty mode the Windows REPL
+# uses, so this path works there too (processed input off → ^C arrives as data); if
+# raw mode can't be set at all we just block, and ^C falls back to the platform's
+# default console kill. Mirrors Kaimon's `_wait_for_quit_key`. EOF (stdin closed)
+# also returns — a detached operator can stop the server by closing the input. Raw
+# mode is re-asserted on a timer: anything else touching the tty (a spawned child
+# inheriting it, a stty from the shell) can knock it back to cooked, which would
+# turn ^C back into an undeliverable SIGINT.
 function _wait_for_ctrl_c()
     term = REPL.Terminals.TTYTerminal(get(ENV, "TERM", "dumb"), stdin, stdout, stderr)
     ok = try; REPL.Terminals.raw!(term, true); true; catch; false; end
     ok || (try; wait(Condition()); catch; end; return nothing)
+    keepraw = Timer(2.0; interval = 2.0) do _
+        try; REPL.Terminals.raw!(term, true); catch; end
+    end
     try
         while true
             b = try
@@ -911,9 +929,10 @@ function _wait_for_ctrl_c()
                 e isa EOFError && return nothing
                 rethrow()
             end
-            (b == 0x03 || b == 0x11) && return nothing   # Ctrl-C / Ctrl-Q
+            (b == 0x03 || b == 0x11 || b == UInt8('q') || b == UInt8('Q')) && return nothing
         end
     finally
+        close(keepraw)
         try; REPL.Terminals.raw!(term, false); catch; end
     end
 end
