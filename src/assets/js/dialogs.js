@@ -351,7 +351,8 @@ async function archiveZenodo() {
   if (!await confirmDark('Archive “' + ((nbState && nbState.title) || 'this notebook') +
       '” to Zenodo (“' + name + '”).\n\nThis mints a PERMANENT, citable DOI version — you cannot edit or delete it afterward. ' +
       'Do this at a milestone (a release, a paper), not for a small tweak.', 'Mint DOI', 'danger')) return;
-  _streamPublish([name], { history: (document.getElementById('sitehistory') || {}).checked ? '1' : '0' });
+  // archive:1 — the server treats deposits as a distinct verb from site publishing (see run_publish)
+  _streamPublish([name], { archive: '1', history: (document.getElementById('sitehistory') || {}).checked ? '1' : '0' });
 }
 window.archiveZenodo = archiveZenodo;
 

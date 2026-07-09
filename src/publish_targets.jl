@@ -117,6 +117,169 @@ function preflight(t::GenericUploadTarget)
     return (; ok = isempty(warnings), warnings = warnings)
 end
 
+# ── rsync + a self-hosted Julia server ───────────────────────────────────────────────────────────────
+# rsync the built site to a host you control AND ensure a tiny Julia HTTP.jl static server is running
+# there to serve it — no nginx/caddy, only Julia on the box. It is deployed as a systemd `--user`
+# service (persists across reboots via lingering) when the host has user systemd, else a nohup process.
+# HTTP.jl is the base on purpose: a future mode can serve live interactivity (its router + WebSockets)
+# from the same unit. Served on `bind:port` (default 127.0.0.1 — front it with an SSH tunnel or proxy).
+struct RsyncServeTarget <: PublishTarget
+    name::String
+    dest::String        # rsync destination AND served root: "user@host:/path/to/site"
+    url::String         # public URL to report (through your tunnel / reverse proxy)
+    delete::Bool        # mirror deletes (rsync --delete)
+    bind::String        # remote bind address (default 127.0.0.1)
+    port::Int           # remote bind port
+end
+
+# Bind 0.0.0.0 by DEFAULT so the site is directly reachable at http://<host>:<port>/ — no SSH
+# tunnel. `url` auto-derives from the dest host + port when left blank, so the "live" link points
+# at the real address instead of localhost. (Set bind=127.0.0.1 to keep it private and front it
+# with your own proxy/tunnel.)
+function RsyncServeTarget(; name, dest::AbstractString, url = "", delete::Bool = true,
+                         bind::AbstractString = "0.0.0.0", port::Integer = 8080)
+    u = String(url)
+    if isempty(strip(u))
+        host = first(_split_ssh_dest(String(dest)))          # "user@host" → host
+        h = isempty(host) ? "" : String(split(host, '@')[end])
+        isempty(h) || (u = "http://$h:$(Int(port))/")
+    end
+    return RsyncServeTarget(String(name), String(dest), u, delete, String(bind), Int(port))
+end
+
+# The bundled deployables (shipped in src/serve/), staged to the remote control dir on each publish.
+const _SLATE_SERVE_SCRIPT    = normpath(joinpath(@__DIR__, "serve", "slate_serve.jl"))
+const _SLATE_SERVE_BOOTSTRAP = normpath(joinpath(@__DIR__, "serve", "bootstrap.sh"))
+
+# "user@host:/path" → ("user@host", "/path"). No colon ⇒ ("", dest) (invalid; flagged in preflight).
+function _split_ssh_dest(dest::AbstractString)
+    m = match(r"^([^:]+):(.+)$", String(dest))
+    m === nothing ? ("", String(dest)) : (String(m.captures[1]), String(m.captures[2]))
+end
+
+# Safe slug for the remote control dir + systemd unit name.
+_serve_slug(name) = replace(String(name), r"[^A-Za-z0-9_-]" => "-")
+
+# Reject rsync-serve dests that could inject CLI options or break out of the remote shell.
+# The dest is operator config, but it flows unchecked into ssh/scp/rsync argv and into the
+# single-quoted purge script — a `host` beginning `-` becomes an ssh option (`-oProxyCommand`
+# runs a local command) and a quote/`;`/backtick in the remote path breaks the purge quoting.
+# Returns "" when safe, else a human message. `bind` lands in a systemd unit, so gate it too.
+function _rsync_serve_dest_error(host::AbstractString, remote_dir::AbstractString, bind::AbstractString)
+    (isempty(host) || startswith(host, "-")) && return "rsync-serve host \"$host\" must be [user@]hostname"
+    occursin(r"^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?$", host) ||
+        return "rsync-serve host \"$host\" has unexpected characters (expected [user@]hostname)"
+    (isempty(remote_dir) || startswith(remote_dir, "-")) &&
+        return "rsync-serve path \"$remote_dir\" is empty or looks like a flag"
+    occursin(r"['\"`;&|<>\n\\]", remote_dir) && return "rsync-serve path \"$remote_dir\" contains shell metacharacters"
+    (isempty(bind) || occursin(r"[^A-Za-z0-9._:\[\]-]", bind)) && return "rsync-serve bind \"$bind\" is not a valid host/IP"
+    return ""
+end
+
+# The ordered shell steps of one rsync-serve deploy: push the site, stage the server, (re)start it.
+# Remote paths are $HOME-relative — scp/ssh log in with cwd = $HOME.
+function _rsync_serve_steps(t::RsyncServeTarget, dir, host, remote_dir, slug, ctrl)
+    rargs = String["-az"]; t.delete && push!(rargs, "--delete")
+    append!(rargs, [string(dir, "/"), t.dest])
+    return Cmd[
+        `rsync $rargs`,
+        `ssh $host mkdir -p $ctrl`,
+        `scp -q $_SLATE_SERVE_SCRIPT $host:$ctrl/slate_serve.jl`,
+        `scp -q $_SLATE_SERVE_BOOTSTRAP $host:$ctrl/bootstrap.sh`,
+        `ssh $host bash $ctrl/bootstrap.sh $slug $remote_dir $(t.bind) $(string(t.port))`,
+    ]
+end
+
+function deploy_dir(t::RsyncServeTarget, dir::AbstractString)
+    host, remote_dir = _split_ssh_dest(t.dest)
+    isempty(host) && return PublishResult(; ok = false, status = "error",
+        log = "rsync-serve dest must be user@host:/path (got \"$(t.dest)\")")
+    slug = _serve_slug(t.name)
+    ctrl = ".local/share/slate-serve/$slug"
+    io = IOBuffer()
+    for cmd in _rsync_serve_steps(t, dir, host, remote_dir, slug, ctrl)
+        ok, out = _run_capture(cmd)
+        print(io, out)
+        ok || return PublishResult(; ok = false, url = t.url, status = "error", log = String(take!(io)))
+    end
+    return PublishResult(; ok = true, url = t.url, log = String(take!(io)))
+end
+
+function publish(t::RsyncServeTarget, nb::LiveNotebook; slug = "", bundle = false, base_url = "", kwargs...)
+    dir = mktempdir()
+    try
+        build_site!(dir, nb; site_url = isempty(base_url) ? t.url : base_url, slug = slug, bundle = bundle, kwargs...)
+        return deploy_dir(t, dir)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+function preflight(t::RsyncServeTarget)
+    warnings = String[]
+    for tool in ("rsync", "ssh", "scp")
+        Sys.which(tool) === nothing && push!(warnings, "`$tool` not found on PATH")
+    end
+    isempty(first(_split_ssh_dest(t.dest))) && push!(warnings, "dest must be user@host:/path (with a colon)")
+    (1 <= t.port <= 65535) || push!(warnings, "port $(t.port) is out of range")
+    return (; ok = isempty(warnings), warnings = warnings)
+end
+
+# ── Site subpaths within a target ──────────────────────────────────────────────────────────────────
+# A site's attachment to a target may carry a subpath ("" = the target's root, the default) so
+# several sites can share one bucket/host/repo. This maps an adapter to one that deploys into
+# `<its root>/<subpath>` — only kinds with a path-shaped destination support it; project-rooted
+# hosts (Cloudflare Pages, Netlify) are root-only and error out (caught per-target by the sync).
+_suburl(url, sp) = isempty(url) ? url : string(rstrip(String(url), '/'), "/", sp, "/")
+function with_subpath(t::PublishTarget, subpath::AbstractString)
+    sp = strip(String(subpath), '/')
+    isempty(sp) && return t
+    if t isa GithubPagesTarget
+        return GithubPagesTarget(; name = t.name, repo = t.repo, branch = t.branch,
+            subdir = isempty(t.subdir) ? sp : string(rstrip(t.subdir, '/'), "/", sp),
+            private = t.private, create = t.create)
+    elseif t isa GenericUploadTarget
+        return GenericUploadTarget(; name = t.name, kind = t.kind, dest = string(rstrip(t.dest, '/'), "/", sp),
+            url = _suburl(t.url, sp), endpoint = t.endpoint, delete = t.delete)
+    elseif t isa RsyncServeTarget
+        return RsyncServeTarget(; name = t.name, dest = string(rstrip(t.dest, '/'), "/", sp),
+            url = _suburl(t.url, sp), delete = t.delete, bind = t.bind, port = t.port)
+    end
+    error("target '$(t.name)' is root-only (a $(split(string(typeof(t)), '.')[end]) deploys a whole project) — " *
+          "it can't host a site under a subpath; use a path-based kind (s3/r2/rsync/rsync-serve/github-pages) or a dedicated target")
+end
+
+# ── Deployed-content teardown (opt-in `purge` from the removal flows) ─────────────────────────────
+"""
+    purge_deployed!(t::PublishTarget) -> (; ok, log)
+
+Tear down what a target DEPLOYED, where that's feasible — the opt-in `purge` of the removal flows.
+Only self-hosted kinds can genuinely undeploy; for static hosts (GitHub Pages / Cloudflare /
+Netlify / buckets) this is a documented no-op — remove the deployed content from the host's own
+console (or push an empty site) instead.
+"""
+purge_deployed!(t::PublishTarget) = (; ok = false,
+    log = "purge isn't supported for this target kind — deployed content (if any) was left in place; " *
+          "remove it from the hosting service directly")
+
+# rsync-serve: undo bootstrap.sh — stop+remove the systemd --user unit (or the nohup process),
+# then delete the control dir and the served root on the remote host. Everything best-effort
+# except the final rm (a missing unit/process is normal — e.g. the nohup fallback was used).
+function purge_deployed!(t::RsyncServeTarget)
+    host, remote_dir = _split_ssh_dest(t.dest)
+    isempty(host) && return (; ok = false, log = "rsync-serve dest must be user@host:/path (got \"$(t.dest)\")")
+    slug = _serve_slug(t.name)
+    script = join([
+        "systemctl --user disable --now slate-serve-$slug.service 2>/dev/null || true",
+        "rm -f \"\${XDG_CONFIG_HOME:-\$HOME/.config}/systemd/user/slate-serve-$slug.service\"",
+        "systemctl --user daemon-reload 2>/dev/null || true",
+        "pkill -f 'slate_serve.jl.*$slug' 2>/dev/null || true",
+        "rm -rf \"\$HOME/.local/share/slate-serve/$slug\" '$remote_dir'",
+    ], "; ")
+    ok, out = _run_capture(`ssh $host $script`)
+    return (; ok = ok, log = ok ? "stopped slate-serve-$slug and removed $remote_dir on $host" : out)
+end
+
 # ── shared process runner ────────────────────────────────────────────────────────────────────────
 # Run `cmd`, merging stdout+stderr; returns (ok, output). `env` adds vars to the child environment
 # (for CLI tokens). Never throws.
@@ -298,6 +461,12 @@ function target_from_ledger(t; secrets = Dict{String,String}())
         kind = t.kind == "rsync" ? :rsync : :s3
         return GenericUploadTarget(; name = t.name, kind = kind, dest = _s("dest"), url = _s("url"),
                                    endpoint = _s("endpoint"), delete = get(cfg, "delete", true) !== false)
+    elseif t.kind == "rsync-serve"
+        p = get(cfg, "port", 8080)
+        port = p isa Number ? Int(p) : something(tryparse(Int, string(p)), 8080)
+        return RsyncServeTarget(; name = t.name, dest = _s("dest"), url = _s("url"),
+                                delete = get(cfg, "delete", true) !== false,
+                                bind = _s("bind", "127.0.0.1"), port = port)
     elseif t.kind == "cloudflare-pages"
         return CloudflarePagesTarget(; name = t.name, project = _s("project"), account_id = _s("accountId"),
                                      token = _secret(secrets, _s("secretRef")), url = _s("url"), branch = _s("branch"))

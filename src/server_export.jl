@@ -1132,6 +1132,11 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
         write(htmpl, export_html(nb; runnable = false, og_image = hogpath,
                                  og_url = su, og_type = "website", kwargs...))  # carries `docindex`
         manifest["home"] = true
+        # Provenance: WHICH notebook is the front page — the manager shows it and links back
+        # to the source (before this, the UI could only say "home" with no origin).
+        manifest["homeDoc"] = Dict{String,Any}(
+            "title" => isempty(strip(fm.title)) ? nb.id : strip(fm.title),
+            "path" => abspath(nb.path))
         commit_title = "front page — $(isempty(strip(fm.title)) ? nb.id : strip(fm.title))"
         docUrl = su
     else
@@ -1253,13 +1258,17 @@ function site_docs(name::AbstractString)
     return docs isa AbstractVector ? docs : Any[]
 end
 
-# The site's front page: whether a `home`-tagged notebook was built into it (renders to the root) and
-# the site title (which, for a home page, is that notebook's title) — for the manager to name it.
+# The site's front page: whether a `home`-tagged notebook was built into it (renders to the root),
+# the built site title, and the home notebook's OWN title + source path (provenance, recorded at
+# build time; "" for sites built before homeDoc existed — a republish fills them in).
 function site_frontpage(name::AbstractString)
     dir = _site_dir(name)
-    (dir === nothing || !isdir(dir)) && return (; home = false, title = "")
+    (dir === nothing || !isdir(dir)) && return (; home = false, title = "", homeTitle = "", homePath = "")
     man = _read_site_manifest(dir)
-    return (; home = get(man, "home", false) === true, title = String(get(man, "title", "")))
+    hd = get(man, "homeDoc", Dict{String,Any}())
+    hd isa AbstractDict || (hd = Dict{String,Any}())
+    return (; home = get(man, "home", false) === true, title = String(get(man, "title", "")),
+            homeTitle = String(get(hd, "title", "")), homePath = String(get(hd, "path", "")))
 end
 
 """

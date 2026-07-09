@@ -765,20 +765,31 @@ function create_tools(GateTool::Type)
     """
         publish(notebook; targets="") -> String
 
-    Publish THIS notebook's document to its configured publish TARGETS — GitHub Pages, S3/Cloudflare
-    R2, rsync, or a Zenodo DOI — recording each result in the publish ledger (what/when/where).
-    `targets` is a comma-separated list of target names as configured in the Publishing manager
-    (`slate.publish_targets`); empty ⇒ the targets already assigned to this document. Publishing only
-    ever touches OUTPUT (a `gh-pages`-style branch / bucket / archive), never a source repo.
+    Publish THIS notebook's document to its configured publish TARGETS — re-pushable live
+    destinations: GitHub Pages, S3/Cloudflare R2, rsync, … — recording each result in the publish
+    ledger (what/when/where). `targets` is a comma-separated list of target names as configured in
+    the Publishing manager (`slate.publish_targets`); empty ⇒ the targets already assigned to this
+    document. Publishing only ever touches OUTPUT (a `gh-pages`-style branch / bucket), never a
+    source repo. ARCHIVES (Zenodo DOIs) are a different verb — permanent and immutable, never part
+    of a site push; mint one deliberately with `slate.archive`.
     """
     function publish_tool(notebook::String; targets::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         names = String[String(strip(t)) for t in split(targets, ',') if !isempty(strip(t))]
+        note = ""
         if isempty(names)
             info = NotebookServer.publish_doc_info(nb)
             names = String[String(t) for t in get(info, "assignedTargets", String[])]
+            # An archive assigned to the doc (a past deposit) must not be re-minted as a side
+            # effect of an implicit "publish everywhere" — archives are always explicit.
+            archives = try; Set(NotebookServer.archive_target_names()); catch; Set{String}(); end
+            skipped = [n for n in names if n in archives]
+            if !isempty(skipped)
+                filter!(n -> !(n in archives), names)
+                note = "\n(skipped archive target$(length(skipped) == 1 ? "" : "s") $(join(skipped, ", ")) — a DOI deposit is deliberate; use slate.archive)"
+            end
         end
-        isempty(names) && return "No publish targets. Configure one with slate.publish_targets(op=\"add\", …), then pass targets=\"name1,name2\" (or assign them in the Publishing manager)."
+        isempty(names) && return "No publish targets. Configure one with slate.publish_targets(op=\"add\", …), then pass targets=\"name1,name2\" (or assign them in the Publishing manager)." * note
         res = try
             NotebookServer.run_publish(nb, names)
         catch e
@@ -788,8 +799,47 @@ function create_tools(GateTool::Type)
         lines = ["$(r["ok"] ? "✅" : "❌") $(r["target"]) — $(r["status"])" *
                  (isempty(r["url"]) ? "" : " → " * r["url"]) *
                  (isempty(r["doi"]) ? "" : " (DOI $(r["doi"]))") for r in res["results"]]
-        msg = (res["ok"] ? "Published" : "Publish completed with errors") * ":\n" * join(lines, "\n")
+        msg = (res["ok"] ? "Published" : "Publish completed with errors") * ":\n" * join(lines, "\n") * note
         return _surfaced(nb, "publish", Dict{String,Any}("targets" => join(names, ",")), msg)
+    end
+
+    """
+        archive(notebook; target="") -> String
+
+    ⚠ PERMANENT: deposit this notebook's standalone bundle to an ARCHIVE target (Zenodo), minting an
+    immutable, citable DOI version that can never be edited or deleted. This is a milestone act (a
+    release, a paper) — NEVER do it casually or as part of routine publishing, and CONFIRM WITH THE
+    USER before calling unless they just asked for exactly this. `target` is the archive target's
+    name from the Publishing manager; empty is accepted only when exactly one archive target is
+    configured. Live-site publishing is `slate.publish`.
+    """
+    function archive_tool(notebook::String; target::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        archives = try
+            NotebookServer.archive_target_names()
+        catch e
+            return "⛔ Could not read the publish ledger: " * sprint(showerror, e)
+        end
+        isempty(archives) && return "No archive target configured. Add one in the Publishing manager (kind=zenodo, with the API token in Secrets), then retry."
+        name = String(strip(target))
+        if isempty(name)
+            length(archives) == 1 || return "Several archive targets configured ($(join(archives, ", "))) — pass target=\"name\"."
+            name = archives[1]
+        elseif !(name in archives)
+            return "⛔ '$name' is not an archive target (archives: $(join(archives, ", "))). Live sites go through slate.publish."
+        end
+        res = try
+            NotebookServer.run_publish(nb, [name]; archive = true)
+        catch e
+            return _surfaced(nb, "archive", Dict{String,Any}("target" => name),
+                             "⛔ Archive failed: " * sprint(showerror, e))
+        end
+        r = res["results"][1]
+        msg = r["ok"] ?
+            "✅ Archived — DOI $(r["doi"]) (permanent, citable; this version can never be changed)" *
+            (isempty(r["url"]) ? "" : " → " * r["url"]) :
+            "❌ Archive failed: $(r["status"])\n$(r["log"])"
+        return _surfaced(nb, "archive", Dict{String,Any}("target" => name), msg)
     end
 
     """
@@ -823,13 +873,21 @@ function create_tools(GateTool::Type)
         publish_targets(op="list"; name="", kind="", config="") -> String
 
     Manage the named publish TARGETS in the ledger (shared across notebooks). `op="list"` shows them;
-    `op="add"` upserts target `name` of `kind` ("github-pages" | "s3" | "r2" | "rsync" | "zenodo") with
-    a JSON `config` (e.g. `{"repo":"me/site"}`, `{"dest":"s3://bucket","endpoint":"…"}`, or
-    `{"secretRef":"zenodo-token"}`); `op="rm"` deletes it. Secret VALUES are never set here — put a
-    `secretRef` in the config and store the token in the manager's secret store.
+    `op="add"` upserts target `name` of `kind` ("github-pages" | "cloudflare-pages" | "netlify" |
+    "s3" | "r2" | "rsync" | "rsync-serve" | "zenodo") with a JSON `config` — e.g.
+    `{"repo":"me/site"}`, `{"dest":"s3://bucket","endpoint":"…"}`, `{"secretRef":"zenodo-token"}`, or
+    for "rsync-serve" (rsync to your own host + a self-hosted Julia static server there):
+    `{"dest":"user@host:/path","url":"http://…","bind":"127.0.0.1","port":8080}`. `op="rm"` deletes
+    it. Secret VALUES are never set here — put a `secretRef` in the config and store the token in the
+    manager's secret store. Note "zenodo" is an ARCHIVE backend: configured here, but deposits are
+    minted only via `slate.archive` (permanent, immutable DOIs) — `slate.publish` refuses it.
+
+    Removal is LOCAL by default (the definition goes away; sites/documents are detached; deployed
+    content stays live). `op="rm", purge="true"` ALSO tears down the deployed side where feasible —
+    rsync-serve stops its remote server and deletes the served dir; static hosts are a no-op.
     """
     function publish_targets_tool(; op::String = "list", name::String = "", kind::String = "",
-                                  config::String = "")::String
+                                  config::String = "", purge::String = "")::String
         if op == "list"
             tgts = get(NotebookServer.publish_ledger_view(), "targets", Any[])
             isempty(tgts) && return "No publish targets configured. Add one, e.g.\n  slate.publish_targets(op=add, name=site, kind=github-pages, config={\"repo\":\"me/site\"})."
@@ -846,10 +904,74 @@ function create_tools(GateTool::Type)
             return string("✅ target '", name, "' (", kind, ") saved.")
         elseif op == "rm"
             isempty(strip(name)) && return "op=rm needs name=."
-            NotebookServer.publish_target_delete!(String(name))
-            return string("✅ target '", name, "' removed.")
+            view = NotebookServer.publish_target_delete!(String(name); purge = lowercase(purge) == "true")
+            plog = get(view, "purgeLog", String[])
+            return string("✅ target '", name, "' removed (references detached).",
+                          isempty(plog) ? "" : "\n" * join(plog, "\n"))
         else
             return string("bad op '", op, "' — use list|add|rm.")
+        end
+    end
+
+    """
+        sites(op="list"; name="", targets="", home="", title="", paths="", purge="") -> String
+
+    Manage publish SITES (logical portfolios: one canonical local build synced to a set of
+    destination targets). `op="list"` shows them. `op="set"` creates/updates site `name`:
+    `targets` = comma-separated target names, `home` = the home doc slug (optional), `title` = the
+    site's display title ("" ⇒ the site name), `paths` = optional per-target subpaths as
+    `target=subpath` pairs (comma-separated, e.g. `bucket=stat-mech,gh=blog`) so several sites can
+    share one target without overwriting each other (blank ⇒ that target's root). A (target,
+    subpath) already claimed by another site is refused. `op="delete"` removes the definition AND
+    the local build — when the site has destination targets you must DECIDE about the deployed
+    content: the first call reports the targets and asks you to re-invoke with `purge="true"` (also
+    tear down deployed content where feasible — rsync-serve is stopped and wiped; static hosts stay
+    live) or `purge="false"` (leave everything deployed as-is). Ask the user which they want.
+    """
+    function sites_tool(; op::String = "list", name::String = "", targets::String = "",
+                        home::String = "", title::String = "", paths::String = "", purge::String = "")::String
+        if op == "list"
+            sites = get(NotebookServer.publish_ledger_view(), "sites", Any[])
+            isempty(sites) && return "No sites yet. Create one: slate.sites(op=\"set\", name=\"…\", targets=\"t1,t2\")."
+            return "Sites:\n" * join(["  $(s["name"])" *
+                (isempty(String(get(s, "title", ""))) ? "" : "  “$(s["title"])”") *
+                "  → " * (isempty(s["targets"]) ? "(local-only)" :
+                    join([let p = String(get(get(s, "paths", Dict()), t, "")); isempty(p) ? t : "$t/$p"; end for t in s["targets"]], ", ")) *
+                "  · $(length(get(s, "docs", []))) doc(s)" for s in sites], "\n")
+        elseif op in ("set", "create")
+            isempty(strip(name)) && return "op=set needs name=."
+            ts = String[String(strip(t)) for t in split(targets, ',') if !isempty(strip(t))]
+            pmap = Dict{String,String}()
+            for pair in split(paths, ',')
+                kv = split(pair, '='; limit = 2)
+                length(kv) == 2 && !isempty(strip(kv[1])) && (pmap[String(strip(kv[1]))] = String(strip(kv[2])))
+            end
+            try
+                NotebookServer.publish_site_set!(String(name), ts, String(home), String(title); paths = pmap)
+            catch e
+                return "⛔ " * sprint(showerror, e)
+            end
+            return string("✅ site '", name, "' saved (targets: ", isempty(ts) ? "none — local staging" :
+                join([let p = get(pmap, t, ""); isempty(p) ? t : "$t/$p"; end for t in ts], ", "), ").")
+        elseif op == "delete"
+            isempty(strip(name)) && return "op=delete needs name=."
+            site = let v = NotebookServer.publish_ledger_view()
+                idx = findfirst(s -> s["name"] == name, get(v, "sites", Any[]))
+                idx === nothing ? nothing : v["sites"][idx]
+            end
+            site === nothing && return "No site '$name'."
+            tnames = String[String(t) for t in get(site, "targets", String[])]
+            if !isempty(tnames) && !(lowercase(purge) in ("true", "false"))
+                return "Site '$name' deploys to: $(join(tnames, ", ")).\nDECIDE about the deployed content " *
+                       "(ask the user): re-invoke with purge=\"true\" to also tear it down where feasible, " *
+                       "or purge=\"false\" to remove only the local definition + build."
+            end
+            view = NotebookServer.publish_site_delete!(String(name); purge = lowercase(purge) == "true")
+            plog = get(view, "purgeLog", String[])
+            return string("✅ site '", name, "' removed (definition + local build).",
+                          isempty(plog) ? "" : "\n" * join(plog, "\n"))
+        else
+            return string("bad op '", op, "' — use list|set|delete.")
         end
     end
 
@@ -893,8 +1015,10 @@ function create_tools(GateTool::Type)
         GateTool("search_docs", search_docs_tool),
         GateTool("pkg", pkg),
         GateTool("publish", publish_tool),
+        GateTool("archive", archive_tool),
         GateTool("publish_history", publish_history_tool),
         GateTool("publish_targets", publish_targets_tool),
+        GateTool("sites", sites_tool),
     ]
 end
 

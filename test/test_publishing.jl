@@ -8,10 +8,15 @@ const PL = KaimonSlate.PublishLedger
 const NS = KaimonSlate.NotebookServer
 
 # Clear every KaimonSlate/XDG home var so a test starts from a known state, then apply overrides.
+# FORCE the local ledger backend: default_store() picks a GistStore when `gh` is authenticated,
+# and a gist is keyed by GitHub identity — it ignores KAIMONSLATE_HOME, so tests that mutate via
+# the NS.publish_* helpers would share (and pollute) the developer's REAL publish gist and leak
+# state across testsets. "local" gives each test its own on-disk ledger under its temp home.
 _clear() = Dict("KAIMONSLATE_HOME" => nothing, "KAIMONSLATE_CONFIG_HOME" => nothing,
                 "KAIMONSLATE_DATA_HOME" => nothing, "KAIMONSLATE_CACHE_HOME" => nothing,
                 "KAIMONSLATE_SITES_DIR" => nothing, "XDG_CONFIG_HOME" => nothing,
-                "XDG_DATA_HOME" => nothing, "XDG_CACHE_HOME" => nothing)
+                "XDG_DATA_HOME" => nothing, "XDG_CACHE_HOME" => nothing,
+                "KAIMONSLATE_LEDGER_BACKEND" => "local")
 _env(pairs...) = merge(_clear(), Dict(pairs...))
 
 @testset "SlateHome — XDG home resolution" begin
@@ -264,6 +269,16 @@ end
     rs = NS.target_from_ledger(PL.Target("rs", "rsync"; config = Dict("dest" => "host:/var/www")))
     @test rs.kind === :rsync && rs.dest == "host:/var/www"
 
+    # rsync-serve: rsync + a self-hosted Julia static server on the destination host
+    sv = NS.target_from_ledger(PL.Target("factorio", "rsync-serve";
+        config = Dict("dest" => "u@h:/srv/site", "url" => "http://h:8080/", "bind" => "0.0.0.0", "port" => "9090")))
+    @test sv isa NS.RsyncServeTarget && sv.dest == "u@h:/srv/site" && sv.bind == "0.0.0.0"
+    @test sv.port == 9090 && sv.delete                              # string port coerced; delete defaults on
+    @test NS._split_ssh_dest("u@h:/p") == ("u@h", "/p")
+    @test NS._split_ssh_dest("/no-colon") == ("", "/no-colon")
+    @test !NS.preflight(NS.RsyncServeTarget(; name = "x", dest = "/no-colon", port = 99999)).ok
+    @test "rsync-serve" in NS._TARGET_KINDS
+
     @test_throws ErrorException NS.target_from_ledger(PL.Target("z", "totally-unknown-kind"))
 
     # preflight surfaces missing config without touching the network
@@ -375,6 +390,96 @@ end
             # force a failure by pointing at an unmocked deposition id
             r2 = NS._zenodo_deposit(c, "999", file, meta)
             @test !r2.ok && occursin("Zenodo HTTP", r2.log) && !endswith(last(c.calls)[2], "/actions/publish")
+        end
+    end
+end
+
+@testset "publish vs archive are different verbs" begin
+    mktempdir() do tmp
+        withenv(_env("KAIMONSLATE_HOME" => tmp)...) do
+            @test NS._is_archive_kind("zenodo")
+            @test !NS._is_archive_kind("github-pages")
+            @test !NS._is_archive_kind("rsync")
+            NS.publish_target_set!("site", "github-pages", Dict{String,Any}("repo" => "u/r"))
+            NS.publish_target_set!("doi", "zenodo", Dict{String,Any}("secretRef" => "tok"))
+            @test NS.archive_target_names() == ["doi"]
+            led = KaimonSlate.PublishLedger.load(KaimonSlate.PublishLedger.default_store())
+            # a site publish may not carry an archive along (would mint an immutable DOI)
+            @test NS._verb_mismatch(led, ["site"], false) === nothing
+            @test occursin("permanent", NS._verb_mismatch(led, ["site", "doi"], false))
+            @test occursin("slate.archive", NS._verb_mismatch(led, ["doi"], false))
+            # an archive run deposits to archive kinds only
+            @test NS._verb_mismatch(led, ["doi"], true) === nothing
+            @test occursin("not archive target", NS._verb_mismatch(led, ["doi", "site"], true))
+        end
+    end
+end
+
+@testset "sites: titles, removal hygiene, purge plumbing" begin
+    mktempdir() do tmp
+        withenv(_env("KAIMONSLATE_HOME" => tmp, "KAIMONSLATE_SITES_DIR" => joinpath(tmp, "sites"))...) do
+            NS.publish_target_set!("gh", "github-pages", Dict{String,Any}("repo" => "u/r"))
+            NS.publish_site_set!("stat-mech", ["gh"], "", "Stat Mech")
+            led = PL.load(PL.default_store())
+            s = led.sites["stat-mech"]
+            @test s.title == "Stat Mech" && s.targets == ["gh"] && s.home == ""
+            PL.save(PL.default_store(), led)                       # title survives the JSON round-trip
+            @test PL.load(PL.default_store()).sites["stat-mech"].title == "Stat Mech"
+            NS.publish_site_set!("blog", String[])                 # untitled → "" (build falls back to the name)
+            @test PL.load(PL.default_store()).sites["blog"].title == ""
+            v = NS.publish_ledger_view()                           # the manager view carries the title
+            sv = [x for x in v["sites"] if x["name"] == "stat-mech"][1]
+            @test sv["title"] == "Stat Mech"
+
+            # deleting a target detaches it from sites — no dangling destination refs
+            NS.publish_target_delete!("gh")
+            @test PL.load(PL.default_store()).sites["stat-mech"].targets == String[]
+
+            # deleting a site removes the definition AND its local canonical build
+            dir = NS._site_dir("stat-mech")
+            mkpath(dir); write(joinpath(dir, "index.html"), "x")
+            NS.publish_site_delete!("stat-mech")
+            @test !haskey(PL.load(PL.default_store()).sites, "stat-mech")
+            @test !isdir(dir)
+
+            # purge: generic kinds are a documented no-op (only self-hosted kinds can undeploy)
+            r = NS.purge_deployed!(NS.GenericUploadTarget(; name = "x", kind = :s3, dest = "s3://b"))
+            @test !r.ok && occursin("purge isn't supported", r.log)
+        end
+    end
+end
+
+@testset "site subpaths within a target" begin
+    mktempdir() do tmp
+        withenv(_env("KAIMONSLATE_HOME" => tmp, "KAIMONSLATE_SITES_DIR" => joinpath(tmp, "sites"))...) do
+            NS.publish_target_set!("bucket", "s3", Dict{String,Any}("dest" => "s3://b", "url" => "https://cdn/"))
+            NS.publish_target_set!("gh", "github-pages", Dict{String,Any}("repo" => "u/r"))
+            NS.publish_target_set!("cf", "cloudflare-pages", Dict{String,Any}("project" => "p"))
+
+            # paths persist + round-trip
+            NS.publish_site_set!("stat", ["bucket"], "", "Stat"; paths = Dict("bucket" => "stat-mech"))
+            led = PL.load(PL.default_store())
+            @test led.sites["stat"].paths == Dict("bucket" => "stat-mech")
+            PL.save(PL.default_store(), led)
+            @test PL.load(PL.default_store()).sites["stat"].paths["bucket"] == "stat-mech"
+
+            # a DIFFERENT subpath on the same target is fine; the SAME location clashes
+            NS.publish_site_set!("blog", ["bucket"], "", ""; paths = Dict("bucket" => "blog"))
+            @test_throws ErrorException NS.publish_site_set!("dup", ["bucket"]; paths = Dict("bucket" => "blog"))
+            # root vs subpath don't clash; two roots on one target DO
+            NS.publish_site_set!("root1", ["gh"])
+            @test_throws ErrorException NS.publish_site_set!("root2", ["gh"])
+            # re-saving the SAME site to its own location is allowed (not a self-clash)
+            NS.publish_site_set!("stat", ["bucket"], "", "Stat 2"; paths = Dict("bucket" => "stat-mech"))
+
+            # with_subpath transforms path-based adapters; root-only kinds error
+            s3 = NS.target_from_ledger(led.targets["bucket"])
+            sub = NS.with_subpath(s3, "stat-mech")
+            @test sub.dest == "s3://b/stat-mech" && sub.url == "https://cdn/stat-mech/"
+            @test NS.with_subpath(s3, "") === s3                       # empty subpath = identity
+            gh = NS.with_subpath(NS.target_from_ledger(led.targets["gh"]), "blog")
+            @test gh.subdir == "blog"
+            @test_throws ErrorException NS.with_subpath(NS.target_from_ledger(led.targets["cf"]), "x")
         end
     end
 end

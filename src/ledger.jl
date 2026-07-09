@@ -76,10 +76,14 @@ struct SiteGroup
     name::String
     targets::Vector{String}   # the destination targets this site syncs to (references into Ledger.targets)
     home::String              # slug/docId of the home notebook, or ""
+    title::String             # the site's display title (<title>/masthead); "" ⇒ the site name
+    paths::Dict{String,String} # target name → subpath WITHIN that target ("",'absent' ⇒ its root) —
+                               # lets several sites share one bucket/host without overwriting each other
 end
 
-SiteGroup(name; targets = String[], target = "", home = "") =
-    SiteGroup(String(name), isempty(targets) && !isempty(target) ? [String(target)] : collect(String, targets), String(home))
+SiteGroup(name; targets = String[], target = "", home = "", title = "", paths = Dict{String,String}()) =
+    SiteGroup(String(name), isempty(targets) && !isempty(target) ? [String(target)] : collect(String, targets),
+              String(home), String(title), Dict{String,String}(String(k) => String(v) for (k, v) in pairs(paths)))
 
 "The whole ledger: documents ↔ targets ↔ optional site groupings."
 mutable struct Ledger
@@ -228,9 +232,16 @@ function _target_from_dict(name, d)
     return Target(String(name), _str(d, "kind"); config = cfg)
 end
 
-_site_to_dict(s::SiteGroup) = Dict{String,Any}("targets" => copy(s.targets), "home" => s.home)
-_site_from_dict(name, d) = SiteGroup(String(name);
-    targets = [String(t) for t in get(d, "targets", String[])], target = _str(d, "target"), home = _str(d, "home"))
+_site_to_dict(s::SiteGroup) = Dict{String,Any}("targets" => copy(s.targets), "home" => s.home,
+                                               "title" => s.title, "paths" => copy(s.paths))
+function _site_from_dict(name, d)
+    p = get(d, "paths", Dict{String,Any}())
+    paths = p isa AbstractDict ? Dict{String,String}(String(k) => String(v) for (k, v) in pairs(p)) :
+                                 Dict{String,String}()
+    return SiteGroup(String(name);
+        targets = [String(t) for t in get(d, "targets", String[])], target = _str(d, "target"),
+        home = _str(d, "home"), title = _str(d, "title"), paths = paths)
+end
 
 "Plain-`Dict` form of the ledger (the JSON shape)."
 function to_dict(l::Ledger)

@@ -95,7 +95,7 @@ end
 # ── ledger → view JSON ─────────────────────────────────────────────────────────────────────────────
 # The manager's read model. Targets carry only NON-secret config; we surface `secretRef` names, never
 # secret values. `available` lists the target kinds the UI can offer.
-const _TARGET_KINDS = ["github-pages", "cloudflare-pages", "netlify", "s3", "r2", "rsync", "zenodo"]
+const _TARGET_KINDS = ["github-pages", "cloudflare-pages", "netlify", "s3", "r2", "rsync", "rsync-serve", "zenodo"]
 
 _event_view(e) = Dict{String,Any}("id" => e.id, "ts" => e.ts, "target" => e.target,
     "status" => e.status, "url" => e.url, "doi" => e.doi, "commit" => e.commit, "note" => e.note)
@@ -109,9 +109,12 @@ end
 _target_view(t) = Dict{String,Any}("name" => t.name, "kind" => t.kind, "config" => t.config)
 function _site_view(s)
     fp = site_frontpage(s.name)
-    return Dict{String,Any}("name" => s.name, "targets" => copy(s.targets),
+    return Dict{String,Any}("name" => s.name, "title" => s.title, "targets" => copy(s.targets),
+        "paths" => copy(s.paths),               # target → subpath within it ("" = root)
         "docs" => site_docs(s.name),            # docs/order/sections from the local build
-        "hasHome" => fp.home, "homeTitle" => fp.title)   # the front-page notebook (tagged `home`), if any
+        # Front page (a `home`-tagged notebook): presence + WHICH notebook it is — title and
+        # source path recorded at build time, so the manager can name it and link back to it.
+        "hasHome" => fp.home, "homeTitle" => fp.homeTitle, "homePath" => fp.homePath)
 end
 
 # The authenticated GitHub login (for owner auto-fill so a new github-pages target only needs a repo
@@ -142,6 +145,9 @@ function publish_ledger_view()
     store = PublishLedger.default_store()
     view = _ledger_view(PublishLedger.load(store))
     view["backend"] = store isa PublishLedger.GistStore ? "gist" : "local"
+    # The gist is the cross-machine ledger — link it so "— gist" is inspectable, not a mystery.
+    store isa PublishLedger.GistStore && store.id !== nothing &&
+        (view["backendUrl"] = "https://gist.github.com/" * store.id)
     return view
 end
 
@@ -167,15 +173,37 @@ function publish_target_set!(name::AbstractString, kind::AbstractString, config:
     return publish_ledger_view()
 end
 
-function publish_target_delete!(name::AbstractString)
+"""Delete a target definition. Removal is LOCAL by default: the ledger entry goes away and every
+reference (documents AND sites) is detached — deployed content stays live. `purge=true` also tears
+down the deployed side where feasible (see `purge_deployed!`; rsync-serve stops its remote server
+and removes the served dir). The view gains a `purgeLog` entry when a purge ran."""
+function publish_target_delete!(name::AbstractString; purge::Bool = false)
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
+    plog = nothing
+    if purge
+        t = get(led.targets, String(name), nothing)
+        if t !== nothing
+            r = try
+                purge_deployed!(target_from_ledger(t; secrets = _secrets_load()))
+            catch e
+                (; ok = false, log = sprint(showerror, e))
+            end
+            plog = "$(String(name)): $(strip(r.log))"
+            r.ok || @warn "slate: purge of deployed content failed (target removed anyway)" target = name log = r.log
+        end
+    end
     delete!(led.targets, String(name))
     for d in values(led.documents)
         filter!(!=(String(name)), d.targets)
     end
+    for s in values(led.sites)                       # sites too — a deleted target must not linger
+        filter!(!=(String(name)), s.targets)         # as a dangling site destination
+    end
     PublishLedger.save(store, led)
-    return publish_ledger_view()
+    view = publish_ledger_view()
+    plog === nothing || (view["purgeLog"] = [plog])
+    return view
 end
 
 function publish_doc_delete!(docId::AbstractString)
@@ -209,22 +237,72 @@ function publish_doc_set_targets!(nb::LiveNotebook, names)
     return publish_doc_info(nb)
 end
 
+# A site deploys to a LOCATION = (target, normalized subpath). Two sites writing the same location
+# would overwrite each other, so `publish_site_set!` refuses that. Returns the clashing site name,
+# or "" if the (target, subpath) is free.
+_norm_subpath(p) = strip(strip(String(p)), '/')
+function _location_clash(led, thisSite, target, subpath)
+    sp = _norm_subpath(subpath)
+    for (nm, s) in led.sites
+        nm == String(thisSite) && continue
+        (target in s.targets && _norm_subpath(get(s.paths, target, "")) == sp) && return nm
+    end
+    return ""
+end
+
 # ── Sites (logical portfolios: a canonical local build that syncs to a set of destination targets) ──
-"Create/update a site: its destination targets + home doc. Membership/order/sections live in its local build."
-function publish_site_set!(name::AbstractString, targets, home::AbstractString = "")
+"""Create/update a site: its destination targets, home doc, display title ("" ⇒ the site name), and
+optional per-target subpaths (target → path within that target; "" ⇒ its root). Refuses a
+(target, subpath) location already claimed by another site — they'd overwrite each other.
+Membership/order/sections live in its local build."""
+function publish_site_set!(name::AbstractString, targets, home::AbstractString = "",
+                           title::AbstractString = ""; paths = Dict{String,String}())
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
-    led.sites[String(name)] = PublishLedger.SiteGroup(String(name); targets = collect(String, targets), home = String(home))
+    tlist = collect(String, targets)
+    pmap = Dict{String,String}(String(k) => _norm_subpath(v) for (k, v) in pairs(paths) if String(k) in tlist)
+    for t in tlist
+        clash = _location_clash(led, name, t, get(pmap, t, ""))
+        isempty(clash) || error("target '$t'" * (isempty(get(pmap, t, "")) ? " (root)" : " path '$(pmap[t])'") *
+            " is already used by site '$clash' — give this site a different subpath on '$t' so they don't overwrite each other")
+    end
+    led.sites[String(name)] = PublishLedger.SiteGroup(String(name); targets = tlist,
+                                                      home = String(home), title = String(title), paths = pmap)
     PublishLedger.save(store, led)
     return publish_ledger_view()
 end
 
-function publish_site_delete!(name::AbstractString)
+"""Delete a site. Local removal always: the ledger definition AND the local canonical build dir go
+away. `purge=true` additionally tears down deployed content on each of the site's targets where
+feasible (see `purge_deployed!`). The view gains a `purgeLog` entry when a purge ran."""
+function publish_site_delete!(name::AbstractString; purge::Bool = false)
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
+    site = get(led.sites, String(name), nothing)
+    logs = String[]
+    if purge && site !== nothing
+        secrets = _secrets_load()
+        for tn in site.targets
+            t = get(led.targets, tn, nothing)
+            t === nothing && continue
+            r = try
+                # Purge THIS site's subpath within the target — not the whole target (a sibling
+                # site may share it at a different path).
+                purge_deployed!(with_subpath(target_from_ledger(t; secrets = secrets), get(site.paths, tn, "")))
+            catch e
+                (; ok = false, log = sprint(showerror, e))
+            end
+            push!(logs, "$tn: $(strip(r.log))")
+            r.ok || @warn "slate: purge of deployed content failed (site removed anyway)" site = name target = tn log = r.log
+        end
+    end
     delete!(led.sites, String(name))
     PublishLedger.save(store, led)
-    return publish_ledger_view()
+    dir = _site_dir(String(name))                    # the canonical local build is part of the site
+    dir === nothing || rm(dir; recursive = true, force = true)
+    view = publish_ledger_view()
+    isempty(logs) || (view["purgeLog"] = logs)
+    return view
 end
 
 """
@@ -244,12 +322,18 @@ function sync_site!(name::AbstractString; on_event = nothing)
     tnames = [n for n in site.targets if haskey(led.targets, n)]
     isempty(tnames) && error("site '$name' has no configured destinations — add some in the manager")
     secrets = _secrets_load()
-    adapters = PublishTarget[target_from_ledger(led.targets[n]; secrets = secrets) for n in tnames]
-    results = Vector{PublishResult}(undef, length(adapters))
-    @sync for (i, a) in enumerate(adapters)
+    results = Vector{PublishResult}(undef, length(tnames))
+    @sync for (i, n) in enumerate(tnames)
         @async begin
-            on_event === nothing || on_event(i, :start, a)
-            r = try; deploy_dir(a, dir); catch e; PublishResult(; ok = false, log = sprint(showerror, e)); end
+            # Each attachment may deploy into a SUBPATH within its target (site.paths) so sibling
+            # sites can share one bucket/host; a root-only kind under a subpath is that row's error.
+            r = try
+                a = with_subpath(target_from_ledger(led.targets[n]; secrets = secrets), get(site.paths, n, ""))
+                on_event === nothing || on_event(i, :start, a)
+                deploy_dir(a, dir)
+            catch e
+                PublishResult(; ok = false, log = sprint(showerror, e))
+            end
             results[i] = r
             on_event === nothing || on_event(i, :done, r)
         end
@@ -264,10 +348,15 @@ The site publish action: build `nb` into the site's canonical local dir (accumul
 then sync the whole build to every destination. `kwargs` are the site-build options (bundle/history/…).
 """
 function publish_to_site!(nb::LiveNotebook, siteName::AbstractString; on_event = nothing, kwargs...)
-    built = export_to_site(nb, String(siteName); kwargs...)   # accumulate this doc into the canonical build
-    # A site with no live destinations is a local staging area — build it, but there's nothing to sync.
     led = PublishLedger.load(PublishLedger.default_store())
     site = get(led.sites, String(siteName), nothing)
+    # The SITE owns its display title — persisted on the SiteGroup, falling back to the site
+    # name. It overrides any transient per-request `site_title` (that transient value is how a
+    # stale "portfolio" title leaked into other sites' manifests).
+    stitle = site === nothing ? String(siteName) :
+             (isempty(strip(site.title)) ? site.name : site.title)
+    built = export_to_site(nb, String(siteName); kwargs..., site_title = stitle)   # accumulate this doc into the canonical build
+    # A site with no live destinations is a local staging area — build it, but there's nothing to sync.
     tnames = site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
     isempty(tnames) && return Dict{String,Any}("ok" => true, "localOnly" => true,
         "url" => built.url, "docCount" => built.docCount, "results" => Any[])
@@ -323,23 +412,61 @@ function _publish_summary(names, results)
                                        "log" => r.log) for (n, r) in zip(names, results)])
 end
 
+# ── Publish targets vs. archives ──────────────────────────────────────────────
+# Two different verbs share the target store. PUBLISH targets are re-pushable live
+# destinations (GitHub Pages, S3/R2, rsync, …) — pushing again replaces the site.
+# ARCHIVE kinds (Zenodo today) mint a PERMANENT, immutable, citable version per
+# deposit — incompatible with incremental pushes, so they are never part of a site
+# publish: minting is its own deliberate act (the 📄 Archive button / slate.archive).
+const _ARCHIVE_KINDS = ("zenodo",)
+_is_archive_kind(kind) = String(kind) in _ARCHIVE_KINDS
+
+"Names of the configured targets that are ARCHIVES (see `_ARCHIVE_KINDS`), from the live ledger."
+function archive_target_names()
+    led = PublishLedger.load(PublishLedger.default_store())
+    return String[String(n) for (n, t) in led.targets if _is_archive_kind(t.kind)]
+end
+
+# Verb/kind agreement for a publish run (pure — unit-tested): the error message when the named
+# targets don't fit the verb, else `nothing`. All names must already exist in `led.targets`.
+function _verb_mismatch(led, names, archive::Bool)
+    arch = [n for n in names if _is_archive_kind(led.targets[n].kind)]
+    if !archive && !isempty(arch)
+        return "$(join(arch, ", ")) mint(s) a permanent, immutable DOI version — archives are a " *
+               "deliberate act, not part of site publishing. Use the 📄 Archive button (or slate.archive)."
+    end
+    if archive && length(arch) != length(names)
+        return "not archive target(s): $(join(setdiff(names, arch), ", ")) — an archive run deposits " *
+               "to archive kinds ($(join(_ARCHIVE_KINDS, ", "))) only; live sites go through a normal publish."
+    end
+    return nothing
+end
+
 """
-    run_publish(nb, target_names; on_event=nothing, build opts…) -> summary::Dict
+    run_publish(nb, target_names; archive=false, on_event=nothing, build opts…) -> summary::Dict
 
 Load the ledger, ensure this notebook's document + its targets, resolve secrets from the config home,
-fan out the publish concurrently (forwarding the site-build options to each adapter — GitHub/S3/rsync
-build+deploy the site, Zenodo ignores them and archives the bundle), record one event per target, and
-persist. `on_event(i, phase, payload)` streams progress. Throws if a named target isn't configured.
+fan out the publish concurrently (forwarding the site-build options to each adapter), record one
+event per target, and persist. `on_event(i, phase, payload)` streams progress. Throws if a named
+target isn't configured.
+
+Publishing and archiving are DIFFERENT VERBS on the same store: with `archive=false` (default) every
+named target must be a re-pushable live destination — an archive kind (Zenodo) is refused, because a
+deposit mints a permanent immutable version and must never ride along with a site push. With
+`archive=true` the run is a deliberate archival: every named target must be an archive kind.
 """
-function run_publish(nb::LiveNotebook, target_names; on_event = nothing, slug = "", site_title = "",
+function run_publish(nb::LiveNotebook, target_names; archive::Bool = false, on_event = nothing,
+                     slug = "", site_title = "",
                      theme = "dark", outputs = "all", source = true, bundle = false, history = false)
     names = collect(String, target_names)
     isempty(names) && error("no targets selected")
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
-    di = _ensure_doc!(led, nb; target_names = names)
     missing = [n for n in names if !haskey(led.targets, n)]
     isempty(missing) || error("unconfigured target(s): $(join(missing, ", ")) — add them in the manager first")
+    mismatch = _verb_mismatch(led, names, archive)
+    mismatch === nothing || error(mismatch)
+    di = _ensure_doc!(led, nb; target_names = names)
     secrets = _secrets_load()
     slg = isempty(strip(String(slug))) ? di.slug : String(slug)
     results = publish_document!(nb, led, di.docId, store; target_names = names, secrets = secrets,
@@ -373,7 +500,9 @@ function _sse_publish(stream::HTTP.Stream, h::Hub)
         return
     end
     names = filter(!isempty, strip.(split(get(q, "targets", ""), ',')))
-    # site-build options (forwarded to the adapters; ignored by Zenodo)
+    # `archive=1` marks a deliberate deposit (the 📄 Archive button) — see run_publish.
+    is_archive = get(q, "archive", "0") == "1"
+    # site-build options (forwarded to the adapters; ignored by archive kinds)
     bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
              theme = get(q, "theme", "dark"), outputs = get(q, "outputs", "all"),
              source = get(q, "source", "1") != "0", bundle = get(q, "bundle", "0") == "1",
@@ -392,7 +521,7 @@ function _sse_publish(stream::HTTP.Stream, h::Hub)
                     r.ok || isempty(strip(r.log)) || put!(ch, ("log", first(split(strip(r.log), '\n'))))
                 end
             end
-            summary = run_publish(nb, names; on_event = on_event, slug = bopts.slug,
+            summary = run_publish(nb, names; archive = is_archive, on_event = on_event, slug = bopts.slug,
                                   site_title = bopts.site_title, theme = bopts.theme, outputs = bopts.outputs,
                                   source = bopts.source, bundle = bopts.bundle, history = bopts.history)
             put!(ch, ("done", JSON.json(summary)))
@@ -445,12 +574,26 @@ function _sse_stream(stream::HTTP.Stream, run_fn)
     return
 end
 
-# Build THIS notebook into a site's canonical local dir, then sync the whole build to its destinations.
+# Build a notebook into a site's canonical local dir, then sync the whole build to its destinations.
+# The notebook is named by the route id (an OPEN notebook) OR — so the manager can publish a recent
+# notebook without the user opening it first — by a `path` query param, which is opened on demand
+# (spawns its worker + runs it, exactly like opening it in the browser would).
 function _sse_site_publish(stream::HTTP.Stream, h::Hub)
     uri = HTTP.URI(stream.message.target); q = HTTP.queryparams(uri)
     m = match(r"^/api/([^/]+)/site-publish", uri.path); id = m === nothing ? "" : String(m.captures[1])
     nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
     site = get(q, "site", "")
+    if nb === nothing
+        path = expanduser(String(get(q, "path", "")))
+        if !isempty(path) && isfile(path)
+            nb = try
+                nid = open_notebook!(h, path)          # open on demand → its worker runs it
+                find_live(h, nid)
+            catch e
+                return _sse_stream(stream, _oe -> error("could not open $(basename(path)): " * sprint(showerror, e)))
+            end
+        end
+    end
     nb === nothing && return _sse_stream(stream, _oe -> error("no such notebook: $id"))
     isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
     bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
@@ -487,11 +630,13 @@ function _register_publish_routes!(router, h::Hub)
         (isempty(name) || isempty(kind)) && return HTTP.Response(400, "target needs name + kind")
         _json(publish_target_set!(name, kind, get(b, "config", Dict{String,Any}())))
     end)
-    # Delete a target (global).
+    # Delete a target (global). Local removal by default; `purge:true` also tears down its
+    # deployed content where feasible.
     HTTP.register!(router, "POST", "/api/publish/target-delete", req -> begin
-        name = strip(String(get(_body(req), "name", "")))
+        b = _body(req)
+        name = strip(String(get(b, "name", "")))
         isempty(name) && return HTTP.Response(400, "missing target name")
-        _json(publish_target_delete!(name))
+        _json(publish_target_delete!(name; purge = get(b, "purge", false) === true))
     end)
     # Forget a document + its history (global).
     HTTP.register!(router, "POST", "/api/publish/doc-delete", req -> begin
@@ -534,19 +679,31 @@ function _register_publish_routes!(router, h::Hub)
         name = strip(String(get(b, "name", "")))
         isempty(name) && return HTTP.Response(400, "missing name")
         targets = [String(t) for t in get(b, "targets", Any[])]
-        home = String(get(b, "home", ""))
+        # A body that OMITS home/title/paths keeps the site's existing values (a targets-only save
+        # must not wipe them); sending an explicit "" clears.
+        old = get(PublishLedger.load(PublishLedger.default_store()).sites, String(name), nothing)
+        home = haskey(b, "home") ? String(get(b, "home", "")) : (old === nothing ? "" : old.home)
+        title = haskey(b, "title") ? String(get(b, "title", "")) : (old === nothing ? "" : old.title)
+        paths = if haskey(b, "paths")
+            pv = get(b, "paths", Dict{String,Any}())
+            pv isa AbstractDict ? Dict{String,String}(String(k) => String(v) for (k, v) in pairs(pv)) : Dict{String,String}()
+        else
+            old === nothing ? Dict{String,String}() : copy(old.paths)
+        end
         try
-            _json(publish_site_set!(name, targets, home))
+            _json(publish_site_set!(name, targets, home, title; paths = paths))
         catch e
-            HTTP.Response(500, "Save site failed: " * sprint(showerror, e))
+            HTTP.Response(400, "Save site failed: " * sprint(showerror, e))   # 400: usually a location clash
         end
     end)
-    # Delete a site definition (does not remove already-deployed builds) (global).
+    # Delete a site: the definition + the local build always; `purge:true` also tears down
+    # deployed content on the site's targets where feasible.
     HTTP.register!(router, "POST", "/api/publish/site-delete", req -> begin
-        name = strip(String(get(_body(req), "name", "")))
+        b = _body(req)
+        name = strip(String(get(b, "name", "")))
         isempty(name) && return HTTP.Response(400, "missing name")
         try
-            _json(publish_site_delete!(name))
+            _json(publish_site_delete!(name; purge = get(b, "purge", false) === true))
         catch e
             HTTP.Response(500, "Delete site failed: " * sprint(showerror, e))
         end

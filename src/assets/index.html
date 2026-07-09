@@ -114,6 +114,31 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdlink{color:#569cd6;font-size:.78rem;text-decoration:none;} .pdlink:hover{text-decoration:underline;}
 .pdbtn{background:#1a1e2e;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:.76rem;} .pdbtn:hover{border-color:#569cd6;color:#569cd6;}
 .pdbtn.primary{background:#569cd6;color:#0d1120;border-color:#569cd6;font-weight:600;} .pdmini{margin-left:auto;}
+/* Destructive actions: labeled + red — never a bare grey ✕ (reads as "close"). */
+.pdbtn.danger{color:#e57575;border-color:#4a2a35;}
+.pdbtn.danger:hover{background:rgba(229,117,117,.12);border-color:#e57575;color:#e57575;}
+/* Pressed feedback: async buttons disable + spin until the work settles. */
+.pdbtn:disabled{opacity:.5;cursor:default;pointer-events:none;}
+/* Detail view: breadcrumb back-nav + a readable content width inside the wide modal. */
+.pdcrumb{cursor:pointer;color:#9aa3c0;} .pdcrumb:hover{color:#569cd6;text-decoration:underline;}
+.pdnarrow{max-width:680px;}
+.pubdash.pdslim{width:min(720px,94vw);}
+/* Sync modal — a deploy is an occasion: its own container, per-target rows, a result banner. */
+.pdsyncmodal{width:min(600px,94vw);max-height:86vh;display:flex;flex-direction:column;}
+.pdsyncbanner{border-radius:9px;padding:11px 14px;margin:4px 0 12px;font-size:.86rem;display:none;}
+.pdsyncbanner.on{display:block;}
+.pdsyncbanner.run{background:rgba(86,156,214,.1);border:1px solid #2f4a63;color:#a9c7e4;}
+.pdsyncbanner.ok{background:rgba(90,190,120,.12);border:1px solid #2f5a3c;color:#8fd6a3;}
+.pdsyncbanner.err{background:rgba(229,117,117,.1);border:1px solid #4a2a35;color:#e79aa0;}
+.pdsyncrows{overflow:auto;display:flex;flex-direction:column;gap:8px;}
+.pdsyncrow{border:1px solid #232739;border-radius:9px;padding:10px 12px;background:#10131f;}
+.pdsyncrow .r1{display:flex;align-items:center;gap:9px;}
+.pdsyncrow .st{width:16px;text-align:center;}
+.pdsyncrow .st.ok{color:#6ecb8b;} .pdsyncrow .st.err{color:#e57575;}
+.pdsyncrow.err{border-color:#4a2a35;}
+.pdsyncdetail{margin:8px 0 0 25px;font-family:ui-monospace,Menlo,monospace;font-size:.74rem;color:#9aa3c0;white-space:pre-wrap;border-left:2px solid #2a2e40;padding-left:10px;}
+.pdspin{display:inline-block;width:10px;height:10px;margin-right:6px;border:2px solid rgba(212,216,232,.35);border-top-color:currentColor;border-radius:50%;animation:pdspin .7s linear infinite;vertical-align:-1px;}
+@keyframes pdspin{to{transform:rotate(360deg)}}
 .pdform{display:flex;flex-direction:column;gap:6px;margin:8px 0;padding:10px;border:1px dashed #2a2e40;border-radius:8px;}
 .pdinp{background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:5px 9px;font-size:.82rem;} .pdinp:focus{outline:none;border-color:#569cd6;}
 .pdtag{display:inline-flex;align-items:center;gap:6px;font-size:.82rem;color:#d4d8e8;}
@@ -175,6 +200,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div class="pddim" style="font-size:.76rem;margin-bottom:6px">Drag to reorder within a section, or between sections. Add sections and rename them. Apply re-pushes just the index — the pages themselves aren't rebuilt.</div>
   <div class="pdbody" style="flex-direction:column;overflow:auto"><div id="pdarrbody" style="width:100%"></div></div>
   <div class="row"><button onclick="pdAddSection()">+ Section</button><button onclick="closeArrange()">Cancel</button><button class="primary" id="pdarrapply" onclick="applyArrange()">Apply &amp; re-push</button></div>
+</div></div>
+<div class="modal-bg" id="pdsyncbg"><div class="modal pdsyncmodal">
+  <div class="pdhead"><strong id="pdsynctitle">Deploying…</strong><span class="pdsub" id="pdsyncsub"></span><button class="pdx" id="pdsyncx" onclick="pdCloseSync()" title="Close" style="visibility:hidden">✕</button></div>
+  <div id="pdsyncbanner" class="pdsyncbanner"></div>
+  <div id="pdsyncrows" class="pdsyncrows"></div>
+  <div class="row"><button class="primary" id="pdsyncdone" onclick="pdCloseSync()" disabled>Working…</button></div>
 </div></div>
 <div class="modal-bg" id="importbg"><div class="modal importmodal">
   <div class="msg"><strong>Self-contained notebook</strong> <span style="color:#7a82a4;font-weight:400">— run it now (temporary), or import into a project you own</span></div>
@@ -388,10 +419,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     if(t.kind==='github-pages'&&t.config.repo){var p=t.config.repo.split('/');return p.length===2?('https://'+p[0]+'.github.io/'+p[1]+'/'):'';}
     if(t.kind==='cloudflare-pages')return t.config.url||(t.config.project?('https://'+t.config.project+'.pages.dev/'):'');
     if(t.kind==='zenodo')return '';                    // DOI archive, not a live site
-    return t.config.url||'';
+    if(t.config.url)return t.config.url;
+    // rsync-serve runs its own server at http://<host>:<port>/ — derive when no URL is set.
+    if(t.kind==='rsync-serve'&&t.config.dest){var host=t.config.dest.split(':')[0].split('@').pop();
+      if(host)return 'http://'+host+':'+(t.config.port||'8080')+'/';}
+    return '';                                          // plain rsync/s3 without a public URL: unknown
   }
-  function _pubIcon(k){return k==='netlify'?'🔺':k==='cloudflare-pages'?'🟧':k==='github-pages'?'🌐':'🗄';}
-  function _destLabel(k){return k==='github-pages'?'GitHub Pages':k==='cloudflare-pages'?'Cloudflare':k==='netlify'?'Netlify':k;}
+  function _pubIcon(k){return k==='netlify'?'🔺':k==='cloudflare-pages'?'🟧':k==='github-pages'?'🌐':(k==='rsync-serve'||k==='rsync')?'🖥':(k==='s3'||k==='r2')?'🪣':'🗄';}
+  function _destLabel(k){return k==='github-pages'?'GitHub Pages':k==='cloudflare-pages'?'Cloudflare':k==='netlify'?'Netlify':k==='rsync-serve'?'Self-hosted':k==='rsync'?'rsync':k==='r2'?'R2':k==='s3'?'S3':k;}
   // Render the Sites section from a ledger view (sites+targets) and a set of names with a local build.
   // Synchronous, so it can paint the server-inlined ledger in the first frame. Destination chips + the
   // Preview link live in the collapsed .scdests, so a later refresh that fills them causes no shift.
@@ -425,9 +460,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // ── Publishing manager (master-detail): targets overview → drill into Content / Config / Policies ─
   var pubdashBg=document.getElementById('pubdashbg');
   var _pdView={documents:[],targets:[],secretRefs:[],availableKinds:[],ghUser:''};
-  var _pdSel=null, _pdTab='content';
+  var _pdSel=null;          // open target detail (name), or null
+  var _pdSite=null;         // open site editor: null = none, '' = the New-site form, else the site name
+  var _pdPane=null;         // 'add' (new target) | 'secrets' | null — other focused sub-pages
   var _abs=function(p){return /^([A-Za-z]:[\\/]|\/)/.test(p||'');};
   function openPubDash(){
+    _pdSel=null;_pdSite=null;_pdPane=null;   // always reopen on the OVERVIEW — no stale sub-page
     showLoading('Loading publishing…');
     loadPubDash(function(){ hideLoading(); pubdashBg.classList.add('show'); },
                function(){ hideLoading(); alertDark('Could not load the publishing ledger.'); });
@@ -436,21 +474,47 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   window.openPubDash=openPubDash; window.closePubDash=closePubDash;
   function loadPubDash(done,fail){
     fetch('/api/publish/ledger',{cache:'no-store'}).then(function(r){return r.json();}).then(function(v){
-      _pdView=v; document.getElementById('pdbackend').textContent=v.backend?('— '+v.backend):'';
+      _pdView=v;
+      var bk=document.getElementById('pdbackend');
+      if(bk)bk.innerHTML=v.backend?(v.backendUrl
+        ?('— synced via <a class="pdlink" href="'+esc(v.backendUrl)+'" target="_blank" rel="noopener">'+esc(v.backend)+' ↗</a>')
+        :('— '+esc(v.backend))):'';
       pdRender(); if(done)done();
     }).catch(function(){ if(fail)fail(); });
   }
-  function pdRender(){ _pdSel?pdRenderDetail():pdRenderOverview(); }
+  function pdRender(){
+    // The wide modal fits the overview's tile grid; every focused sub-page (target, site,
+    // add-target, secrets) is a single narrow column — shrink the modal, no dead space.
+    var focused=_pdSel||_pdSite!==null||_pdPane;
+    var m=document.querySelector('#pubdashbg .pubdash'); if(m)m.classList.toggle('pdslim',!!focused);
+    if(_pdSel)pdRenderDetail();
+    else if(_pdSite!==null)pdRenderSiteDetail();
+    else if(_pdPane==='add')pdRenderAdd();
+    else if(_pdPane==='secrets')pdRenderSecrets();
+    else pdRenderOverview();
+  }
   function pdTargetByName(n){return (_pdView.targets||[]).filter(function(t){return t.name===n;})[0];}
-  // Open a document's notebook by its stable docId (uses its absolute source path).
-  function pdOpenDoc(docId){
-    var d=(_pdView.documents||[]).filter(function(x){return x.docId===docId;})[0]; if(!d)return;
-    if(!_abs(d.sourcePath)){ alertDark('“'+(d.title||d.slug)+'” has no local path on this machine to open.'); return; }
+  // Immediate press feedback: disable the clicked button + spinner until its async work settles.
+  // Returns a restore fn (a no-op if a re-render replaced the button in the meantime).
+  function pdBusy(btn){
+    if(!btn||btn.disabled)return function(){};
+    var old=btn.innerHTML; btn.disabled=true; btn.innerHTML='<span class="pdspin"></span>'+old;
+    return function(){ btn.disabled=false; btn.innerHTML=old; };
+  }
+  // Open a notebook in the hub by its absolute source path (front-page links, doc rows).
+  function pdOpenPath(path){
+    if(!_abs(path)){ alertDark('That notebook has no local path on this machine to open.'); return; }
     showLoading('Opening…');
-    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:d.sourcePath})})
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
       .then(function(r){location.href=r.url;})
       .catch(function(e){hideLoading();alertDark('Open failed: '+e);});
+  }
+  window.pdOpenPath=pdOpenPath;
+  // Open a document's notebook by its stable docId (uses its absolute source path).
+  function pdOpenDoc(docId){
+    var d=(_pdView.documents||[]).filter(function(x){return x.docId===docId;})[0]; if(!d)return;
+    pdOpenPath(d.sourcePath);
   }
   window.pdOpenDoc=pdOpenDoc;
   // Documents with ≥1 event to target `tname` → {doc, version(count), latest(newest event)}. Legacy
@@ -466,7 +530,23 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pdTargetDocCount(tname){ return pdSitesForTarget(tname).reduce(function(a,s){return a+((s.docs||[]).length);},0); }
   function pdTargetLive(t){
     if(t.kind==='github-pages'&&t.config.repo){var p=t.config.repo.split('/');return p.length===2?('https://'+p[0]+'.github.io/'+p[1]+'/'):'';}
-    return t.config.url||'';
+    if(t.config.url)return t.config.url;
+    // rsync-serve: reachable at http://<host>:<port>/ (its own server) — derive when no URL is set.
+    if(t.kind==='rsync-serve'&&t.config.dest){var host=t.config.dest.split(':')[0].split('@').pop();
+      if(host)return 'http://'+host+':'+(t.config.port||'8080')+'/';}
+    return '';
+  }
+  // A loopback URL is only reachable on this machine (a 127.0.0.1-bound rsync-serve needs the SSH
+  // tunnel up). Flag it so a "live ↗" to localhost isn't presented as if it were public.
+  function pdIsLoopback(u){return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i.test(u||'');}
+  // Renders the target's live link (or ''), with a tunnel note when it's loopback.
+  function pdLiveLink(t,cls){
+    var u=pdTargetLive(t); if(!u)return '';
+    var loop=pdIsLoopback(u);
+    return '<a class="pdlink'+(cls?(' '+cls):'')+'" href="'+esc(u)+'" target="_blank" rel="noopener" title="'+
+      (loop?'tunnel-only — reachable on this machine while the SSH tunnel to the host is up':
+            'this destination\'s deployed copy — each target a site syncs to serves its own copy')+'">'+
+      (loop?'localhost ↗ (tunnel)':'live ↗')+'</a>';
   }
   function pdTargetSummary(t){
     if(t.kind==='github-pages')return t.config.repo||'';
@@ -477,8 +557,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pdSiteByName(n){return (_pdView.sites||[]).filter(function(s){return s.name===n;})[0];}
   // A site's destination chips (its configured targets, with kind + a warning if the target is gone).
   function pdSiteChips(s){
-    return (s.targets||[]).map(function(n){var t=pdTargetByName(n);
-      return '<span class="pdchip'+(t?'':' warn')+'">'+esc(n)+(t?'':' ?')+'</span>';}).join(' ')||'<span class="pddim">no destinations</span>';
+    var paths=s.paths||{};
+    return (s.targets||[]).map(function(n){var t=pdTargetByName(n),sp=paths[n]||'';
+      return '<span class="pdchip'+(t?'':' warn')+'">'+esc(n)+(sp?('<span style="opacity:.7">/'+esc(sp)+'</span>'):'')+(t?'':' ?')+'</span>';}).join(' ')||'<span class="pddim">no destinations</span>';
   }
   function pdRenderOverview(){
     document.getElementById('pdtitle').textContent='Publishing';
@@ -487,59 +568,79 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var siteTiles=sites.map(function(s){var nd=(s.docs||[]).length;
       return '<div class="pdtile" onclick="pdEditSite(\''+esc(s.name)+'\')">'+
         '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+
-          '<button class="pdbtn pdmini primary" style="margin-left:auto" onclick="event.stopPropagation();pdSyncSite(\''+esc(s.name)+'\')" title="Deploy to all destinations">▶ Sync</button></div>'+
+          '<button class="pdbtn pdmini primary" style="margin-left:auto" onclick="event.stopPropagation();pdSyncSite(\''+esc(s.name)+'\',this)" title="Deploy to all destinations">▶ Sync</button></div>'+
         '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
         '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+'</div></div>';
     }).join('');
-    var tiles=ts.map(function(t){ var host=t.kind!=='zenodo', live=pdTargetLive(t);
+    var tiles=ts.map(function(t){ var host=t.kind!=='zenodo';
       var slist=host?pdSitesForTarget(t.name):[], n=host?pdTargetDocCount(t.name):docsForTarget(t.name).length;
       var meta=host?(n+' doc'+(n===1?'':'s')+' · '+slist.length+' site'+(slist.length===1?'':'s')):(n+' archived');
+      var live=pdLiveLink(t,'liveover');
       return '<div class="pdtile" onclick="pdOpen(\''+esc(t.name)+'\')">'+
         '<div class="pdrow"><span class="pl">'+esc(t.name)+'</span><span class="pdchip">'+esc(t.kind)+'</span><span style="margin-left:auto;color:#6a7090">›</span></div>'+
         '<div class="pddim pdcfg" style="max-width:100%">'+esc(pdTargetSummary(t))+'</div>'+
-        '<div class="pdrow" style="margin-top:4px"><span class="pddim">'+meta+'</span>'+(live?'<a class="pdlink" style="margin-left:auto" href="'+esc(live)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()">live ↗</a>':'')+'</div></div>';
+        '<div class="pdrow" style="margin-top:4px"><span class="pddim">'+meta+'</span>'+(live?'<span style="margin-left:auto" onclick="event.stopPropagation()">'+live+'</span>':'')+'</div></div>';
     }).join('');
     document.getElementById('pdbody').innerHTML=
       '<div class="pdsec" style="margin-top:0">Sites</div>'+
       '<div class="pdtiles">'+(siteTiles||'<div class="pddim">No sites yet.</div>')+'</div>'+
       '<div class="pdrow" style="margin-top:10px"><button class="pdbtn primary" onclick="pdShowSite(\'\')">+ New site</button></div>'+
-      '<div class="pdsec">Publish targets</div>'+
+      '<div class="pdsec" style="margin-top:30px;padding-top:16px;border-top:1px solid #232739">Publish targets</div>'+
       '<div class="pdtiles">'+(tiles||'<div class="pddim">No targets yet. Add one, or publish a notebook (☰ → ☁ Publish…).</div>')+'</div>'+
       '<div class="pdrow" style="margin-top:16px;gap:8px"><button class="pdbtn primary" onclick="pdShowAdd()">+ Add target</button><button class="pdbtn" onclick="pdShowSecrets()">⚙ Secrets</button></div>'+
       '<div id="pdextra" style="margin-top:8px"></div>';
   }
-  function pdOpen(n){_pdSel=n;_pdTab='content';pdRender();} window.pdOpen=pdOpen;
-  function pdBack(){_pdSel=null;pdRender();} window.pdBack=pdBack;
-  function pdShowAdd(){
-    var owner=(_pdView.ghUser||''), kinds=_pdView.availableKinds||['github-pages','cloudflare-pages','netlify','s3','r2','rsync','zenodo'];
-    document.getElementById('pdextra').innerHTML='<div class="pdform"><div class="pddim" style="font-size:.72rem">GitHub: just a repo NAME publishes under your account'+(owner?(' ('+esc(owner)+'/…)'):'')+'.</div>'+
-      '<input id="pdtname" class="pdinp" placeholder="label — optional (auto-named)"/>'+
+  function pdOpen(n){_pdSel=n;_pdSite=null;_pdPane=null;pdRender();} window.pdOpen=pdOpen;
+  function pdBack(){_pdSel=null;_pdSite=null;_pdPane=null;pdRender();} window.pdBack=pdBack;
+  function pdShowAdd(){_pdPane='add';_pdSel=null;_pdSite=null;pdRender();} window.pdShowAdd=pdShowAdd;
+  function pdRenderAdd(){
+    document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › add target';
+    var owner=(_pdView.ghUser||''), kinds=_pdView.availableKinds||['github-pages','cloudflare-pages','netlify','s3','r2','rsync','rsync-serve','zenodo'];
+    document.getElementById('pdbody').innerHTML='<div class="pdnarrow"><div class="pdform">'+
+      // Kind first — it decides everything below; the optional label comes last.
       '<select id="pdtkind" class="pdinp" onchange="pdKindFields()">'+kinds.map(function(k){return '<option value="'+esc(k)+'">'+esc(k)+'</option>';}).join('')+'</select>'+
-      '<div id="pdtfields"></div><button class="pdbtn primary" onclick="pdAddTarget()">+ Add target</button></div>';
+      '<div class="pddim" style="font-size:.72rem">GitHub: just a repo NAME publishes under your account'+(owner?(' ('+esc(owner)+'/…)'):'')+'.</div>'+
+      '<div id="pdtfields"></div>'+
+      '<input id="pdtname" class="pdinp" placeholder="label — optional (auto-named)"/>'+
+      '<button class="pdbtn primary" onclick="pdAddTarget(this)">+ Add target</button></div></div>';
     pdKindFields();
   }
-  window.pdShowAdd=pdShowAdd;
-  function pdShowSecrets(){
+  function pdShowSecrets(){_pdPane='secrets';_pdSel=null;_pdSite=null;pdRender();} window.pdShowSecrets=pdShowSecrets;
+  function pdRenderSecrets(){
+    document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › secrets';
     var refs=_pdView.secretRefs||[];
-    var rows=refs.length?refs.map(function(r){return '<div class="pdrow"><span class="pl">'+esc(r)+'</span><span class="pdchip ok">set</span><button class="pdbtn pdmini" onclick="pdDelSecret(\''+esc(r)+'\')">✕</button></div>';}).join(''):'<div class="pddim">None.</div>';
-    document.getElementById('pdextra').innerHTML='<div class="pdsec">Secrets</div>'+rows+
+    var rows=refs.length?refs.map(function(r){return '<div class="pdrow"><span class="pl">'+esc(r)+'</span><span class="pdchip ok">set</span><button class="pdbtn pdmini danger" onclick="pdDelSecret(this,\''+esc(r)+'\')">delete</button></div>';}).join(''):'<div class="pddim">None.</div>';
+    document.getElementById('pdbody').innerHTML='<div class="pdnarrow">'+
+      '<div class="pdsec" style="margin-top:0">Secrets</div>'+rows+
       '<div class="pdform"><input id="pdsref" class="pdinp" placeholder="ref name (e.g. zenodo-token)"/>'+
       '<div style="display:flex;gap:8px;align-items:center"><input id="pdsval" class="pdinp" type="text" placeholder="secret value" autocomplete="off" style="flex:1"/>'+
       '<label class="pdtag" style="font-size:.74rem;white-space:nowrap"><input type="checkbox" id="pdsmask" onchange="pdToggleSecretMask()"/> hide</label></div>'+
-      '<button class="pdbtn primary" onclick="pdSetSecret()">Save secret</button></div>'+
-      '<div class="pddim" style="font-size:.72rem">Visible as you type; stored only in your config home (chmod 600) — never in the ledger/gist.</div>';
+      '<button class="pdbtn primary" onclick="pdSetSecret(this)">Save secret</button></div>'+
+      '<div class="pddim" style="font-size:.72rem">Visible as you type; stored only in your config home (chmod 600) — never in the ledger/gist.</div></div>';
   }
-  window.pdShowSecrets=pdShowSecrets;
-  // ── SITES — create/edit a site (name + which targets it deploys to + optional home), and Sync. ──
-  function pdEditSite(name){pdShowSite(name);} window.pdEditSite=pdEditSite;
-  function pdShowSite(name){
-    var s=name?pdSiteByName(name):null, ts=_pdView.targets||[];
+  // ── SITES — a focused editor page (like a target's detail): breadcrumb + only this site. ──
+  function pdEditSite(name){_pdSite=name;_pdSel=null;pdRender();} window.pdEditSite=pdEditSite;
+  function pdShowSite(name){_pdSite=(name==null?'':String(name));_pdSel=null;pdRender();} window.pdShowSite=pdShowSite;
+  function pdRenderSiteDetail(){
+    var s=_pdSite?pdSiteByName(_pdSite):null;
+    if(_pdSite&&!s){pdBack();return;}   // deleted/renamed under us → overview
+    document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › '+(s?esc(s.name):'new site');
+    var ts=_pdView.targets||[];
     var deployable=ts.filter(function(t){return t.kind!=='zenodo';});   // Zenodo mints DOIs — its own flow, not a live host
     var chosen=s?(s.targets||[]):[];
+    var spaths=(s&&s.paths)||{};
     var docs=s?(s.docs||[]):[];
+    // Each destination: a checkbox + a subpath input (empty = the target's ROOT). The subpath lets
+    // several sites share one bucket/host — the picker reveals it only when the target is checked.
+    // github-pages/s3/r2/rsync/rsync-serve host a subpath; cloudflare-pages/netlify are root-only.
+    var subOK=function(k){return k==='github-pages'||k==='s3'||k==='r2'||k==='rsync'||k==='rsync-serve';};
     var picks=deployable.length?deployable.map(function(t){
-      return '<label class="pdtag" style="display:flex;gap:8px;margin:5px 0"><input type="checkbox" class="pdst" value="'+esc(t.name)+'"'+(chosen.indexOf(t.name)>=0?' checked':'')+'/> '+esc(t.name)+' <span class="pdchip">'+esc(t.kind)+'</span></label>';
-    }).join(''):'<div class="pddim">No deployable targets yet — add one below first.</div>';
+      var on=chosen.indexOf(t.name)>=0, sp=spaths[t.name]||'';
+      var sub=subOK(t.kind)
+        ? '<input class="pdinp pdsp" data-t="'+esc(t.name)+'" placeholder="subpath (optional — blank = root)" value="'+esc(sp)+'" style="margin:4px 0 8px 26px;width:calc(100% - 26px);box-sizing:border-box;display:'+(on?'block':'none')+'"/>'
+        : '';
+      return '<label class="pdtag" style="display:flex;gap:8px;margin:5px 0"><input type="checkbox" class="pdst" value="'+esc(t.name)+'"'+(on?' checked':'')+' onchange="pdToggleSub(this)"/> '+esc(t.name)+' <span class="pdchip">'+esc(t.kind)+'</span>'+(subOK(t.kind)?'':' <span class="pddim" style="font-size:.7rem">root-only</span>')+'</label>'+sub;
+    }).join(''):'<div class="pddim">No deployable targets yet — add one from Publishing first.</div>';
     // Documents in the site's canonical build: list with section badge + remove; drag-order via Arrange.
     // (The front page is set by tagging a cell `home` in that notebook — it renders to the site root and
     // isn't a card here, so there's no separate "home" picker.)
@@ -548,79 +649,163 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       var rows=docs.length?docs.map(function(d){var sl=d.slug||d.title;
         return '<div class="pdrow pdsub2"><span>'+esc(d.title||d.slug)+'</span>'+
           (d.section?'<span class="pdchip" style="margin-left:6px">'+esc(d.section)+'</span>':'')+
-          '<button class="pdbtn pdmini" onclick="pdRemoveSiteDoc(\''+esc(s.name)+'\',\''+esc(sl)+'\')" title="remove from site">✕</button></div>';
+          '<button class="pdbtn pdmini danger" onclick="pdRemoveSiteDoc(this,\''+esc(s.name)+'\',\''+esc(sl)+'\')" title="remove from this site\'s build">remove</button></div>';
       }).join(''):'<div class="pddim">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
-      var fp=s.hasHome?('<div class="pddim" style="margin:2px 0">Front page: <b>'+esc(s.homeTitle||'home')+'</b> <span class="pdchip">home</span></div>')
-                      :'<div class="pddim" style="margin:2px 0">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
+      var fp=s.hasHome?('<div class="pddim" style="margin:2px 0">Front page: <b>'+esc(s.homeTitle||'home')+'</b> <span class="pdchip">home</span>'+
+          (s.homePath?' — from <a class="pdlink" onclick="pdOpenPath(\''+esc(s.homePath)+'\')" title="'+esc(s.homePath)+'">'+esc(s.homePath.split(/[\\/]/).pop()||'notebook')+' ↗</a>'
+                     :' <span style="opacity:.65">(source notebook not recorded — republish it once to link it here)</span>')+'</div>')
+        :'<div class="pddim" style="margin:2px 0">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
       docMgmt='<div class="pdsec">Front page</div>'+fp+'<div class="pdsec">Documents</div>'+rows+
         (docs.length?'<div class="pdrow" style="margin-top:8px"><button class="pdbtn" onclick="openSiteArrange(\''+esc(s.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag to order + group into sections</span></div>':'');
     }
-    document.getElementById('pdextra').innerHTML='<div class="pdform">'+
-      '<div class="pdsec" style="margin-top:0">'+(s?('Edit site “'+esc(s.name)+'”'):'New site')+'</div>'+
-      (s?'':'<input id="pdsitename" class="pdinp" placeholder="site name (e.g. portfolio)"/>')+
-      '<div class="pddim" style="font-size:.72rem">Deploy to these destinations:</div>'+picks+
+    // name = the site's IDENTIFIER (part of the URL, fixed once created); title = what readers SEE.
+    var lbl=function(txt,hint){return '<label class="pddim" style="display:block;margin:10px 0 3px;font-size:.74rem">'+txt+' <span style="opacity:.7">— '+hint+'</span></label>';};
+    document.getElementById('pdbody').innerHTML='<div class="pdnarrow"><div class="pdform">'+
+      (s?'':lbl('Site name','its identifier: becomes the URL, /sites/&lt;name&gt;/; can\'t change later')+
+           '<input id="pdsitename" class="pdinp" placeholder="portfolio"/>')+
+      lbl('Display title','the front-page heading &amp; browser-tab title readers see; empty = the site name')+
+      '<input id="pdsitetitle" class="pdinp" placeholder="'+(s?esc(s.name):'e.g. “Stat Mech Notebooks”')+'" value="'+esc((s&&s.title)||'')+'"/>'+
+      '<div class="pdsec">Deploys to</div>'+picks+
       docMgmt+
-      '<div class="pdrow" style="margin-top:12px;gap:8px"><button class="pdbtn primary" onclick="pdSaveSite('+(s?('\''+esc(s.name)+'\''):'\'\'')+')">'+(s?'Save':'Create')+'</button>'+
-      (s?'<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\')">▶ Sync now</button><button class="pdbtn pdmini" style="margin-left:auto" onclick="pdDelSite(\''+esc(s.name)+'\')">✕ Delete site</button>':'')+'</div>'+
-      '<div id="pdsitelog" class="pdsync-log" style="display:none"></div></div>';
+      '<div class="pdrow" style="margin-top:14px;gap:8px"><button class="pdbtn primary" onclick="pdSaveSite(this,'+(s?('\''+esc(s.name)+'\''):'\'\'')+')">'+(s?'Save':'Create')+'</button></div>'+
+      '<div id="pdsitelog" class="pdsync-log" style="display:none"></div>'+
+      (s?'<div class="pdrow" style="margin-top:22px;padding-top:10px;border-top:1px solid #232739">'+
+         '<button class="pdbtn pdmini danger" style="margin-left:0" onclick="pdDelSite(this,\''+esc(s.name)+'\')">Delete site…</button></div>':'')+
+      '</div></div>';
   }
-  window.pdShowSite=pdShowSite;
-  function pdSaveSite(name){
+  // Reveal/hide a destination's subpath input as it's (un)checked.
+  function pdToggleSub(cb){var el=document.querySelector('.pdsp[data-t="'+cb.value.replace(/"/g,'\\"')+'"]');if(el)el.style.display=cb.checked?'block':'none';}
+  window.pdToggleSub=pdToggleSub;
+  function pdSaveSite(btn,name){
     var nm=name||((document.getElementById('pdsitename')||{}).value||'').trim();
     if(!nm){alertDark('Give the site a name.');return;}
     var targets=[].slice.call(document.querySelectorAll('.pdst:checked')).map(function(el){return el.value;});
-    fetch('/api/publish/site',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm,targets:targets})})
+    var title=((document.getElementById('pdsitetitle')||{}).value||'').trim();
+    var paths={};   // only checked targets with a non-empty subpath
+    [].slice.call(document.querySelectorAll('.pdsp')).forEach(function(el){
+      var t=el.getAttribute('data-t'), v=(el.value||'').trim().replace(/^\/+|\/+$/g,'');
+      if(v&&targets.indexOf(t)>=0)paths[t]=v;
+    });
+    var done=pdBusy(btn);
+    fetch('/api/publish/site',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm,targets:targets,title:title,paths:paths})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(v){_pdView=v;pdRender();}).catch(function(e){alertDark('Save site failed: '+e);});
+      .then(function(v){_pdView=v;pdBack();}).catch(function(e){alertDark('Save site failed: '+e);}).finally(done);
   }
   window.pdSaveSite=pdSaveSite;
   // Remove a document from a site's local build (Sync afterward to update the destinations).
-  function pdRemoveSiteDoc(site,slug){
+  function pdRemoveSiteDoc(btn,site,slug){
     confirmDark('Remove this document from “'+site+'”?\nIt\'s deleted from the local build — hit ▶ Sync to update the destinations.','Remove','danger').then(function(ok){if(!ok)return;
+      var done=pdBusy(btn);
       fetch('/api/publish/site-remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:site,slug:slug})})
         .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
         .then(function(){loadPubDash(function(){pdShowSite(site);});})   // refresh docs, reopen the editor
-        .catch(function(e){alertDark('Remove failed: '+e);});});
+        .catch(function(e){alertDark('Remove failed: '+e);}).finally(done);});
   }
   window.pdRemoveSiteDoc=pdRemoveSiteDoc;
-  function pdDelSite(name){
-    confirmDark('Delete site “'+name+'”? Already-deployed builds stay live; this only removes the definition.','Delete','danger').then(function(ok){if(!ok)return;
-      fetch('/api/publish/site-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
-        .then(function(r){return r.json();}).then(function(v){_pdView=v;pdRender();}).catch(function(){alertDark('Delete site failed');});});
+  function pdDelSite(btn,name){
+    var s=pdSiteByName(name)||{targets:[]};
+    confirmDark('Delete site “'+name+'”? The definition and its LOCAL build are removed.','Delete','danger').then(function(ok){if(!ok)return;
+      var doDelete=function(purge){
+        var done=pdBusy(btn);   // purge can ssh to a remote host — spinner until it settles
+        fetch('/api/publish/site-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,purge:purge})})
+          .then(function(r){return r.json();}).then(function(v){_pdView=v;pdRender();
+            if(v.purgeLog&&v.purgeLog.length)alertDark('Purge:\n'+v.purgeLog.join('\n'));})
+          .catch(function(){alertDark('Delete site failed');}).finally(done);
+      };
+      // The site deploys somewhere → let the user decide about the DEPLOYED content too.
+      if((s.targets||[]).length){
+        confirmDark('Also remove the DEPLOYED content from:\n· '+s.targets.join('\n· ')+
+          '\n\n(where feasible — a self-hosted rsync-serve is stopped and wiped; static hosts are left as-is)','Purge deployed','danger')
+          .then(function(p){doDelete(!!p);});
+      } else doDelete(false);
+    });
   }
   window.pdDelSite=pdDelSite;
   // Re-deploy a site's canonical build to all its destinations (SSE progress via EventSource).
-  function pdSyncSite(name){
+  // ── Sync as an occasion: a dedicated modal that shows each destination going out live, then a
+  // persistent result summary (per-target ✓/✗, live URLs, warnings/errors) you dismiss when done. ──
+  var _syncES=null;
+  function pdCloseSync(){ if(_syncES){try{_syncES.close();}catch(_){}_syncES=null;} document.getElementById('pdsyncbg').classList.remove('show'); }
+  window.pdCloseSync=pdCloseSync;
+  function _syncBanner(cls,html){var b=document.getElementById('pdsyncbanner');b.className='pdsyncbanner on '+cls;b.innerHTML=html;}
+  function _syncRunning(on){var d=document.getElementById('pdsyncdone');d.disabled=on;d.textContent=on?'Working…':'Done';
+    document.getElementById('pdsyncx').style.visibility=on?'hidden':'visible';
+    // On finish, no row should be left spinning — clear any still-"waiting…" rows to a dash.
+    if(!on)[].slice.call(document.querySelectorAll('#pdsyncrows .st .pdspin')).forEach(function(sp){
+      var st=sp.closest('.st'); if(st){st.innerHTML='—';st.style.color='#6a7090';}
+      var row=sp.closest('.pdsyncrow'); if(row){var lbl=row.querySelector('[id^=syncst-]'); if(lbl&&/waiting|deploying/.test(lbl.textContent))lbl.textContent='not started';}
+    });}
+  // Render the authoritative per-target result cards from the `done` summary.
+  function _syncResults(site,d){
+    var res=d.results||[]; var bad=res.filter(function(r){return !r.ok;}).length;
+    var rows=res.map(function(r){
+      var t=pdTargetByName(r.target)||{kind:''};
+      var live=(r.url&&pdIsLoopback(r.url))?('<a class="pdlink" href="'+esc(r.url)+'" target="_blank" rel="noopener" title="tunnel-only — needs the SSH tunnel up">localhost ↗ (tunnel)</a>')
+             :(r.url?('<a class="pdlink" href="'+esc(r.url)+'" target="_blank" rel="noopener">open ↗</a>'):'');
+      var detail=(!r.ok&&r.log)?('<div class="pdsyncdetail">'+esc(r.log)+'</div>'):'';
+      return '<div class="pdsyncrow'+(r.ok?'':' err')+'"><div class="r1">'+
+        '<span class="st '+(r.ok?'ok':'err')+'">'+(r.ok?'✓':'✗')+'</span>'+
+        '<span class="pl">'+esc(r.target)+'</span>'+(t.kind?'<span class="pdchip">'+esc(t.kind)+'</span>':'')+
+        '<span class="pddim" style="margin-left:6px">'+esc(r.ok?(r.status||'deployed'):('failed — '+(r.status||'error')))+'</span>'+
+        '<span style="margin-left:auto">'+live+'</span></div>'+detail+'</div>';
+    }).join('');
+    document.getElementById('pdsyncrows').innerHTML=rows;
+    if(bad===0)_syncBanner('ok','✓ <b>Deployed “'+esc(site)+'” to '+res.length+' destination'+(res.length===1?'':'s')+'.</b> Every target is checked in and live.');
+    else _syncBanner('err','⚠ <b>Finished with '+bad+' issue'+(bad===1?'':'s')+'</b> — '+(res.length-bad)+' of '+res.length+' deployed. See the failed target'+(bad===1?'':'s')+' below.');
+    _syncRunning(false);
+  }
+  function pdSyncSite(name,btn){
     var s=pdSiteByName(name); if(!s)return;
     if(!(s.targets||[]).length){alertDark('“'+name+'” has no destinations yet — edit it and pick some.');return;}
-    pdShowSite(name);   // ensure the editor (with its log area) is open
-    var log=document.getElementById('pdsitelog'); if(log){log.style.display='block';log.textContent='Connecting…';}
-    var line=function(t){if(log){log.textContent=(log.textContent==='Connecting…'?'':log.textContent+'\n')+t;log.scrollTop=log.scrollHeight;}};
-    var es=new EventSource('/api/publish/site-sync?site='+encodeURIComponent(name));
-    es.addEventListener('status',function(e){line('… '+e.data);});
-    es.addEventListener('log',function(e){line(e.data);});
-    es.addEventListener('done',function(e){es.close();var d;try{d=JSON.parse(e.data);}catch(_){d={};}
-      line(d.ok?'✓ Synced to all destinations.':'⚠ Finished with errors.');loadPubDash();});
-    es.addEventListener('failed',function(e){es.close();line('✗ '+e.data);});
-    es.onerror=function(){es.close();line('✗ connection lost');};
+    // Nothing built yet → sync would fail on "no local build". Guide instead of failing.
+    if(!(s.docs||[]).length && !s.hasHome){
+      alertDark('“'+name+'” has no content yet — nothing to deploy.\n\nOpen a notebook and publish it into this site first (☰ → ☁ Publish… → choose “'+name+'”). Then Sync pushes that build to every destination.');
+      return;
+    }
+    // Open the dedicated modal with a pending row per destination.
+    document.getElementById('pdsynctitle').textContent='Deploying “'+name+'”';
+    document.getElementById('pdsyncsub').textContent='';
+    _syncBanner('run','<span class="pdspin"></span> Deploying to '+s.targets.length+' destination'+(s.targets.length===1?'':'s')+'…');
+    document.getElementById('pdsyncrows').innerHTML=s.targets.map(function(n){var t=pdTargetByName(n)||{kind:''};
+      return '<div class="pdsyncrow" id="syncrow-'+_slugId(n)+'"><div class="r1"><span class="st"><span class="pdspin"></span></span>'+
+        '<span class="pl">'+esc(n)+'</span>'+(t.kind?'<span class="pdchip">'+esc(t.kind)+'</span>':'')+
+        '<span class="pddim" id="syncst-'+_slugId(n)+'" style="margin-left:6px">waiting…</span></div></div>';
+    }).join('');
+    _syncRunning(true);
+    document.getElementById('pdsyncbg').classList.add('show');
+    if(_syncES){try{_syncES.close();}catch(_){}}
+    var es=_syncES=new EventSource('/api/publish/site-sync?site='+encodeURIComponent(name));
+    es.addEventListener('status',function(e){   // "Deploying to X…" — mark that row in-progress
+      var m=/Deploying to (.+)…/.exec(e.data); if(m){var st=document.getElementById('syncst-'+_slugId(m[1]));if(st)st.textContent='deploying…';}
+    });
+    es.addEventListener('done',function(e){es.close();_syncES=null;var d;try{d=JSON.parse(e.data);}catch(_){d={results:[]};}
+      _syncResults(name,d); loadPubDash();});
+    es.addEventListener('failed',function(e){es.close();_syncES=null;
+      _syncBanner('err','✗ <b>Sync failed to start.</b><div class="pdsyncdetail">'+esc(e.data)+'</div>');_syncRunning(false);});
+    es.onerror=function(){es.close();_syncES=null;_syncBanner('err','✗ <b>Connection lost</b> before the sync finished.');_syncRunning(false);};
   }
   window.pdSyncSite=pdSyncSite;
+  function _slugId(s){return String(s).replace(/[^A-Za-z0-9_-]/g,'_');}
   // ── DETAIL — back + Content / Config / Policies tabs. ─────────────────────────────────────────
   function pdRenderDetail(){
     var t=pdTargetByName(_pdSel); if(!t){pdBack();return;}
-    document.getElementById('pdtitle').textContent='Publishing › '+t.name;
-    var tabs=[['content','Content'],['config','Config'],['policies','Policies']];
-    var bar=tabs.map(function(x){return '<button class="pdtab'+(_pdTab===x[0]?' on':'')+'" onclick="pdTabSel(\''+x[0]+'\')">'+x[1]+'</button>';}).join('');
-    document.getElementById('pdbody').innerHTML=
-      '<div class="pdrow"><button class="pdbtn" onclick="pdBack()">← Targets</button>'+
-      '<span class="pl">'+esc(t.name)+'</span><span class="pdchip">'+esc(t.kind)+'</span>'+
-      (pdTargetLive(t)?'<a class="pdlink" style="margin-left:auto" href="'+esc(pdTargetLive(t))+'" target="_blank" rel="noopener">live ↗</a>':'<span style="margin-left:auto"></span>')+
-      '<button class="pdbtn pdmini" style="margin-left:8px" onclick="pdDelTarget(\''+esc(t.name)+'\')" title="delete target">✕</button></div>'+
-      '<div class="pdtabs">'+bar+'</div><div id="pdtab" style="margin-top:12px"></div>';
-    pdRenderTab(t);
+    // Breadcrumb IS the navigation: "Publishing" clicks back to the overview (no separate button).
+    document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › '+esc(t.name);
+    // One vertical page (no tabs — there isn't enough in them): content, config, policies,
+    // a single Save, and the danger zone at the bottom, apart from the everyday actions.
+    document.getElementById('pdbody').innerHTML='<div class="pdnarrow">'+
+      '<div class="pdrow"><span class="pl">'+esc(t.name)+'</span><span class="pdchip">'+esc(t.kind)+'</span>'+
+      (pdTargetLive(t)?'<span style="margin-left:auto">'+pdLiveLink(t)+'</span>':'')+
+      '</div>'+
+      '<div id="pdcontent"></div>'+
+      '<div class="pdsec">Config</div><div id="pdconfig"></div>'+
+      '<div class="pdsec">Policies</div><div id="pdpolicies"></div>'+
+      '<div class="pdrow" style="margin-top:14px"><button class="pdbtn primary" onclick="pdSaveDetail(this)">Save changes</button></div>'+
+      '<div class="pdrow" style="margin-top:24px;padding-top:12px;border-top:1px solid #232739">'+
+      '<button class="pdbtn pdmini danger" style="margin-left:0" onclick="pdDelTarget(this,\''+esc(t.name)+'\')">Delete target…</button></div>'+
+      '</div>';
+    pdRenderContent(t);pdRenderConfig(t);pdRenderPolicies(t);
   }
-  function pdTabSel(tb){_pdTab=tb;pdRenderDetail();} window.pdTabSel=pdTabSel;
-  function pdRenderTab(t){ if(_pdTab==='config')pdRenderConfig(t); else if(_pdTab==='policies')pdRenderPolicies(t); else pdRenderContent(t); }
   function pdRenderContent(t){
     if(t.kind==='zenodo'){   // Zenodo archives: legacy per-notebook events carry the minted DOI.
       var docs=docsForTarget(t.name);
@@ -628,9 +813,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         return '<div class="pdrow pdsub2"><span>'+esc(x.doc.title||x.doc.slug)+'</span>'+
           '<span class="pdchip'+(x.latest.status==='ok'?' ok':'')+'">v'+x.version+'</span>'+
           (x.latest.doi?' <span class="pddim">DOI '+esc(x.latest.doi)+'</span>':'')+
-          '<button class="pdbtn pdmini" onclick="pdOpenDoc(\''+esc(x.doc.docId)+'\')">open</button></div>';
+          '<button class="pdbtn pdmini" onclick="pdOpenDoc(\''+esc(x.doc.docId)+'\')">open</button>'+
+          '<button class="pdbtn pdmini danger" style="margin-left:6px" onclick="pdDelDoc(this,\''+esc(x.doc.docId)+'\',\''+esc(x.doc.title||x.doc.slug)+'\')" title="forget this document\'s ledger record (the DOI itself is permanent)">forget</button></div>';
       }).join(''):'<div class="pddim">No versions archived here yet.</div>';
-      document.getElementById('pdtab').innerHTML='<div class="pdsec" style="margin-top:0">Archived versions</div>'+zlist;
+      document.getElementById('pdcontent').innerHTML='<div class="pdsec">Archived versions</div>'+zlist;
       return;
     }
     // Host target: its content is the sites that deploy here — each carries its own doc build. Manage
@@ -639,10 +825,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var list=slist.length?slist.map(function(s){var nd=(s.docs||[]).length;
       return '<div class="pdrow pdsub2"><span>🌐 '+esc(s.name)+'</span>'+
         '<span class="pddim" style="margin-left:6px">'+nd+' doc'+(nd===1?'':'s')+'</span>'+
-        '<button class="pdbtn pdmini" onclick="pdBack();pdEditSite(\''+esc(s.name)+'\')">manage</button></div>';
+        '<a class="pdlink" style="margin-left:auto;font-size:.78rem" onclick="pdBack();pdEditSite(\''+esc(s.name)+'\')" title="open this site\'s editor (back on the Publishing page)">edit site ›</a></div>';
     }).join(''):'<div class="pddim">No sites deploy here yet — add this target to a site (Sites → edit → Deploy to).</div>';
-    document.getElementById('pdtab').innerHTML='<div class="pdsec" style="margin-top:0">Sites deploying here</div>'+list+
-      (live?'<div class="pdrow" style="margin-top:10px"><a class="pdlink" href="'+esc(live)+'" target="_blank" rel="noopener">live ↗ '+esc(live)+'</a></div>':'');
+    document.getElementById('pdcontent').innerHTML='<div class="pdsec">Sites deploying here</div>'+list;
   }
   function pdRenderConfig(t){
     var c=t.config||{}, refs=_pdView.secretRefs||[], h='';
@@ -653,39 +838,70 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     else if(t.kind==='netlify')h=f('siteId','Site id',c.siteId)+sel('secretRef','Auth token',c.secretRef)+f('url','Public URL',c.url);
     else if(t.kind==='s3'||t.kind==='r2')h=f('dest','Destination',c.dest)+(t.kind==='r2'?f('endpoint','R2 endpoint',c.endpoint):'')+f('url','Public URL',c.url);
     else if(t.kind==='rsync')h=f('dest','Destination',c.dest)+f('url','Public URL',c.url);
+    else if(t.kind==='rsync-serve')h=f('dest','Destination',c.dest)+f('url','Public URL',c.url)+f('bind','Bind address',c.bind)+f('port','Port',c.port);
     else if(t.kind==='zenodo')h=sel('secretRef','API token',c.secretRef)+f('depositionId','Deposition id',c.depositionId);
-    document.getElementById('pdtab').innerHTML=h+'<div class="pdrow" style="margin-top:14px"><button class="pdbtn primary" onclick="pdSaveDetail()">Save config</button></div>';
+    document.getElementById('pdconfig').innerHTML=h||'<div class="pddim">Nothing to configure for this kind.</div>';
   }
   function pdRenderPolicies(t){
     var c=t.config||{}, h='';
     var chk=function(id,label,on){return '<label class="pdtag" style="display:flex;margin:8px 0"><input type="checkbox" id="pdp_'+id+'" '+(on?'checked':'')+'/> '+esc(label)+'</label>';};
     if(t.kind==='github-pages')h=chk('private','Private repo (Pages needs GitHub Pro)',c.private===true)+chk('create','Create the repo if it doesn\'t exist',c.create!==false);
     else if(t.kind==='cloudflare-pages')h='<div class="pdrow"><label class="pddim" style="min-width:130px">Deploy branch</label><input id="pdp_branch" class="pdinp" style="flex:1" value="'+esc(c.branch||'')+'" placeholder="production"/></div>';
-    else if(t.kind==='s3'||t.kind==='r2'||t.kind==='rsync')h=chk('delete','Mirror deletes (remove files no longer in the build)',c['delete']!==false);
+    else if(t.kind==='s3'||t.kind==='r2'||t.kind==='rsync'||t.kind==='rsync-serve')h=chk('delete','Mirror deletes (remove files no longer in the build)',c['delete']!==false);
     else if(t.kind==='zenodo')h=chk('sandbox','Use the Zenodo sandbox (test DOIs, not real)',c.sandbox===true);
     else h='<div class="pddim">No policies for this target kind.</div>';
-    document.getElementById('pdtab').innerHTML=h+'<div class="pdrow" style="margin-top:14px"><button class="pdbtn primary" onclick="pdSaveDetail()">Save policies</button></div>';
+    document.getElementById('pdpolicies').innerHTML=h;
   }
-  function pdSaveDetail(){
+  function pdSaveDetail(btn){
     var t=pdTargetByName(_pdSel); if(!t)return;
     var cfg={}; for(var k in t.config)cfg[k]=t.config[k];
     document.querySelectorAll('[id^=pdc_]').forEach(function(el){var key=el.id.slice(4),v=(el.value||'').trim();if(v)cfg[key]=v;else delete cfg[key];});
     document.querySelectorAll('[id^=pdp_]').forEach(function(el){var key=el.id.slice(4);if(el.type==='checkbox')cfg[key]=el.checked;else{var v=(el.value||'').trim();if(v)cfg[key]=v;else delete cfg[key];}});
+    var done=pdBusy(btn);
     fetch('/api/publish/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:t.name,kind:t.kind,config:cfg})})
-      .then(function(r){return r.json();}).then(function(v){_pdView=v;pdRenderDetail();}).catch(function(){alertDark('Save failed');});
+      .then(function(r){return r.json();}).then(function(v){_pdView=v;pdRenderDetail();}).catch(function(){alertDark('Save failed');}).finally(done);
   }
   window.pdSaveDetail=pdSaveDetail;
-  function pdFld(id,ph){return '<input id="pdf_'+id+'" class="pdinp" placeholder="'+esc(ph)+'"/>';}
-  function pdChk(id,label,on){return '<label class="pdtag"><input type="checkbox" id="pdf_'+id+'" '+(on?'checked':'')+'/> '+esc(label)+'</label>';}
-  function pdRefSel(id,refs){return '<select id="pdf_'+id+'" class="pdinp"><option value="">— secret ref —</option>'+(refs||[]).map(function(r){return '<option value="'+esc(r)+'">'+esc(r)+'</option>';}).join('')+'</select>';}
+  // Field builders: one field per line — a labeled row with a short description, the input
+  // below it (placeholders stay fully visible; they only show FORMAT examples, not meaning).
+  function pdFldLbl(label,hint){return '<label class="pddim" style="display:block;margin:10px 0 3px;font-size:.74rem">'+esc(label)+(hint?' <span style="opacity:.7">— '+esc(hint)+'</span>':'')+'</label>';}
+  function pdFld(id,label,hint,ph){return pdFldLbl(label,hint)+'<input id="pdf_'+id+'" class="pdinp" style="width:100%;box-sizing:border-box" placeholder="'+esc(ph||'')+'"/>';}
+  function pdChk(id,label,on){return '<label class="pdtag" style="display:flex;gap:8px;margin:10px 0"><input type="checkbox" id="pdf_'+id+'" '+(on?'checked':'')+'/> '+esc(label)+'</label>';}
+  function pdRefSel(id,refs,label,hint){return pdFldLbl(label||'API token',hint||'a secret ref from the Secrets page (never the raw token)')+'<select id="pdf_'+id+'" class="pdinp" style="width:100%"><option value="">— secret ref —</option>'+(refs||[]).map(function(r){return '<option value="'+esc(r)+'">'+esc(r)+'</option>';}).join('')+'</select>';}
   function pdKindFields(){
     var k=(document.getElementById('pdtkind')||{}).value, refs=_pdView.secretRefs||[], owner=_pdView.ghUser||'', h='';
-    if(k==='github-pages')h=pdFld('repo',owner?(owner+'/repo-name  (or owner/name)'):'owner/name')+pdFld('branch','branch (default gh-pages)')+pdFld('subdir','subdir (optional)')+pdChk('private','Private repo')+pdChk('create','Create repo if missing',true);
-    else if(k==='cloudflare-pages')h=pdFld('project','Pages project name')+pdFld('accountId','Cloudflare account id')+pdRefSel('secretRef',refs)+pdFld('url','public URL (optional)');
-    else if(k==='netlify')h=pdFld('siteId','Netlify site id')+pdRefSel('secretRef',refs)+pdFld('url','public URL (optional)');
-    else if(k==='s3'||k==='r2')h=pdFld('dest','s3://bucket/prefix')+pdFld('url','public URL (optional)')+(k==='r2'?pdFld('endpoint','R2 endpoint URL'):'')+pdChk('delete','Mirror deletes',true);
-    else if(k==='rsync')h=pdFld('dest','user@host:/var/www')+pdFld('url','public URL (optional)')+pdChk('delete','Mirror deletes',true);
-    else if(k==='zenodo')h=pdRefSel('secretRef',refs)+pdChk('sandbox','Use Zenodo sandbox');
+    if(k==='github-pages')h=
+      pdFld('repo','GitHub repository','the repo whose gh-pages branch serves the site',owner?(owner+'/site — or just “site”'):'owner/name')+
+      pdFld('branch','Branch','which branch Pages serves','gh-pages')+
+      pdFld('subdir','Subdirectory','publish under a subfolder of that branch (optional)','')+
+      pdChk('private','Private repo (Pages needs GitHub Pro)')+pdChk('create','Create the repo if it doesn\'t exist',true);
+    else if(k==='cloudflare-pages')h=
+      pdFld('project','Pages project','the Cloudflare Pages project name','my-site')+
+      pdFld('accountId','Account id','from the Cloudflare dashboard (Workers &amp; Pages)','')+
+      pdRefSel('secretRef',refs,'API token','a secret ref holding a token with Pages:Edit')+
+      pdFld('url','Public URL','the live link shown in the manager (optional)','https://my-site.pages.dev/');
+    else if(k==='netlify')h=
+      pdFld('siteId','Site id','Netlify → Site settings → General','')+
+      pdRefSel('secretRef',refs,'Auth token','a secret ref holding a Netlify personal access token')+
+      pdFld('url','Public URL','the live link shown in the manager (optional)','https://my-site.netlify.app/');
+    else if(k==='s3'||k==='r2')h=
+      pdFld('dest','Destination','the bucket (and optional prefix) the site uploads to','s3://bucket/prefix')+
+      (k==='r2'?pdFld('endpoint','R2 endpoint','your account\'s S3-compatible endpoint','https://<account>.r2.cloudflarestorage.com'):'')+
+      pdFld('url','Public URL','how readers reach it — CDN/custom domain (optional)','')+
+      pdChk('delete','Mirror deletes (remove remote files no longer in the build)',true);
+    else if(k==='rsync')h=
+      pdFld('dest','Destination','ssh target the built site is rsynced to','user@host:/var/www')+
+      pdFld('url','Public URL','the live link shown in the manager (optional)','')+
+      pdChk('delete','Mirror deletes (remove remote files no longer in the build)',true);
+    else if(k==='rsync-serve')h=
+      pdFld('dest','Destination','rsync target AND the served root — a tiny Julia server is installed there','user@host:/srv/site')+
+      pdFld('url','Public URL','how readers reach it — blank auto-derives http://&lt;host&gt;:&lt;port&gt;/','')+
+      pdFld('bind','Bind address','0.0.0.0 = reachable at the host (default); 127.0.0.1 = private, front it yourself','0.0.0.0')+
+      pdFld('port','Port','the server\'s port on the host','8080')+
+      pdChk('delete','Mirror deletes (remove remote files no longer in the build)',true);
+    else if(k==='zenodo')h=
+      pdRefSel('secretRef',refs,'API token','a secret ref holding your Zenodo personal token')+
+      pdChk('sandbox','Use the Zenodo sandbox (test DOIs, not real ones)');
     var host=document.getElementById('pdtfields'); if(host)host.innerHTML=h;
   }
   window.pdKindFields=pdKindFields;
@@ -697,6 +913,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     else if(kind==='netlify'){put('siteId','siteId');put('secretRef','secretRef');put('url','url');}
     else if(kind==='s3'||kind==='r2'){put('dest','dest');put('url','url');put('endpoint','endpoint');c['delete']=b('delete');}
     else if(kind==='rsync'){put('dest','dest');put('url','url');c['delete']=b('delete');}
+    else if(kind==='rsync-serve'){put('dest','dest');put('url','url');put('bind','bind');put('port','port');c['delete']=b('delete');}
     else if(kind==='zenodo'){put('secretRef','secretRef');c.sandbox=b('sandbox');}
     return c;
   }
@@ -705,34 +922,57 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     if(kind==='github-pages'&&c.repo)return c.repo.split('/').filter(Boolean).pop()||'';
     if(kind==='cloudflare-pages'&&c.project)return c.project;
     if(kind==='netlify')return 'netlify';
-    if((kind==='s3'||kind==='r2'||kind==='rsync')&&c.dest)return c.dest.replace(/^\w+:\/\//,'').split(/[\/:]/).filter(Boolean)[0]||kind;
+    if((kind==='s3'||kind==='r2'||kind==='rsync'||kind==='rsync-serve')&&c.dest)return c.dest.replace(/^\w+:\/\//,'').split(/[\/:]/).filter(Boolean)[0]||kind;
     if(kind==='zenodo')return 'zenodo';
     return '';
   }
-  function pdAddTarget(){
+  function pdAddTarget(btn){
     var kind=(document.getElementById('pdtkind')||{}).value, config=pdReadKind(kind);
     if(kind==='github-pages'&&config.repo&&config.repo.indexOf('/')<0&&_pdView.ghUser){config.repo=_pdView.ghUser+'/'+config.repo;}  // bare name → your account
     var name=(document.getElementById('pdtname').value||'').trim()||pdDeriveName(kind,config);
     if(!name){alertDark('Fill the repo/destination (or type a label)');return;}
+    var done=pdBusy(btn);
     fetch('/api/publish/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,kind:kind,config:config})})
-      .then(function(r){return r.json();}).then(function(v){_pdView=v;pdOpen(name);}).catch(function(){alertDark('Save failed');});
+      .then(function(r){return r.json();}).then(function(v){_pdView=v;pdOpen(name);}).catch(function(){alertDark('Save failed');}).finally(done);
   }
   window.pdAddTarget=pdAddTarget;
-  function pdDelTarget(name){
-    confirmDark('Delete target “'+name+'”? Published history is kept.','Delete','danger').then(function(ok){if(!ok)return;
-      fetch('/api/publish/target-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
-        .then(function(r){return r.json();}).then(function(v){_pdView=v;pdBack();}).catch(function(){alertDark('Delete failed');});});}
+  function pdDelTarget(btn,name){
+    var t=pdTargetByName(name)||{};
+    confirmDark('Delete target “'+name+'”? Published history is kept; sites/documents pointing at it are detached.','Delete','danger').then(function(ok){if(!ok)return;
+      var doDelete=function(purge){
+        var done=pdBusy(btn);   // purge can ssh to a remote host — spinner until it settles
+        fetch('/api/publish/target-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,purge:purge})})
+          .then(function(r){return r.json();}).then(function(v){_pdView=v;pdBack();
+            if(v.purgeLog&&v.purgeLog.length)alertDark('Purge:\n'+v.purgeLog.join('\n'));})
+          .catch(function(){alertDark('Delete failed');}).finally(done);
+      };
+      // Only rsync-serve can genuinely undeploy — offer it; other kinds delete local-only.
+      if(t.kind==='rsync-serve'){
+        confirmDark('Also STOP the remote server and DELETE the deployed site on '+((t.config||{}).dest||'the host')+'?','Purge deployed','danger')
+          .then(function(p){doDelete(!!p);});
+      } else doDelete(false);
+    });}
   window.pdDelTarget=pdDelTarget;
   function pdToggleSecretMask(){var e=document.getElementById('pdsval'); if(e)e.type=document.getElementById('pdsmask').checked?'password':'text';}
   window.pdToggleSecretMask=pdToggleSecretMask;
-  function pdSecretPost(ref,value){
+  function pdSecretPost(ref,value,btn){
+    var done=pdBusy(btn);
     fetch('/api/publish/secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:ref,value:value})})
-      .then(function(r){return r.json();}).then(function(d){_pdView.secretRefs=d.refs||[];pdShowSecrets();}).catch(function(){alertDark('Secret save failed');});
+      .then(function(r){return r.json();}).then(function(d){_pdView.secretRefs=d.refs||[];pdShowSecrets();}).catch(function(){alertDark('Secret save failed');}).finally(done);
   }
-  function pdSetSecret(){var ref=(document.getElementById('pdsref').value||'').trim(),val=document.getElementById('pdsval').value;if(!ref){alertDark('Secret needs a ref name');return;}pdSecretPost(ref,val);}
+  function pdSetSecret(btn){var ref=(document.getElementById('pdsref').value||'').trim(),val=document.getElementById('pdsval').value;if(!ref){alertDark('Secret needs a ref name');return;}pdSecretPost(ref,val,btn);}
   window.pdSetSecret=pdSetSecret;
-  function pdDelSecret(r){if(!r)return;confirmDark('Delete secret “'+r+'”?','Delete','danger').then(function(ok){if(ok)pdSecretPost(r,'');});}
+  function pdDelSecret(btn,r){if(!r)return;confirmDark('Delete secret “'+r+'”?','Delete','danger').then(function(ok){if(ok)pdSecretPost(r,'',btn);});}
   window.pdDelSecret=pdDelSecret;
+  // Forget a document's LEDGER record (its publish/archive history). Local bookkeeping only:
+  // deployed sites stay live, and a minted DOI is permanent regardless.
+  function pdDelDoc(btn,docId,label){
+    confirmDark('Forget “'+label+'” from the publish ledger?\nIts local history (events, DOI records) is removed. Deployed content stays live — a minted DOI is permanent either way.','Forget','danger').then(function(ok){if(!ok)return;
+      var done=pdBusy(btn);
+      fetch('/api/publish/doc-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({docId:docId})})
+        .then(function(r){return r.json();}).then(function(v){_pdView=v;pdRender();}).catch(function(){alertDark('Forget failed');}).finally(done);});
+  }
+  window.pdDelDoc=pdDelDoc;
   // ── Arrange documents: drag-reorder within/between sections. Works on a SITE's local build ('site',
   // then Sync) or directly on a published gh repo ('repo', re-pushes the index). ──────────────────────
   var _arrMode='site', _arrTarget='';
