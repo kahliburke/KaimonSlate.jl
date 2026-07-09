@@ -12,6 +12,8 @@ module NotebookServer
 using HTTP, JSON, FileWatching, CodecZlib
 import Base64
 import Dates                                  # publish dates for the multi-doc site manifest
+import Logging                                # standalone serve: route hub log detail to a file
+import REPL                                   # standalone serve: raw-mode ^C byte (see _wait_for_ctrl_c)
 import Tar
 import Typst_jll
 import Pkg
@@ -754,7 +756,7 @@ function _await_http_ready(url::AbstractString; timeout::Real = 10)
     t0 = time()
     while time() - t0 < timeout
         try
-            r = HTTP.get(url; retry = false, redirect = false, status_exception = false, readtimeout = 2)
+            r = HTTP.get(url; retry = false, redirect = false, status_exception = false, request_timeout = 2)
             r.status < 500 && return true
         catch
         end
@@ -765,15 +767,45 @@ end
 
 # A prominent, framed "your notebook is live" banner with the openable URL emphasized (bold + underline,
 # the terminal's default hyperlinking makes it clickable). Printed once the hub answers HTTP.
-function _print_ready_banner(url::AbstractString)
+function _print_ready_banner(url::AbstractString; logpath::AbstractString = "")
     rule = "─"^72
     printstyled("\n", rule, "\n"; color = :green)
     printstyled("  ✓  Your Kaimon Slate notebook is live\n\n"; color = :green, bold = true)
     print("      →  ")
     printstyled(url; color = :cyan, bold = true, underline = true)
     print("\n\n  Open the link above in a browser. Press Ctrl-C here to stop the server.\n")
+    if !isempty(logpath)
+        print("  Detailed server log: ")
+        printstyled(logpath, "\n"; color = :light_black)
+    end
     printstyled(rule, "\n\n"; color = :green)
     flush(stdout)
+end
+
+# ── Standalone console hygiene ─────────────────────────────────────────────────
+# In the run.jl / serve_notebook path the console is the USER's surface: after the
+# ready banner it should stay quiet unless something is genuinely wrong. Everything
+# else (worker spawns, browser connects, slow-request warnings, …) goes — with full
+# detail — to a log file in the same tmp dir as the worker logs; the banner says
+# where. Errors still reach the console (forwarded to the original logger).
+struct _FileDemuxLogger <: Logging.AbstractLogger
+    io::IO
+    console::Logging.AbstractLogger
+end
+Logging.min_enabled_level(::_FileDemuxLogger) = Logging.Info
+Logging.shouldlog(::_FileDemuxLogger, args...) = true
+Logging.catch_exceptions(::_FileDemuxLogger) = true
+function Logging.handle_message(l::_FileDemuxLogger, lvl, msg, _mod, grp, id, file, line; kw...)
+    try
+        ts = Dates.format(Dates.now(), "HH:MM:SS")
+        println(l.io, "[", ts, "] ", lvl, ": ", msg,
+                isempty(kw) ? "" : string("  (", join(["$k=$(repr(v))" for (k, v) in kw], ", "), ")"))
+        flush(l.io)
+    catch
+    end
+    lvl >= Logging.Error &&
+        Logging.handle_message(l.console, lvl, msg, _mod, grp, id, file, line; kw...)
+    return nothing
 end
 
 # Open `url` in the viewer's default browser, best-effort. This is what makes a Windows double-click
@@ -794,21 +826,96 @@ function _open_in_browser(url::AbstractString)
 end
 
 """
-    serve_notebook(path; host="127.0.0.1", port=8765)
+    serve_notebook(path; host="127.0.0.1", port=8765, quiet=true)
 
-Open the notebook at `path` in a hub and serve it. **Blocks** until stopped. Once the hub is answering
-HTTP, prints a framed banner with the openable notebook URL (so a launcher like `run.jl` surfaces a
-ready, clickable link rather than a bare port).
+Open the notebook at `path` in a hub and serve it. **Blocks** until stopped (Ctrl-C shuts the hub
+and its workers down cleanly). Once the hub is answering HTTP, prints a framed banner with the
+openable notebook URL (so a launcher like `run.jl` surfaces a ready, clickable link rather than a
+bare port). With `quiet=true` (default) the console stays clean after the banner: the hub's log
+detail (worker spawns, connects, warnings) goes to a file in the same tmp dir as the worker logs —
+the banner shows the path; only errors still print.
 """
-function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765)
+function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, quiet::Bool = true)
+    # Swap the logger BEFORE anything spawns so worker-spawn infos land in the file.
+    logpath = joinpath(tempdir(), "kaimonslate", "hub-$port.log")
+    logio = nothing
+    prevlogger = nothing
+    if quiet
+        try
+            mkpath(dirname(logpath))
+            logio = open(logpath, "a")
+            println(logio, "── serve_notebook  $(Dates.now())  $path ──")
+            prevlogger = Logging.global_logger(_FileDemuxLogger(logio, Logging.global_logger()))
+        catch
+            logio = nothing                  # log hygiene must never block serving
+        end
+    end
     h = start_server(path; host = host, port = port)
     id = isempty(h.notebooks) ? "" : first(keys(h.notebooks))
     url = "$(_hub_url(h))/n/$id"
     _await_http_ready(_hub_url(h))          # wait until the server actually answers before announcing it
-    _print_ready_banner(url)
+    _print_ready_banner(url; logpath = logio === nothing ? "" : logpath)
     _open_in_browser(url)                    # best-effort: land a double-click launch straight in a browser
-    wait(h.server)
+    # Block until stopped — and make Ctrl-C actually stop it. Signals are a dead end
+    # here (verified against a live hub): once the threaded HTTP listener runs, a
+    # SIGINT is never delivered into this process at all in a `julia -e` run — ^C was
+    # simply ignored, the hub kept serving and respawning the workers the terminal's
+    # process-group SIGINT had killed. So do what Kaimon's headless server does: raw
+    # mode turns ISIG off and ^C arrives as a plain BYTE (0x03) on stdin — read it,
+    # tear down gracefully in a normal task context, and leave via `_exit` (Julia's
+    # threaded exit machinery is itself wedge/crash-prone in this process). The
+    # non-tty / interactive fallback blocks on the server; a REPL ^C lands there as a
+    # regular InterruptException.
+    cleaned = Ref(false)
+    cleanup = function ()
+        cleaned[] && return
+        cleaned[] = true
+        try; stop_hub(h); catch; end         # server + SSE + every worker — nothing left to respawn
+        # Route logging away from the file, then only FLUSH it — a `close` can block
+        # forever on the stream lock if a dying task held it mid-write.
+        prevlogger === nothing || (try; Logging.global_logger(prevlogger); catch; end)
+        logio === nothing || (try; flush(logio); catch; end)
+        println("\n  Kaimon Slate stopped.")
+        return
+    end
+    if !isinteractive() && stdin isa Base.TTY
+        _wait_for_ctrl_c()                   # ^C (or ^Q / stdin EOF) as a raw byte
+        println("\n  Stopping the notebook server…")
+        cleanup()
+        ccall(:_exit, Cvoid, (Cint,), 0)
+    end
+    try
+        wait(h.server)
+    catch e
+        e isa InterruptException || rethrow()
+        println("\n  Stopping the notebook server…")
+    finally
+        cleanup()
+    end
     return h
+end
+
+# Block until the operator presses Ctrl-C (0x03) or Ctrl-Q (0x11), read as raw bytes
+# with ISIG off — the reliable stand-in for SIGINT (never delivered to this process;
+# see serve_notebook). Mirrors Kaimon's `_wait_for_quit_key`. EOF (stdin closed) also
+# returns — a detached operator can stop the server by closing the input.
+function _wait_for_ctrl_c()
+    term = REPL.Terminals.TTYTerminal(get(ENV, "TERM", "dumb"), stdin, stdout, stderr)
+    ok = try; REPL.Terminals.raw!(term, true); true; catch; false; end
+    ok || (try; wait(Condition()); catch; end; return nothing)
+    try
+        while true
+            b = try
+                read(stdin, UInt8)
+            catch e
+                e isa EOFError && return nothing
+                rethrow()
+            end
+            (b == 0x03 || b == 0x11) && return nothing   # Ctrl-C / Ctrl-Q
+        end
+    finally
+        try; REPL.Terminals.raw!(term, false); catch; end
+    end
 end
 
 end # module NotebookServer
