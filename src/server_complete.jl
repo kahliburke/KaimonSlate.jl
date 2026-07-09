@@ -424,6 +424,16 @@ function _make_router(h::Hub)
         p = joinpath(_JS_DIR, f)
         isfile(p) ? _asset(read(p, String), "application/javascript; charset=utf-8") : HTTP.Response(404)
     end)
+    # Vendored map GeoJSON for echarts `registerMap` (e.g. /assets/maps/world.json) — served
+    # immutable; the front-end fetches + registers a map once per page.
+    HTTP.register!(router, "GET", "/assets/maps/{file}", req -> begin
+        f = HTTP.getparam(req, "file")
+        (occursin('/', f) || occursin('\\', f) || occursin("..", f) || !endswith(f, ".json")) && return HTTP.Response(404)
+        p = joinpath(dirname(_JS_DIR), "maps", f)
+        isfile(p) ? HTTP.Response(200, ["Content-Type" => "application/json",
+                                        "Cache-Control" => "public, max-age=31536000, immutable"], read(p)) :
+                    HTTP.Response(404)
+    end)
     # Local site host: serve a persistent named site (export_to_site) over HTTP so its client-side
     # index — which `fetch`es slate-site.json (blocked on file://) — works. Greedy `**` for nested
     # slug dirs; `_site_file` resolves + guards against `..` traversal outside the site dir.

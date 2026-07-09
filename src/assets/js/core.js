@@ -84,6 +84,38 @@ function _snapCell(cellId, insts, spec) {
   }, 700);
 }
 
+// Geo maps: a spec may carry `registerMap` — {name, url} (or a list) declaring GeoJSON the chart
+// needs (Slate serves a vendored world at /assets/maps/world.json). Each map is fetched + passed to
+// echarts.registerMap ONCE per page (in-flight promise shared); setOption waits on it so a geo chart
+// renders complete on first paint. The key is stripped before setOption (it isn't an ECharts option).
+const _mapRegistry = {};                             // name → Promise (registration done/in flight)
+function _ensureMaps(spec) {
+  const reqs = spec && spec.registerMap ? [].concat(spec.registerMap) : [];
+  return Promise.all(reqs.map(r => {
+    if (!r || !r.name || !r.url || (echarts.getMap && echarts.getMap(r.name))) return Promise.resolve();
+    if (!_mapRegistry[r.name])
+      _mapRegistry[r.name] = fetch(r.url).then(x => x.json())
+        .then(j => echarts.registerMap(r.name, j))
+        .catch(() => { delete _mapRegistry[r.name]; });   // failed fetch → retry on a later render
+    return _mapRegistry[r.name];
+  }));
+}
+function _sansMaps(s) {
+  if (!s || (!s.registerMap && !s.__size)) return s;
+  const c = Object.assign({}, s); delete c.registerMap; delete c.__size; return c;
+}
+// Slate `height=`/`width=` chart kwargs ride as `__size` — apply to the chart's DIV (a number is
+// px; any CSS length string passes through), then let the instance re-measure. No-op when unchanged.
+function _applySize(el, inst, s) {
+  const sz = (s && s.__size) || {};
+  const css = v => v == null ? '' : (typeof v === 'number' ? v + 'px' : String(v));
+  const h = css(sz.height), w = css(sz.width);
+  let changed = false;
+  if (el.style.height !== h) { el.style.height = h; changed = true; }
+  if (el.style.width !== w) { el.style.width = w; changed = true; }
+  if (changed && inst) try { inst.resize(); } catch (_) {}
+}
+
 // Render/refresh a cell's ECharts. Instances persist across reactive updates, so
 // data changes animate in place (setOption) instead of swapping an image.
 function renderCharts(c) {
@@ -97,15 +129,36 @@ function renderCharts(c) {
       insts.push(echarts.init(d, 'dark'));
     }
     while (host.children.length > specs.length) { host.removeChild(host.lastChild); const inst = insts.pop(); if (inst) try { inst.dispose(); } catch (_) {} }
-    specs.forEach((s, i) => { try { insts[i].setOption(s); } catch (e) {} });
-    if (insts.length) _snapCell(c.id, insts, specs[0]);   // PNG (slate_view) + SVG (vector PDF) → server
+    specs.forEach((s, i) => _applySize(host.children[i], insts[i], s));
+    Promise.all(specs.map((s, i) => _ensureMaps(s).then(() => _geoSafeSetOption(insts[i], s))))
+      .then(() => { if (insts.length) _snapCell(c.id, insts, _sansMaps(specs[0])); });
   }
   // Inline `{{ echart(…) }}` placeholders in a markdown cell.
   document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
     const spec = specs[+el.dataset.i]; if (!spec) return;
     if (!el._inst) el._inst = echarts.init(el, 'dark');
-    try { el._inst.setOption(spec); } catch (e) {}
+    _applySize(el, el._inst, spec);
+    _ensureMaps(spec).then(() => _geoSafeSetOption(el._inst, spec));
   });
+}
+// setOption that can't leave a DEAD geo bind. If a spec needs a registered map but a setOption ever
+// ran before registration (fetch in flight, or a transient fetch failure), ECharts silently binds the
+// series to a broken geo — the map later merges in but the points keep a full-canvas layout ("zoom
+// disconnected from the scatter"). Heal: on the first render where the map IS registered, clear()
+// once to force a fresh coordinate bind; after that never clear again (preserves the user's roam).
+function _geoSafeSetOption(inst, s) {
+  if (!inst) return;
+  try {
+    const reqs = s && s.registerMap ? [].concat(s.registerMap) : [];
+    const ready = reqs.every(r => r && r.name && echarts.getMap && echarts.getMap(r.name));
+    if (reqs.length && ready && !inst.__mapsReady) { inst.clear(); inst.__mapsReady = true; }
+    inst.setOption(_sansMaps(s));
+    // Canvas-size self-heal: if layout/CSS changed the div since init (fonts settling, panel
+    // toggles), the internal canvas keeps the stale size and every component lays out against it.
+    const dom = inst.getDom();
+    if (dom && (dom.clientWidth !== inst.getWidth() || dom.clientHeight !== inst.getHeight()))
+      inst.resize();
+  } catch (e) {}
 }
 window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
 

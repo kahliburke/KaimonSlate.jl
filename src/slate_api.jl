@@ -72,7 +72,18 @@ const SLATE_API = SlateApiEntry[
         DEFAULTS: dark theme + transparent bg (`theme=false` to opt out); `tooltip=true`; a `legend`
         appears when ≥2 series are named (`legend=<spec>` to place it, `legend=false` to drop it);
         `title="…"`. Reactive charts re-`setOption` (~300 ms transition; `animation=false` to snap).
-        Worked examples: `examples/echarts_dsl.jl`. See also `series`."""),
+
+        SIZE: `height=520` / `width="80%"` (px number or any CSS length) size the chart's box.
+
+        GEO MAPS: `registerMap=(name="world", url="/assets/maps/world.json")` fetches + registers
+        GeoJSON before render (Slate serves a vendored world map at that URL); then
+        `geo=(map="world", roam=true)` plus series with `coordinateSystem="geo"` draw on real
+        coastlines. NOTE `silent=true` on the geo kills roam (it swallows the mouse) — disable
+        hover-highlight with `emphasis=(disabled=true,)` instead. Geo-bound and heatmap series
+        default to `progressive=0` (ECharts' progressive layers keep a stale blit under a roaming
+        coordinate system — the dots stop following the map); pass an explicit `progressive=N` to
+        re-enable for huge data.
+        Worked examples: `examples/echarts_dsl.jl`, `examples/seismic_month.jl`. See also `series`."""),
     SlateApiEntry("series", "Charts", "series(kind, x, y; name, smooth, stack, symbolSize, …) -> EChartSeries",
         """One series for the composable `echart(series(…), series(…); …)` form — combine different
         kinds/axes in one chart. Same positional data shapes as `echart`'s Express kinds (`:line`/`:bar`/
@@ -253,7 +264,9 @@ const SLATE_API = SlateApiEntry[
         """Per-cell tags travel in the `#%%` header (set them with the 🏷 button in the cell header, or
         an explicit header token). Behaviour tags: `collapsed` (fold the cell), `hidecode` (hide the
         editor, show output), `trace` (wrap in @trace — inspect every value), `nocache` (opt OUT of
-        durable memoization — for impure / side-effecting cells). Presentation tags: `slide` (force a
+        durable memoization — for impure / side-effecting cells), `cache` (opt IN regardless of
+        runtime — persist a pipeline stage's result so it RESTORES instead of recomputing until an
+        input actually changes). Presentation tags: `slide` (force a
         new slide), `notes` (speaker notes, presenter-only). Document-metadata ROLE tags: `title`,
         `abstract`, `bibliography` (see "front matter"). Site tags (see "site"): `home` (this notebook is
         the published site's FRONT PAGE), `docindex` (marks where the document listing is injected). Any
@@ -404,7 +417,8 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
     WebPage(css=@asset("app.css"), js=@asset("app.js"), html=@asset("app.html"))  # self-contained HTML page
 
 ## Cell tags (🏷 in the cell header, or `#%%` header tokens, e.g. `#%% md id=abs abstract`)
-    collapsed · hidecode · trace · nocache (skip durable caching) · plus free-form tags.
+    collapsed · hidecode · trace · nocache (skip durable caching) · cache (ALWAYS persist — a pipeline
+stage restores instead of recomputing) · plus free-form tags.
     Presentation: slide (force a new slide) · notes (speaker notes — presenter view only).
     Document metadata (ROLES): title · abstract · bibliography. Expensive cells (≥400ms) auto-cache.
 

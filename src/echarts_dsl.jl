@@ -208,6 +208,30 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
     # `10¹⁹` in a title — silently falls back to a DIFFERENT font, so the title diverges from the
     # rest of the chart. A caller `textStyle` kwarg overrides this.
     haskey(opt, "textStyle") || (opt["textStyle"] = Dict{String,Any}("fontFamily" => "inherit"))
+    return _slate_normalize!(opt)
+end
+
+# Final Slate-side normalisation of a finished option, applied to EVERY echart form (incl. raw):
+# 1. Geo-bound and heatmap series default to `progressive = 0`. ECharts progressively renders any
+#    series past ~3k points onto its own layer, and that layer keeps a STALE blit when the
+#    coordinate system relays out — most visibly a `geo` roam, where the dots stop following the
+#    map ("zoom disconnected from the scatter"). Pass an explicit `progressive = N` to opt back in.
+# 2. Top-level `height`/`width` become `__size` — a Slate front-end directive (the chart div is
+#    sized before init/resize), NOT an ECharts option key, so it's split out and stripped client-side.
+function _slate_normalize!(opt::Dict{String,Any})
+    s = get(opt, "series", nothing)
+    if s isa AbstractVector
+        for e in s
+            e isa AbstractDict || continue
+            fragile = get(e, "coordinateSystem", "") == "geo" || get(e, "type", "") == "heatmap"
+            fragile && !haskey(e, "progressive") && (e["progressive"] = 0)
+        end
+    end
+    sz = Dict{String,Any}()
+    for k in ("height", "width")
+        haskey(opt, k) && (sz[k] = pop!(opt, k))
+    end
+    isempty(sz) || (opt["__size"] = sz)
     return opt
 end
 
@@ -278,7 +302,12 @@ into a live value) — see the `slate.api` reference.
 # "just works" on a one-series chart (e.g. a log axis, a category x-axis, a slider zoom).
 const _EC_TOPLEVEL = Set{String}(["xAxis", "yAxis", "grid", "dataZoom", "visualMap", "polar",
     "angleAxis", "radiusAxis", "radar", "geo", "toolbox", "dataset", "brush", "calendar", "timeline",
-    "singleAxis", "parallel", "parallelAxis", "graphic", "axisPointer", "textStyle", "color"])
+    "singleAxis", "parallel", "parallelAxis", "graphic", "axisPointer", "textStyle", "color",
+    # Slate extensions (not ECharts keys): `registerMap=(name="world", url="/assets/maps/world.json")`
+    # declares a geo map to fetch + `echarts.registerMap` before render (vector for several); the
+    # front-end registers each map once per page and strips the key. `height`/`width` size the chart's
+    # DIV (px number or any CSS length) — split into `__size` by `_slate_normalize!`.
+    "registerMap", "height", "width"])
 
 # Express: a single series + simple layout. Kwargs naming a top-level component (xAxis/yAxis/grid/…)
 # go on the OPTION (so `yAxis=(type=:log,)` makes a log axis); everything else styles the series.
@@ -293,4 +322,4 @@ end
 # Composable: one or more `series(...)`, plus raw layout/components (grid/dataZoom/visualMap/…).
 echart(s::EChartSeries, more::EChartSeries...; kwargs...) = EChart(_echart_build([s, more...]; kwargs...))
 # Raw NamedTuple/keyword options — the full ECharts surface, Symbol/NamedTuple-friendly.
-echart(; kwargs...) = EChart(Dict{String,Any}(String(k) => _ec(v) for (k, v) in kwargs))
+echart(; kwargs...) = EChart(_slate_normalize!(Dict{String,Any}(String(k) => _ec(v) for (k, v) in kwargs)))
