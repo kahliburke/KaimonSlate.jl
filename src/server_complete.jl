@@ -191,32 +191,63 @@ function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
 end
 
 # Move this notebook's worker onto (or off) an SSH host, PROVISIONING + spawning there and connecting
-# over CURVE/tunnel. `spec` = "ssh_host[,transport]" (transport = tunnel|direct); "" ⇒ back to a local
-# worker. Same tear-down → re-pick (`_select_kernel` reads meta["runon"]) → async re-run as
-# `set_remote_worker!`. Runtime-only (never written to the `.jl`).
-function set_run_on!(nb::LiveNotebook, spec::AbstractString)
+# over CURVE/tunnel. `spec` = "ssh_host[,transport]" (transport = tunnel|direct); "" ⇒ local.
+# `scope` picks which run-location LAYER this sets (see `_effective_runon`):
+#   :session  (default) — runtime-only override, wins for this session, never written to the `.jl`.
+#   :notebook           — DURABLE override, persisted in the Slate.config footer (and clears any session temp).
+#   :clear              — drop BOTH the session and notebook overrides → fall back to the global default / local.
+# Either way: tear down the old kernel → re-pick via `_select_kernel` → stale all cells → async re-run
+# (which drives prepare!→provision+spawn on the new host).
+function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :session)
+    remotehost = ""
     lock(nb.lock) do
         s = strip(String(spec))
-        isempty(s) ? delete!(nb.report.meta, "runon") : (nb.report.meta["runon"] = String(s))
+        if scope === :clear
+            delete!(nb.report.meta, "runon_session"); delete!(nb.report.meta, "runon")
+        elseif scope === :notebook
+            isempty(s) ? delete!(nb.report.meta, "runon") : (nb.report.meta["runon"] = String(s))
+            delete!(nb.report.meta, "runon_session")       # a durable choice supersedes a session temp
+        else  # :session
+            isempty(s) ? delete!(nb.report.meta, "runon_session") : (nb.report.meta["runon_session"] = String(s))
+        end
         try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → tunnel/sync torn down
         nb.kernel = _select_kernel(nb.path, nb.report)
+        remotehost = (nb.kernel isa ReportEngine.GateKernel && nb.kernel.target isa ReportEngine.RemoteTarget) ?
+                     nb.kernel.target.ssh_host : ""
         build_dependencies!(nb.report)
         # The new worker has an EMPTY namespace → every cell must re-run on it. Invalidate all cells so
-        # `_drain!` actually re-evaluates them (which is what triggers prepare!→spawn on the new host);
-        # without this, cells left FRESH from the previous worker leave the runner with nothing to do and
-        # the remote worker is never even spawned. Mirrors ReportEngine.reset!.
+        # `_drain!` re-evaluates them; mirrors ReportEngine.reset!.
         for c in nb.report.cells; c.state = STALE; c.output = nothing; end
+        delete!(nb.report.meta, "hydrate_error")
         nb.report.meta["hydrating"] = true
+        # Tell the banner this is a remote bring-up (provision + connect can take minutes) rather than a
+        # plain re-run — so the UI stops implying it's "running cells" while the worker isn't even up yet.
+        isempty(remotehost) ? delete!(nb.report.meta, "hydratingKind") :
+            (nb.report.meta["hydratingKind"] = "remote"; nb.report.meta["hydratingHost"] = remotehost)
         nb.version += 1
     end
+    scope === :session || _persist!(nb)     # notebook/clear change the durable footer → write the .jl
     _broadcast(nb, "restart")
     @async begin
         try
-            _drain!(nb)                                        # first eval → prepare! provisions + spawns + connects
+            # For a remote target, bring the worker up ONCE up front (provision → spawn → connect). This is
+            # the interception point: a spawn/provision failure becomes a SINGLE notebook-level error
+            # (the hydrate-error banner) instead of the identical error stamped onto every cell. Only once
+            # the worker is really connected do we run the cells.
+            isempty(remotehost) || ReportEngine.prepare!(nb.kernel, nb.report)
+            _drain!(nb)
         catch e
-            @warn "KaimonSlate: run-on switch re-run failed" exception = (e, catch_backtrace())
+            msg = sprint(showerror, e)
+            lock(nb.lock) do
+                nb.report.meta["hydrate_error"] = msg
+                for c in nb.report.cells; c.output = nothing; (c.state == RUNNING) && (c.state = STALE); end  # nothing ran → no per-cell errors
+            end
+            @warn "KaimonSlate: run-on bring-up failed" host = remotehost exception = (e, catch_backtrace())
         finally
-            lock(nb.lock) do; delete!(nb.report.meta, "hydrating"); nb.version += 1; end
+            lock(nb.lock) do
+                delete!(nb.report.meta, "hydrating"); delete!(nb.report.meta, "hydratingKind"); delete!(nb.report.meta, "hydratingHost")
+                nb.version += 1
+            end
             try; _broadcast(nb, string(nb.version)); catch; end
         end
     end
@@ -363,10 +394,13 @@ function _make_router(h::Hub)
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
     # `KaimonSlate.create_tools`'s open: creates the file if it doesn't exist.
     HTTP.register!(router, "POST", "/api/open", req -> begin
-        path = expanduser(strip(String(get(_body(req), "path", ""))))   # resolve ~ (tab-complete emits ~ paths)
+        b = _body(req)
+        path = expanduser(strip(String(get(b, "path", ""))))   # resolve ~ (tab-complete emits ~ paths)
         isempty(path) && return HTTP.Response(400, "missing path")
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
-        id = open_notebook!(h, path)
+        # Optional run-location chosen in the open/new-notebook picker ("host[,transport]"); "" = follow
+        # the file's own choice / the global default. Only applied when the notebook isn't already open.
+        id = open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))))
         _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
     end)
     # Upload a `.jl` from the browser (the viewing machine) → save it under a persistent uploads dir and
@@ -413,6 +447,40 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/shutdown", req -> begin
         id = HTTP.getparam(req, "id")
         close_notebook!(h, id) ? _json(Dict("closed" => id)) : HTTP.Response(404, "no such notebook")
+    end)
+    # ── Run-location: host list, global default, preflight, remote-worker registry ──────────────────
+    # Candidate ssh hosts (~/.ssh/config Host aliases) + the current machine global default → the picker.
+    HTTP.register!(router, "GET", "/api/ssh-hosts", _ ->
+        _json(Dict("hosts" => ReportEngine.ssh_config_hosts(), "global" => RUNON_DEFAULT[])))
+    # Set the machine GLOBAL run-location default (where new notebooks run). Body {host:"..."}. Persisted
+    # to slate.json via the hook KaimonSlate installed. "" ⇒ new notebooks run local by default.
+    HTTP.register!(router, "POST", "/api/run-on-default", req ->
+        _json(Dict("global" => set_runon_default!(String(get(_body(req), "host", ""))))))
+    # Test + prime a host: the full reported dry-run (ssh, julia, provision, KaimonGate, CURVE, spawn+
+    # connect+eval+teardown). Body {host, transport:"tunnel"|"direct"}. Slow on a cold host (provision).
+    HTTP.register!(router, "POST", "/api/preflight", req -> begin
+        b = _body(req)
+        host = strip(String(get(b, "host", "")))
+        isempty(host) && return _json(Dict("ok" => false, "error" => "no host"))
+        tr = Symbol(strip(String(get(b, "transport", "tunnel"))))
+        tr in (:tunnel, :direct) || (tr = :tunnel)
+        _json(ReportEngine.preflight_remote(host; transport = tr))
+    end)
+    # Remote-worker registry for a host: list workers (which notebook, last activity, reconnectable?,
+    # possibly-abandoned?) so a human can clean up. Body/query {host}. Reaping is POST /api/reap-worker.
+    HTTP.register!(router, "GET", "/api/remote-workers", req -> begin
+        host = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "host", "")))
+        isempty(host) && return _json(Dict("host" => "", "workers" => []))
+        _json(Dict("host" => host, "workers" => ReportEngine.list_remote_workers(host)))
+    end)
+    # Manually reap a specific remote worker (kill process + remove its manifest). Body {host, port}.
+    # Never automatic — the user decides, so a worker with useful results is never killed out from under them.
+    HTTP.register!(router, "POST", "/api/reap-worker", req -> begin
+        b = _body(req)
+        host = strip(String(get(b, "host", "")))
+        port = tryparse(Int, string(get(b, "port", "")))
+        (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
+        _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
     end)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin
         id = HTTP.getparam(req, "id")
@@ -799,6 +867,15 @@ function _make_router(h::Hub)
         set_remote_worker!(nb, String(get(_body(req), "ports", "")))
         _json(state_json(nb))
     end))
+    # Set this notebook's run-location. Body {host:"ssh_host[,transport]", scope:"session"|"notebook"|"clear"}.
+    # host="" + scope="session"/"notebook" → local for that layer; scope="clear" drops both overrides.
+    HTTP.register!(router, "POST", "/api/{id}/run-on", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        sc = Symbol(strip(String(get(b, "scope", "session"))))
+        sc in (:session, :notebook, :clear) || (sc = :session)
+        set_run_on!(nb, String(get(b, "host", "")); scope = sc)
+        _json(state_json(nb))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/cancel", req -> _withnb(h, req, nb -> (cancel_run!(nb); _json(state_json(nb)))))
     # Agent chat: forward the turn to Kaimon's agent service (spawning a session
     # bound to this notebook on first use); the agent's `{kind,turn,data}` events
@@ -1063,6 +1140,8 @@ function start_hub(; host = "127.0.0.1", port = 8765)
             nb === nothing ? (HTTP.setstatus(stream, 404); HTTP.startwrite(stream)) : _sse(stream, nb)
         elseif startswith(target, "/api/import-standalone")   # long-lived SSE; raw Stream, not router
             _sse_import(stream, h)
+        elseif startswith(target, "/api/preflight-stream")     # streamed remote preflight (step-by-step)
+            _sse_preflight(stream, h)
         elseif occursin(_PUBLISH_RE, target)                  # multi-target publish; per-target SSE progress
             _sse_publish(stream, h)
         elseif occursin(_SITE_PUBLISH_RE, target)             # build notebook into a site + sync all destinations
@@ -1087,14 +1166,14 @@ end
 Load the notebook at `path` into the hub (reusing the existing entry if already
 open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
 """
-function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "")
+function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "", runon::AbstractString = "")
     file = abspath(path)
     id = lock(h.lock) do
         for nb in values(h.notebooks)
             abspath(nb.path) == file && return nb.id
         end
         id = _unique_id(h, file)
-        nb = load_notebook(file; id = id, threads = threads)
+        nb = load_notebook(file; id = id, threads = threads, runon = runon)
         h.notebooks[id] = nb
         _start_watcher!(nb)
         return id

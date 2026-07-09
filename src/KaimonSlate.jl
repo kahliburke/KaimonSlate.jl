@@ -266,11 +266,29 @@ function set_parallel_default!(on::Bool)
     return on
 end
 
+"The machine's GLOBAL default run-location for new notebooks (\"host[,transport]\"; \"\" = local)."
+run_location_default()::String = String(get(_slate_config(), "run_location", ""))
+
+"""
+    set_run_location_default!(spec) -> String
+
+Persist the global default run-location (where new notebooks run) to slate.json and apply it live.
+Per-notebook and per-session overrides still win. Returns the stored spec.
+"""
+set_run_location_default!(spec::AbstractString) = NotebookServer.set_runon_default!(spec)
+
 # Load persisted settings into the engine BEFORE any worker spawns (called at init).
 function _load_slate_config!()
     s = worker_threads()
     isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
     NotebookServer.PARALLEL_DEFAULT[] = parallel_default()
+    NotebookServer.RUNON_DEFAULT[] = run_location_default()
+    # Install the persist hook so set_runon_default! (from the browser route / gate tool) writes slate.json.
+    NotebookServer._RUNON_PERSIST[] = function (spec)
+        cfg = _slate_config(); cfg["run_location"] = String(spec)
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+        return nothing
+    end
     return nothing
 end
 
@@ -368,7 +386,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        run_on(notebook::String, host::String) -> String
+        run_on(notebook::String, host::String, scope::String) -> String
 
     Choose WHERE this notebook's worker runs — per notebook. `host=""` runs it LOCALLY.
     `host="ssh_host"` (or `"ssh_host,transport"`, transport = tunnel|direct, default tunnel) PROVISIONS
@@ -376,13 +394,75 @@ function create_tools(GateTool::Type)
     behaves exactly as if local (reactivity, hot-reload, streaming all transparent). The host must be an
     SSH target you've already set up (a `Host` in ~/.ssh/config with key auth). Different notebooks can
     target different hosts/envs independently. Switches a live notebook and re-runs.
+
+    `scope` picks which layer this sets: `"session"` (default) = this session only, not saved;
+    `"notebook"` = durable, saved in the .jl so it reopens there; `"clear"` = drop both overrides and
+    fall back to the global default / local. Use `check_remote` first to validate + prime a new host.
     """
-    function run_on(notebook::String, host::String)::String
+    function run_on(notebook::String, host::String, scope::String = "session")::String
         nb, err = _nb(notebook); nb === nothing && return err
-        set_run_on!(nb, host)
-        return isempty(strip(host)) ?
-               "✅ $(basename(nb.path)) → LOCAL worker." :
-               "✅ $(basename(nb.path)) → provisioning + spawning on '$host'; watch `slate.diag` or the worker log for progress."
+        sc = Symbol(strip(scope)); sc in (:session, :notebook, :clear) || (sc = :session)
+        set_run_on!(nb, host; scope = sc)
+        sc === :clear && return "✅ $(basename(nb.path)) → run-location cleared (follows global default / local)."
+        isempty(strip(host)) && return "✅ $(basename(nb.path)) → LOCAL worker ($(sc))."
+        return "✅ $(basename(nb.path)) → provisioning + spawning on '$host' ($(sc)); watch `slate.diag` or the worker log for progress."
+    end
+
+    """
+        check_remote(host::String, transport::String) -> String
+
+    Test + prime an SSH host for remote notebooks: a full reported dry-run — ssh reachability, Julia
+    presence (+version), env provisioning, KaimonGate load, CURVE key (for `direct`), then a real
+    spawn → connect → round-trip eval → clean teardown. `transport` = "tunnel" (default) | "direct".
+    Returns a step-by-step checklist. Slow on a cold host (first-time provisioning). Run this before
+    `run_on` to catch setup problems early; it also primes the host so the first real run is fast.
+    """
+    function check_remote(host::String, transport::String = "tunnel")::String
+        h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
+        tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
+        r = ReportEngine.preflight_remote(h; transport = tr)
+        io = IOBuffer()
+        println(io, (r["ok"] ? "✅" : "❌"), " preflight '$h' ($(r["transport"])) — ", r["ok"] ? "ALL OK" : "FAILED")
+        for s in r["steps"]
+            mark = s["status"] == "ok" ? "✓" : s["status"] == "skip" ? "–" : "✗"
+            println(io, "  $mark $(s["name"])  ($(s["ms"])ms)", isempty(s["detail"]) ? "" : "\n      $(s["detail"])")
+        end
+        return String(take!(io))
+    end
+
+    """
+        remote_workers(host::String) -> String
+
+    List the Slate workers on `host`: which notebook each serves, whether it's still running, its last
+    computation time, and whether it looks abandoned — so you can decide what to clean up. Reap a
+    specific one with `reap_worker`. Never kills anything.
+    """
+    function remote_workers(host::String)::String
+        h = strip(host); isempty(h) && return "Give an ssh host."
+        ws = ReportEngine.list_remote_workers(h)
+        isempty(ws) && return "No Slate workers found on '$h' (or host unreachable)."
+        io = IOBuffer(); println(io, "Workers on '$h':")
+        for w in ws
+            mf = w["manifest"]
+            nbk = ReportEngine._manifest_get(mf, "notebook"); nbk = isempty(nbk) ? "?" : nbk
+            spawned = ReportEngine._manifest_get(mf, "spawned")
+            la = w["lastActivity"]; age = la == 0 ? "never" : string(round(Int, (time() - la) / 60), "m ago")
+            println(io, "  • port $(w["port"])  $(w["alive"] ? "🟢 running" : "⚪ stopped")  notebook=$(nbk)  last activity: $age", isempty(spawned) ? "" : "  (spawned $spawned)")
+        end
+        println(io, "\nReap one with reap_worker(host, port).")
+        return String(take!(io))
+    end
+
+    """
+        reap_worker(host::String, port::Int) -> String
+
+    Explicitly kill the worker on `host:port` and remove its files. Manual only — nothing is auto-reaped,
+    so a worker holding useful results is safe until you choose to remove it. Use `remote_workers` first.
+    """
+    function reap_worker(host::String, port::Int)::String
+        h = strip(host); isempty(h) && return "Give an ssh host."
+        ReportEngine.reap_remote_worker(h, port)
+        return "✅ reaped worker-$port on '$h' (process killed, files removed)."
     end
 
     """
@@ -1014,6 +1094,9 @@ function create_tools(GateTool::Type)
         GateTool("list", nb_list),
         GateTool("close", nb_close),
         GateTool("run_on", run_on),
+        GateTool("check_remote", check_remote),
+        GateTool("remote_workers", remote_workers),
+        GateTool("reap_worker", reap_worker),
         GateTool("read", read_cells),
         GateTool("add_cell", add_cell),
         GateTool("edit_cell", edit_cell),

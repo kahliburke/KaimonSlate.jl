@@ -619,6 +619,12 @@ function state_json(nb::LiveNotebook)
     meta["publishRepo"] = get(nb.report.meta, "publishrepo", "")             # last GitHub publish target (owner/name); pre-fills the dialog
     meta["publishSlug"] = get(nb.report.meta, "publishslug", "")             # last publish slug ("" = home / default)
     meta["remoteWorker"] = get(nb.report.meta, "remoteworker", "")           # "port,stream" if running on a remote worker
+    # Run-location (three layers → one effective value; see _effective_runon). The toolbar picker binds to these.
+    meta["runLocation"] = _effective_runon(nb.report)                        # effective "host[,transport]" ("" = local)
+    meta["runLocationSource"] = _runon_source(nb.report)                     # session | notebook | global | default(local)
+    meta["runLocationNotebook"] = get(nb.report.meta, "runon", "")           # the DURABLE footer override ("" = none)
+    meta["runLocationSession"] = get(nb.report.meta, "runon_session", "")    # the runtime session override ("" = none)
+    meta["runLocationGlobal"] = RUNON_DEFAULT[]                              # the machine global default ("" = local)
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true
@@ -632,8 +638,11 @@ function state_json(nb::LiveNotebook)
         end
         meta["hydrating"] = true
         # "env" = reconstructing a self-contained bundle's environment (shows a frozen preview);
-        # "run" = a normal open whose initial full run is happening in the background.
-        meta["hydratingKind"] = haskey(nb.report.meta, "preview") ? "env" : "run"
+        # "run" = a normal open whose initial full run is happening in the background;
+        # "remote" = bringing up a remote worker (provision + connect) before any cell can run.
+        meta["hydratingKind"] = get(nb.report.meta, "hydratingKind",
+                                    haskey(nb.report.meta, "preview") ? "env" : "run")
+        haskey(nb.report.meta, "hydratingHost") && (meta["hydratingHost"] = nb.report.meta["hydratingHost"])
         return meta
     end
     bindref, hostednames = _bind_index(nb.report)

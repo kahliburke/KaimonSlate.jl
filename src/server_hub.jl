@@ -39,7 +39,8 @@ _notebooks_json(h::Hub) = lock(h.lock) do
              "binds" => sum(c -> length(c.binds), cs; init = 0),
              "compute_ms" => sum(c -> c.output === nothing ? 0.0 : c.output.duration_ms, cs; init = 0.0),
              "mtime" => _file_mtime(nb.path),
-             "worker" => _worker_label(nb), "port" => _worker_port(nb))
+             "worker" => _worker_label(nb), "port" => _worker_port(nb),
+             "runLocation" => _worker_location(nb))
      end for nb in values(h.notebooks)]
     # Most-recently-edited first (the dict's iteration order is otherwise arbitrary).
     sort!(nbs; by = d -> d["mtime"], rev = true)
@@ -52,6 +53,10 @@ _worker_label(nb::LiveNotebook) =
 # The gate worker's port (0 / nothing when in-process) — for the index card's running dot.
 _worker_port(nb::LiveNotebook) =
     nb.kernel isa GateKernel && nb.kernel.port != 0 ? nb.kernel.port : nothing
+
+# Where this notebook's worker actually runs — "" (local) or the ssh host — for the index card badge.
+_worker_location(nb::LiveNotebook) =
+    (nb.kernel isa GateKernel && nb.kernel.target isa ReportEngine.RemoteTarget) ? nb.kernel.target.ssh_host : ""
 
 # File mtime as unix seconds (the index renders it as relative "edited Nm ago"); 0 if absent.
 _file_mtime(path::AbstractString) = try; round(Int, mtime(abspath(path))); catch; 0; end

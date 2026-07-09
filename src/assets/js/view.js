@@ -472,18 +472,23 @@ function updateChrome(state) {
               ? ('worker :' + w.port + (w.connected ? ' · connected' : (state.hydrating ? ' · starting…' : ' · disconnected')))
               : 'in-process kernel';
   }
+  window.renderRunLoc && window.renderRunLoc(state);   // toolbar run-location pill (session/notebook/global)
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const hb = document.getElementById('hydbanner');
   _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
   if (state.hydrating) {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
-    hb.innerHTML = '<span class="hydspin"></span>' + (state.hydratingKind === 'run'
-      ? 'Running the notebook — cells go live as they finish…'
-      : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…');
+    hb.innerHTML = '<span class="hydspin"></span>' + (
+      state.hydratingKind === 'remote'
+        ? ('Starting the worker on <b>' + (state.hydratingHost || 'the remote host') + '</b> — provisioning &amp; connecting' +
+           ' (a first run installs Julia deps and can take a few minutes)…')
+      : state.hydratingKind === 'run'
+        ? 'Running the notebook — cells go live as they finish…'
+        : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…');
     document.body.classList.add('hydrating');
   } else if (state.hydrateError) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
-    hb.textContent = '⚠ Environment reconstruction failed: ' + state.hydrateError;
+    hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)
     document.body.classList.remove('hydrating');
   } else {
     hb.style.display = 'none'; document.body.classList.remove('hydrating');

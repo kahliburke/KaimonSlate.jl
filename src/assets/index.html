@@ -12,6 +12,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .nbhead{display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .nb .t{color:#fff;font-weight:600;} .nb .p{color:#6a7090;font-family:Menlo,monospace;font-size:.8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .wport{font-size:.72rem;color:#56d364;font-family:Menlo,monospace;white-space:nowrap;flex:0 0 auto;}
+.wloc{font-size:.72rem;color:#e3b341;white-space:nowrap;flex:0 0 auto;border:1px solid #3a3320;border-radius:20px;padding:1px 8px;background:rgba(227,179,65,.08);}
+.wloc.local{color:#6a7090;border-color:#21253a;background:none;}
 .meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px;}
 .bdg{font-size:.7rem;padding:2px 7px;border-radius:999px;background:#1a1f30;border:1px solid #262b40;color:#9aa3c0;line-height:1.3;}
 .bdg.stale{color:#e3b341;border-color:#5a4a1e;background:rgba(227,179,65,.08);}
@@ -34,9 +36,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .cols{display:grid;grid-template-columns:minmax(340px,1fr) minmax(360px,1.05fr);gap:36px;align-items:start;max-width:1160px;margin:6px 0 8px;}
 @media(max-width:840px){.cols{grid-template-columns:1fr;gap:26px;}}
 .colL,.colR{min-width:0;}
-.open{display:flex;gap:8px;margin-bottom:24px;}
+.open{display:flex;flex-direction:column;gap:8px;margin-bottom:24px;align-items:stretch;}
+.openctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.ctllabel{color:#8a90a8;font-size:.8rem;flex:0 0 auto;}
 .empty{margin-top:2px;}
-.pathwrap{position:relative;flex:1;}
+.pathwrap{position:relative;width:100%;}
 .pathwrap input{width:100%;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 12px;font-family:Menlo,monospace;font-size:.85rem;}
 .pathwrap input:focus{outline:none;border-color:#569cd6;}
 .comp{position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:5;list-style:none;margin:0;padding:4px;
@@ -47,6 +51,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .comp li.more:hover{background:none;}
 .open button{background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 16px;cursor:pointer;}
 .open button:hover{border-color:#569cd6;color:#569cd6;}
+.runonsel{flex:0 0 auto;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 10px;cursor:pointer;max-width:200px;}
+.runonsel:hover{border-color:#569cd6;}
+.imrow select.runonsel{max-width:100%;width:100%;}
 .modal-bg{position:fixed;inset:0;background:rgba(5,8,16,.66);display:none;align-items:center;justify-content:center;z-index:50;}
 .modal-bg.show{display:flex;}
 #modalbg{z-index:90;}   /* shared confirm/alert sits above the publishing dashboard (also .modal-bg z-index:50) */
@@ -67,6 +74,36 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .loading .lmsg{color:#d4d8e8;font-size:.9rem;}
 .importmodal{max-width:640px;}
 .imrow{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
+/* Remotes manager modal */
+.remotesmodal{max-width:640px;}
+.remotesmodal .imrow{flex-direction:row;align-items:center;gap:10px;}
+.remotesmodal .imrow>label{flex:0 0 70px;color:#8a90a8;font-size:.82rem;}
+.remotesmodal #rthost{flex:1 1 auto;min-width:0;background:#0d1120;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 10px;font-family:Menlo,monospace;font-size:.82rem;}
+.rttr{display:flex;gap:16px;align-items:center;}
+.rttr label{display:inline-flex;gap:5px;align-items:center;color:#d4d8e8;font-size:.84rem;cursor:pointer;}
+.rtactions{display:flex;gap:8px;align-items:center;margin:10px 0;}
+.rtsteps{font-size:.82rem;}
+.rtnote{color:#6a7090;display:flex;align-items:center;gap:8px;padding:4px 0;}
+.rtnote.err{color:#e57575;}
+.rtstep{padding:3px 2px;border-bottom:1px solid rgba(42,46,64,.5);color:#d4d8e8;}
+.rtstep.run{color:#6a7090;}
+.rtmark{display:inline-block;width:1.2em;font-weight:700;}
+.rtstep.ok .rtmark{color:#56d364;} .rtstep.fail .rtmark{color:#e57575;} .rtstep.skip .rtmark{color:#6a7090;}
+.rtms{color:#6a7090;font-size:.74rem;margin-left:4px;}
+.rtdetail{color:#6a7090;font-size:.76rem;margin:1px 0 2px 1.2em;white-space:pre-wrap;}
+.rtverdict{font-weight:600;padding:5px 8px;border-radius:6px;margin:6px 0;}
+.rtverdict.ok{color:#56d364;background:rgba(86,211,100,.1);} .rtverdict.fail{color:#e57575;background:rgba(229,117,117,.1);}
+.rthosts{margin-top:12px;}
+.rthhead{color:#6a7090;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px;}
+.rthrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid rgba(42,46,64,.5);color:#d4d8e8;font-size:.88rem;}
+.rthrow em{color:#6a7090;font-style:normal;font-size:.74rem;}
+.rthbtns{display:flex;gap:6px;flex:0 0 auto;}
+.modal .rthuse,.modal .rthforget,.modal .rthdef{padding:3px 10px;font-size:.76rem;border-radius:6px;}
+.modal .rthforget{color:#e57575;border-color:#3a2030;}
+.modal .rthdef{color:#e3b341;border-color:#3a3320;}
+.rthrow.isdef{background:rgba(227,179,65,.06);border-radius:6px;padding-left:6px;padding-right:6px;}
+.rthrow.isdef em{color:#e3b341;}
+.rtportin{width:74px;background:#0d1120;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:5px 8px;font-size:.8rem;}
 .imrow label{color:#8a90b0;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;}
 .impath{font-family:Menlo,monospace;font-size:.8rem;color:#cdd3e6;word-break:break-all;}
 .imrow input{background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 10px;font-family:Menlo,monospace;font-size:.82rem;}
@@ -180,9 +217,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
              placeholder="~/path/to/notebook.jl — Tab to complete, Enter to open"/>
       <ul id="comp" class="comp"></ul>
     </div>
-    <button id="openbtn">Open</button>
-    <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
-    <input type="file" id="uploadin" accept=".jl" style="display:none"/>
+    <div class="openctl">
+      <span class="ctllabel">Run on</span>
+      <select id="openrunon" class="runonsel" title="where this notebook's worker will run" onchange="_runonSelChanged('openrunon')"></select>
+      <input id="openrunonhost" class="runonsel" type="text" placeholder="ssh host" title="type any SSH host (or user@host)" spellcheck="false" autocomplete="off" style="display:none">
+      <button id="openbtn">Open</button>
+      <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
+      <button id="remotesbtn" title="Set up &amp; test remote hosts for running notebooks">🖧 Remotes</button>
+      <input type="file" id="uploadin" accept=".jl" style="display:none"/>
+    </div>
   </div>
   <div id="recent" class="recent"></div>
 </div>
@@ -207,10 +250,28 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div id="pdsyncrows" class="pdsyncrows"></div>
   <div class="row"><button class="primary" id="pdsyncdone" onclick="pdCloseSync()" disabled>Working…</button></div>
 </div></div>
+<div class="modal-bg" id="remotesbg"><div class="modal remotesmodal">
+  <div class="msg"><strong>Remote hosts</strong> <span style="color:#7a82a4;font-weight:400">— run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config).</span></div>
+  <div class="imrow"><label>Host</label><input id="rthost" spellcheck="false" autocomplete="off" placeholder="ssh_host (or user@host)"/></div>
+  <div class="imrow"><label>Transport</label>
+    <span class="rttr"><label><input type="radio" name="rttr" value="tunnel" checked onchange="_rtSyncPorts()"> SSH tunnel</label>
+    <label><input type="radio" name="rttr" value="direct" onchange="_rtSyncPorts()"> Direct · CURVE</label></span></div>
+  <div class="imrow" id="rtports" style="display:none"><label>Ports</label>
+    <span class="rttr"><input id="rtport" class="rtportin" type="number" min="1024" max="65535" placeholder="main" title="remote main/REP port — blank = auto (9100+)">
+    <input id="rtstream" class="rtportin" type="number" min="1024" max="65535" placeholder="stream" title="remote stream/PUB port — blank = main+1">
+    <span class="pddim">blank = auto</span></span></div>
+  <div class="rtactions"><button id="rttest" class="primary">🩺 Test &amp; prime</button>
+    <span id="rtdefnote" class="pddim"></span></div>
+  <div id="rtsteps" class="rtsteps"></div>
+  <div class="rthosts" id="rthosts"></div>
+  <div class="row"><button id="rtclose">Close</button></div>
+</div></div>
 <div class="modal-bg" id="importbg"><div class="modal importmodal">
   <div class="msg"><strong>Self-contained notebook</strong> <span style="color:#7a82a4;font-weight:400">— run it now (temporary), or import into a project you own</span></div>
   <div class="imrow"><label>Source</label><span id="imsrc" class="impath"></span></div>
   <div class="imrow"><label>Import to (new project directory)</label><input id="imtarget" spellcheck="false" autocomplete="off"/></div>
+  <div class="imrow"><label>Run on</label><select id="imrunon" class="runonsel" onchange="_runonSelChanged('imrunon')"></select>
+    <input id="imrunonhost" class="runonsel" type="text" placeholder="ssh host (or user@host)" spellcheck="false" autocomplete="off" style="display:none"></div>
   <pre id="imlog" class="imlog" style="display:none"></pre>
   <div class="imstatus" id="imstatus"></div>
   <div class="row"><button id="imcancel">Cancel</button><button id="imimport">📦 Import</button><button id="imrun" class="primary">▶ Run (temporary)</button></div>
@@ -236,10 +297,39 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   document.addEventListener('keydown',function(e){if(modalBg.classList.contains('show')&&e.key==='Escape')_close(false);});
   function showLoading(m){loadMsg.textContent=m||'Working…';loadEl.classList.add('show');}
   function hideLoading(){loadEl.classList.remove('show');}
-  function openPath(p){p=(p||'').trim();if(!p)return;
+  // ── Run-location selects (home) — populated from ~/.ssh/config + the global default ─────────
+  var _sshHosts=[], _sshGlobal='';
+  // Hosts you've tested here but that aren't in ~/.ssh/config are remembered locally so they stay
+  // pickable (the "set up a new remote" story). Value is the "host[,transport]" spec.
+  function _knownRemotes(){ try{ return JSON.parse(localStorage.getItem('slateRemotes')||'[]'); }catch(_){ return []; } }
+  function _rememberRemote(spec){ if(!spec||spec==='local') return; var a=_knownRemotes(); if(a.indexOf(spec)<0){ a.push(spec); try{localStorage.setItem('slateRemotes',JSON.stringify(a));}catch(_){}} }
+  function _forgetRemote(spec){ var a=_knownRemotes().filter(function(x){return x!==spec;}); try{localStorage.setItem('slateRemotes',JSON.stringify(a));}catch(_){}}
+  function _allRemoteHosts(){ var s=_sshHosts.slice(); _knownRemotes().forEach(function(spec){ var h=spec.split(',')[0]; if(s.indexOf(h)<0) s.push(h); }); return s; }
+  function _fillRunon(sel){ if(!sel) return; var cur=sel.value; sel.innerHTML='';
+    function opt(v,t){var o=document.createElement('option');o.value=v;o.textContent=t;sel.appendChild(o);}
+    opt('', _sshGlobal ? ('Default — '+_sshGlobal+' (global)') : 'Local (this machine)');
+    if(_sshGlobal) opt('local','Local (this machine)');
+    _allRemoteHosts().forEach(function(h){ if(h!==_sshGlobal) opt(h,'🖧 '+h); });
+    opt('__custom__','✎ Custom host…');
+    if(cur){ sel.value=cur; }   // keep a prior pick if still valid
+  }
+  // Reveal a free-text host field when "Custom host…" is chosen, so any SSH host can be typed.
+  function _runonHostId(selId){ return selId==='imrunon' ? 'imrunonhost' : 'openrunonhost'; }
+  function _runonSelChanged(selId){ var s=document.getElementById(selId),hi=document.getElementById(_runonHostId(selId));
+    if(hi){ hi.style.display=(s.value==='__custom__')?'':'none'; if(s.value==='__custom__') hi.focus(); } }
+  function _loadRunon(){ fetch('/api/ssh-hosts').then(function(r){return r.json();}).then(function(d){
+    _sshHosts=d.hosts||[]; _sshGlobal=d.global||'';
+    _fillRunon(document.getElementById('openrunon')); _fillRunon(document.getElementById('imrunon'));
+  }).catch(function(){}); }
+  _loadRunon();
+  function _runonOf(id){ var s=document.getElementById(id); if(!s) return '';
+    if(s.value==='__custom__'){ var hi=document.getElementById(_runonHostId(id)); return hi?hi.value.trim():''; }
+    return s.value||''; }
+  function openPath(p, runon){p=(p||'').trim();if(!p)return;
+    if(runon===undefined) runon=_runonOf('openrunon');
     try{localStorage.setItem('slateLastDir', window.PLATFORM.dirOf(p));}catch(e){}   // remember the directory
-    showLoading('Opening “'+p+'” — starting the worker…');
-    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
+    showLoading('Opening “'+p+'” — starting the worker'+(runon&&runon!=='local'?' on '+runon:'')+'…');
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
       .then(function(d){pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
   // ── Import a self-contained .jl (one carrying a Slate.bundle footer) ─────────
@@ -266,7 +356,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // reconstructs + runs its env in the background, showing the embedded preview meanwhile.
   function startImport(){
     _imDone=false;_imBusy(true);imStatus.className='imstatus';imStatus.textContent='Importing…';
-    var url='/api/import-standalone?path='+encodeURIComponent(_imPath)+'&target='+encodeURIComponent(imTarget.value.trim());
+    var url='/api/import-standalone?path='+encodeURIComponent(_imPath)+'&target='+encodeURIComponent(imTarget.value.trim())+'&runon='+encodeURIComponent(_runonOf('imrunon'));
     var es=new EventSource(url);_imES=es;
     es.addEventListener('status',function(e){imStatus.className='imstatus';imStatus.textContent=e.data;});
     es.addEventListener('log',function(e){_imLine(e.data);});
@@ -278,12 +368,75 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       imStatus.className='imstatus err';imStatus.textContent=e.data;_imBusy(false);imCancel.textContent='Close';});
     es.onerror=function(){if(_imDone)return;          // ignore the stream-close after done/failed
       imStatus.className='imstatus err';imStatus.textContent='Connection lost — is the server running?';_imBusy(false);};}
-  imRun.onclick=function(){pushRecent(_imPath);closeImport();openPath(_imPath);};   // open in place → hydrates
+  imRun.onclick=function(){pushRecent(_imPath);var ro=_runonOf('imrunon');closeImport();openPath(_imPath,ro);};   // open in place → hydrates
   imImport.onclick=startImport;
   imCancel.onclick=closeImport;
   imTarget.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();if(!imImport.disabled)startImport();}});
   importBg.addEventListener('mousedown',function(e){if(e.target===importBg)closeImport();});
   document.addEventListener('keydown',function(e){if(e.key==='Escape'&&importBg.classList.contains('show'))closeImport();});
+  // ── Remotes manager (set up + test a remote host, set the default) ─────────────
+  var remotesBg=document.getElementById('remotesbg'),rtHost=document.getElementById('rthost'),
+      rtSteps=document.getElementById('rtsteps'),rtTestBtn=document.getElementById('rttest'),
+      rtHostsEl=document.getElementById('rthosts'),_rtES=null,_rtLastOK='';
+  function _rtTransport(){var r=document.querySelector('input[name="rttr"]:checked');return r?r.value:'tunnel';}
+  function _rtSyncPorts(){document.getElementById('rtports').style.display=(_rtTransport()==='direct')?'flex':'none';}
+  // "host[,transport[,port,stream]]" — ports only for :direct, blank = auto.
+  function _rtSpec(h){var t=_rtTransport();if(t!=='direct')return h;
+    var p=(document.getElementById('rtport').value||'').trim(),s=(document.getElementById('rtstream').value||'').trim();
+    return p?(h+',direct,'+p+(s?','+s:'')):(h+',direct');}
+  function rtRenderHosts(){
+    var all=_allRemoteHosts();
+    if(!all.length){rtHostsEl.innerHTML='<div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div>';return;}
+    rtHostsEl.innerHTML='<div class="rthhead">Known remotes</div>'+all.map(function(h){
+      var isDef=(h===_sshGlobal), isCustom=(_sshHosts.indexOf(h)<0);
+      return '<div class="rthrow'+(isDef?' isdef':'')+'"><span>'+(isDef?'★':'🖧')+' '+esc(h)+
+        (isDef?' <em>(default)</em>':'')+(isCustom?' <em>(custom)</em>':'')+'</span>'+
+        '<span class="rthbtns"><button data-h="'+esc(h)+'" class="rthuse">Use ⤴</button>'+
+        (isDef?'<button data-h="" class="rthdef" title="stop using this as the default → new notebooks run local">★ Unset</button>'
+              :'<button data-h="'+esc(h)+'" class="rthdef" title="make this the default for new notebooks">★ Default</button>')+
+        (isCustom?'<button data-h="'+esc(h)+'" class="rthforget" title="forget this custom host">✕</button>':'')+'</span></div>';
+    }).join('');
+    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthuse'),function(b){b.onclick=function(){rtHost.value=b.dataset.h;};});
+    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthdef'),function(b){b.onclick=function(){rtSetDefaultHost(b.dataset.h);};});
+    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthforget'),function(b){b.onclick=function(){
+      _knownRemotes().filter(function(s){return s.split(',')[0]===b.dataset.h;}).forEach(_forgetRemote);
+      _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();};});
+  }
+  function rtSetDefaultHost(host){
+    fetch('/api/run-on-default',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({host:host})})
+      .then(function(r){return r.json();}).then(function(d){_sshGlobal=(d&&d.global)||'';
+        _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();}).catch(function(){});}
+  function openRemotes(){_rtLastOK='';rtSteps.innerHTML='';
+    rtHost.value='';var pp=document.getElementById('rtport'),ps=document.getElementById('rtstream');if(pp)pp.value='';if(ps)ps.value='';
+    _rtSyncPorts();rtRenderHosts();remotesBg.classList.add('show');rtHost.focus();}
+  function closeRemotes(){if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}remotesBg.classList.remove('show');}
+  function rtTest(){
+    var host=rtHost.value.trim(); if(!host){rtSteps.innerHTML='<div class="pddim">Enter a host to test.</div>';return;}
+    var tr=_rtTransport(); if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}
+    _rtLastOK='';
+    rtSteps.innerHTML='<div class="rtnote"><span class="hydspin"></span> Testing '+esc(host)+' ('+tr+')… a first-time host provisions Julia deps and can take a few minutes.</div><div id="rtstepl"></div>';
+    var list=document.getElementById('rtstepl'),rows={};
+    var es=new EventSource('/api/preflight-stream?host='+encodeURIComponent(host)+'&transport='+encodeURIComponent(tr));_rtES=es;
+    es.addEventListener('step',function(e){var s;try{s=JSON.parse(e.data);}catch(_){return;}
+      var el=rows[s.name]; if(!el){el=document.createElement('div');rows[s.name]=el;list.appendChild(el);}
+      var run=s.status==='run',m=run?'<span class="hydspin"></span>':s.status==='ok'?'✓':s.status==='skip'?'–':'✗';
+      el.className='rtstep '+(run?'run':s.status);
+      el.innerHTML='<span class="rtmark">'+m+'</span> <b>'+esc(s.name)+'</b> <span class="rtms">'+(run?'…':s.ms+'ms')+'</span>'+(s.detail?'<div class="rtdetail">'+esc(s.detail)+'</div>':'');});
+    es.addEventListener('done',function(e){var d={};try{d=JSON.parse(e.data);}catch(_){}es.close();_rtES=null;
+      var n=rtSteps.querySelector('.rtnote'); if(n)n.remove();
+      var v=document.createElement('div');v.className='rtverdict '+(d.ok?'ok':'fail');
+      v.textContent=d.ok?'✅ All checks passed — host is primed and ready.':'❌ Some checks failed — see above.';
+      list.parentNode.insertBefore(v,list);
+      if(d.ok){_rtLastOK=_rtSpec(host);_rememberRemote(_rtLastOK);
+        _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();}});
+    es.addEventListener('failed',function(e){es.close();_rtES=null;list.insertAdjacentHTML('beforeend','<div class="rtnote err">'+esc(e.data)+'</div>');});
+  }
+  document.getElementById('remotesbtn').onclick=openRemotes;
+  document.getElementById('rtclose').onclick=closeRemotes;
+  rtTestBtn.onclick=rtTest;
+  rtHost.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();rtTest();}});
+  remotesBg.addEventListener('mousedown',function(e){if(e.target===remotesBg)closeRemotes();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&remotesBg.classList.contains('show'))closeRemotes();});
   function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
     if(moreTrunc)html+='<li class="more">… more entries — keep typing to filter</li>';
     comp.innerHTML=html;comp.style.display=(items.length||moreTrunc)?'block':'none';}
@@ -400,6 +553,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       box.innerHTML = nbs.length ? '<h2 class="sect">Running</h2>'+nbs.map(function(n){
         return '<div class="nb'+(n.errors?' has-err':'')+'"><a class="nbmain" href="/n/'+encodeURIComponent(n.id)+'">'+
           '<span class="nbhead"><span class="t">'+esc(n.title)+'</span>'+
+          (n.runLocation?'<span class="wloc" title="worker runs on '+esc(n.runLocation)+'">🖧 '+esc(n.runLocation)+'</span>':'<span class="wloc local" title="worker runs on this machine">💻 local</span>')+
           (n.port?'<span class="wport" title="gate worker port">● :'+n.port+'</span>':'')+'</span>'+
           '<span class="p">'+esc(n.path)+'</span>'+
           '<span class="meta">'+nbBadges(n)+'</span>'+nbFoot(n)+'</a>'+

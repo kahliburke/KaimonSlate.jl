@@ -123,6 +123,7 @@ function _sse_import(stream::HTTP.Stream, h)
     q = HTTP.queryparams(HTTP.URI(stream.message.target))
     path = expanduser(strip(get(q, "path", "")))
     target = let t = strip(get(q, "target", "")); isempty(t) ? "" : expanduser(t); end
+    runon = strip(get(q, "runon", ""))              # run-location chosen in the import dialog ("" = local/global)
     try
         (isfile(path) && _has_bundle_footer(path)) ||
             return emit("failed", "Not a self-contained notebook (no Slate.bundle footer):\n$path")
@@ -139,8 +140,37 @@ function _sse_import(stream::HTTP.Stream, h)
         r === :failed && return emit("failed",
             "Package instantiation failed.\nThe project is at $tdir — open it and retry there.")
         emit("status", "Opening notebook…")
-        id = open_notebook!(h, openpath)
+        id = open_notebook!(h, openpath; runon = String(runon))
         emit("done", JSON.json(Dict("id" => id, "url" => "/n/$id", "target" => tdir)))
+    catch e
+        emit("failed", sprint(showerror, e))
+    end
+    return nothing
+end
+
+# SSE handler for `GET /api/preflight-stream?host=&transport=` — the browser "Test connection" flow.
+# Runs the same reported dry-run as the `check_remote` gate tool, but STREAMS each step as it starts
+# ("run") and completes ("ok"/"fail"/"skip") so the checklist fills in live (a cold provision is
+# minutes). Browser-triggerable, no MCP tool required.
+function _sse_preflight(stream::HTTP.Stream, h)
+    HTTP.setheader(stream, "Content-Type" => "text/event-stream")
+    HTTP.setheader(stream, "Cache-Control" => "no-cache")
+    HTTP.startwrite(stream)
+    function emit(ev::AbstractString, data::AbstractString)
+        io = IOBuffer(); println(io, "event: ", ev)
+        for ln in split(data, '\n'); println(io, "data: ", ln); end
+        println(io)
+        try; write(stream, String(take!(io))); return true; catch; return false; end
+    end
+    q = HTTP.queryparams(HTTP.URI(stream.message.target))
+    host = strip(get(q, "host", ""))
+    tr = Symbol(strip(get(q, "transport", "tunnel"))); tr in (:tunnel, :direct) || (tr = :tunnel)
+    isempty(host) && (emit("failed", "no host given"); return nothing)
+    try
+        r = ReportEngine.preflight_remote(host; transport = tr, on_step = step ->
+            emit("step", JSON.json(Dict("name" => step.name, "status" => step.status,
+                                        "detail" => step.detail, "ms" => step.ms))))
+        emit("done", JSON.json(Dict("ok" => r["ok"], "host" => r["host"], "transport" => r["transport"])))
     catch e
         emit("failed", sprint(showerror, e))
     end

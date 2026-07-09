@@ -181,6 +181,20 @@ function openSettings() {
   const perm = document.getElementById('setperm');
   perm.value = agentPerm();
   perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
+  // Default run location (global) — where NEW notebooks run. Server-side (slate.json) via the global
+  // /api/run-on-default; the host list comes from ~/.ssh/config. gapi() (runloc.js) hits the raw route.
+  const rl = document.getElementById('setrunloc');
+  if (rl && window.gapi) {
+    gapi('GET', '/api/ssh-hosts').then(d => {
+      const hosts = (d && d.hosts) || [], cur = (d && d.global) || '';
+      rl.innerHTML = '<option value="">Local (this machine)</option>' +
+        hosts.map(h => `<option value="${h}">🖧 ${h}</option>`).join('');
+      if (cur && !hosts.includes(cur)) rl.innerHTML += `<option value="${cur}">🖧 ${cur}</option>`;
+      rl.value = cur;
+      rl.onchange = () => gapi('POST', '/api/run-on-default', { host: rl.value })
+        .then(() => { try { toast('Default run location → ' + (rl.value || 'local'), 2200); } catch (_) {} });
+    }).catch(() => {});
+  }
   document.getElementById('setbg').classList.add('show');
 }
 // Your GLOBAL agent-model default ('' = server default = sonnet).

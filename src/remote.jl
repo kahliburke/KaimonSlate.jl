@@ -93,10 +93,13 @@ struct RemoteTarget <: RunTarget
     ssh_host::String
     transport::Symbol            # :tunnel | :direct
     project::String              # remote parent-project path (provisioned + synced)
+    port::Int                    # pinned remote main/REP port (0 ⇒ auto via _next_ports)
+    stream_port::Int             # pinned remote stream/PUB port (0 ⇒ port+1)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
-             project::AbstractString = "~/.cache/kaimonslate/remote") =
-    RemoteTarget(String(ssh_host), transport, String(project))
+             project::AbstractString = "~/.cache/kaimonslate/remote",
+             port::Int = 0, stream_port::Int = 0) =
+    RemoteTarget(String(ssh_host), transport, String(project), port, stream_port)
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -191,7 +194,7 @@ _ssh_test(host, argv::Cmd) =
 # it survives. The script self-activates via `homedir()` (a `--project=~/…` wouldn't expand under ssh).
 # Returns ok::Bool; the remote script is removed after.
 function _ssh_julia!(host, code::AbstractString, what::AbstractString)
-    _ssh_ok(host, `mkdir -p $_REMOTE_ROOT`) || return false
+    _ssh_ok(host, `mkdir -p $_REMOTE_ROOT`) || return (false, "")
     tmp = tempname()
     write(tmp, code)
     remote = "$_REMOTE_ROOT/$(basename(tmp)).jl"
@@ -199,10 +202,30 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString)
         run(pipeline(`scp -q $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
     catch; false; end
     rm(tmp; force = true)
-    scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return false)
-    ok = first(_run_logged(_ssh(host, `julia --startup-file=no $remote`), what))
+    scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return (false, ""))
+    ok, out = _run_logged(_ssh(host, `julia --startup-file=no $remote`), what)
     try; run(pipeline(_ssh(host, `rm -f $remote`); stdout = devnull, stderr = devnull)); catch; end
-    return ok
+    return (ok, out)
+end
+
+# Parse ~/.ssh/config for `Host` aliases (skipping wildcard patterns) — the candidate hosts the
+# run-location picker offers. Best-effort: [] if the file is absent/unreadable.
+function ssh_config_hosts()
+    path = joinpath(homedir(), ".ssh", "config")
+    isfile(path) || return String[]
+    hosts = String[]
+    try
+        for line in eachline(path)
+            m = match(r"^\s*Host\s+(.+)$"i, line)
+            m === nothing && continue
+            for h in split(strip(m.captures[1]))
+                (occursin('*', h) || occursin('?', h)) && continue
+                String(h) in hosts || push!(hosts, String(h))
+            end
+        end
+    catch
+    end
+    return hosts
 end
 
 # Value-fetch over ssh (curve key, SSH_CONNECTION): keep stdout CLEAN (stderr separate) but log it on failure.
@@ -240,6 +263,10 @@ reruns (rsync only ships deltas; the env instantiate is skipped once `.ready` ex
 function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     host = t.ssh_host
     _rlog("provision START host=$host transport=$(t.transport) project=$(t.project) parent=$parent_project")
+    # Reachability precheck FIRST — a clear message beats a cryptic "rsync … failed" ten steps in when the
+    # host is a typo or your ssh config/key isn't set up.
+    _ssh_test(host, `true`) ||
+        error("Cannot reach '$host' over SSH — check the hostname and your ~/.ssh/config (key-based auth is required; try `ssh $host` in a terminal).")
     # 1. worker payload
     srcdir = @__DIR__
     tmp = mktempdir()
@@ -261,7 +288,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
         Pkg.add(["KaimonGate", "Revise"])
         Pkg.instantiate()
         """
-        _ssh_julia!(host, code, "build KaimonGate env on $host") ||
+        first(_ssh_julia!(host, code, "build KaimonGate env on $host")) ||
             error("provision: could not build the remote KaimonGate env on $host (is `julia` on its PATH?)")
         _ssh_ok(host, `touch $_REMOTE_KGATE_ENV/.ready`)
     else
@@ -385,30 +412,49 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     provision_remote!(t, parent_project)
     start_sync!(t, parent_project)
 
-    # Fixed remote ports for this worker (loopback-bound for :tunnel, 0.0.0.0 for :direct).
-    port, stream_port = _next_ports()
-    k.port = port; k.stream_port = stream_port
-    script = _remote_worker_script(t, port, stream_port, t.project, _hub_client_pubkey())
+    # Reconnect-first: if a LIVE worker for this same notebook already exists on the host (e.g. after an
+    # extension restart or a network blip), REATTACH to it — preserving its warm namespace + results and
+    # skipping a costly re-spawn/re-precompile — rather than spawning a new one (which would orphan the old).
+    reattach = nothing
+    try; reattach = _find_live_worker(host, k.label, k.parent); catch; end
+    if reattach !== nothing
+        port, stream_port = reattach.port, reattach.stream_port
+        k.port = port; k.stream_port = stream_port
+        _rlog("reconnect: reattaching to live worker-$port on $host (notebook=$(k.label)) — skipping spawn")
+    else
+        # Remote ports for this worker (loopback-bound for :tunnel, 0.0.0.0 for :direct). Pinned when the
+        # target names them (needed for :direct behind a firewall — you must know which ports to open);
+        # otherwise auto-assigned from _next_ports (9100+).
+        port, stream_port = t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) : _next_ports()
+        k.port = port; k.stream_port = stream_port
+        script = _remote_worker_script(t, port, stream_port, t.project, _hub_client_pubkey())
 
-    # Ship the worker script as a FILE (verified: `-e` + nested-ssh quoting mangles it) and launch it
-    # detached with `setsid` so it outlives the ssh exec. Paths are $HOME-relative (ssh login cwd).
-    remote_script = "$_REMOTE_WORKER/worker-$port.jl"
-    logf = "$_REMOTE_WORKER/worker-$port.log"
-    tmp = tempname()
-    write(tmp, script)
-    try
-        run(pipeline(`scp -q $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
-    finally
-        rm(tmp; force = true)
+        # Ship the worker script as a FILE (verified: `-e` + nested-ssh quoting mangles it) and launch it
+        # detached with `setsid` so it outlives the ssh exec. Paths are $HOME-relative (ssh login cwd).
+        remote_script = "$_REMOTE_WORKER/worker-$port.jl"
+        logf = "$_REMOTE_WORKER/worker-$port.log"
+        tmp = tempname()
+        write(tmp, script)
+        try
+            run(pipeline(`scp -q $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
+        finally
+            rm(tmp; force = true)
+        end
+        threads = effective_worker_threads(k.threads)
+        proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
+        launch = "cd \$HOME && setsid nohup julia --project=$proj --startup-file=no --threads=$threads $remote_script > $logf 2>&1 &"
+        _rlog("spawn: launching worker on $host  (port=$port stream=$stream_port threads=$threads)\n    remote log: $host:$logf")
+        # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
+        # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
+        _ssh_ok(host, `$launch`) ||
+            _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
+        # Record who/what this worker serves so it's self-describing (list/reconnect/reap all read this).
+        _write_worker_manifest!(host, port, [
+            "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
+            "transport" => string(t.transport), "port" => string(port), "stream_port" => string(stream_port),
+            "client_pubkey" => _hub_client_pubkey(), "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"),
+        ])
     end
-    threads = effective_worker_threads(k.threads)
-    proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
-    launch = "cd \$HOME && setsid nohup julia --project=$proj --startup-file=no --threads=$threads $remote_script > $logf 2>&1 &"
-    _rlog("spawn: launching worker on $host  (port=$port stream=$stream_port threads=$threads)\n    remote log: $host:$logf")
-    # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
-    # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
-    _ssh_ok(host, `$launch`) ||
-        _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
 
     # Resolve connect coordinates + CURVE server key.
     server_key = ""
@@ -483,9 +529,237 @@ function teardown_remote!(k)
         if k.port != 0
             _rlog("teardown: closing tunnel + sync, killing remote worker-$(k.port).jl on $(t.ssh_host)")
             try; _ssh_test(t.ssh_host, `pkill -f $("worker-" * string(k.port) * ".jl")`); catch; end
+            # Drop the manifest + script so a deliberately-closed worker doesn't linger in the registry
+            # list (keep the .log for post-mortem). Full removal is the explicit `reap_remote_worker`.
+            try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json")`); catch; end
         else
             _rlog("teardown: closing tunnel + sync on $(t.ssh_host) (no worker was spawned)")
         end
     end
     return nothing
+end
+
+# ── Preflight: test + prime a remote host ─────────────────────────────────────────
+# An explicit, reported dry-run of the ENTIRE remote path — so you can validate (and warm) a host
+# before pinning a notebook to it. Runs the REAL machinery (provision → spawn → tunnel/CURVE →
+# connect → round-trip eval) then tears it down, recording every step (timed, pass/fail, captured
+# detail) to remote.log and returning a structured checklist for the UI's "Test connection".
+struct PreflightStep
+    name::String
+    status::String    # "ok" | "fail" | "skip"
+    detail::String
+    ms::Int
+end
+_pfdict(s::PreflightStep) = Dict{String,Any}("name" => s.name, "status" => s.status, "detail" => s.detail, "ms" => s.ms)
+
+# Run one step: time it, catch throws as failures, log + collect, and (if given) stream it via `on_step`
+# the moment it completes — so a caller can report progress live instead of waiting for the whole run.
+# `f` is first so the `do`-block call form `_pfstep!(steps, name, on_step) do … end` binds it correctly.
+function _pfstep!(f, steps::Vector{PreflightStep}, name::AbstractString, on_step = nothing)
+    on_step === nothing || on_step(PreflightStep(String(name), "run", "", 0))   # announce "in progress"
+    t0 = time()
+    status = "fail"; detail = ""
+    try
+        (status, detail) = f()
+    catch e
+        status = "fail"; detail = sprint(showerror, e)
+    end
+    step = PreflightStep(String(name), String(status), String(detail), round(Int, (time() - t0) * 1000))
+    push!(steps, step)
+    _rlog("preflight [$(step.status)] $(step.name) ($(step.ms)ms)" * (isempty(step.detail) ? "" : " — " * first(step.detail, 300)))
+    on_step === nothing || on_step(step)
+    return step
+end
+
+function _pfresult(host, transport, steps::Vector{PreflightStep})
+    ok = all(s -> s.status != "fail", steps)
+    _rlog("preflight DONE $host → $(ok ? "ALL OK" : "FAILED")")
+    return Dict{String,Any}("host" => String(host), "transport" => String(transport),
+                            "ok" => ok, "steps" => [_pfdict(s) for s in steps])
+end
+
+"""
+    preflight_remote(host; transport=:tunnel, on_step=nothing) -> Dict
+
+Test + prime `host`: ssh reachability, Julia presence (+version), env provisioning, KaimonGate load,
+CURVE key (for `:direct`), then a real spawn → connect → round-trip eval → clean teardown. Returns
+`Dict("host","transport","ok",steps=>[{name,status,detail,ms}…])`. Idempotent and self-cleaning: it
+leaves the primed env behind (so the first real run is fast) but no worker or tunnel running.
+`on_step(::PreflightStep)`, if given, is called as each step STARTS (status "run") and COMPLETES — so
+the SSE endpoint can stream progress live instead of blocking for the whole (minutes-long) run.
+"""
+function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_step = nothing)
+    host = String(host)
+    t = RemoteTarget(host; transport = transport, project = "~/.cache/kaimonslate/remote/__preflight__")
+    steps = PreflightStep[]
+    _rlog("═══ PREFLIGHT: $host (transport=$transport) ═══")
+
+    s = _pfstep!(steps, "SSH reachable", on_step) do
+        _ssh_test(host, `true`) ? ("ok", "key-based ssh to '$host' works") :
+            ("fail", "cannot ssh to '$host' in BatchMode — check ~/.ssh/config Host + key auth (try `ssh $host` in a terminal)")
+    end
+    s.status == "ok" || return _pfresult(host, transport, steps)
+
+    s = _pfstep!(steps, "Julia present", on_step) do
+        okj, out = _ssh_capture(host, `julia --version`)
+        okj ? ("ok", strip(out)) :
+            ("fail", "`julia` not on PATH on '$host' — install juliaup (`curl -fsSL https://install.julialang.org | sh`) or add it to the login PATH")
+    end
+    s.status == "ok" || return _pfresult(host, transport, steps)
+
+    s = _pfstep!(steps, "Provision env", on_step) do
+        provision_remote!(t, "")   # detached: ships worker payload + builds/primes the KaimonGate env
+        ("ok", "worker payload + KaimonGate env ready under ~/.cache/kaimonslate")
+    end
+    s.status == "ok" || return _pfresult(host, transport, steps)
+
+    _pfstep!(steps, "KaimonGate loads", on_step) do
+        okk, out = _ssh_julia!(host, """
+        insert!(LOAD_PATH, 1, joinpath(homedir(), raw"$_REMOTE_KGATE_ENV"))
+        import KaimonGate
+        print("KaimonGate v", pkgversion(KaimonGate))
+        """, "probe KaimonGate on $host")
+        okk ? ("ok", strip(out)) : ("fail", "KaimonGate failed to load in the remote env (see remote.log)")
+    end
+
+    if transport === :direct
+        _pfstep!(steps, "CURVE server key", on_step) do
+            okc, out = _ssh_capture(host, `head -n1 $_REMOTE_KEY_PATH`)
+            (okc && !isempty(strip(out))) ? ("ok", "server pubkey present ($(first(strip(out), 12))…)") :
+                ("fail", "no CURVE server key at $_REMOTE_KEY_PATH — run a KaimonGate serve once on '$host' to generate it, or use transport=tunnel")
+        end
+    else
+        _pfstep!(steps, "CURVE server key", on_step) do
+            ("skip", "n/a for :tunnel — SSH provides the encryption")
+        end
+    end
+
+    # Capstone — a real spawn → connect (tunnel/CURVE) → round-trip eval → teardown. Proves the whole
+    # transport + connection + eval loop end-to-end, then leaves nothing running.
+    _pfstep!(steps, "Spawn + connect + eval", on_step) do
+        k = GateKernel("~/.cache/kaimonslate/remote/__preflight__";
+                       parent = "", threads = "", target = t, label = "preflight")
+        rep = parse_report("# preflight"; id = "__preflight__", title = "preflight")
+        try
+            out = eval_capture(k, rep,
+                "string(gethostname(), \" · \", Sys.KERNEL, \" · julia \", VERSION, \" · pid \", getpid())",
+                "preflight")
+            out.exception !== nothing ? ("fail", "remote eval errored: " * out.exception) :
+                ("ok", "round-trip OK → " * strip(replace(out.value_repr, "\"" => "")))
+        finally
+            try; shutdown!(k); catch; end   # closes tunnel, kills probe worker, stops sync
+        end
+    end
+
+    return _pfresult(host, transport, steps)
+end
+
+# ── Remote-worker registry: self-describing workers + lifecycle ───────────────────────────────────
+# Every spawned worker leaves a manifest on the host (`worker-<port>.json`) recording WHO spawned it and
+# for WHAT — so a worker can answer "am I still wanted?" and a human can see, list, reconnect to, or
+# reap workers without guessing. "Last computation" is read cheaply from the worker LOG's mtime (the
+# worker writes to it on every eval), so no worker-side bookkeeping is needed. Nothing is ever killed
+# automatically: `reap_remote_worker` is explicit, so a worker holding useful results is safe.
+
+# Write the manifest for a just-launched worker (flat JSON, built by hand → no JSON dep here; fed over
+# ssh stdin so the braces/quotes never touch argv). Best-effort.
+function _write_worker_manifest!(host, port::Int, fields)
+    esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => " ", "\r" => " ")
+    body = "{" * join(["\"$(esc(k))\":\"$(esc(v))\"" for (k, v) in fields], ",") * "}"
+    path = "$_REMOTE_WORKER/worker-$port.json"
+    try
+        run(pipeline(_ssh(host, `$("cat > " * path)`); stdin = IOBuffer(body), stdout = devnull, stderr = devnull))
+    catch e
+        _rlog("manifest: could not write $host:$path ($(sprint(showerror, e)))")
+    end
+    return nothing
+end
+
+# The probe (shipped as a file, run on the host) that enumerates workers: for each `worker-<port>.json`
+# it emits port, liveness (pgrep), the log's mtime (last activity) and size, and the raw manifest —
+# delimited with control chars and wrapped in sentinels so incidental stdout noise can't corrupt it.
+const _WORKERS_PROBE = raw"""
+    dir = joinpath(homedir(), "REMOTE_WORKER_DIR")
+    print("\x02")
+    if isdir(dir)
+        for f in sort(readdir(dir))
+            (startswith(f, "worker-") && endswith(f, ".json")) || continue
+            port = replace(replace(f, "worker-" => ""), ".json" => "")
+            body = try; replace(read(joinpath(dir, f), String), r"[\r\n]" => " "); catch; "{}"; end
+            logf = joinpath(dir, "worker-" * port * ".log")
+            lastact = isfile(logf) ? round(Int, mtime(logf)) : 0
+            logsz = isfile(logf) ? filesize(logf) : 0
+            alive = try; success(pipeline(`pgrep -f $("worker-" * port * ".jl")`; stdout = devnull, stderr = devnull)); catch; false; end
+            print(port, "\x1f", alive ? "1" : "0", "\x1f", lastact, "\x1f", logsz, "\x1f", body, "\x1e")
+        end
+    end
+    print("\x03")
+    """
+
+"""
+    list_remote_workers(host) -> Vector{Dict}
+
+Enumerate the workers Slate has spawned on `host`, each: `port`, `alive` (process running), `lastActivity`
+(unix mtime of its log = last computation), `logBytes`, and `manifest` (raw JSON string — the browser
+parses it for who/what/when). Reads the on-host manifests over one ssh call. `[]` if unreachable/none.
+"""
+function list_remote_workers(host)
+    code = replace(_WORKERS_PROBE, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
+    ok, out = _ssh_julia!(host, code, "list workers on $host")
+    ok || return Any[]
+    i = findfirst('\x02', out); j = findlast('\x03', out)
+    (i === nothing || j === nothing || j <= i) && return Any[]
+    payload = out[nextind(out, i):prevind(out, j)]
+    workers = Any[]
+    for rec in split(payload, '\x1e'; keepempty = false)
+        parts = split(rec, '\x1f')
+        length(parts) >= 5 || continue
+        port = tryparse(Int, strip(parts[1])); port === nothing && continue
+        push!(workers, Dict{String,Any}(
+            "port" => port,
+            "alive" => strip(parts[2]) == "1",
+            "lastActivity" => something(tryparse(Int, strip(parts[3])), 0),
+            "logBytes" => something(tryparse(Int, strip(parts[4])), 0),
+            "manifest" => String(strip(parts[5])),
+        ))
+    end
+    return workers
+end
+
+# Pull one value out of a flat manifest JSON string (no JSON dep — the manifest is a flat "k":"v" object
+# we wrote ourselves; a regex is enough and avoids a parser on this path).
+function _manifest_get(json::AbstractString, key::AbstractString)
+    m = match(Regex("\"" * key * "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\""), json)
+    m === nothing ? "" : replace(replace(m.captures[1], "\\\"" => "\""), "\\\\" => "\\")
+end
+
+# Find a LIVE worker on `host` already serving this exact notebook (same label + parent) spawned by THIS
+# hub — the reconnect target. Returns (port, stream_port) or nothing. Conservative: only a single,
+# unambiguous, alive, same-hub match reattaches; anything else spawns fresh.
+function _find_live_worker(host, label, parent)
+    matches = Tuple{Int,Int}[]
+    for w in list_remote_workers(host)
+        w["alive"] === true || continue
+        mf = w["manifest"]
+        (_manifest_get(mf, "notebook") == String(label) &&
+         _manifest_get(mf, "parent") == String(parent) &&
+         _manifest_get(mf, "hub") == gethostname()) || continue
+        sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
+        push!(matches, (w["port"], sp))
+    end
+    length(matches) == 1 || return nothing
+    return (port = matches[1][1], stream_port = matches[1][2])
+end
+
+"""
+    reap_remote_worker(host, port) -> Bool
+
+Explicitly kill the worker on `host:port` and remove its script/log/manifest. Manual only — Slate
+never auto-reaps (a worker may hold results worth keeping). Returns true if the kill+cleanup ran.
+"""
+function reap_remote_worker(host, port::Int)
+    _rlog("reap: killing worker-$port on $host (manual)")
+    try; _ssh_test(host, `pkill -f $("worker-" * string(port) * ".jl")`); catch; end
+    try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json")`); catch; end
+    return true
 end

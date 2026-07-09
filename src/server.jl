@@ -110,23 +110,31 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             @warn "slate: ignoring malformed remoteworker spec (want \"port,stream_port\")" spec = rw
         end
         # Remote-SPAWN, PER NOTEBOOK: PROVISION + run THIS notebook's worker on an SSH host, connecting
-        # over CURVE (:direct) or a supervised SSH tunnel (:ssh_tunnel). Set via `slate.run_on` →
-        # meta["runon"] = "ssh_host[,transport]" (transport = tunnel|direct, default tunnel). Each notebook
-        # picks its own destination independently. Machine-specific (ssh alias/tunnel) → runtime-only meta,
-        # never the `.jl` footer. `prepare!` provisions + spawns + connects, keeping the parent synced.
-        ro = strip(String(get(report.meta, "runon", "")))
+        # over CURVE (:direct) or a supervised SSH tunnel (default). The destination is resolved from three
+        # layers — a runtime SESSION override, the notebook's DURABLE footer override, then the machine
+        # GLOBAL default (see `_effective_runon`). Value = "ssh_host[,transport]". `prepare!` provisions +
+        # spawns + connects, keeping the parent synced.
+        ro = _effective_runon(report)
         if !isempty(ro)
-            parts = split(ro, ','; limit = 2)
+            # spec = "host[,transport[,port,stream]]" — transport tunnel|direct (default tunnel); the two
+            # optional ports pin the remote main/stream ports (mainly for :direct behind a firewall).
+            parts = split(ro, ',')
             rhost = String(strip(parts[1]))
-            transport = length(parts) == 2 ? Symbol(strip(parts[2])) : :tunnel
+            transport = length(parts) >= 2 && !isempty(strip(parts[2])) ? Symbol(strip(parts[2])) : :tunnel
+            pport  = length(parts) >= 3 ? something(tryparse(Int, strip(parts[3])), 0) : 0
+            psport = length(parts) >= 4 ? something(tryparse(Int, strip(parts[4])), 0) : 0
             proj = Base.current_project(dirname(abspath(path)))
             parent = proj === nothing ? "" : dirname(proj)
             report.meta["assetbase"] = parent
             # per-host remote project dir keyed by the local parent's basename (avoid cross-notebook clash)
             rproj = "~/.cache/kaimonslate/remote/" * (isempty(parent) ? "detached" : basename(parent))
-            target = ReportEngine.RemoteTarget(rhost; transport = transport, project = rproj)
+            target = ReportEngine.RemoteTarget(rhost; transport = transport, project = rproj,
+                                               port = pport, stream_port = psport)
             ReportEngine._rlog("_select_kernel → REMOTE kernel host=$rhost transport=$transport rproj=$rproj parent=$parent")
-            return ReportEngine.GateKernel(rproj; parent = parent, threads = threads, target = target)
+            # `label` = the notebook filename → the worker's manifest records WHICH notebook it serves
+            # (else the remote-workers list shows "?"). Also the gate-session display name, like local kernels.
+            return ReportEngine.GateKernel(rproj; parent = parent, threads = threads, target = target,
+                                           label = basename(abspath(path)))
         end
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
@@ -163,7 +171,8 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
     return InProcessKernel()
 end
 
-function load_notebook(path::AbstractString; id::AbstractString = "", threads::AbstractString = "")
+function load_notebook(path::AbstractString; id::AbstractString = "", threads::AbstractString = "",
+                       runon::AbstractString = "")
     src = read(path, String)
     base = splitext(basename(path))[1]
     rid = replace(base, r"[^A-Za-z0-9]" => "_")
@@ -172,6 +181,10 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # Per-notebook worker-thread override (from slate.open) → meta, where _select_kernel reads it (and
     # state_json round-trips it). The `.jl` footer carries it across restarts when present.
     isempty(threads) || (r.meta["threads"] = String(threads))
+    # Run-location chosen at open/create time (the new-notebook / import picker) → the DURABLE notebook
+    # override, so _select_kernel boots the worker on that host directly (no wasteful local-then-remote).
+    # Only overrides the FOOTER value when explicitly given; an empty runon leaves the file's own choice.
+    isempty(strip(String(runon))) || (r.meta["runon"] = String(strip(String(runon))))
     build_dependencies!(r)
     _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it
@@ -438,6 +451,47 @@ _emit_pending(nb::LiveNotebook, pending::Integer) = ReportEngine._emit_run_batch
 # from slate.json at init so the choice persists; the per-notebook Settings toggle still overrides.
 const PARALLEL_DEFAULT = Ref(true)
 _parallel_enabled(nb::LiveNotebook) = get(nb.report.meta, "parallel", PARALLEL_DEFAULT[]) === true
+
+# ── Run-location: three layers → one effective value ──────────────────────────────────────────────
+# Where a notebook's worker runs is resolved from (highest precedence first):
+#   1. SESSION override   — meta["runon_session"], runtime-only, never persisted (the toolbar "just for
+#                           now" pick). Wins for this browser session.
+#   2. NOTEBOOK override  — meta["runon"], DURABLE in the .jl Slate.config footer (author baked a host in).
+#   3. GLOBAL default     — RUNON_DEFAULT[], a per-machine default from slate.json ("where new notebooks
+#                           run"), configurable in Settings + the new-notebook/import dialogs.
+#   4. else               — "" ⇒ LOCAL.
+# The value is "host[,transport]" (transport = tunnel|direct, default tunnel). RUNON_DEFAULT is a
+# machine-specific ssh alias, so like PARALLEL_DEFAULT it's an in-memory global loaded from slate.json.
+const RUNON_DEFAULT = Ref("")
+# Persist hook: KaimonSlate installs a `spec -> nothing` that writes slate.json (NotebookServer has no
+# business knowing the config path). `set_runon_default!` sets the live ref and calls it.
+const _RUNON_PERSIST = Ref{Any}(nothing)
+function set_runon_default!(spec::AbstractString)
+    RUNON_DEFAULT[] = String(strip(String(spec)))
+    p = _RUNON_PERSIST[]
+    p === nothing || (try; p(RUNON_DEFAULT[]); catch e; @warn "slate: could not persist run-location default" exception = e; end)
+    return RUNON_DEFAULT[]
+end
+
+# A layer value of "local" (case-insensitive) is an EXPLICIT local pick — it forces local even when a
+# lower layer (e.g. the global default) names a host. An empty value = "no override at this layer".
+_norm_runon(s) = lowercase(strip(String(s))) == "local" ? "" : String(strip(String(s)))
+
+# The effective run-location for a report's meta (see the layer list above). "" ⇒ local.
+function _effective_runon(report)
+    s = strip(String(get(report.meta, "runon_session", "")))
+    isempty(s) || return _norm_runon(s)
+    n = strip(String(get(report.meta, "runon", "")))
+    isempty(n) || return _norm_runon(n)
+    return _norm_runon(strip(String(RUNON_DEFAULT[])))
+end
+# Which layer supplied the effective value — labels the toolbar's source badge.
+function _runon_source(report)
+    isempty(strip(String(get(report.meta, "runon_session", "")))) || return "session"
+    isempty(strip(String(get(report.meta, "runon", ""))))         || return "notebook"
+    isempty(strip(String(RUNON_DEFAULT[])))                        || return "global"
+    return "default"   # local
+end
 
 # Per-(notebook,run) snapshot of each batched cell's src_hash at launch — the version guard for a
 # streamed result (a cell edited mid-batch has its in-flight result discarded; see server_celldone).

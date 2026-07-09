@@ -1,0 +1,196 @@
+// ── Run-location picker (toolbar) ─────────────────────────────────────────────────────────────────
+// The "Running on: X" control. Three layers resolve server-side (session > notebook > global default);
+// this UI shows the EFFECTIVE value + which layer set it, and lets you switch (session-only), persist
+// (save in the .jl), clear, TEST + prime a host (preflight checklist), or manage/reap remote workers.
+// Per-notebook actions go through api() (NB_ID-scoped); the host-list/preflight/registry routes are
+// GLOBAL, so gapi() hits them raw (no NB_ID rewrite) — the same routes the home dialogs reuse.
+
+let _rlHosts = null;     // cached {hosts:[~/.ssh/config aliases], global:"default host"}
+let _rlSel = '';         // selected host in the open menu ('' = local, '__custom__' = typed)
+
+const gapi = async (method, path, body) => {
+  const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json' },
+                                body: body ? JSON.stringify(body) : undefined });
+  return r.json();
+};
+const _rlEsc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Reflect the effective run-location into the toolbar pill (called from updateChrome on every state).
+function renderRunLoc(state) {
+  const el = document.getElementById('runloc'); if (!el) return;
+  const loc = (state && state.runLocation) || '';
+  const src = (state && state.runLocationSource) || 'default';
+  const host = loc ? loc.split(',')[0] : '';
+  document.getElementById('runlocicon').textContent = host ? '🖧' : '💻';
+  document.getElementById('runloclabel').textContent = host || 'local';
+  el.classList.toggle('remote', !!host);
+  const srcTxt = src === 'session' ? 'session' : src === 'notebook' ? 'saved' : src === 'global' ? 'global' : '';
+  const se = document.getElementById('runlocsrc'); se.textContent = srcTxt; se.style.display = srcTxt ? '' : 'none';
+  el.title = host ? ('worker runs on ' + host + ' (' + (srcTxt || 'set') + ') — click to change')
+                  : 'worker runs locally — click to run it on another machine';
+}
+
+async function toggleRunLoc(ev) {
+  ev && ev.stopPropagation();
+  const bg = document.getElementById('runlocbg');
+  if (bg.classList.contains('show')) { closeRunLoc(); return; }
+  document.getElementById('rlresult').innerHTML = '';
+  await rlBuild();
+  bg.classList.add('show');
+}
+function closeRunLoc() {
+  if (_rlES) { try { _rlES.close(); } catch (_) {} _rlES = null; }
+  document.getElementById('runlocbg').classList.remove('show');
+}
+
+// Known remotes = ~/.ssh/config hosts ∪ the locally-remembered ones (shared with the home Remotes
+// manager via the same localStorage key), so a host you set up on the front page is pickable here too.
+function _rlKnownHosts() {
+  const hosts = ((_rlHosts && _rlHosts.hosts) || []).slice();
+  try { JSON.parse(localStorage.getItem('slateRemotes') || '[]').forEach(spec => {
+    const h = String(spec).split(',')[0]; if (h && !hosts.includes(h)) hosts.push(h); }); } catch (_) {}
+  return hosts;
+}
+async function rlBuild() {
+  if (!_rlHosts) { try { _rlHosts = await gapi('GET', '/api/ssh-hosts'); } catch (_) { _rlHosts = { hosts: [], global: '' }; } }
+  const cur = (nbState && nbState.runLocation) || '', p = cur.split(',');
+  const curHost = p[0] || '', curTr = p[1] || 'tunnel';
+  const srcMap = { session: 'session', notebook: 'saved in notebook', global: 'global default', default: 'local' };
+  document.getElementById('rlsourcebadge').textContent = srcMap[(nbState && nbState.runLocationSource) || 'default'] || '';
+  document.getElementById('rlcustom').value = curHost;
+  document.getElementById('rllocalbtn').classList.toggle('active', !curHost);
+  const trIn = document.querySelector('input[name="rltr"][value="' + (curTr === 'direct' ? 'direct' : 'tunnel') + '"]');
+  if (trIn) trIn.checked = true;
+  document.getElementById('rlport').value = p[2] || ''; document.getElementById('rlstream').value = p[3] || '';
+  _rlSyncTransport();
+  rlRenderKnown(curHost);
+}
+// The "known remotes" list (each with a Use button, ★ marking the global default) — mirrors the home
+// Remotes manager. Clicking Use fills the host field.
+function rlRenderKnown(curHost) {
+  const known = _rlKnownHosts(), el = document.getElementById('rlknown');
+  if (!known.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="rlknownhead">Known remotes</div>' + known.map(h => {
+    const isDef = h === ((_rlHosts && _rlHosts.global) || '');
+    return '<div class="rlrow' + (h === curHost ? ' on' : '') + '"><span>' + (isDef ? '★' : '🖧') + ' ' + _rlEsc(h) +
+      (isDef ? ' <em>(default)</em>' : '') + '</span><button class="rluse" onclick="rlUse(\'' + _rlEsc(h) + '\')">Use ⤴</button></div>';
+  }).join('');
+}
+function rlUse(h) {
+  document.getElementById('rlcustom').value = h;
+  document.getElementById('rllocalbtn').classList.remove('active');
+  _rlSyncTransport(); rlRenderKnown(h);
+}
+function rlPickLocal() {
+  document.getElementById('rlcustom').value = '';
+  document.getElementById('rllocalbtn').classList.add('active');
+  _rlSyncTransport(); rlRenderKnown('');
+}
+function rlCustomChanged() {
+  document.getElementById('rllocalbtn').classList.toggle('active', !document.getElementById('rlcustom').value.trim());
+  _rlSyncTransport(); rlRenderKnown(_rlSelectedHost());
+}
+function _rlSelectedHost() { return document.getElementById('rlcustom').value.trim(); }
+function _rlSyncTransport() {
+  const h = _rlSelectedHost();
+  document.getElementById('rltransport').style.display = h ? '' : 'none';
+  const tr = (document.querySelector('input[name="rltr"]:checked') || {}).value || 'tunnel';
+  const pr = document.getElementById('rlports');
+  if (pr) pr.style.display = (h && tr === 'direct') ? '' : 'none';   // ports only matter for :direct
+}
+// The "host[,transport[,port,stream]]" spec. tunnel is the default → omit it for a clean value. For
+// :direct, append pinned ports when given (needed behind a firewall); blank ports mean auto.
+function _rlSpec() {
+  const h = _rlSelectedHost(); if (!h) return 'local';   // explicit local (force local even if a global default is set)
+  const tr = (document.querySelector('input[name="rltr"]:checked') || {}).value || 'tunnel';
+  if (tr !== 'direct') return h;
+  const p = (document.getElementById('rlport').value || '').trim();
+  const s = (document.getElementById('rlstream').value || '').trim();
+  return p ? (h + ',direct,' + p + (s ? ',' + s : '')) : (h + ',direct');
+}
+
+async function rlApply(scope) {
+  const spec = scope === 'clear' ? '' : _rlSpec();
+  closeRunLoc();
+  const s = await api('POST', '/api/run-on', { host: spec, scope });
+  try { renderAll(s); } catch (_) {}
+  const where = spec ? ("'" + spec + "'") : 'local';
+  toast(scope === 'clear' ? 'Run-location cleared → follows global/local' :
+        scope === 'notebook' ? ('Saved — this notebook runs on ' + where) :
+        ('Switching worker to ' + where + '…'), 2600);
+}
+
+let _rlES = null;
+// Stream the preflight over SSE so each step fills in live (a cold host provisions for minutes).
+// Browser-triggerable directly — no MCP tool involved.
+function rlTest() {
+  const host = _rlSelectedHost();
+  const box = document.getElementById('rlresult');
+  if (!host) { box.innerHTML = '<div class="rlnote">Pick a host to test.</div>'; return; }
+  const tr = (document.querySelector('input[name="rltr"]:checked') || {}).value || 'tunnel';
+  if (_rlES) { try { _rlES.close(); } catch (_) {} _rlES = null; }
+  box.innerHTML = '<div class="rlnote" id="rlnote"><span class="hydspin"></span> Testing ' + _rlEsc(host) + ' (' + tr +
+    ')… a first-time host provisions Julia deps and can take a few minutes.</div><div id="rlsteps"></div>';
+  const steps = document.getElementById('rlsteps'), rows = {};
+  const es = new EventSource('/api/preflight-stream?host=' + encodeURIComponent(host) + '&transport=' + encodeURIComponent(tr));
+  _rlES = es;
+  es.addEventListener('step', e => {
+    let s; try { s = JSON.parse(e.data); } catch (_) { return; }
+    let el = rows[s.name];
+    if (!el) { el = document.createElement('div'); rows[s.name] = el; steps.appendChild(el); }
+    const running = s.status === 'run';
+    const m = running ? '<span class="hydspin"></span>' : s.status === 'ok' ? '✓' : s.status === 'skip' ? '–' : '✗';
+    el.className = 'rlstep ' + (running ? 'run' : s.status);
+    el.innerHTML = '<span class="rlmark">' + m + '</span> <b>' + _rlEsc(s.name) + '</b> <span class="rlms">' +
+      (running ? '…' : s.ms + 'ms') + '</span>' + (s.detail ? '<div class="rldetail">' + _rlEsc(s.detail) + '</div>' : '');
+  });
+  es.addEventListener('done', e => {
+    let d = {}; try { d = JSON.parse(e.data); } catch (_) {}
+    es.close(); _rlES = null;
+    const note = document.getElementById('rlnote'); if (note) note.remove();
+    const v = document.createElement('div'); v.className = 'rlverdict ' + (d.ok ? 'ok' : 'fail');
+    v.textContent = d.ok ? '✅ All checks passed — host is primed and ready.' : '❌ Some checks failed — see above.';
+    steps.parentNode.insertBefore(v, steps);
+  });
+  es.addEventListener('failed', e => { es.close(); _rlES = null;
+    steps.insertAdjacentHTML('beforeend', '<div class="rlnote err">' + _rlEsc(e.data) + '</div>'); });
+  es.onerror = () => { if (!_rlES) return; };   // normal close after done/failed already handled
+}
+
+async function rlManageWorkers(ev) {
+  ev && ev.preventDefault();
+  const host = _rlSelectedHost() || (_rlHosts && _rlHosts.global) || '';
+  const box = document.getElementById('rlresult');
+  if (!host) { box.innerHTML = '<div class="rlnote">Pick a host to list its workers.</div>'; return; }
+  box.innerHTML = '<div class="rlnote"><span class="hydspin"></span> Listing workers on ' + _rlEsc(host) + '…</div>';
+  let r; try { r = await gapi('GET', '/api/remote-workers?host=' + encodeURIComponent(host)); }
+  catch (_) { box.innerHTML = '<div class="rlnote err">Could not list workers.</div>'; return; }
+  const ws = r.workers || [];
+  if (!ws.length) { box.innerHTML = '<div class="rlnote">No Slate workers on ' + _rlEsc(host) + '.</div>'; return; }
+  const now = Date.now() / 1000;
+  const rows = ws.map(w => {
+    let mf = {}; try { mf = JSON.parse(w.manifest || '{}'); } catch (_) {}
+    const age = w.lastActivity ? (Math.round((now - w.lastActivity) / 60) + 'm ago') : 'never';
+    const abandoned = w.alive && w.lastActivity && (now - w.lastActivity > 3600);
+    return '<div class="rlworker"><div class="rlwinfo"><b>' + (w.alive ? '🟢' : '⚪') + ' :' + w.port + '</b> ' +
+      _rlEsc(mf.notebook || '?') + '<div class="rldetail">last activity: ' + age +
+      (abandoned ? ' · <span class="rlabandon">possibly abandoned</span>' : '') +
+      (mf.spawned ? ' · since ' + _rlEsc(mf.spawned) : '') + '</div></div>' +
+      '<button class="rlreap" onclick="rlReap(\'' + _rlEsc(host) + '\',' + w.port + ')" title="kill this worker + remove its files">Reap</button></div>';
+  }).join('');
+  box.innerHTML = '<div class="rlnote">Workers on ' + _rlEsc(host) + ' — reap only ones you\'re sure about (results are lost):</div>' + rows;
+}
+async function rlReap(host, port) {
+  if (!await confirmDark('Reap worker :' + port + ' on ' + host + '?\nThis kills it and removes its files — any un-fetched results are lost.', 'Reap', 'danger')) return;
+  await gapi('POST', '/api/reap-worker', { host, port });
+  rlManageWorkers();
+}
+
+// Backdrop click / Esc close the modal (mirrors the Settings modal).
+document.addEventListener('mousedown', e => { if (e.target && e.target.id === 'runlocbg') closeRunLoc(); });
+document.addEventListener('keydown', e => {
+  const bg = document.getElementById('runlocbg');
+  if (e.key === 'Escape' && bg && bg.classList.contains('show')) { e.stopPropagation(); closeRunLoc(); }
+}, true);
+window.renderRunLoc = renderRunLoc;

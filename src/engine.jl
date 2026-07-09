@@ -423,11 +423,15 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # carries its presentation style with it. `publishrepo`/`publishslug` remember WHERE this notebook
 # was last published (owner/name + slug), so the dialog pre-fills and a CI action can read the
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
-const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "agentmodel",
+const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "agentmodel", "runon",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
                       "publishrepo", "publishslug", "series", "docid")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            "agentmodel" => :string,
+                           # `runon` = this notebook's DURABLE run-location override ("host[,transport]"):
+                           # a machine-specific ssh alias the author chose to bake in (the *session* and
+                           # *global* run-location layers live in runtime meta / slate.json, never here).
+                           "runon" => :string,
                            "slidelevel" => :int, "slidetransition" => :string,
                            "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string,
                            "publishrepo" => :string, "publishslug" => :string, "series" => :string,
