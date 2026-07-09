@@ -925,10 +925,11 @@ body.modkey .cm-content { cursor: pointer; }
 .rlknown { margin-top:12px; }
 .rlknownhead { color:var(--dim); font-size:.7rem; text-transform:uppercase; letter-spacing:.05em; margin-bottom:2px; }
 .runlocmodal #rlknown .rlrow { display:flex; justify-content:space-between; align-items:center; gap:10px;
-  padding:6px 6px; border-bottom:1px solid color-mix(in srgb, var(--border) 45%, transparent); font-size:.86rem; color:var(--text); }
+  padding:6px 6px; border-bottom:1px solid color-mix(in srgb, var(--border) 45%, transparent); font-size:.86rem; color:var(--text);
+  cursor:pointer; border-radius:6px; transition:background .1s; }
+.runlocmodal #rlknown .rlrow:hover { background:color-mix(in srgb, var(--accent) 16%, transparent); }
 .runlocmodal #rlknown .rlrow.on { background:color-mix(in srgb, var(--accent) 10%, transparent); border-radius:6px; }
 .runlocmodal #rlknown .rlrow em { color:var(--gold); font-style:normal; font-size:.74rem; }
-.modal .rluse { padding:3px 10px; font-size:.76rem; border-radius:6px; flex:0 0 auto; }
 .rlcustom { width:100%; box-sizing:border-box; margin:4px 0 2px; padding:5px 8px; font-size:.82rem;
   background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; }
 .rltransport { display:flex; align-items:center; gap:12px; padding:6px 6px 2px; font-size:.78rem; color:var(--dim); flex-wrap:wrap; }

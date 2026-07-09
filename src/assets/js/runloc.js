@@ -66,15 +66,15 @@ async function rlBuild() {
   _rlSyncTransport();
   rlRenderKnown(curHost);
 }
-// The "known remotes" list (each with a Use button, ★ marking the global default) — mirrors the home
-// Remotes manager. Clicking Use fills the host field.
+// The "known remotes" list (★ marks the global default). The whole row is the click target — clicking
+// it selects that remote (fills the host field); the currently-selected one is marked `.on`.
 function rlRenderKnown(curHost) {
   const known = _rlKnownHosts(), el = document.getElementById('rlknown');
   if (!known.length) { el.innerHTML = ''; return; }
   el.innerHTML = '<div class="rlknownhead">Known remotes</div>' + known.map(h => {
     const isDef = h === ((_rlHosts && _rlHosts.global) || '');
-    return '<div class="rlrow' + (h === curHost ? ' on' : '') + '"><span>' + (isDef ? '★' : '🖧') + ' ' + _rlEsc(h) +
-      (isDef ? ' <em>(default)</em>' : '') + '</span><button class="rluse" onclick="rlUse(\'' + _rlEsc(h) + '\')">Use ⤴</button></div>';
+    return '<div class="rlrow' + (h === curHost ? ' on' : '') + '" role="button" title="use this remote" onclick="rlUse(\'' +
+      _rlEsc(h) + '\')"><span>' + (isDef ? '★' : '🖧') + ' ' + _rlEsc(h) + (isDef ? ' <em>(default)</em>' : '') + '</span></div>';
   }).join('');
 }
 function rlUse(h) {

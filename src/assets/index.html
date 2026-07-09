@@ -97,8 +97,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rthhead{color:#6a7090;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px;}
 .rthrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid rgba(42,46,64,.5);color:#d4d8e8;font-size:.88rem;}
 .rthrow em{color:#6a7090;font-style:normal;font-size:.74rem;}
+.rthname{cursor:pointer;flex:1 1 auto;padding:2px 4px;border-radius:6px;transition:background .1s;}
+.rthname:hover{background:rgba(88,110,240,.16);}
 .rthbtns{display:flex;gap:6px;flex:0 0 auto;}
-.modal .rthuse,.modal .rthforget,.modal .rthdef{padding:3px 10px;font-size:.76rem;border-radius:6px;}
+.modal .rthforget,.modal .rthdef{padding:3px 10px;font-size:.76rem;border-radius:6px;}
 .modal .rthforget{color:#e57575;border-color:#3a2030;}
 .modal .rthdef{color:#e3b341;border-color:#3a3320;}
 .rthrow.isdef{background:rgba(227,179,65,.06);border-radius:6px;padding-left:6px;padding-right:6px;}
@@ -389,14 +391,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     if(!all.length){rtHostsEl.innerHTML='<div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div>';return;}
     rtHostsEl.innerHTML='<div class="rthhead">Known remotes</div>'+all.map(function(h){
       var isDef=(h===_sshGlobal), isCustom=(_sshHosts.indexOf(h)<0);
-      return '<div class="rthrow'+(isDef?' isdef':'')+'"><span>'+(isDef?'★':'🖧')+' '+esc(h)+
+      return '<div class="rthrow'+(isDef?' isdef':'')+'"><span class="rthname" data-h="'+esc(h)+'" role="button" title="use this remote">'+(isDef?'★':'🖧')+' '+esc(h)+
         (isDef?' <em>(default)</em>':'')+(isCustom?' <em>(custom)</em>':'')+'</span>'+
-        '<span class="rthbtns"><button data-h="'+esc(h)+'" class="rthuse">Use ⤴</button>'+
+        '<span class="rthbtns">'+
         (isDef?'<button data-h="" class="rthdef" title="stop using this as the default → new notebooks run local">★ Unset</button>'
               :'<button data-h="'+esc(h)+'" class="rthdef" title="make this the default for new notebooks">★ Default</button>')+
         (isCustom?'<button data-h="'+esc(h)+'" class="rthforget" title="forget this custom host">✕</button>':'')+'</span></div>';
     }).join('');
-    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthuse'),function(b){b.onclick=function(){rtHost.value=b.dataset.h;};});
+    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthname'),function(b){b.onclick=function(){rtHost.value=b.dataset.h;};});
     Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthdef'),function(b){b.onclick=function(){rtSetDefaultHost(b.dataset.h);};});
     Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthforget'),function(b){b.onclick=function(){
       _knownRemotes().filter(function(s){return s.split(',')[0]===b.dataset.h;}).forEach(_forgetRemote);
