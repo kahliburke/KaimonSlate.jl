@@ -188,6 +188,26 @@ const NS = KaimonSlate.NotebookServer
             @test :reviewed in _flags(cid)
         end
 
+        @testset "`needs=` tags survive sanitization and wire a manual edge" begin
+            # The sanitizer folds punctuation to underscores — but a `key=value` tag's `=` and
+            # value-commas are GRAMMAR: `needs=a,b` mangled to `needs_a_b` silently severs every
+            # manual edge on the first tag round-trip (live regression).
+            @test Symbol("needs=up,db") in NS._parse_tag_symbols(["needs=up,db"])
+            @test Symbol("needs=up") in NS._parse_tag_symbols("needs=up cache")     # string form: whitespace-split
+            @test :cache in NS._parse_tag_symbols("needs=up cache")
+            @test Symbol("needs=a_b") in NS._parse_tag_symbols(["needs=a-b"])       # values still sanitized
+            @test isempty(NS._parse_tag_symbols(["needs="]))                        # empty value → dropped
+            # End-to-end: tag a downstream cell via the UI path; the edge lands in deps, the cell
+            # restales, and the tag survives the persist round-trip verbatim.
+            up = match(r"id=(\w+)", NS.agent_add_cell!(nb, "sideeffect = 1"))[1]
+            dn = match(r"id=(\w+)", NS.agent_add_cell!(nb, "observed = 2"))[1]
+            NS.set_cell_tags!(nb, dn, ["needs=$up"])
+            dncell = nb.report.cells[NS._index_of(nb.report.cells, dn)]
+            @test up in dncell.deps
+            @test dncell.state == KaimonSlate.ReportEngine.STALE
+            @test occursin("needs=$up", read(nb.path, String))
+        end
+
         @testset "scratch eval — diagnostics without a cell" begin
             n0 = length(nb.report.cells)
             @test occursin("7", NS.agent_scratch_eval!(nb, "3 + 4"))

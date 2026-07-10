@@ -85,6 +85,50 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "producer" in findcell(r, "consumer").deps
     end
 
+    @testset "manual edges (`needs=` header tag)" begin
+        # Tag grammar: comma list, multiple tokens union, empty segments dropped.
+        @test ReportEngine._manual_needs(Set([Symbol("needs=a,b"), Symbol("needs=c"), :cache])) |> sort ==
+              ["a", "b", "c"]
+        @test ReportEngine._manual_needs(Set([Symbol("needs="), :nocache])) == String[]
+
+        # No shared variable — dataflow alone sees NO edge; the tag asserts one, and the
+        # dependents index (staleness propagation) picks it up like any other dep.
+        r = parse_report("#%% code id=mktable\nsideeffect = 1\n" *
+                         "#%% code id=agg needs=mktable\nres = 2 + 2")
+        build_dependencies!(r)
+        @test "mktable" in findcell(r, "agg").deps
+        @test "agg" in dependents_of(r, ["mktable"])
+
+        # Only an EARLIER CODE cell is a legal target: forward refs, unknown ids, and markdown
+        # targets add no edge (and never error) — the UI flags them as inert.
+        r = parse_report("#%% code id=early needs=late,ghost\nx1 = 1\n" *
+                         "#%% md id=prose\n# words\n" *
+                         "#%% code id=late\nx2 = 2\n" *
+                         "#%% code id=mdneed needs=prose\nx3 = 3")
+        build_dependencies!(r)
+        @test isempty(findcell(r, "early").deps)
+        @test isempty(findcell(r, "mdneed").deps)
+
+        # A markdown HOLDER may need a code cell (prose narrating table state re-renders with it).
+        r = parse_report("#%% code id=a\naa = 1\n#%% md id=m needs=a\nplain prose")
+        build_dependencies!(r)
+        @test "a" in findcell(r, "m").deps
+
+        # `_memo_key` walks deps transitively — editing the manual upstream's source must
+        # invalidate the reader's durable memo (the whole point for CREATE TABLE → readers).
+        key_of(src_up) = begin
+            rr = parse_report("#%% code id=up\n$src_up\n#%% code id=down needs=up\nd = 1")
+            build_dependencies!(rr)
+            ReportEngine._memo_key(rr, findcell(rr, "down"))
+        end
+        k1, k2 = key_of("u = 1"), key_of("u = 2")
+        @test !isempty(k1) && !isempty(k2) && k1 != k2
+
+        # The tag survives serialization (it's ordinary free-form tag storage).
+        r = parse_report("#%% code id=up\nu = 1\n#%% code id=down needs=up\nd = 1")
+        @test occursin("needs=up", ReportEngine.serialize_report(r))
+    end
+
     @testset "_BIND_CACHE is a bounded LRU (no wholesale re-inference cliff)" begin
         empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
         # Fill past the cap with distinct cell ids; correctness survives the eviction sweep —

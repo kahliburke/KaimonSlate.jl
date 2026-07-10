@@ -148,6 +148,15 @@ function cellHeaderInner(c) {
       ? `<span class="dupwarn" onclick="window.dupInfo(event,'${c.id}')" title="defined in more than one cell — click for details">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
     (c.backrefs && c.backrefs.length
       ? `<span class="dupwarn" onclick="window.backrefInfo(event,'${c.id}')" title="used above its definition — click for details">⤵️ ${c.backrefs.map(_esc).join(', ')}</span>` : '') +
+    ((() => {   // `needs=` entries that resolve to no EARLIER CODE cell → the manual edge is inert
+      if (!c.needs || !c.needs.length) return '';
+      const cs = (window.__slateState || {}).cells || [];
+      const idx = id => cs.findIndex(x => x.id === id);
+      const me = idx(c.id);
+      const bad = c.needs.filter(n => { const j = idx(n); return j < 0 || j >= me || cs[j].kind !== 'code'; });
+      return bad.length
+        ? `<span class="dupwarn" title="needs= names no earlier code cell (deleted, moved below, or markdown) — this manual edge is inert">🔗⚠ ${bad.map(_esc).join(', ')}</span>` : '';
+    })()) +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +

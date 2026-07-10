@@ -574,11 +574,34 @@ end
 
 # ── Dependency graph (most-recent-prior-writer) ──────────────────────────────
 
+# Manual edges (`needs=id1,id2` header tag): user-asserted dependencies for effects no binding
+# carries — a cell that reads a DuckDB TABLE another cell CREATEs shares no variable with it, so
+# dataflow analysis sees no edge and staleness/scheduling/memo-keys all miss the coupling. The tag
+# names the upstream cell directly; `build_dependencies!` folds it into `deps`, where the ordinary
+# machinery takes over (restale propagation, parallel-batch ordering, and `_memo_key`'s transitive
+# source digest — an edit to the upstream invalidates the reader's durable memo). Tags are the
+# storage; the DAG view's link gesture is just an editor for them. Only an EARLIER CODE cell can
+# be named (document order IS topological order — a forward/unknown id adds no edge; the UI flags
+# it on the cell so a deleted upstream degrades loudly, not silently).
+function _manual_needs(flags::AbstractSet{Symbol})
+    out = String[]
+    for f in flags
+        s = String(f)
+        startswith(s, "needs=") || continue
+        for t in eachsplit(chopprefix(s, "needs="), ',')
+            isempty(t) || push!(out, String(t))
+        end
+    end
+    return out
+end
+_manual_needs(c::Cell) = _manual_needs(c.flags)
+
 """
     build_dependencies!(report) -> report
 
 Re-infer bindings and compute each code cell's upstream `deps` (ids). A cell
-depends on the most recent prior writer of each name it reads. An `:opaque` cell
+depends on the most recent prior writer of each name it reads, plus any earlier
+cells its `needs=` tag names (user-asserted effect edges). An `:opaque` cell
 depends on all prior code cells, and all later code cells depend on it (barrier).
 """
 function build_dependencies!(report::Report)
@@ -602,6 +625,7 @@ function build_dependencies!(report::Report)
     barrier::Union{String,Nothing} = nothing
     seen = String[]
     pending_reads = Dict{Symbol,String}() # name → FIRST cell to read it top-level with no prior writer
+    priorcode = Set{String}()             # ids of earlier CODE cells — the only legal `needs=` targets
     for c in report.cells
         if c.kind == MARKDOWN
             # md cells depend on the writers of their interpolation vars (+ barrier),
@@ -611,6 +635,9 @@ function build_dependencies!(report::Report)
             end
             for r in c.reads_now
                 haskey(writer, r) || get!(pending_reads, r, c.id)
+            end
+            for t in _manual_needs(c)
+                t in priorcode && push!(c.deps, t)
             end
             barrier === nothing || push!(c.deps, barrier)
             delete!(c.deps, c.id)
@@ -627,6 +654,9 @@ function build_dependencies!(report::Report)
         for r in c.reads_now
             haskey(writer, r) || get!(pending_reads, r, c.id)
         end
+        for t in _manual_needs(c)
+            t in priorcode && push!(c.deps, t)
+        end
         barrier === nothing || push!(c.deps, barrier)
         if :opaque in c.flags
             union!(c.deps, seen)          # depends on everything before it
@@ -642,6 +672,7 @@ function build_dependencies!(report::Report)
         # cell's deps and needlessly restale the whole downstream tail (a real code cell with a
         # bare side effect still `reads` its callees, so it stays in `seen` and keeps its order).
         (isempty(c.reads) && isempty(c.writes) && !(:opaque in c.flags)) || push!(seen, c.id)
+        push!(priorcode, c.id)
     end
     # Names defined by 2+ code cells — a shared-namespace collision (last writer wins), a silent
     # footgun (an edit to one looks like dead reactivity). Count DISTINCT cells per name (each

@@ -659,9 +659,20 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
         # (edit_cell! force=true). Otherwise eval_stale! only re-runs cells our
         # affected-cell detection already flagged — so a Revise'd src change that
         # we failed to map to this cell would return its cached (stale) result.
+        # Like the play button, the force cascades: the re-run may change this cell's
+        # outputs (or its side effects — the usual reason to force), so dependents
+        # (dataflow AND manual `needs=` edges) restale and force too — a memo restore
+        # against unchanged upstream sources would resurrect pre-re-run results.
         if !isempty(id)
             i = findfirst(c -> c.id == id, nb.report.cells)
-            i === nothing || (nb.report.cells[i].state = STALE)
+            if i !== nothing
+                frc = get!(Set{String}, _FORCE_RUN, nb.id)
+                for did in dependents_of(nb.report, Set([id]))   # closure includes `id` itself
+                    j = findfirst(c -> c.id == did, nb.report.cells)
+                    j === nothing || (nb.report.cells[j].state = STALE)
+                    push!(frc, String(did))
+                end
+            end
         end
         return nothing
     end
@@ -928,13 +939,26 @@ end
 
 # Parse a user tag spec into sanitized, header-safe tag Symbols. Accepts either a collection of
 # strings (the editor UI) or a single comma/space-separated string (the add/edit tools). Empties are
-# dropped; punctuation folds to underscores (mirrors id sanitization).
+# dropped; punctuation folds to underscores (mirrors id sanitization) — EXCEPT in `key=value` tags
+# (`needs=up,db`): their structural `=` and value-commas are grammar, not noise (folding them silently
+# severed every manual edge on the first tag round-trip), so sanitize the key and each value segment
+# individually. In the STRING form a `key=value` token binds tighter than the comma separator
+# (whitespace-split first), so `needs=a,b cache` is two tags.
 function _parse_tag_symbols(tags)
-    items = tags isa AbstractString ? split(tags, r"[,\s]+") : tags
+    items = tags isa AbstractString ? split(tags, r"\s+") : tags
     want = Set{Symbol}()
+    clean(s) = replace(s, r"[^A-Za-z0-9_]+" => "_")
     for t in items
         s = strip(String(t)); isempty(s) && continue
-        push!(want, Symbol(replace(s, r"[^A-Za-z0-9_]+" => "_")))
+        m = match(r"^([A-Za-z][A-Za-z0-9_]*)=(.*)$", s)
+        if m !== nothing
+            vals = [clean(v) for v in eachsplit(m.captures[2], ',') if !isempty(v)]
+            isempty(vals) || push!(want, Symbol(string(m.captures[1], "=", join(vals, ","))))
+        else
+            for p in eachsplit(s, ',')
+                isempty(p) || push!(want, Symbol(clean(p)))
+            end
+        end
     end
     return want
 end

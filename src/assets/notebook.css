@@ -780,6 +780,11 @@ body.modkey .cm-content { cursor: pointer; }
    recompute while you edit. The divider is mouse-resizable (--dagw, persisted). */
 .dagpane { position:fixed; z-index:60; background:var(--bg2); display:none; flex-direction:column; }
 .dagpane.open { display:flex; }
+/* Manual-edge link mode (🔗 header button, then click two cells; dag.js dagLinkToggle) */
+#daglinkbtn.on { color:#b39ddb; background:var(--bg3); box-shadow:inset 0 0 0 1px #7d6f9e; border-radius:5px; }
+#daglinkhint { position:absolute; top:40px; left:50%; transform:translateX(-50%); z-index:5;
+  background:var(--bg3); color:var(--text); border:1px dashed #7d6f9e; border-radius:6px;
+  padding:3px 10px; font-size:12px; pointer-events:none; white-space:nowrap; }
 .dagpane.dock-right { top:0; right:0; bottom:0; width:var(--dagw, 44vw);
   border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; }
 .dagpane.dock-bottom { left:0; right:0; bottom:0; height:var(--dagh, 42vh);

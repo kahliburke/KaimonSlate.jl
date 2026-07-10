@@ -301,8 +301,8 @@ const SLATE_API = SlateApiEntry[
         the published site's FRONT PAGE), `docindex` (marks where the document listing is injected).
         `needs=<id>,<id>` asserts MANUAL dependency edges on EARLIER code cells — for effects no
         variable carries (a cell reading a DB table another cell CREATEs): the engine treats them as
-        real edges (staleness, run ordering, memo keys). Draw/remove them in the DAG pane with
-        ⌥-click (two cells to link; a dashed edge to unlink). Any
+        real edges (staleness, run ordering, memo keys). Draw/remove them in the DAG pane: 🔗 arms
+        link mode, then click two cells to link (click a dashed edge to unlink). Any
         other token is a free-form tag that round-trips. Expensive cells (≥400 ms) are otherwise
         auto-cached to disk and RESTORED after a restart instead of recomputing."""),
 
@@ -464,7 +464,7 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
 ## Cell tags (🏷 in the cell header, or `#%%` header tokens, e.g. `#%% md id=abs abstract`)
     collapsed · hidecode · trace · nocache (skip durable caching) · cache (ALWAYS persist — a pipeline
 stage restores instead of recomputing) · needs=<id>,… (manual dependency edges on earlier code cells,
-for effects no variable carries, e.g. DB tables; ⌥-click two cells in the DAG pane) · plus free-form tags.
+for effects no variable carries, e.g. DB tables; 🔗 link mode in the DAG pane) · plus free-form tags.
     Presentation: slide (force a new slide) · notes (speaker notes — presenter view only).
     Document metadata (ROLES): title · abstract · bibliography. Expensive cells (≥400ms) auto-cache.
 

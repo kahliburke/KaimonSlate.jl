@@ -91,6 +91,7 @@ function _dagAgo(ts) {
 // pure-prose md stays out of the graph).
 function _dagModel(cells) {
   const byId = {}; cells.forEach(c => { byId[c.id] = c; });
+  const docIdx = {}; cells.forEach((c, i) => { docIdx[c.id] = i; });   // document order = topo order
   const touched = new Set();
   cells.forEach(c => (c.deps || []).forEach(d => { if (byId[d]) { touched.add(c.id); touched.add(d); } }));
   let nodes = cells.filter(c => c.kind === 'code' || touched.has(c.id));
@@ -138,6 +139,7 @@ function _dagModel(cells) {
   nodes.forEach(c => (byId[c.id].deps || []).forEach(d => {
     if (!inc.has(d)) return;
     links.push({ source: d, target: c.id,
+                 manual: (byId[c.id].needs || []).includes(d),                // user-asserted (`needs=` tag) → dashed
                  dim: setup.has(d) || opaque.has(d) || opaque.has(c.id) });   // dim: faint, ignored by layout
   }));
   if (!_dagIsoOn) {
@@ -147,7 +149,7 @@ function _dagModel(cells) {
     links.forEach(l => { t2.add(l.source); t2.add(l.target); });
     nodes = nodes.filter(c => t2.has(c.id));
   }
-  return { nodes, links, layer, slot, layers, byId, setup };
+  return { nodes, links, layer, slot, layers, byId, setup, docIdx };
 }
 
 // Block metrics — one source of truth for layout (dagre needs each node's box) and
@@ -289,13 +291,18 @@ function _dagLineageIdx(L, id) {
   });
   return idx;
 }
+// Bump the edge series' data version → every edge renderItem re-evaluates (hover states live
+// OUTSIDE the option, so a repaint must be forced).
+function _dagEdgeBump() {
+  if (!_dagChart || !_dagCtx) return;
+  _dagEdgeV++;
+  try { _dagChart.setOption({ series: [{ id: 'dag-edges', data: _dagCtx.L.links.map((_, i) => [i, _dagEdgeV]) }] }); } catch (_) {}
+}
 function _dagSetHover(id) {
   if (_dagHoverId === id) return;
   _dagHoverId = id;
   _dagHoverIdx = _dagCtx ? _dagLineageIdx(_dagCtx.L, id) : null;
-  if (!_dagChart || !_dagCtx) return;
-  _dagEdgeV++;                                       // bump forces the edge renderItems to re-evaluate
-  try { _dagChart.setOption({ series: [{ id: 'dag-edges', data: _dagCtx.L.links.map((_, i) => [i, _dagEdgeV]) }] }); } catch (_) {}
+  _dagEdgeBump();
 }
 const _dagCost = c => (c.stats && c.stats.total_ms) || c.duration || 0;
 
@@ -402,7 +409,7 @@ function _dagLayout(m, w, h, dir) {
     });
     const links = m.links.map(l => {
       const e = (!l.dim && g.hasEdge(l.source, l.target)) ? g.edge(l.source, l.target) : null;
-      return { s: l.source, t: l.target, dim: l.dim,
+      return { s: l.source, t: l.target, dim: l.dim, manual: l.manual,
                pts: (e && e.points && e.points.length > 1) ? e.points.map(p => [p.x, p.y + rowH]) : null };
     });
     const L = { nodes, links, gw: Math.max(gr.width || w, ax), gh: (gr.height || h) + rowH };
@@ -424,7 +431,7 @@ function _dagLayout(m, w, h, dir) {
   });
   return {
     nodes: m.nodes.map(c => ({ c, b: _dagBlock(c), x: pos[c.id][0], y: pos[c.id][1] })),
-    links: m.links.map(l => ({ s: l.source, t: l.target, dim: l.dim, pts: [pos[l.source], pos[l.target]] })),
+    links: m.links.map(l => ({ s: l.source, t: l.target, dim: l.dim, manual: l.manual, pts: [pos[l.source], pos[l.target]] })),
     gw: w, gh: h,
   };
 }
@@ -466,7 +473,7 @@ let _dagLayoutKey = '', _dagLayoutVal = null;
 function _dagLayoutCached(m, w, h, dir) {
   const key = 'v5|' + (_dagSetupOn ? 'S' : 's') + (_dagIsoOn ? 'I|' : 'i|') + dir + '|' + w + 'x' + h + '|' +
     m.nodes.map(c => { const b = _dagBlock(c); return c.id + ':' + (b.w | 0) + ':' + b.h; }).join(',') + '|' +
-    m.links.map(l => l.source + (l.dim ? '~' : '>') + l.target).join(',');   // dim-ness shapes the layout
+    m.links.map(l => l.source + (l.dim ? '~' : l.manual ? '≈' : '>') + l.target).join(',');   // dim-ness shapes the layout; manual-ness is styling but rides the cached links
   if (key !== _dagLayoutKey || !_dagLayoutVal) { _dagLayoutKey = key; _dagLayoutVal = _dagLayout(m, w, h, dir); }
   return _dagLayoutVal;
 }
@@ -586,11 +593,15 @@ function _dagOption() {
           const s = stOf(l.s), hot = !l.dim && s === 'running';
           const hv = _dagHoverIdx ? _dagHoverIdx.get(params.dataIndex) : null;
           const faded = _dagHoverIdx && !hv;
-          const col = s === 'errored' ? P.errored
+          // Link mode: hovering a MANUAL edge is a delete affordance — red, bold, ✕ badge at the middle.
+          const del = _dagLinkMode && l.manual && params.dataIndex === _dagLinkHoverEdge;
+          const col = del ? P.errored
+                    : s === 'errored' ? P.errored
                     : hv ? (hv.up ? _DAG_UP_HUE : _DAG_DOWN_HUE)   // amber upstream · teal downstream
                     : hot ? P.edgeHot : P.edge;
-          const lw = hv ? (hv.d === 1 ? 2.8 : 1.8) : l.dim ? 0.8 : hot ? 2.4 : 1.4;
-          const op = hv ? (hv.d === 1 ? 0.98 : Math.max(0.3, 0.62 - 0.12 * (hv.d - 2)))
+          const lw = del ? 3 : hv ? (hv.d === 1 ? 2.8 : 1.8) : l.dim ? 0.8 : hot ? 2.4 : 1.4;
+          const op = del ? 1
+                   : hv ? (hv.d === 1 ? 0.98 : Math.max(0.3, 0.62 - 0.12 * (hv.d - 2)))
                    : faded ? (l.dim ? 0.04 : 0.15) : l.dim ? 0.12 : hot ? 0.95 : 0.6;
           // Decimate waypoints (Douglas-Peucker): keep endpoints + genuine detours, drop
           // micro-wiggles — the spline relaxes into longer arcs but still dodges nodes.
@@ -599,6 +610,7 @@ function _dagOption() {
           let x1 = pts[n - 2][0], y1 = pts[n - 2][1];
           const x2 = pts[n - 1][0], y2 = pts[n - 1][1];
           const style = { fill: 'none', stroke: col, lineWidth: lw, opacity: op };
+          if (l.manual) style.lineDash = [6, 4];       // user-asserted (`needs=`) — an assertion, not derived dataflow
           const kids = [];
           if (!l.dim && n === 2) {
             // no detour → the canonical SYMMETRIC S: leave the source square along the flow
@@ -631,6 +643,13 @@ function _dagOption() {
           const ah = 7, aw = 3.4, bx = x2 - ux * ah, by = y2 - uy * ah;
           kids.push({ type: 'polygon', shape: { points: [[x2, y2], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
             style: { fill: col, opacity: Math.min(1, op + 0.1) } });
+          if (del) {   // ✕ badge at the edge's midpoint — "click deletes this edge"
+            const m = n === 2 ? [(pts[0][0] + x2) / 2, (pts[0][1] + y2) / 2] : pts[Math.floor(n / 2)];
+            kids.push({ type: 'circle', shape: { cx: m[0], cy: m[1], r: 8 },
+              style: { fill: P.bg, stroke: P.errored, lineWidth: 1.6, opacity: 1 } });
+            kids.push({ type: 'text', style: { x: m[0], y: m[1], text: '✕', fill: P.errored,
+              font: 'bold 11px sans-serif', textAlign: 'center', textVerticalAlign: 'middle', opacity: 1 } });
+          }
           return { type: 'group', children: kids };
         },
       },
@@ -739,16 +758,39 @@ function _dagRender() {
   if (!_dagChart._dagWired) {
     _dagChart._dagWired = true;
     _dagChart.on('click', p => {
-      if (!_dagCtx || p.seriesName !== 'nodes') return;
+      if (!_dagCtx) return;
+      if (p.seriesName === 'edges') {                        // link mode: click a dashed (manual) edge → remove it
+        const l = _dagCtx.L.links[p.dataIndex];
+        if (_dagLinkMode && l && l.manual) {
+          _dagLinkHoverEdge = -1;
+          _dagSetNeeds(l.t, (_dagCtx.m.byId[l.t].needs || []).filter(x => x !== l.s));
+        }
+        return;
+      }
+      if (p.seriesName !== 'nodes') return;
       const id = _dagCtx.L.nodes[p.dataIndex].c.id;
+      if (_dagLinkMode) { _dagLinkClick(id); return; }       // link mode: two clicks draw a manual edge
       window.selectCell && selectCell(id, false);
       const raw = p.event && p.event.event;
       if (raw && raw.shiftKey) { _dagJump(id); return; }     // ⇧-click → navigate the editor
       _dagCard(id, p.event ? p.event.offsetX : 0, p.event ? p.event.offsetY : 0);   // click → details card
     });
     _dagChart.getZr().on('click', e => { if (!e.target) _dagCardClose(); });        // empty canvas → dismiss
-    _dagChart.on('mouseover', p => { if (p.seriesName === 'nodes' && _dagCtx) _dagSetHover(_dagCtx.L.nodes[p.dataIndex].c.id); });
-    _dagChart.on('mouseout', p => { if (p.seriesName === 'nodes') _dagSetHover(null); });
+    _dagChart.on('mouseover', p => {
+      if (!_dagCtx) return;
+      if (p.seriesName === 'nodes') {
+        const id = _dagCtx.L.nodes[p.dataIndex].c.id;
+        _dagSetHover(id);
+        if (_dagLinkMode && _dagLinkSrc != null) _dagLinkPreview(id);   // rubber-band toward the hover
+      } else if (p.seriesName === 'edges' && _dagLinkMode) {
+        const l = _dagCtx.L.links[p.dataIndex];
+        if (l && l.manual) { _dagLinkHoverEdge = p.dataIndex; _dagEdgeBump(); }   // red ✕ = click deletes
+      }
+    });
+    _dagChart.on('mouseout', p => {
+      if (p.seriesName === 'nodes') { _dagSetHover(null); _dagLinkPreview(null); }
+      else if (p.seriesName === 'edges' && _dagLinkHoverEdge >= 0) { _dagLinkHoverEdge = -1; _dagEdgeBump(); }
+    });
     // Gentle wheel zoom, anchored on the cursor. ECharts' built-in wheel rate is fixed
     // (~1.4× per tick) and way too hot; exp(-ΔY·k) is mild per tick AND continuous for
     // trackpad pixel deltas. Both axes get the same factor → aspect stays locked.
@@ -896,6 +938,112 @@ function _dagRdp(pts, eps) {
   if (maxD <= eps) return [pts[0], pts[pts.length - 1]];
   return _dagRdp(pts.slice(0, maxI + 1), eps).slice(0, -1).concat(_dagRdp(pts.slice(maxI), eps));
 }
+
+// ── Manual edges: 🔗 link mode ──────────────────────────────────────────────────
+// The DAG is where a MISSING edge is visible (a table-creating cell and its readers sit
+// disconnected), so the fix lives here: arm link mode with the 🔗 button in the pane header,
+// then click one cell and click the other — the edge is asserted as a `needs=` tag on the
+// downstream cell (the ordinary tag machinery persists it; the engine folds it into deps).
+// Document order IS topological order, so any pair has exactly one legal direction — the
+// gesture auto-directs, it cannot be drawn backward. While armed, clicking a dashed (manual)
+// edge removes it. The mode STAYS armed for drawing several edges; Esc or 🔗 again exits.
+let _dagLinkMode = false, _dagLinkSrc = null, _dagLinkHoverEdge = -1;
+const _DAG_LINK_BASE = 'link mode — click two cells to connect (again to disconnect) · Esc exits';
+function _dagLinkHint(msg) {
+  let el = document.getElementById('daglinkhint');
+  if (!msg) { el && el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div'); el.id = 'daglinkhint';
+    const pane = document.getElementById('dagpane'); if (!pane) return;
+    pane.appendChild(el);
+  }
+  el.textContent = msg;
+}
+function dagLinkToggle() {
+  _dagLinkMode = !_dagLinkMode; _dagLinkSrc = null; _dagLinkHoverEdge = -1;
+  const b = document.getElementById('daglinkbtn'); b && b.classList.toggle('on', _dagLinkMode);
+  _dagLinkHint(_dagLinkMode ? _DAG_LINK_BASE : null);
+  _dagLinkPreview(null);
+  _dagEdgeBump();                                          // repaint edges (delete-hover styling on/off)
+  _dagLinkMode && _dagCardClose();
+}
+async function _dagSetNeeds(tgt, needs) {
+  const c = _dagCtx && _dagCtx.m.byId[tgt]; if (!c) return;
+  const tags = (c.tags || []).filter(t => !String(t).startsWith('needs='));
+  needs = [...new Set(needs)];
+  if (needs.length) tags.push('needs=' + needs.join(','));
+  renderAll(await api('POST', '/api/tags/' + tgt, { tags }));
+}
+// Rubber-band preview while a source is armed: a dashed arrow from the armed cell to the
+// hovered one, pointing the direction the edge WILL take (doc order decides — hover an earlier
+// cell and the arrow points at YOUR cell). Violet = will connect · red = illegal pair (the
+// earlier cell isn't code). An ALREADY-linked pair draws no phantom arrow — the EXISTING dashed
+// edge lights up red + ✕ instead (same delete affordance as hovering the edge itself), because
+// clicking will disconnect. NB `$action:'replace'` on every draw: after a graphic `remove`,
+// re-adding the same id with the default merge action is silently ignored by ECharts — that
+// exact quirk made the preview vanish for good after the first node-to-node move.
+function _dagLinkPreview(id) {
+  if (!_dagChart) return;
+  const drop = () => { try { _dagChart.setOption({ graphic: [{ id: 'daglinkpv', $action: 'remove' }] }); } catch (_) {} };
+  const unmark = () => { if (_dagLinkHoverEdge >= 0) { _dagLinkHoverEdge = -1; _dagEdgeBump(); } };
+  if (!id || id === _dagLinkSrc || _dagLinkSrc == null || !_dagCtx) { drop(); unmark(); return; }
+  const nd = x => _dagCtx.L.nodes.find(n => n.c.id === x);
+  const a = nd(_dagLinkSrc), b = nd(id); if (!a || !b) { drop(); unmark(); return; }
+  const di = _dagCtx.m.docIdx;
+  const [s0, t0] = (di[a.c.id] ?? 0) < (di[b.c.id] ?? 0) ? [a, b] : [b, a];
+  const sc = _dagCtx.m.byId[s0.c.id];
+  const legal = sc && sc.kind === 'code';
+  if (legal && (_dagCtx.m.byId[t0.c.id].needs || []).includes(s0.c.id)) {
+    drop();                                                // linked pair → highlight the REAL edge
+    const li = _dagCtx.L.links.findIndex(l => l.manual && l.s === s0.c.id && l.t === t0.c.id);
+    if (li >= 0 && li !== _dagLinkHoverEdge) { _dagLinkHoverEdge = li; _dagEdgeBump(); }
+    return;
+  }
+  unmark();
+  let p1, p2;
+  try {
+    p1 = _dagChart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [s0.x, s0.y]);
+    p2 = _dagChart.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [t0.x, t0.y]);
+  } catch (_) { drop(); return; }
+  if (!p1 || !p2) { drop(); return; }
+  const dx = p2[0] - p1[0], dy = p2[1] - p1[1], len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  const q1 = [p1[0] + ux * 26, p1[1] + uy * 26], q2 = [p2[0] - ux * 30, p2[1] - uy * 30];
+  const col = legal ? '#b39ddb' : _dagCtx.P.errored;
+  const ah = 10, aw = 5, bx = q2[0] - ux * ah, by = q2[1] - uy * ah;
+  try {
+    _dagChart.setOption({ graphic: [{ id: 'daglinkpv', type: 'group', $action: 'replace', silent: true, children: [
+      { type: 'line', shape: { x1: q1[0], y1: q1[1], x2: bx, y2: by },
+        style: { stroke: col, lineWidth: 2.6, lineDash: [7, 5], opacity: 0.95 } },
+      { type: 'polygon', shape: { points: [[q2[0], q2[1]], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
+        style: { fill: col, opacity: 0.95 } },
+    ] }] });
+  } catch (_) {}
+}
+function _dagLinkClick(id) {
+  if (_dagLinkSrc == null) {
+    _dagLinkSrc = id;
+    _dagLinkHint('linking ' + id + ' — click the other cell');
+    return;
+  }
+  const a = _dagLinkSrc; _dagLinkSrc = null; _dagLinkPreview(null);
+  if (a === id || !_dagCtx) { _dagLinkHint(_DAG_LINK_BASE); return; }   // same cell twice → reset
+  const di = _dagCtx.m.docIdx;
+  const [src, tgt] = (di[a] ?? 0) < (di[id] ?? 0) ? [a, id] : [id, a];
+  const sc = _dagCtx.m.byId[src];
+  if (!sc || sc.kind !== 'code') {                        // only a code cell computes anything to wait for
+    _dagLinkHint('only a code cell can be a dependency');
+    setTimeout(() => _dagLinkMode && _dagLinkHint(_DAG_LINK_BASE), 2500);
+    return;
+  }
+  _dagLinkHint(_DAG_LINK_BASE);                           // stay armed — draw the next edge
+  const cur = _dagCtx.m.byId[tgt].needs || [];
+  // Toggle: the same pair again REMOVES the manual edge (mirrors the preview's ✕).
+  _dagSetNeeds(tgt, cur.includes(src) ? cur.filter(x => x !== src) : [...cur, src]);
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _dagLinkMode) dagLinkToggle();
+});
 
 function _dagQueue() {
   if (!_dagOpen() || _dagRaf) return;

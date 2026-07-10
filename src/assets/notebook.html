@@ -206,6 +206,7 @@
       <label><input type="checkbox" id="dagoptsetup" onchange="dagSetupSet(this.checked)"> show setup cells <span class="dhdim">(using/import + their edges)</span></label>
       <label><input type="checkbox" id="dagoptiso" onchange="dagIsoSet(this.checked)"> show isolated cells <span class="dhdim">(no dataflow edges)</span></label>
     </div></span>
+    <button class="hbtn" id="daglinkbtn" onclick="dagLinkToggle()" title="link mode — click two cells to add a manual dependency edge (needs= tag, for effects no variable carries); click a dashed edge to remove it">🔗</button>
     <button class="hbtn" id="dagdock" onclick="dagDock()" title="dock side">◨</button>
     <button class="hbtn" id="dagheat" onclick="dagHeat()" title="cost heat map — color cells by accumulated compute time (hotter = more expensive)">🔥</button>
     <button class="hbtn" id="dagdir" onclick="dagDir()" title="layout direction — auto follows the pane shape (tall → top-down)">⇅ auto</button>
@@ -216,6 +217,7 @@
       <div class="dhrow"><kbd>scroll</kbd> zoom &nbsp;·&nbsp; <kbd>drag</kbd> pan</div>
       <div class="dhrow"><kbd>hover</kbd> lineage — <span style="color:#e2a63d">amber upstream</span> · <span style="color:#3fc6c0">teal downstream</span> (bold = direct)</div>
       <div class="dhrow"><kbd>🔥</kbd> cost heat — fill = Σ compute · ×evals · ↓pulls</div>
+      <div class="dhrow"><kbd>🔗</kbd> link mode — click two cells: manual edge (dashed) for effects no variable carries</div>
       <div class="dhrow"><kbd>💾</kbd> dashed border = cached pipeline stage</div>
       <div class="dhsec">corner wedge — output type</div>
       <div class="dhrow dhsw"><i style="background:#00c9a7"></i>table <i style="background:#d066e2"></i>chart <i style="background:#ff8f3d"></i>file <i style="background:#00b4ff"></i>control <i style="background:#9ba3ad"></i>setup</div>

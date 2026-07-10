@@ -578,6 +578,11 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         br = sort!(String[name for (name, rw) in backref if first(rw) == c.id])
         isempty(br) || (d["backrefs"] = br)
     end
+    # User-asserted effect edges (`needs=` tag), shipped parsed: the DAG styles these manual
+    # edges dashed, and the client flags entries that resolve to no EARLIER CODE cell (dangling
+    # after a delete/move) — the engine ignores those, and silence would mask the lost edge.
+    nd = ReportEngine._manual_needs(c.flags)
+    isempty(nd) || (d["needs"] = nd)
     # Truncated outputs → append an access bar (open ↗ / editor / download) to the rendered output.
     if c.kind == CODE && c.output !== nothing && !isempty(c.output.overflow)
         bar = _overflow_bar(nbid, c.output.overflow)
