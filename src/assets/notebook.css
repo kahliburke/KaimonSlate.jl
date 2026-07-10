@@ -774,6 +774,7 @@ body.modkey .cm-content { cursor: pointer; }
 .dagpane.dock-bottom { left:0; right:0; bottom:0; height:var(--dagh, 42vh);
   border-top:1px solid var(--bg3); box-shadow:0 -8px 24px #0007; }
 .dagpane .aphead { flex:0 0 auto; }
+.dagpane .aphead .hbtn { font-size:.95rem; padding:4px 11px; }   /* match the rest of the UI's control weight */
 .daggrip { position:absolute; z-index:2; }
 .dagpane.dock-right .daggrip { left:-5px; top:0; bottom:0; width:10px; cursor:ew-resize; }
 .dagpane.dock-bottom .daggrip { top:-5px; left:0; right:0; height:10px; cursor:ns-resize; }

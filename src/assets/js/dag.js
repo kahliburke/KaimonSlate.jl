@@ -147,6 +147,23 @@ function _dagModel(cells) {
 
 // Block metrics — one source of truth for layout (dagre needs each node's box) and
 // paint (drawn size must match or blocks overlap).
+// ECharts snapshots for chart-kind nodes/cards: the interactive instances already live in
+// the notebook DOM (window.charts, cell id → [instances]), so a thumbnail is one cheap
+// canvas read — cached per cell, invalidated when the cell re-runs or live-patches.
+const _dagEcThumbs = {};
+function _dagEcThumb(id, big) {
+  const e = _dagEcThumbs[id];
+  if (e) return big ? e.big : e.small;
+  const inst = window.charts && window.charts[id] && window.charts[id][0];
+  if (!inst || !inst.getDataURL) return null;
+  try {
+    const cap = { small: inst.getDataURL({ pixelRatio: 0.5, backgroundColor: 'transparent' }),
+                  big: inst.getDataURL({ pixelRatio: 1.25, backgroundColor: 'transparent' }) };
+    _dagEcThumbs[id] = cap;
+    return big ? cap.big : cap.small;
+  } catch (_) { return null; }
+}
+
 const _DAG_THUMB_H = 58;   // design height of the image-preview band inside a node
 function _dagBlock(c) {
   // A defines row that just repeats the cell id is noise (the overwhelmingly common
@@ -170,7 +187,7 @@ function _dagBlock(c) {
     d2 = d2 ? `${d2} · ${dims}` : dims;
   } else if (kind === 'image' || kind === 'chart') {
     const m2 = /<img[^>]+src="([^"]+)"/.exec(c.output || '');
-    if (m2) thumb = m2[1];
+    thumb = m2 ? m2[1] : kind === 'chart' ? _dagEcThumb(c.id, false) : null;   // live ECharts → snapshot
   }
   const dur = c.duration == null ? '' : _dagFmtMs(c.duration);
   const icon = _DAG_KINDS[kind].icon;
@@ -275,31 +292,88 @@ function _dagLayout(m, w, h, dir) {
   const tb = dir === 'TB';
   if (window.dagre) {
     // Nodes whose EVERY edge is dim (the setup island: using/import hubs + their
-    // satellites) leave dagre entirely and stack in a compact left column — dagre lays
+    // satellites) leave dagre entirely and stack in a compact row above — dagre lays
     // disconnected components side by side, which would spend the width the hub-edge
-    // removal just saved.
+    // removal saved. (Vacuously includes isolated nodes.)
     const aside = new Set();
     m.nodes.forEach(c => {
-      // aside: every incident edge is a whisper — OR no edges at all (an isolated node
-      // handed to dagre becomes its own side-by-side component and widens the graph)
       const es = m.links.filter(l => l.source === c.id || l.target === c.id);
       if (es.every(l => l.dim)) aside.add(c.id);
     });
-    const g = new dagre.graphlib.Graph();
-    g.setGraph({ rankdir: dir, ranker: 'tight-tree',
-                 ranksep: tb ? 38 : 52, nodesep: tb ? 14 : 18, edgesep: 10, marginx: 16, marginy: 14 });
-    g.setDefaultEdgeLabel(() => ({}));
-    m.nodes.forEach(c => {
-      if (aside.has(c.id)) return;
-      const b = _dagBlock(c); g.setNode(c.id, { width: b.w + 6, height: b.h + 6 });
-    });
-    m.links.forEach(l => {
-      if (!l.dim && !aside.has(l.source) && !aside.has(l.target)) g.setEdge(l.source, l.target);
-    });
-    dagre.layout(g);
+    // One dagre pass, optionally with row PINS. Rank-wrapping is expressed INSIDE dagre —
+    // an invisible spine chain (one 1×1 node per final row) and zero-length pin edges tie
+    // each real node to its row — so dagre's own router still draws every visible edge
+    // around every node (hand-moving nodes after layout left edges slicing behind cells).
+    // Mostly dagre DEFAULTS (default ranker, default edge weight/minlen) — only the
+    // separations are tuned down for compact cards. The one structural addition is the
+    // optional row-pin spine for rank wrapping.
+    const build = assign => {
+      const g = new dagre.graphlib.Graph();
+      // edgesep kept tight: every edge crossing a pinned row inserts a virtual node into
+      // that rank's ordering, and their spacing adds up to real width on busy graphs
+      g.setGraph({ rankdir: dir, ranksep: 34, nodesep: 22, edgesep: 4, marginx: 16, marginy: 14 });
+      g.setDefaultEdgeLabel(() => ({}));
+      m.nodes.forEach(c => {
+        if (aside.has(c.id)) return;
+        const b = _dagBlock(c); g.setNode(c.id, { width: b.w + 6, height: b.h + 6 });
+      });
+      m.links.forEach(l => {
+        if (!l.dim && !aside.has(l.source) && !aside.has(l.target)) g.setEdge(l.source, l.target);
+      });
+      if (assign) {
+        let maxR = 0; assign.forEach(r => { maxR = Math.max(maxR, r); });
+        for (let i = 0; i <= maxR + 1; i++) g.setNode('__spine' + i, { width: 1, height: 1 });
+        for (let i = 0; i <= maxR; i++) g.setEdge('__spine' + i, '__spine' + (i + 1), { weight: 1, minlen: 1 });
+        assign.forEach((r, id) => {
+          // strictly BETWEEN the row's spine and the next (dagre rejects minlen 0):
+          // spine_r < node < spine_{r+1} → exactly one rank per row
+          g.setEdge('__spine' + r, id, { weight: 0, minlen: 1 });
+          g.setEdge(id, '__spine' + (r + 1), { weight: 0, minlen: 1 });
+        });
+      }
+      dagre.layout(g);
+      return g;
+    };
+    let g = build(null);
+    // Detect over-wide ranks (TB): pack each into rows within the pane budget (pass-1
+    // x-order preserved → low crossings) and re-run dagre with those rows pinned.
+    if (tb) {
+      const budget = Math.max(w - 24, 420);
+      const byRank = new Map();
+      m.nodes.forEach(c => {
+        if (aside.has(c.id)) return;
+        const n = g.node(c.id), k2 = Math.round(n.y);
+        byRank.has(k2) || byRank.set(k2, []);
+        byRank.get(k2).push({ id: c.id, x: n.x, w: _dagBlock(c).w });
+      });
+      const SEP = 22;                                // keep the packer honest with nodesep
+      const ranks = [...byRank.keys()].sort((a, b) => a - b).map(k2 => byRank.get(k2));
+      const width = row => row.reduce((s2, n) => s2 + n.w + SEP, -SEP);
+      if (ranks.some(r => width(r) > budget)) {
+        const mkAssign = b2 => {
+          const assign = new Map();
+          let sub = 0;
+          ranks.forEach(rank => {
+            rank.sort((a, b) => a.x - b.x);
+            let cw = 0, any = false;
+            rank.forEach(n => {
+              if (any && cw + n.w + SEP > b2) { sub++; cw = 0; }
+              assign.set(n.id, sub); cw += n.w + SEP; any = true;
+            });
+            sub++;
+          });
+          return assign;
+        };
+        g = build(mkAssign(budget));
+        // dagre's coordinate assignment spreads pinned rows beyond their packed width
+        // (alignment chains); if the result overshoots the pane, re-pack ONCE with the
+        // budget scaled by the overshoot so the final spread lands near the pane width.
+        const spread = (g.graph().width || w) / Math.max(1, w);
+        if (spread > 1.15) g = build(mkAssign(Math.max(300, budget / spread)));
+      }
+    }
     const gr = g.graph();
-    // Aside nodes sit in a ROW ABOVE the flow (vertical growth is cheap in a tall pane;
-    // a side column would spend the width the hub-edge removal saved).
+    // Aside nodes sit in a ROW ABOVE the flow (vertical growth is cheap in a tall pane).
     const asideList = m.nodes.filter(c => aside.has(c.id));
     let rowH = 0, ax = 16;
     const asidePos = {};
@@ -312,49 +386,15 @@ function _dagLayout(m, w, h, dir) {
       if (!aside.has(c.id)) { const n = g.node(c.id); return { c, b, x: n.x, y: n.y + rowH }; }
       return { c, b, x: asidePos[c.id][0], y: asidePos[c.id][1] };
     });
-    let links = m.links.map(l => {
+    const links = m.links.map(l => {
       const e = (!l.dim && g.hasEdge(l.source, l.target)) ? g.edge(l.source, l.target) : null;
       return { s: l.source, t: l.target, dim: l.dim,
                pts: (e && e.points && e.points.length > 1) ? e.points.map(p => [p.x, p.y + rowH]) : null };
     });
-    let gw = Math.max(gr.width || w, ax), gh = (gr.height || h) + rowH;
-    // TB rank WRAPPING: a rank wider than the pane forces a tiny fit scale and strands
-    // the tall pane's vertical space. Pack each over-wide rank into stacked rows (dagre's
-    // x-order preserved → low crossing), trading width for depth. Node positions move,
-    // so routed edge points are dropped — edges re-render as border-clipped straight
-    // lines (see _dagOption's fallback).
-    if (tb) {
-      const budget = Math.max(w - 24, 420);
-      const main = nodes.filter(n => !aside.has(n.c.id));
-      const byRank = new Map();
-      main.forEach(n => { const k2 = Math.round(n.y); byRank.has(k2) || byRank.set(k2, []); byRank.get(k2).push(n); });
-      const ranks = [...byRank.keys()].sort((a, b) => a - b).map(k2 => byRank.get(k2));
-      const width = row => row.reduce((s2, n) => s2 + n.b.w + 14, -14);
-      if (ranks.some(r => width(r) > budget)) {
-        let cursor = rowH + 14, maxW = 0;
-        ranks.forEach(rank => {
-          rank.sort((a, b) => a.x - b.x);
-          const rows = [[]]; let cw = 0;
-          rank.forEach(n => {
-            if (cw + n.b.w + 14 > budget && rows[rows.length - 1].length) { rows.push([]); cw = 0; }
-            rows[rows.length - 1].push(n); cw += n.b.w + 14;
-          });
-          rows.forEach(row => {
-            const rw = width(row), rh = Math.max(...row.map(n => n.b.h));
-            let x = -rw / 2;
-            row.forEach(n => { n.x = x + n.b.w / 2; n.y = cursor + rh / 2; x += n.b.w + 14; });
-            maxW = Math.max(maxW, rw);
-            cursor += rh + 16;
-          });
-          cursor += 22;                              // rank separation
-        });
-        const cx2 = maxW / 2 + 12;
-        main.forEach(n => { n.x += cx2; });          // recenter into positive coords
-        links = links.map(l => ({ ...l, pts: null }));
-        gw = Math.max(maxW + 24, ax); gh = cursor;
-      }
-    }
-    return { nodes, links, gw, gh };
+    const L = { nodes, links, gw: Math.max(gr.width || w, ax), gh: (gr.height || h) + rowH };
+    _dagSqueeze(L, 0, 46);   // collapse empty full-height corridors (dagre's BK spread, spine overhead)
+    _dagSqueeze(L, 1, 42);   // …and empty full-width bands between ranks
+    return L;
   }
   const nL = m.layers.length, maxS = Math.max(...m.layers.map(l => l.length));
   const padA = 90, padB = 46;                       // main-axis / cross-axis padding
@@ -373,6 +413,37 @@ function _dagLayout(m, w, h, dir) {
     links: m.links.map(l => ({ s: l.source, t: l.target, dim: l.dim, pts: [pos[l.source], pos[l.target]] })),
     gw: w, gh: h,
   };
+}
+
+// Gap squeeze: collapse EMPTY strips that span the whole graph on one axis to `maxGap`,
+// shifting nodes and edge waypoints by the same piecewise offsets — relative geometry
+// inside occupied regions is untouched, so dagre's routing stays valid while dead
+// corridors (BK straightening spread, spine-pin rank overhead, tall-node bands) vanish.
+function _dagSqueeze(L, axis, maxGap) {
+  const iv = L.nodes.map(n => {
+    const c = axis ? n.y : n.x, half = (axis ? n.b.h : n.b.w) / 2 + 8;
+    return [c - half, c + half];
+  }).sort((a, b) => a[0] - b[0]);
+  const occ = [];
+  iv.forEach(i => {
+    const last = occ[occ.length - 1];
+    if (last && i[0] <= last[1] + 1) last[1] = Math.max(last[1], i[1]);
+    else occ.push([i[0], i[1]]);
+  });
+  const cuts = [];                                   // [gap start, excess to remove]
+  for (let i = 1; i < occ.length; i++) {
+    const gap = occ[i][0] - occ[i - 1][1];
+    if (gap > maxGap) cuts.push([occ[i - 1][1], gap - maxGap]);
+  }
+  if (!cuts.length) return;
+  const shift = v => {                               // points inside a gap compress smoothly
+    let s = 0;
+    for (const [pos, ex] of cuts) if (v > pos) s += Math.min(ex, v - pos);
+    return v - s;
+  };
+  L.nodes.forEach(n => { if (axis) n.y = shift(n.y); else n.x = shift(n.x); });
+  L.links.forEach(l => (l.pts || []).forEach(p => { p[axis] = shift(p[axis]); }));
+  if (axis) L.gh = shift(L.gh); else L.gw = shift(L.gw);
 }
 
 // Memoized layout — the breathing animation re-paints ~25×/s; dagre must not re-run
@@ -399,32 +470,18 @@ function _dagOption() {
   // deliberately not in the layout key — a state flip must not re-run dagre.)
   L.nodes.forEach(n => { const cur = m.byId[n.c.id]; if (cur) { n.c = cur; n.b = _dagBlock(cur); } });
   const P = _dagPalette();
-  // Edge fallback (wrapped ranks, whisper edges): S-CURVES that leave the source's
-  // outflow border and enter the target's inflow border (bottom→top in TB), so edges
-  // keep the routed look — smooth, arrowheads landing square on the border — even
-  // when node positions came from rank-wrapping rather than dagre.
-  const tb = dir === 'TB';
+  // Edge fallback (whisper edges + the no-dagre case): plain border-clipped straight
+  // segments — every VISIBLE dataflow edge carries dagre-routed waypoints.
+  const tb = dir === 'TB';                           // edge tangents follow the flow axis
   const ndOf = {}; L.nodes.forEach(n => { ndOf[n.c.id] = n; });
   L.links.forEach(l => {
     if (l.pts) return;
     const a = ndOf[l.s], z = ndOf[l.t];
     if (!a || !z) { l.pts = [[0, 0], [0, 0]]; return; }
-    const fwd = tb ? z.y - z.b.h / 2 > a.y + a.b.h / 2 : z.x - z.b.w / 2 > a.x + a.b.w / 2;
-    if (tb && fwd) {
-      const sy = a.y + a.b.h / 2, ty = z.y - z.b.h / 2;
-      const bend = Math.max(10, Math.min(30, (ty - sy) * 0.3));
-      l.pts = [[a.x, sy], [a.x, sy + bend], [z.x, ty - bend], [z.x, ty]];
-    } else if (!tb && fwd) {
-      const sx = a.x + a.b.w / 2, tx = z.x - z.b.w / 2;
-      const bend = Math.max(10, Math.min(30, (tx - sx) * 0.3));
-      l.pts = [[sx, a.y], [sx + bend, a.y], [tx - bend, z.y], [tx, z.y]];
-    } else {
-      // non-forward (rare: aside/whisper geometry) — border-clipped straight segment
-      const dx = z.x - a.x, dy = z.y - a.y;
-      const clip = n => Math.min(dx ? Math.abs((n.b.w / 2 + 5) / dx) : 9, dy ? Math.abs((n.b.h / 2 + 5) / dy) : 9, 0.45);
-      const tA = clip(a), tB = clip(z);
-      l.pts = [[a.x + dx * tA, a.y + dy * tA], [z.x - dx * tB, z.y - dy * tB]];
-    }
+    const dx = z.x - a.x, dy = z.y - a.y;
+    const clip = n => Math.min(dx ? Math.abs((n.b.w / 2 + 5) / dx) : 9, dy ? Math.abs((n.b.h / 2 + 5) / dy) : 9, 0.45);
+    const tA = clip(a), tB = clip(z);
+    l.pts = [[a.x + dx * tA, a.y + dy * tA], [z.x - dx * tB, z.y - dy * tB]];
   });
   const stOf = id => _dagState(m.byId[id]);
   _dagAnyRunning = m.nodes.some(c => _dagState(c) === 'running');
@@ -459,17 +516,28 @@ function _dagOption() {
   };
   const edgeTip = i => _dagCardEl() ? '' : `${L.links[i].s} → ${L.links[i].t}`;
 
-  // Aspect-preserving axis ranges: pad the shorter direction so one graph unit is the
-  // same number of pixels on both axes (blocks keep their shape), graph centered.
-  // Then add SLACK beyond the fit window on every side — inside-dataZoom clamps its
-  // window to the axis extent, so without slack there is nothing to pan at full fit.
-  // The initial dataZoom start/end percentages select exactly the centered fit window.
-  const u = Math.max(L.gw / w, L.gh / h, 0.0001);
-  const exX = (w * u - L.gw) / 2, exY = (h * u - L.gh) / 2;
+  // Fit window = the TRUE bounding box of nodes AND every edge waypoint (bus lanes can
+  // run outside the node extent — nothing may escape the initial view). Aspect-preserving:
+  // pad the shorter direction so one graph unit is the same number of pixels on both axes.
+  // Then add SLACK beyond the fit window on every side — inside-dataZoom clamps its window
+  // to the axis extent, so without slack there is nothing to pan at full fit. The initial
+  // dataZoom start/end percentages select exactly the centered fit window.
+  let bx0 = 0, by0 = 0, bx1 = L.gw, by1 = L.gh;
+  L.nodes.forEach(n => {
+    bx0 = Math.min(bx0, n.x - n.b.w / 2 - 6); bx1 = Math.max(bx1, n.x + n.b.w / 2 + 6);
+    by0 = Math.min(by0, n.y - n.b.h / 2 - 6); by1 = Math.max(by1, n.y + n.b.h / 2 + 6);
+  });
+  L.links.forEach(l => (l.pts || []).forEach(p => {
+    bx0 = Math.min(bx0, p[0] - 6); bx1 = Math.max(bx1, p[0] + 6);
+    by0 = Math.min(by0, p[1] - 6); by1 = Math.max(by1, p[1] + 6);
+  }));
+  const bw = bx1 - bx0, bh = by1 - by0;
+  const u = Math.max(bw / w, bh / h, 0.0001);
+  const exX = (w * u - bw) / 2, exY = (h * u - bh) / 2;
   const mX = 0.6 * w * u, mY = 0.6 * h * u;                    // pan slack (60% of a viewport per side)
-  const totX = L.gw + 2 * exX + 2 * mX, totY = L.gh + 2 * exY + 2 * mY;
-  const zx = [mX / totX * 100, (mX + L.gw + 2 * exX) / totX * 100];
-  const zy = [mY / totY * 100, (mY + L.gh + 2 * exY) / totY * 100];
+  const totX = bw + 2 * exX + 2 * mX, totY = bh + 2 * exY + 2 * mY;
+  const zx = [mX / totX * 100, (mX + bw + 2 * exX) / totX * 100];
+  const zy = [mY / totY * 100, (mY + bh + 2 * exY) / totY * 100];
 
   return {
     animation: false,
@@ -479,8 +547,8 @@ function _dagOption() {
       formatter: p => p.seriesName === 'nodes' ? nodeTip(p.dataIndex) : edgeTip(p.dataIndex),
     },
     grid: { left: 0, right: 0, top: 0, bottom: 0 },
-    xAxis: { type: 'value', min: -exX - mX, max: L.gw + exX + mX, show: false },
-    yAxis: { type: 'value', min: -exY - mY, max: L.gh + exY + mY, show: false, inverse: true },   // dagre's y grows DOWN
+    xAxis: { type: 'value', min: bx0 - exX - mX, max: bx1 + exX + mX, show: false },
+    yAxis: { type: 'value', min: by0 - exY - mY, max: by1 + exY + mY, show: false, inverse: true },   // dagre's y grows DOWN
     dataZoom: [
       // wheel zoom is handled by our own listener (ECharts' rate is fixed and too hot) —
       // the inside zooms provide drag-pan + the programmatic window
@@ -509,16 +577,46 @@ function _dagOption() {
           const lw = hv ? (hv.d === 1 ? 2.8 : 1.8) : l.dim ? 0.8 : hot ? 2.4 : 1.4;
           const op = hv ? (hv.d === 1 ? 0.98 : Math.max(0.3, 0.62 - 0.12 * (hv.d - 2)))
                    : faded ? (l.dim ? 0.04 : 0.15) : l.dim ? 0.12 : hot ? 0.95 : 0.6;
-          const pts = l.pts.map(p => api.coord(p));
-          const n = pts.length, x1 = pts[n - 2][0], y1 = pts[n - 2][1], x2 = pts[n - 1][0], y2 = pts[n - 1][1];
+          // Decimate waypoints (Douglas-Peucker): keep endpoints + genuine detours, drop
+          // micro-wiggles — the spline relaxes into longer arcs but still dodges nodes.
+          const pts = _dagRdp(l.pts.map(p => api.coord(p)), 18);
+          const n = pts.length;
+          let x1 = pts[n - 2][0], y1 = pts[n - 2][1];
+          const x2 = pts[n - 1][0], y2 = pts[n - 1][1];
+          const style = { fill: 'none', stroke: col, lineWidth: lw, opacity: op };
+          const kids = [];
+          if (!l.dim && n === 2) {
+            // no detour → the canonical SYMMETRIC S: leave the source square along the flow
+            // axis, inflect at the midpoint, arrive square — tangents vertical in TB.
+            const s0 = pts[0], k = 0.45;
+            const shp = tb
+              ? { x1: s0[0], y1: s0[1], cpx1: s0[0], cpy1: s0[1] + k * (y2 - s0[1]),
+                  cpx2: x2, cpy2: y2 - k * (y2 - s0[1]), x2, y2 }
+              : { x1: s0[0], y1: s0[1], cpx1: s0[0] + k * (x2 - s0[0]), cpy1: s0[1],
+                  cpx2: x2 - k * (x2 - s0[0]), cpy2: s0[1], x2, y2 };
+            kids.push({ type: 'bezierCurve', style, shape: shp });
+            x1 = shp.cpx2; y1 = shp.cpy2;             // arrow follows the arrival tangent
+          } else if (n === 2) {
+            kids.push({ type: 'line', shape: { x1: pts[0][0], y1: pts[0][1], x2, y2 }, style });
+          } else {
+            const Pp = [pts[0], pts[0], ...pts, pts[n - 1], pts[n - 1]];
+            for (let i = 0; i + 3 < Pp.length; i++) {
+              const a1 = Pp[i + 1], a2 = Pp[i + 2], a3 = Pp[i + 3];
+              const sx2 = (a1[0] + 4 * a2[0] + a3[0]) / 6, sy2 = (a1[1] + 4 * a2[1] + a3[1]) / 6;
+              const px2 = i === 0 ? pts[0][0] : (Pp[i][0] + 4 * a1[0] + a2[0]) / 6;
+              const py2 = i === 0 ? pts[0][1] : (Pp[i][1] + 4 * a1[1] + a2[1]) / 6;
+              kids.push({ type: 'bezierCurve', style, shape: {
+                x1: px2, y1: py2,
+                cpx1: (2 * a1[0] + a2[0]) / 3, cpy1: (2 * a1[1] + a2[1]) / 3,
+                cpx2: (a1[0] + 2 * a2[0]) / 3, cpy2: (a1[1] + 2 * a2[1]) / 3,
+                x2: sx2, y2: sy2 } });
+            }
+          }
           const len = Math.hypot(x2 - x1, y2 - y1) || 1, ux = (x2 - x1) / len, uy = (y2 - y1) / len;
           const ah = 7, aw = 3.4, bx = x2 - ux * ah, by = y2 - uy * ah;
-          return { type: 'group', children: [
-            { type: 'polyline', shape: { points: pts.slice(0, -1).concat([[bx, by]]), smooth: 0.22 },
-              style: { fill: 'none', stroke: col, lineWidth: lw, opacity: op } },
-            { type: 'polygon', shape: { points: [[x2, y2], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
-              style: { fill: col, opacity: Math.min(1, op + 0.1) } },
-          ] };
+          kids.push({ type: 'polygon', shape: { points: [[x2, y2], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
+            style: { fill: col, opacity: Math.min(1, op + 0.1) } });
+          return { type: 'group', children: kids };
         },
       },
       { // breathing halo — a tight ring around RUNNING cards. This is the ONLY series the
@@ -678,7 +776,11 @@ function _dagMiniTable(t) {
 function _dagPreview(c, kind) {
   const img = /<img[^>]+src="([^"]+)"/.exec(c.output || '');
   if (img) return `<img class="dagcard-thumb" src="${img[1]}"/>`;
-  if (kind === 'chart') return '<div class="dagcard-dim">interactive chart — open the cell to explore it</div>';
+  if (kind === 'chart') {
+    const cap = _dagEcThumb(c.id, true);   // snapshot of the live instance
+    return cap ? `<img class="dagcard-thumb" src="${cap}"/>`
+               : '<div class="dagcard-dim">interactive chart — open the cell to explore it</div>';
+  }
   if (kind === 'table' && c.tables && c.tables.length) return _dagMiniTable(c.tables[0] || {});
   const txt = (c.output || '').replace(/&quot;|&#34;/g, '"').replace(/<[^>]*>/g, '').trim();
   if (kind === 'file' && txt) return `<div class="dagcard-defs">${_esc(txt.replace(/^"|"$/g, ''))}</div>`;
@@ -760,6 +862,25 @@ function _dagHighlight(id) {
   _dagQueue();
 }
 
+// Ramer–Douglas–Peucker polyline simplification (screen px tolerance).
+function _dagRdp(pts, eps) {
+  if (pts.length <= 2) return pts;
+  const d2line = (p, a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const L2 = dx * dx + dy * dy;
+    if (!L2) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2));
+    return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+  };
+  let maxD = 0, maxI = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = d2line(pts[i], pts[0], pts[pts.length - 1]);
+    if (d > maxD) { maxD = d; maxI = i; }
+  }
+  if (maxD <= eps) return [pts[0], pts[pts.length - 1]];
+  return _dagRdp(pts.slice(0, maxI + 1), eps).slice(0, -1).concat(_dagRdp(pts.slice(maxI), eps));
+}
+
 function _dagQueue() {
   if (!_dagOpen() || _dagRaf) return;
   _dagRaf = requestAnimationFrame(() => { _dagRaf = 0; _dagRender(); });
@@ -810,9 +931,20 @@ function _dagApplyDock() {
 }
 
 function toggleDag() {
+  // The page reflows when the pane opens/closes (its width changes) — anchor the
+  // top-most visible cell so the reader's place in the notebook doesn't drift.
+  let anchor = null, off = 0;
+  for (const el of document.querySelectorAll('#nb .cell')) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > 70) { anchor = el; off = r.top; break; }
+  }
   const p = document.getElementById('dagpane');
   const open = p.classList.toggle('open');
   document.body.classList.toggle('dag-open', open);          // the notebook reflows around the pane
+  if (anchor) requestAnimationFrame(() => {
+    const r = anchor.getBoundingClientRect();
+    Math.abs(r.top - off) > 1 && window.scrollBy(0, r.top - off);
+  });
   if (open) requestAnimationFrame(_dagRender);               // after the pane lays out (sizes valid)
   else { _dagCardClose(); _dagPulseSync(); }
 }
@@ -826,9 +958,12 @@ function dagFit() {
 (() => {
   const prevRun = window.onCellRun, prevDone = window.onCellDone;
   window.onCellRun = id => { prevRun && prevRun(id); _dagRunning.add(id); _dagQueue(); _dagPulseSync(); };
-  window.onCellDone = c => { prevDone && prevDone(c); _dagRunning.delete(c.id); _dagQueue(); _dagPulseSync(); };
+  window.onCellDone = c => { prevDone && prevDone(c); _dagRunning.delete(c.id); delete _dagEcThumbs[c.id]; _dagQueue(); _dagPulseSync(); };
   window.onNbState = () => { _dagRunning.clear(); _dagQueue(); };      // full publish — structure may have changed
-  window.onCellsPatched = () => { _dagQueue(); };                      // targeted refresh — states/durations moved
+  window.onCellsPatched = cells => {                                   // targeted refresh — states/durations moved
+    (cells || []).forEach(c => delete _dagEcThumbs[c.id]);             // chart may have re-rendered → re-snapshot
+    _dagQueue();
+  };
   window.addEventListener('resize', debounce(() => { if (_dagOpen() && _dagChart) { _dagChart.resize(); _dagQueue(); } }, 150));
 })();
 
@@ -865,6 +1000,12 @@ function dagFit() {
   }, { passive: false, capture: true });
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
+    // Esc that ORIGINATED in an editor/input belongs to IT (exit to command mode) — the
+    // editor may already have blurred by the time this bubbles, so check the event's
+    // target (not activeElement) and respect a handled event.
+    if (e.defaultPrevented) return;
+    const t = e.target;
+    if (t && t.closest && t.closest('.cm-editor, input, textarea, [contenteditable]')) return;
     if (_dagCardEl()) { _dagCardClose(); return; }
     if (_dagOpen()) toggleDag();
   });
