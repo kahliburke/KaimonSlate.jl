@@ -126,7 +126,7 @@ let pt(r) = (value = [r.longitude, r.latitude, r.depth, r.mag], name = r.place)
              data = medium, symbolSize = 7, itemStyle = (opacity = 0.85,)),
             (type = "effectScatter", coordinateSystem = "geo", name = "M ≥ 6",
              data = major, symbolSize = 13, zlevel = 1,
-             rippleEffect = (brushType = "stroke", scale = 3.5),
+             rippleEffect = (brushType = "stroke", scale = 10),
              label = (show = false,)),
         ])
 end
