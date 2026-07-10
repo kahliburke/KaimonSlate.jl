@@ -451,6 +451,135 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test isempty(findcell(r3, "p").deps)
     end
 
+    @testset "ground truth: restale never under-invalidates (randomized notebooks)" begin
+        # THE invariant ("staleness never under-invalidates", deps.jl header): for notebooks whose
+        # true dataflow is known BY CONSTRUCTION, the engine's blast radius must contain every cell
+        # whose result could actually change — for every possible single-cell edit. Over-restale is
+        # allowed (precision is best-effort); under-restale is the bug class this guards against,
+        # across plain bindings, in-place mutation, markdown interpolation, deferred function refs,
+        # and macro-hidden writes all at once.
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+        rng = Random.MersenneTwister(23)
+        ok = true
+        for trial in 1:15
+            n = rand(rng, 6:18)
+            io = IOBuffer()
+            truedeps = [Int[] for _ in 1:n]        # cell idx → TRUE direct upstream cell idxs
+            writer_of = Dict{Symbol,Int}()          # name → its (unique) defining cell
+            mutators_of = Dict{Symbol,Vector{Int}}()
+            # cells 1–2: a macro-hidden definition + its reader (exercises expansion recovery)
+            print(io, "#%% code id=c1\nBase.@kwdef struct GT$(trial); x::Int = 1; end\n")
+            writer_of[Symbol("GT$(trial)")] = 1
+            print(io, "#%% code id=c2\ngtv = [GT$(trial)().x]\n")
+            push!(truedeps[2], 1); writer_of[:gtv] = 2
+            for i in 3:n
+                avail = collect(keys(writer_of))
+                # a name's TRUE producers: its definer + every prior mutator
+                producers(nm, upto) = vcat(writer_of[nm],
+                                           [m for m in get(mutators_of, nm, Int[]) if m < upto])
+                style = rand(rng)
+                if style < 0.15                                        # mutation cell
+                    nm = rand(rng, avail)
+                    print(io, "#%% code id=c$i\npush!($nm, 1)\n")
+                    append!(truedeps[i], producers(nm, i))
+                    push!(get!(mutators_of, nm, Int[]), i)
+                elseif style < 0.3                                     # markdown reader
+                    nm = rand(rng, avail)
+                    print(io, "#%% md id=c$i\nvalue: {{ sum($nm) }}\n")
+                    append!(truedeps[i], producers(nm, i))
+                elseif style < 0.4                                     # deferred function def (no immediate dep)
+                    nm = rand(rng, avail)
+                    print(io, "#%% code id=c$i\ngtf$i() = sum($nm)\n")
+                    writer_of[Symbol("gtf$i")] = i                     # over-restale here is fine; under isn't asserted
+                else                                                   # plain definer reading 0–3 names
+                    reads = unique(rand(rng, avail, rand(rng, 0:min(3, length(avail)))))
+                    rhs = isempty(reads) ? "[$i]" : "[" * join(("sum($r)" for r in reads), " + ") * "]"
+                    nm = Symbol("gt$i")
+                    print(io, "#%% code id=c$i\n$nm = $rhs\n")
+                    for r in reads
+                        append!(truedeps[i], producers(r, i))
+                    end
+                    writer_of[nm] = i
+                end
+            end
+            r = parse_report(String(take!(io)))
+            build_dependencies!(r)
+            ReportEngine.prewarm_macros!(r)          # in-process expansion — no eval needed
+            # true transitive dependents of each cell (forward closure over truedeps)
+            fwd = [Int[] for _ in 1:n]
+            for (i, ds) in enumerate(truedeps), d in unique(ds)
+                push!(fwd[d], i)
+            end
+            for seed in 1:n
+                truth = Set{Int}([seed]); queue = [seed]
+                while !isempty(queue)
+                    for d in fwd[pop!(queue)]
+                        d in truth || (push!(truth, d); push!(queue, d))
+                    end
+                end
+                engine = dependents_of(r, Set(["c$seed"]))
+                ok &= all(t -> "c$t" in engine, truth)
+            end
+        end
+        @test ok
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+    end
+
+    @testset "structural fuzz: garbage in, invariants hold (never a throw)" begin
+        # Load-bearing structural invariants under hostile input: parse/build/update cycles over
+        # notebooks salted with unparseable garbage must never throw, and must always leave
+        # (1) every dep pointing at an EARLIER cell (document order = topological order),
+        # (2) the dependents index an exact transpose of deps, (3) byid complete, (4) no self-deps.
+        rng = Random.MersenneTwister(31)
+        garbage = ("x = (", "@nosuchmacro q = ", ")))(((", "function f(", "end end", "\"unterminated",
+                   "x = 1; y = (a b c)", "🤖 = ∅ ⊕ ∅")
+        structural_ok(r) = begin
+            pos = Dict(c.id => i for (i, c) in enumerate(r.cells))
+            all(c -> all(d -> haskey(pos, d) && pos[d] < pos[c.id], c.deps), r.cells) &&
+            all(c -> !(c.id in c.deps), r.cells) &&
+            length(r.byid) == length(r.cells) &&
+            Set((p, d) for (p, ds) in r.dependents for d in ds) ==
+                Set((d, c.id) for c in r.cells for d in c.deps)
+        end
+        ok = true
+        for trial in 1:20
+            n = rand(rng, 4:14)
+            mk() = begin
+                io = IOBuffer()
+                for i in 1:n
+                    if rand(rng) < 0.3
+                        print(io, "#%% code id=g$i\n$(rand(rng, garbage))\n")
+                    else
+                        prev = rand(rng, 1:max(1, i - 1))
+                        print(io, "#%% code id=g$i\nfz$i = $(i == 1 ? "1" : "fz$prev + 1")\n")
+                    end
+                end
+                String(take!(io))
+            end
+            src = mk()
+            r = try
+                rr = parse_report(src); build_dependencies!(rr); rr
+            catch
+                ok = false; continue
+            end
+            ok &= structural_ok(r)
+            for _ in 1:3                     # edit cycles: mutate one random cell's source
+                cells = split(src, "#%% "; keepempty = false)
+                j = rand(rng, 1:length(cells))
+                header, _ = split(String(cells[j]), '\n'; limit = 2)
+                cells[j] = header * "\nfzedit = $(rand(rng, 1:99))\n"
+                src = join(("#%% " * String(c) for c in cells), "")
+                try
+                    update_source!(r, src)
+                catch
+                    ok = false; break
+                end
+                ok &= structural_ok(r)
+            end
+        end
+        @test ok
+    end
+
     @testset "dependents index: BFS ≡ the old fixpoint (equivalence oracle)" begin
         # `dependents_of` walks `report.dependents` (the transpose of `deps`, rebuilt by
         # `build_dependencies!`). Keep the pre-index fixpoint as the reference: any divergence on a
