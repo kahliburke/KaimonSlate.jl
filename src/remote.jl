@@ -1054,7 +1054,23 @@ end
 # straight from the page cache — no read()/vcat copies hub-side); a v1 server keeps getting the
 # single-frame copy-chunk 'P'. `server_key` (Z85, the gate's pinned CURVE key — the data socket
 # serves with the SAME key) encrypts the channel on :direct; tunnel passes "" (SSH encrypts).
-const _BLOB_CHUNK = 8 << 20   # 8 MiB per REQ/REP round-trip — throughput vs per-chunk RTT
+# ── Transfer tuning (Settings panel / slate.json / env) ─────────────────────────────────────
+# Bytes per REQ/REP round-trip. Bigger chunks amortize the RTT (throughput); smaller ones keep
+# a slow uplink responsive — each chunk is the granularity at which the strict REQ/REP channel
+# yields (and at which a timeout/cancel can cut in), so on a thin link small chunks stop one
+# push from monopolizing the wire in long bursts. Panel setting (the Ref, persisted to
+# slate.json) wins; KAIMONSLATE_BLOB_CHUNK_MB env next; default 8 MiB; min 64 KB.
+const BLOB_CHUNK_MB = Ref{Float64}(0.0)   # 0 = unset (env / default applies)
+_blob_chunk() = max(65_536, round(Int, 2^20 *
+    (BLOB_CHUNK_MB[] > 0 ? BLOB_CHUNK_MB[] :
+     something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_CHUNK_MB", "")), 8.0))))
+
+# Hard per-entry ceiling (seconds) for the BOOT-window memo carry — the "never stall a notebook
+# open" bound the cost gate enforces regardless of how expensive an entry claims to be to
+# recompute. Same precedence: panel Ref → KAIMONSLATE_CARRY_MAX_S env → 30s default.
+const CARRY_MAX_S = Ref{Float64}(0.0)     # 0 = unset (env / default applies)
+_carry_ceiling_s() = CARRY_MAX_S[] > 0 ? CARRY_MAX_S[] :
+    something(tryparse(Float64, get(ENV, "KAIMONSLATE_CARRY_MAX_S", "")), 30.0)
 
 # ── Per-host upstream-bandwidth memory (the transfer-vs-recompute input) ─────────────────────
 # Every push measures its own rate over 8 MiB chunks and stamps it here (EMA so one anomalous
@@ -1156,8 +1172,9 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
             if v2 && sz > 0
                 mm = Mmap.mmap(p, Vector{UInt8}, sz)
                 off = 0
+                chunk = _blob_chunk()
                 while off < sz
-                    n = min(_BLOB_CHUNK, sz - off)
+                    n = min(chunk, sz - off)
                     last = off + n >= sz
                     hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(String(h))), UInt8[last ? 0x01 : 0x00])
                     Z.send(sock, hdr; more = true)
@@ -1261,7 +1278,6 @@ end
 # the shared engine of the boot-window carry and the mid-session `sync_memo` tool. `boot=true`
 # arms the cost gate (per-entry transfer-vs-recompute + a hard per-entry ceiling, so a big
 # store on a slow link can't stall the notebook open); the explicit tool pushes everything.
-_carry_ceiling_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_CARRY_MAX_S", "")), 30.0)
 function push_notebook_memo!(k, report; boot::Bool = false)
     t = k.target
     t isa RemoteTarget || return "not on a remote worker"

@@ -533,6 +533,26 @@ function _make_router(h::Hub)
     # to slate.json via the hook KaimonSlate installed. "" ⇒ new notebooks run local by default.
     HTTP.register!(router, "POST", "/api/run-on-default", req ->
         _json(Dict("global" => set_runon_default!(String(get(_body(req), "host", ""))))))
+    # Data-transfer knobs for the Settings panel: the memo data-channel chunk size (MB/round-trip)
+    # and the boot-carry per-entry ceiling (s). 0 = unset (env / built-in default applies); the
+    # effective values are reported alongside so the UI can show what "default" currently means.
+    _xfer_json() = _json(Dict(
+        "chunk_mb" => ReportEngine.BLOB_CHUNK_MB[], "carry_max_s" => ReportEngine.CARRY_MAX_S[],
+        "effective_chunk_mb" => round(ReportEngine._blob_chunk() / 2^20; digits = 2),
+        "effective_carry_max_s" => ReportEngine._carry_ceiling_s()))
+    HTTP.register!(router, "GET", "/api/transfer-settings", _ -> _xfer_json())
+    HTTP.register!(router, "POST", "/api/transfer-settings", req -> begin
+        b = _body(req)
+        chunk = max(0.0, something(tryparse(Float64, string(get(b, "chunk_mb", ""))), 0.0))
+        carry = max(0.0, something(tryparse(Float64, string(get(b, "carry_max_s", ""))), 0.0))
+        p = _XFER_PERSIST[]
+        if p !== nothing
+            try; p(chunk, carry); catch e; @warn "slate: could not persist transfer settings" exception = e; end
+        else                                             # standalone hub: live-only, no slate.json
+            ReportEngine.BLOB_CHUNK_MB[] = chunk; ReportEngine.CARRY_MAX_S[] = carry
+        end
+        _xfer_json()
+    end)
     # Test + prime a host: the full reported dry-run (ssh, julia, provision, KaimonGate, CURVE, spawn+
     # connect+eval+teardown). Body {host, transport:"tunnel"|"direct"}. Slow on a cold host (provision).
     HTTP.register!(router, "POST", "/api/preflight", req -> begin

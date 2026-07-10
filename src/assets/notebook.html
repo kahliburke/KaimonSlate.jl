@@ -280,6 +280,10 @@
   <div class="setsec">Execution</div>
   <div class="setrow"><label title="Where NEW notebooks run by default (a Host in ~/.ssh/config). Each notebook and session can still override this from the toolbar 'Running on' picker.">Default run location</label>
     <span class="rt"><select id="setrunloc"><!-- populated from /api/ssh-hosts (settings.js) --></select></span></div>
+  <div class="setrow"><label title="MB sent per round-trip when cached results move to a remote worker. Smaller chunks keep a slow uplink responsive (transfers yield more often); bigger ones move data faster on a good link. Empty = default (8 MB).">Transfer chunk size</label>
+    <span class="rt"><input id="setxferchunk" class="settext setnum" type="number" min="0.1" step="0.5" placeholder="8"/> MB</span></div>
+  <div class="setrow"><label title="When a notebook attaches to a remote worker, cached results are carried over only if moving them beats recomputing them — and never if one entry would take longer than this to transfer (the cell just recomputes remotely). Empty = default (30 s). The sync_memo tool always pushes everything.">Carry time budget</label>
+    <span class="rt"><input id="setxfercarry" class="settext setnum" type="number" min="1" step="5" placeholder="30"/> s</span></div>
   <div class="setsec">Agent</div>
   <div class="setrow"><label title="Your default model for every notebook. A single notebook can override it in 🎚 Notebook config.">Agent model (global default)</label>
     <select id="setmodel">

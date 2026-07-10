@@ -265,6 +265,42 @@ function set_memo_cap_gb!(gb::Real; respawn::Bool = true)
     return v
 end
 
+"Configured data-channel chunk size in MB; 0.0 = unset (env / 8 MiB default applies)."
+blob_chunk_mb()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "blob_chunk_mb", ""))), 0.0)
+
+"""
+    set_blob_chunk_mb!(mb) -> Float64
+
+Persist the memo data-channel chunk size (MB per round-trip) and apply it live — no worker
+respawn needed (the transfer runs hub-side). Smaller chunks keep a slow uplink responsive;
+bigger ones amortize the RTT. `0` clears back to the env / 8 MiB default. Settings panel knob.
+"""
+function set_blob_chunk_mb!(mb::Real)
+    v = max(0.0, Float64(mb))
+    ReportEngine.BLOB_CHUNK_MB[] = v
+    cfg = _slate_config(); v > 0 ? (cfg["blob_chunk_mb"] = v) : delete!(cfg, "blob_chunk_mb")
+    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist chunk-size setting" exception = e; end
+    return v
+end
+
+"Configured boot-carry per-entry ceiling in seconds; 0.0 = unset (env / 30s default applies)."
+carry_max_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "carry_max_s", ""))), 0.0)
+
+"""
+    set_carry_max_s!(s) -> Float64
+
+Persist the boot-window memo-carry ceiling (max seconds any single entry may spend transferring
+before the cost gate skips it — the cell recomputes remotely instead) and apply it live. `0`
+clears back to the env / 30s default. Settings panel knob.
+"""
+function set_carry_max_s!(s::Real)
+    v = max(0.0, Float64(s))
+    ReportEngine.CARRY_MAX_S[] = v
+    cfg = _slate_config(); v > 0 ? (cfg["carry_max_s"] = v) : delete!(cfg, "carry_max_s")
+    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist carry-ceiling setting" exception = e; end
+    return v
+end
+
 "The user's onboarding answer for extension registration: \"yes\" | \"dismissed\" | \"\" (not asked)."
 ext_prompt_choice()::String = String(get(_slate_config(), "ext_prompt", ""))
 
@@ -311,8 +347,16 @@ function _load_slate_config!()
     s = worker_threads()
     isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
     ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
+    ReportEngine.BLOB_CHUNK_MB[] = blob_chunk_mb()
+    ReportEngine.CARRY_MAX_S[] = carry_max_s()
     NotebookServer.PARALLEL_DEFAULT[] = parallel_default()
     NotebookServer.RUNON_DEFAULT[] = run_location_default()
+    # Persist hook for the browser Settings panel's transfer knobs (route in server_complete.jl —
+    # NotebookServer has no JSON-config ownership, same pattern as _RUNON_PERSIST).
+    NotebookServer._XFER_PERSIST[] = function (chunk_mb, carry_s)
+        set_blob_chunk_mb!(chunk_mb); set_carry_max_s!(carry_s)
+        return nothing
+    end
     # Install the persist hook so set_runon_default! (from the browser route / gate tool) writes slate.json.
     NotebookServer._RUNON_PERSIST[] = function (spec)
         cfg = _slate_config(); cfg["run_location"] = String(spec)

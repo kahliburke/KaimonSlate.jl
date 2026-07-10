@@ -585,6 +585,11 @@ function set_runon_default!(spec::AbstractString)
     return RUNON_DEFAULT[]
 end
 
+# Persist hook for the Settings panel's data-transfer knobs (chunk MB, carry ceiling s) — same
+# division of labor as _RUNON_PERSIST: KaimonSlate installs `(chunk_mb, carry_s) -> nothing`
+# which sets the live ReportEngine refs AND writes slate.json.
+const _XFER_PERSIST = Ref{Any}(nothing)
+
 # A layer value of "local" (case-insensitive) is an EXPLICIT local pick — it forces local even when a
 # lower layer (e.g. the global default) names a host. An empty value = "no override at this layer".
 _norm_runon(s) = lowercase(strip(String(s))) == "local" ? "" : String(strip(String(s)))

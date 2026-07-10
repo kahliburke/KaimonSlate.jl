@@ -181,6 +181,24 @@ function openSettings() {
   const perm = document.getElementById('setperm');
   perm.value = agentPerm();
   perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
+  // Data-transfer knobs (global, server-side slate.json): memo data-channel chunk size + the
+  // boot-carry per-entry time budget. 0/empty = server default; the placeholder shows the
+  // EFFECTIVE value so "empty" is never a mystery. Committed together on change (one route).
+  const xchunk = document.getElementById('setxferchunk'), xcarry = document.getElementById('setxfercarry');
+  if (xchunk && xcarry && window.gapi) {
+    const reflect = d => {
+      if (!d) return;
+      xchunk.value = d.chunk_mb > 0 ? d.chunk_mb : '';
+      xcarry.value = d.carry_max_s > 0 ? d.carry_max_s : '';
+      xchunk.placeholder = d.effective_chunk_mb; xcarry.placeholder = d.effective_carry_max_s;
+    };
+    gapi('GET', '/api/transfer-settings').then(reflect).catch(() => {});
+    const commit = () => gapi('POST', '/api/transfer-settings',
+      { chunk_mb: xchunk.value || 0, carry_max_s: xcarry.value || 0 })
+      .then(d => { reflect(d); try { toast('Transfer settings saved', 1800); } catch (_) {} })
+      .catch(() => {});
+    xchunk.onchange = commit; xcarry.onchange = commit;
+  }
   // Default run location (global) — where NEW notebooks run. Server-side (slate.json) via the global
   // /api/run-on-default; the host list comes from ~/.ssh/config. gapi() (runloc.js) hits the raw route.
   const rl = document.getElementById('setrunloc');
