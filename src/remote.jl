@@ -1055,10 +1055,13 @@ end
 # single-frame copy-chunk 'P'. `server_key` (Z85, the gate's pinned CURVE key — the data socket
 # serves with the SAME key) encrypts the channel on :direct; tunnel passes "" (SSH encrypts).
 # ── Transfer tuning (Settings panel / slate.json / env) ─────────────────────────────────────
-# Bytes per REQ/REP round-trip. Bigger chunks amortize the RTT (throughput); smaller ones keep
-# a slow uplink responsive — each chunk is the granularity at which the strict REQ/REP channel
-# yields (and at which a timeout/cancel can cut in), so on a thin link small chunks stop one
-# push from monopolizing the wire in long bursts. Panel setting (the Ref, persisted to
+# Bytes per REQ/REP round-trip. NOTE the blob channel is its own socket (own ssh proc under
+# :tunnel), so chunk size does NOT protect cell results — that isolation is structural — and
+# TCP interleaves competing flows per-packet either way. What it actually governs is the
+# round-trip granularity: the per-chunk recv timeout (a huge chunk on a slow link can outlive
+# rcvtimeo and fail a push that was making progress), how promptly an abort can land, and the
+# worker's per-frame buffer. Bigger chunks amortize RTT (throughput on fat links); smaller
+# ones bound per-chunk exposure on thin ones. Panel setting (the Ref, persisted to
 # slate.json) wins; KAIMONSLATE_BLOB_CHUNK_MB env next; default 8 MiB; min 64 KB.
 const BLOB_CHUNK_MB = Ref{Float64}(0.0)   # 0 = unset (env / default applies)
 _blob_chunk() = max(65_536, round(Int, 2^20 *
