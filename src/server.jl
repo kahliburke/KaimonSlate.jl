@@ -571,6 +571,36 @@ function _teardown_region!(nb::LiveNotebook; kill::Bool = false)
     return nothing
 end
 
+# ── Transfer preview (approve-by-rerun) ─────────────────────────────────────────────────────
+# Rides transfer_binding!'s `on_plan` hook, which fires AFTER the encode and the dedup check —
+# so the preview quotes the EXACT bytes about to cross (an mmap-backed arrow frame prices as
+# its real IPC size; content already on the other side is 0 and never warns). Over the confirm
+# threshold, the cell errors ONCE with the preview and the same (cell, value-version) is
+# remembered as offered — running the cell again proceeds; a new value version asks again.
+# What turns "90 seconds of silent pulling for a typo'd cell" into an informed one-click choice.
+const _XFER_OFFERED = Set{Tuple{String,String,String}}()   # (nb id, cell id, token)
+
+function _xfer_plan_gate(nb::LiveNotebook, cell::Cell, host::AbstractString,
+                         name, token::String)
+    return function (bytes::Int, meta)
+        limit = ReportEngine._xfer_confirm_s()
+        (limit <= 0 || bytes <= 0 || isempty(host)) && return nothing
+        bw = max(ReportEngine._bw_get(host), 1.0e6)
+        secs = bytes / bw
+        secs <= limit && return nothing
+        key = (nb.id, cell.id, token)
+        approved = lock(_REGION_LOCK) do
+            key in _XFER_OFFERED ? (delete!(_XFER_OFFERED, key); true) : (push!(_XFER_OFFERED, key); false)
+        end
+        approved && return nothing
+        error("this cell needs '$name' from the other kernel: $(round(Int, bytes / 2^20)) MB " *
+              "($(meta === nothing ? "" : String(meta.codec) * ", ")exact) ≈ $(round(Int, secs))s " *
+              "at the measured $(round(bw / 1e6; digits = 1)) MB/s to '$host'. Run the cell again " *
+              "to transfer it — or tag the cell `remote` to compute where the data lives, or " *
+              "derive something smaller over there first. (Threshold: $(round(Int, limit))s.)")
+    end
+end
+
 # Ship every cross-boundary input of `cell` to the kernel it is about to run on: each read name
 # whose latest WRITER lives on the other kernel, skipped when the writer's freshness token says
 # the destination already holds that exact run's value (dedup makes a re-ship of an unchanged
@@ -638,7 +668,11 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_remote::Bool 
         end
         # zero-copy materialization is safe when nothing anywhere mutates the name
         zc = !any(o -> r in o.mutates, nb.report.cells)
-        t = ReportEngine.transfer_binding!(src_k, dst_k, string(r); zc = zc)
+        # the wire host prices the preview: whichever side of this transfer is remote
+        whost = src_k.target isa ReportEngine.RemoteTarget ? src_k.target.ssh_host :
+                dst_k.target isa ReportEngine.RemoteTarget ? dst_k.target.ssh_host : ""
+        t = ReportEngine.transfer_binding!(src_k, dst_k, string(r); zc = zc,
+                                           on_plan = _xfer_plan_gate(nb, cell, whost, r, token))
         ReportEngine._rlog("region: '$(r)' → $(dst_remote ? "region" : "main") kernel " *
                            "($(t.bytes) bytes over the wire, $(t.codec)) for cell $(cell.id)")
         lock(_REGION_LOCK) do

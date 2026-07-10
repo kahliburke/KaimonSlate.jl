@@ -721,6 +721,19 @@ function __slate_bind_blob(name::String, hash::String, codec::String; zc::Bool =
     return (; ok = true)
 end
 
+"Cheap size estimate for the namespace global `name` — `(; bytes, type)` via Base.summarysize
+(walks the object, no serialization), or `(; error)`. The transfer-preview input: for numeric
+columns summarysize tracks the arrow/raw blob size closely, so 'this read will move ~160MB'
+can be answered BEFORE paying the encode."
+function __slate_sizeof(name::String)
+    m = _NS[]
+    s = Symbol(name)
+    Base.invokelatest(isdefined, m, s) || return (; error = "no global named '$name'")
+    v = Base.invokelatest(getglobal, m, s)
+    b = try; Base.summarysize(v); catch e; return (; error = first(sprint(showerror, e), 120)); end
+    return (; bytes = b, type = string(typeof(v)))
+end
+
 "Adopt this worker for a notebook (warm-pool handoff): point `PARENT_PROJECT` at the remote
 project dir and swap in a fresh namespace. Loaded packages + the memo store survive — that is
 the warmth a pool worker exists to hold; only the (empty) namespace is discarded."
@@ -1246,6 +1259,7 @@ function tools()
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
+        KaimonGate.GateTool("__slate_sizeof", __slate_sizeof),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_complete", __slate_complete),

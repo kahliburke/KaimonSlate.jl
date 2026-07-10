@@ -271,6 +271,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <span class="rttr"><input id="rtxchunk" class="rtportin" type="number" min="0.1" step="0.5" placeholder="8"> <span class="pddim">MB / round-trip</span></span></div>
   <div class="imrow"><label title="When a notebook attaches to a remote worker, cached results are carried over only when moving them beats recomputing them — and never if one entry would take longer than this to transfer (the cell just recomputes remotely). The sync_memo tool always pushes everything. Blank = default.">Carry time budget</label>
     <span class="rttr"><input id="rtxcarry" class="rtportin" type="number" min="1" step="5" placeholder="30"> <span class="pddim">s / entry on attach</span></span></div>
+  <div class="imrow"><label title="A cell needing a value from the other side of a region boundary pauses with a preview (exact size + estimated time) when the transfer would take longer than this; running the cell again proceeds. 0 disables previews. Blank = default.">Confirm transfers over</label>
+    <span class="rttr"><input id="rtxconfirm" class="rtportin" type="number" min="0" step="5" placeholder="15"> <span class="pddim">s (0 = never ask)</span></span></div>
   <div class="row"><button id="rtclose">Close</button></div>
 </div></div>
 <div class="modal-bg" id="importbg"><div class="modal importmodal">
@@ -415,18 +417,19 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();}).catch(function(){});}
   // Global data-transfer knobs (server-side slate.json; 0/blank = default). The placeholder
   // shows the EFFECTIVE value, so "blank" is never a mystery. Committed together on change.
-  function _xferLoad(){fetch('/api/transfer-settings').then(function(r){return r.json();}).then(function(d){
-    var c=document.getElementById('rtxchunk'),k=document.getElementById('rtxcarry');if(!c||!k)return;
+  function _xferReflect(d){
+    var c=document.getElementById('rtxchunk'),k=document.getElementById('rtxcarry'),f=document.getElementById('rtxconfirm');
+    if(!c||!k||!f||!d)return;
     c.value=d.chunk_mb>0?d.chunk_mb:'';k.value=d.carry_max_s>0?d.carry_max_s:'';
-    c.placeholder=d.effective_chunk_mb;k.placeholder=d.effective_carry_max_s;}).catch(function(){});}
-  function _xferCommit(){var c=document.getElementById('rtxchunk'),k=document.getElementById('rtxcarry');
+    f.value=d.confirm_s>=0?d.confirm_s:'';   // 0 is a real value here (previews off)
+    c.placeholder=d.effective_chunk_mb;k.placeholder=d.effective_carry_max_s;f.placeholder=d.effective_confirm_s;}
+  function _xferLoad(){fetch('/api/transfer-settings').then(function(r){return r.json();}).then(_xferReflect).catch(function(){});}
+  function _xferCommit(){var c=document.getElementById('rtxchunk'),k=document.getElementById('rtxcarry'),f=document.getElementById('rtxconfirm');
     fetch('/api/transfer-settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chunk_mb:c.value||0,carry_max_s:k.value||0})})
-      .then(function(r){return r.json();}).then(function(d){
-        c.value=d.chunk_mb>0?d.chunk_mb:'';k.value=d.carry_max_s>0?d.carry_max_s:'';
-        c.placeholder=d.effective_chunk_mb;k.placeholder=d.effective_carry_max_s;}).catch(function(){});}
-  (function(){var c=document.getElementById('rtxchunk'),k=document.getElementById('rtxcarry');
-    if(c)c.onchange=_xferCommit;if(k)k.onchange=_xferCommit;})();
+      body:JSON.stringify({chunk_mb:c.value||0,carry_max_s:k.value||0,confirm_s:f.value===''?-1:f.value})})
+      .then(function(r){return r.json();}).then(_xferReflect).catch(function(){});}
+  (function(){['rtxchunk','rtxcarry','rtxconfirm'].forEach(function(id){
+    var el=document.getElementById(id);if(el)el.onchange=_xferCommit;});})();
   function openRemotes(){_rtLastOK='';rtSteps.innerHTML='';
     rtHost.value='';var pp=document.getElementById('rtport'),ps=document.getElementById('rtstream');if(pp)pp.value='';if(ps)ps.value='';
     _rtSyncPorts();rtRenderHosts();_xferLoad();remotesBg.classList.add('show');rtHost.focus();}

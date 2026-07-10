@@ -286,6 +286,18 @@ end
 "Configured boot-carry per-entry ceiling in seconds; 0.0 = unset (env / 30s default applies)."
 carry_max_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "carry_max_s", ""))), 0.0)
 
+"Configured transfer-preview threshold (s); -1 = unset (env / 15s default), 0 = previews off."
+xfer_confirm_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "xfer_confirm_s", ""))), -1.0)
+
+"Persist the transfer-preview threshold and apply it live. -1 clears to default; 0 disables."
+function set_xfer_confirm_s!(s::Real)
+    v = Float64(s) < 0 ? -1.0 : Float64(s)
+    ReportEngine.XFER_CONFIRM_S[] = v
+    cfg = _slate_config(); v >= 0 ? (cfg["xfer_confirm_s"] = v) : delete!(cfg, "xfer_confirm_s")
+    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist preview-threshold setting" exception = e; end
+    return v
+end
+
 """
     set_carry_max_s!(s) -> Float64
 
@@ -349,12 +361,13 @@ function _load_slate_config!()
     ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
     ReportEngine.BLOB_CHUNK_MB[] = blob_chunk_mb()
     ReportEngine.CARRY_MAX_S[] = carry_max_s()
+    ReportEngine.XFER_CONFIRM_S[] = xfer_confirm_s()
     NotebookServer.PARALLEL_DEFAULT[] = parallel_default()
     NotebookServer.RUNON_DEFAULT[] = run_location_default()
     # Persist hook for the browser Settings panel's transfer knobs (route in server_complete.jl —
     # NotebookServer has no JSON-config ownership, same pattern as _RUNON_PERSIST).
-    NotebookServer._XFER_PERSIST[] = function (chunk_mb, carry_s)
-        set_blob_chunk_mb!(chunk_mb); set_carry_max_s!(carry_s)
+    NotebookServer._XFER_PERSIST[] = function (chunk_mb, carry_s, confirm_s)
+        set_blob_chunk_mb!(chunk_mb); set_carry_max_s!(carry_s); set_xfer_confirm_s!(confirm_s)
         return nothing
     end
     # Install the persist hook so set_runon_default! (from the browser route / gate tool) writes slate.json.

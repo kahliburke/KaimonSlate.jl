@@ -1076,6 +1076,14 @@ const CARRY_MAX_S = Ref{Float64}(0.0)     # 0 = unset (env / default applies)
 _carry_ceiling_s() = CARRY_MAX_S[] > 0 ? CARRY_MAX_S[] :
     something(tryparse(Float64, get(ENV, "KAIMONSLATE_CARRY_MAX_S", "")), 30.0)
 
+# Region-boundary transfer preview threshold (seconds): a cell whose pending boundary transfer
+# is estimated to take longer than this ERRORS with the preview (what/size/ETA) on its first
+# run; running the cell again proceeds — approve-by-rerun. 15s default; 0 disables previews.
+# Same precedence tiers as the other transfer knobs.
+const XFER_CONFIRM_S = Ref{Float64}(-1.0)  # <0 = unset (env / default applies); 0 = disabled
+_xfer_confirm_s() = XFER_CONFIRM_S[] >= 0 ? XFER_CONFIRM_S[] :
+    something(tryparse(Float64, get(ENV, "KAIMONSLATE_XFER_CONFIRM_S", "")), 15.0)
+
 # ── Per-host upstream-bandwidth memory (the transfer-vs-recompute input) ─────────────────────
 # Every push measures its own rate over 8 MiB chunks and stamps it here (EMA so one anomalous
 # push doesn't own the estimate). Host-level, not per-worker — the link is the physics. The
@@ -1244,7 +1252,8 @@ Ship ONE blob from the LOCAL CAS to a worker's store over its data channel (dedu
 half; `pull_blob!` is the reverse. Returns bytes actually sent (0 = deduped).
 """
 function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
-                    server_key::AbstractString = "", timeout_ms::Int = 20_000)
+                    server_key::AbstractString = "", timeout_ms::Int = 20_000,
+                    on_plan = nothing, meta = nothing)
     root = joinpath(_slate_cache_dir(), "memo")
     p = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
     isfile(p) || error("push_blob!: no local blob $hash")
@@ -1261,7 +1270,11 @@ function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
         v2 = req(UInt8['V']) == "2"
         want = want_hashes(req, [String(hash)])
-        isempty(want) && return 0                          # already there
+        if isempty(want)                                   # already there
+            on_plan === nothing || on_plan(0, meta)
+            return 0
+        end
+        on_plan === nothing || on_plan(Int(filesize(p)), meta)   # exact bytes; may throw (preview gate)
         return _send_blob!(Z, sock, req, p, String(hash), v2)
     finally
         try; Z.close(sock); catch; end
@@ -1395,19 +1408,28 @@ end
 # hub's store, so its leg is free), and the destination binds it (`__slate_bind_blob`). Content
 # addressing gives dedup at every hop — re-shipping an unchanged value costs one round-trip.
 # Returns (; bytes, codec) — bytes MOVED over a network (0 = deduped / local↔local).
-function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false)
+# `on_plan(bytes_to_move, meta)` — called once per WIRE leg after the encode and the dedup
+# check, with the EXACT bytes that will cross (0 = content already on the other side). May
+# throw to abort before anything moves: the transfer-preview gate lives there, so its numbers
+# are the encoded blob's, not a summarysize guess — mmap-backed arrow frames price correctly
+# and dedup'd content never triggers a preview.
+function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, on_plan = nothing)
     meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = 600.0)
     err = try; getproperty(meta, :error); catch; nothing; end
     err === nothing || error("transfer '$name': $err")
     h = String(meta.hash); codec = String(meta.codec)
+    root = joinpath(_slate_cache_dir(), "memo")
     moved = 0
     if src_k.target isa RemoteTarget                       # remote source → land the blob locally
+        have = isfile(joinpath(root, "blobs", "sha256", h[1:2], h))
+        on_plan === nothing || on_plan(have ? 0 : Int(meta.bytes), meta)
         ep = _data_endpoint!(src_k.target, src_k)
         moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key)
     end
     if dst_k.target isa RemoteTarget                       # remote destination → ship it there
         ep = _data_endpoint!(dst_k.target, dst_k)
-        moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key)
+        moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key,
+                            on_plan = src_k.target isa RemoteTarget ? nothing : on_plan, meta = meta)
     end
     r = _tool(dst_k, "__slate_bind_blob", Dict{String,Any}(
         "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = 600.0)

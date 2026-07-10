@@ -539,18 +539,23 @@ function _make_router(h::Hub)
     # effective values are reported alongside so the UI can show what "default" currently means.
     _xfer_json() = _json(Dict(
         "chunk_mb" => ReportEngine.BLOB_CHUNK_MB[], "carry_max_s" => ReportEngine.CARRY_MAX_S[],
+        "confirm_s" => ReportEngine.XFER_CONFIRM_S[],
         "effective_chunk_mb" => round(ReportEngine._blob_chunk() / 2^20; digits = 2),
-        "effective_carry_max_s" => ReportEngine._carry_ceiling_s()))
+        "effective_carry_max_s" => ReportEngine._carry_ceiling_s(),
+        "effective_confirm_s" => ReportEngine._xfer_confirm_s()))
     HTTP.register!(router, "GET", "/api/transfer-settings", _ -> _xfer_json())
     HTTP.register!(router, "POST", "/api/transfer-settings", req -> begin
         b = _body(req)
         chunk = max(0.0, something(tryparse(Float64, string(get(b, "chunk_mb", ""))), 0.0))
         carry = max(0.0, something(tryparse(Float64, string(get(b, "carry_max_s", ""))), 0.0))
+        # confirm: -1 = unset (default applies); 0 = explicitly disabled — the sentinel matters
+        confirm = something(tryparse(Float64, string(get(b, "confirm_s", "-1"))), -1.0)
         p = _XFER_PERSIST[]
         if p !== nothing
-            try; p(chunk, carry); catch e; @warn "slate: could not persist transfer settings" exception = e; end
+            try; p(chunk, carry, confirm); catch e; @warn "slate: could not persist transfer settings" exception = e; end
         else                                             # standalone hub: live-only, no slate.json
             ReportEngine.BLOB_CHUNK_MB[] = chunk; ReportEngine.CARRY_MAX_S[] = carry
+            ReportEngine.XFER_CONFIRM_S[] = confirm
         end
         _xfer_json()
     end)
