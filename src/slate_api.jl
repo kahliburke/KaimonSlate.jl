@@ -360,6 +360,10 @@ _api_categories() = unique(String[e.category for e in SLATE_API])
 function slate_api_entry(name::AbstractString)
     n = lowercase(strip(String(name)))
     isempty(n) && return nothing
+    # A cross-reference from the docs UI qualifies a Slate helper under its pseudo-module — the ref
+    # arrives as "Slate.slate_table". Drop that qualifier so it resolves to the registry entry rather
+    # than falling through to a live `Slate.slate_table` binding lookup (which never exists).
+    n = String(chopprefix(n, "slate."))
     for e in SLATE_API
         lowercase(e.name) == n && return e
     end
