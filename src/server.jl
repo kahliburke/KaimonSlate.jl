@@ -504,11 +504,18 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
             ids !== nothing && cell.id in ids ?
                 (delete!(ids, cell.id); isempty(ids) && delete!(_FORCE_RUN, nb.id); true) : false
         end
+        # Writes no OTHER cell reads — eligible for display-object elision at store time (the
+        # worker decides by TYPE: a Makie Figure nobody reads stores as its wire image only, not
+        # a multi-MB scene graph). Passed at restore time too: an entry that elided a name which
+        # has SINCE gained a reader is treated as a miss, so the re-run re-stores the real object.
+        unread = String[string(w) for w in cell.writes
+                        if !any(o -> o !== cell && w in o.reads, nb.report.cells)]
         m = (key = ReportEngine._memo_key(nb.report, cell),
              names = String[string(w) for w in cell.writes],
              threshold = ReportEngine._MEMO_THRESHOLD_MS,
              force = frc,
-             always = (:cache in cell.flags))   # `cache` tag → persist regardless of runtime
+             always = (:cache in cell.flags),   # `cache` tag → persist regardless of runtime
+             unread = unread)
         (s, cell.src_hash, m)
     end
     out = try

@@ -139,10 +139,12 @@ function slate_memo_entries(; name::AbstractString = "")
         bytes = sum(Int(get(b, "bytes", 0)) for b in binds; init = 0)
         w = get(d, "wire", nothing)
         w isa AbstractDict && (bytes += Int(get(w, "bytes", 0)))
+        elided = join((String(get(e, "name", "")) for e in get(d, "elided", Any[]) if e isa AbstractDict), ", ")
         push!(out, (key = replace(basename(f), r"\.toml$" => ""),
                     names = join(nms, ", "),
                     bytes = bytes,
                     blobs = join((first(String(get(b, "blob", "")), 8) for b in binds), ", "),
+                    elided = elided,   # display objects stored as wire image only (see _memo_store)
                     created = Int(get(d, "created", 0))))
     end
     return out

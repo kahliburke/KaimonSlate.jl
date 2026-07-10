@@ -208,11 +208,19 @@ end
 # (MemoStore, fmt 3) drops pre-manifest entries; those miss once, re-run, and re-store. Everything
 # is DECODED before anything is ASSIGNED, so a missing/corrupt blob (partial gc, a concurrent
 # worker's eviction) is a clean miss, never a half-mutated namespace. Returns nothing (miss) or the wire.
-function _memo_restore(cellkey::String)
+function _memo_restore(cellkey::String; unread::Vector{String} = String[])
     _MEMO_OK || return nothing
     root = _memo_dir(); key = _memo_fullkey(cellkey)
     mf = MemoStore.read_manifest(root, key)
     mf === nothing && return nothing
+    # An entry that ELIDED a display object (stored the wire image, not the object — see
+    # `_memo_store`) is only faithful while that name stays UNREAD. A reader added since means the
+    # real object is needed → treat as a miss; the re-run re-stores WITH the object (its name is no
+    # longer in `unread`). Self-healing, no key games.
+    for e in get(mf, "elided", Any[])
+        e isa AbstractDict || return nothing
+        String(get(e, "name", "")) in unread || return nothing
+    end
     decode(h) = try
         MemoStore.with_blob(io -> Serialization.deserialize(io), root, String(h))
     catch
@@ -246,11 +254,28 @@ end
 # genuine re-run would leave it equally undefined, so the entry stays faithful. A DEFINED value
 # that won't serialize aborts the whole entry (a restore missing it would NOT be faithful); its
 # already-written sibling blobs are simply unreferenced and swept by a later gc.
-function _memo_store(cellkey::String, names::Vector{String}, wire)
+# Display objects (Makie figures/scenes, Plots plots) are the pathological Serialization case:
+# a 14 MB scene graph and seconds to serialize for a chart whose RENDERED image already rides the
+# wire blob. When nothing downstream reads the binding, the object is pure dead weight — store the
+# pixels, elide the object. Type check by ROOT MODULE NAME so the dep-light worker never needs a
+# plotting package loaded to decide.
+function _is_display_object(v)
+    T = typeof(v)
+    nameof(T) in (:Figure, :FigureAxisPlot, :Scene, :Plot) || return false
+    mod = parentmodule(T)
+    while parentmodule(mod) !== mod
+        mod = parentmodule(mod)
+    end
+    return nameof(mod) in (:Makie, :CairoMakie, :GLMakie, :WGLMakie, :RPRMakie, :Plots, :PlotlyBase, :PlotlyJS)
+end
+
+function _memo_store(cellkey::String, names::Vector{String}, wire;
+                     unread::Vector{String} = String[])
     _MEMO_OK || return false
     m = _NS[]
     root = _memo_dir(); key = _memo_fullkey(cellkey)
     entries = Dict{String,Any}[]
+    elided = Dict{String,Any}[]
     # Read each declared write at the LATEST world age. A global the cell defines for the FIRST
     # time this run lives in a binding partition NEWER than this method's captured (older) world
     # age, so a naive `isdefined`/`getglobal` here would not observe it — and we'd wrongly skip
@@ -265,6 +290,11 @@ function _memo_store(cellkey::String, names::Vector{String}, wire)
             continue
         end
         v = Base.invokelatest(getglobal, m, s)
+        if nm in unread && _is_display_object(v)
+            push!(elided, Dict{String,Any}("name" => nm, "type" => string(typeof(v))))
+            @info "slate memo: display object elided (wire image only)" cell = cellkey name = nm
+            continue
+        end
         h, n = try
             MemoStore.put_blob(io -> Serialization.serialize(io, v), root)
         catch e
@@ -275,12 +305,14 @@ function _memo_store(cellkey::String, names::Vector{String}, wire)
     end
     try
         wh, wn = MemoStore.put_blob(io -> Serialization.serialize(io, wire), root)
-        MemoStore.write_manifest(root, key, Dict{String,Any}(
+        mf = Dict{String,Any}(
             "srckey" => String(cellkey),            # the server half of the key (diagnostics)
             "created" => round(Int, time()),
             "julia" => string(VERSION),
             "bindings" => entries,
-            "wire" => Dict{String,Any}("codec" => "jls", "blob" => wh, "bytes" => wn)))
+            "wire" => Dict{String,Any}("codec" => "jls", "blob" => wh, "bytes" => wn))
+        isempty(elided) || (mf["elided"] = elided)  # restore checks these against CURRENT readers
+        MemoStore.write_manifest(root, key, mf)
         _memo_gc()
         return true
     catch e
@@ -298,12 +330,13 @@ end
 # same global are never in flight at once, so concurrent evals only ever touch disjoint globals.
 function _eval_one(source::String, filename::String, memo_key::String,
                    memo_names::Vector{String}, memo_threshold::Float64,
-                   memo_force::Bool = false, memo_always::Bool = false)
+                   memo_force::Bool = false, memo_always::Bool = false,
+                   memo_unread::Vector{String} = String[])
     cid = replace(filename, r"^cell:" => "")
     # `memo_force` (the ▶ play button): an explicit run request — never satisfy it from the cache.
     # The fresh result still stores below, replacing the entry.
     if !isempty(memo_key) && !memo_force
-        w = _memo_restore(memo_key)
+        w = _memo_restore(memo_key; unread = memo_unread)
         if w !== nothing
             @info "slate memo: restored (no recompute)" cell = cid
             return merge(w, (memo = "restored",))   # tell the server this run came from the durable cache
@@ -335,7 +368,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # the serialize cost).
     if !isempty(memo_key) && r.exception === nothing &&
        (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
-        if _memo_store(memo_key, memo_names, r)
+        if _memo_store(memo_key, memo_names, r; unread = memo_unread)
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
             return merge(r, (memo = "stored",))
         end
@@ -350,13 +383,14 @@ persist it after a run that exceeds `memo_threshold` ms."
 function __slate_eval(source::String; filename::String = "string",
                      memo_key::String = "", memo_names::Vector{String} = String[],
                      memo_threshold::Float64 = 0.0, memo_force::Bool = false,
-                     memo_always::Bool = false)
+                     memo_always::Bool = false, memo_unread::Vector{String} = String[])
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
     lock(_CANCEL_LOCK) do; _RUNNING_TASKS[cid] = current_task(); end
     try
-        return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force, memo_always)
+        return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force,
+                         memo_always, memo_unread)
     finally
         lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
     end
@@ -465,7 +499,8 @@ function __slate_eval_batch(cells; run_id::String = "", npool::Int = 0)
                   Vector{String}(String[String(x) for x in _cell_get(c, "memo_names", String[])]),
                   Float64(_cell_get(c, "memo_threshold", 0.0)),
                   _cell_get(c, "memo_force", false) === true,
-                  _cell_get(c, "memo_always", false) === true)
+                  _cell_get(c, "memo_always", false) === true,
+                  Vector{String}(String[String(x) for x in _cell_get(c, "memo_unread", String[])]))
     end
     # Track each task so __slate_cancel can interrupt it; drop it once it finishes.
     onspawn = (id, t) -> lock(_CANCEL_LOCK) do; _RUNNING_TASKS[id] = t; end
