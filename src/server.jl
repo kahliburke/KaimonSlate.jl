@@ -624,6 +624,30 @@ const _PARALLEL_CANCEL = Dict{String,Bool}()
 # normally and may restore when their inputs are unchanged.
 const _FORCE_RUN = Dict{String,Set{String}}()
 
+# Preempt superseded in-flight cells: an edit/delete of a RUNNING cell makes the computation in
+# flight worthless — its result is already version-guarded away on completion (the src_hash compare
+# in `_eval_one!`/`server_celldone`) — so all it can do is burn worker time and delay the fresh
+# run. Best-effort interrupt of just those cells' evaluator tasks; NEVER a correctness dependency
+# (a tight allocation-free loop has no safepoint and won't stop — discard-on-completion remains the
+# backstop). Exclusions: a method/type/macro-DEFINING cell is never preempted (a half-applied
+# method table is worse than a wasted run), nor a graphics cell (an interrupt mid-plot can wedge
+# Makie's display stack). Callers hold nb.lock and pass the PRE-EDIT cells (in-flight source/state).
+_preempt_victims(cells) = String[c.id for c in cells
+                                 if c.kind == CODE && c.state == RUNNING &&
+                                    !_cell_defines(c) && !_uses_shared_graphics(c.source)]
+function _preempt_superseded!(nb::LiveNotebook, cells)
+    victims = _preempt_victims(cells)
+    isempty(victims) && return nothing
+    n = try
+        ReportEngine.cancel_cells(nb.kernel, nb.report, victims)
+    catch e
+        @debug "slate: preempt failed (discard-on-completion still applies)" exception = e
+        0
+    end
+    n > 0 && @info "slate: preempted superseded in-flight cells" notebook = nb.id cells = join(victims, ",")
+    return nothing
+end
+
 # Build the parallel-batch scheduler specs for `code` cells (document order). Plotting cells share
 # Makie's non-thread-safe globals (theme / current-figure / display stack), invisible to dataflow
 # analysis — so they get a synthetic shared write (`_GRAPHICS_SENTINEL`), making par_blockers serialise

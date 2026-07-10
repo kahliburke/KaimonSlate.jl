@@ -30,6 +30,18 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         @test !NS._cell_defines(cell("a = 1\nb = a + 2\nc = b * 3"))  # several bindings, no defs
     end
 
+    @testset "_preempt_victims: only running pure-compute cells are interruptible" begin
+        running(src) = (c = cell(src); c.state = RE.RUNNING; c)
+        # a running compute cell is a victim; the guards must hold everything else back
+        @test NS._preempt_victims((running("x = sum(rand(10^8))"),)) == ["c"]
+        @test isempty(NS._preempt_victims((cell("x = 1"),)))                       # not running
+        @test isempty(NS._preempt_victims((running("f(x) = x + 1"),)))             # method def — never
+        @test isempty(NS._preempt_victims((running("struct S; a; end"),)))         # type def — never
+        @test isempty(NS._preempt_victims((running("fig = Figure(); lines!(ax, x, y)"),)))  # graphics — never
+        # in-process kernel: cancel_cells is a no-op (nothing to preempt)
+        @test RE.cancel_cells(RE.InProcessKernel(), RE.Report("nb", "nb"), ["c"]) == 0
+    end
+
     @testset "parallel default + per-notebook override" begin
         r = RE.Report("nb", "nb")
         nb = NS.LiveNotebook("nb", "", r, RE.InProcessKernel(), 0, String[], String[],

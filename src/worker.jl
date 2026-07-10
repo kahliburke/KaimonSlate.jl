@@ -354,6 +354,27 @@ function __slate_cancel(; run_id::String = "")
     return n
 end
 
+"Interrupt ONLY the named cells' in-flight evaluator tasks — superseded-edit preemption. An
+edited/deleted cell's old-source run can only be discarded on completion (the server's src_hash
+version guard), so stop burning worker time on it. Unknown/finished ids are no-ops; unlike
+`__slate_cancel` this never touches `_BATCH_CANCEL` (unstarted siblings still run). Returns the
+number interrupted. (`ids` is a KEYWORD arg — see `__slate_macroexpand`'s raw-Dict caveat.)"
+function __slate_cancel_cells(; ids::Vector = Any[])
+    n = 0
+    lock(_CANCEL_LOCK) do
+        for raw in ids
+            t = get(_RUNNING_TASKS, String(raw), nothing)
+            t === nothing && continue
+            try
+                istaskdone(t) || (schedule(t, InterruptException(); error = true); n += 1)
+            catch
+            end
+        end
+    end
+    n > 0 && @info "slate cancel: preempted superseded cells" count = n
+    return n
+end
+
 # `cells` is a Vector{Dict} (id/source/deps/reads/writes/opaque/memo fields per cell). NOTE: this
 # currently depends on the gate delivering structured (non-scalar) tool-call arguments intact — see
 # GATE_STRUCTURED_ARGS_ISSUE.md. Until that fabric fix lands, the batch arrives empty and the server
@@ -916,6 +937,7 @@ function tools()
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),
         KaimonGate.GateTool("__slate_cancel", __slate_cancel),
+        KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),

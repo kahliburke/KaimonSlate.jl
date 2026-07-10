@@ -107,6 +107,31 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
         @test Set(seen) == Set([("a", "v:a"), ("b", "v:b")])
     end
 
+    @testset "run_scheduled: an in-flight task can be interrupted via onspawn (preemption)" begin
+        # Mirrors the worker's _RUNNING_TASKS registry: onspawn hands back each spawned task so a
+        # superseded cell's eval can be interrupted (__slate_cancel_cells). The throw is captured
+        # as that cell's result and the rest of the batch still drains — an InterruptException in
+        # one evaluator must never kill the scheduler.
+        cells = [pc("slow"; writes = [:a]), pc("quick"; writes = [:b])]
+        tasks = Dict{String,Task}()
+        lk = ReentrantLock()
+        started = Channel{Bool}(1)
+        evalfn = function (id)
+            if id == "slow"
+                put!(started, true)
+                sleep(30)                     # interrupted long before this finishes
+            end
+            return "done:$id"
+        end
+        runner = Threads.@spawn run_scheduled(cells, 2, evalfn;
+                                              onspawn = (id, t) -> (lock(lk) do; tasks[id] = t; end))
+        take!(started)                        # the slow cell is definitely in flight
+        schedule(tasks["slow"], InterruptException(); error = true)
+        res = fetch(runner)
+        @test res["slow"] isa InterruptException   # captured as the cell's result, not rethrown
+        @test res["quick"] == "done:quick"         # siblings unaffected; batch drained
+    end
+
     @testset "run_scheduled: onspawn hands back a Task per cell (cancellation hook)" begin
         cells = [pc("a"; writes = [:x]), pc("b"; writes = [:y])]
         spawned = Dict{String,Task}()

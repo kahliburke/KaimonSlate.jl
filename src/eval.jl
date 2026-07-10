@@ -255,6 +255,16 @@ module_help(::InProcessKernel, report::Report, name::AbstractString) =
     module_help(report_module(report), name)
 
 """
+    cancel_cells(kernel, report, ids) -> Int
+
+Best-effort interrupt of the named cells' IN-FLIGHT evaluator tasks (superseded-edit
+preemption — see `_preempt_superseded!`). Never a correctness dependency: the src-hash version
+guard still discards a stale result on completion. In-process evals are synchronous with their
+caller — nothing to preempt — so the base method no-ops; the gate kernel forwards to its worker.
+"""
+cancel_cells(::Kernel, ::Report, ids) = 0
+
+"""
     macroexpand_cells(kernel, report, srcs) -> Dict{String,String}
 
 Macro-expand each cell source (`id => source`) in the namespace where cells evaluate —

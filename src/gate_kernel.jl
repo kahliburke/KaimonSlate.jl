@@ -622,6 +622,20 @@ function module_help(k::GateKernel, report::Report, name::AbstractString)
     return Dict{String,Any}(String(k2) => v for (k2, v) in wire)
 end
 
+# Short timeout: this rides inside edit paths holding nb.lock — a stalled worker must not wedge
+# the editor for the default 120 s. No prepare!: no worker ⇒ nothing is in flight to cancel.
+function cancel_cells(k::GateKernel, report::Report, ids)
+    k.conn === nothing && return 0
+    wire = try
+        _tool(k, "__slate_cancel_cells",
+              Dict{String,Any}("ids" => String[String(i) for i in ids]); timeout = 5.0)
+    catch e
+        @debug "slate: cancel_cells gate call failed" exception = e
+        return 0
+    end
+    return wire isa Integer ? Int(wire) : 0
+end
+
 function macroexpand_cells(k::GateKernel, report::Report, srcs::AbstractDict)
     prepare!(k, report)
     wire = try

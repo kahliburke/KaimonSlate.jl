@@ -771,6 +771,7 @@ end
 function delete_cell!(nb::LiveNotebook, id::AbstractString)
     i = _index_of(nb.report.cells, id); i === nothing && return nb
     _snapshot!(nb; label = "delete $id")
+    _preempt_superseded!(nb, (nb.report.cells[i],))   # deleting a RUNNING cell orphans its eval
     deleteat!(nb.report.cells, i)
     _commit_reorder!(nb)   # recomputes only the deleted cell's (now-broken) dependents, if any
 end
@@ -788,6 +789,7 @@ function delete_cells!(nb::LiveNotebook, ids; verb::AbstractString = "delete")
     idxs = sort!([i for (i, c) in enumerate(cells) if c.id in idset])
     isempty(idxs) && return nb
     _snapshot!(nb; label = _op_label(verb, [cells[i].id for i in idxs]))
+    _preempt_superseded!(nb, [cells[i] for i in idxs])   # deleting RUNNING cells orphans their evals
     for i in Iterators.reverse(idxs)
         deleteat!(cells, i)
     end

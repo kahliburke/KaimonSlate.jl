@@ -693,7 +693,10 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         cells = nb.report.cells
         idx = findfirst(c -> c.id == id, cells)
         idx === nothing && return
-        cells[idx].source == String(source) || _snapshot!(nb)
+        if cells[idx].source != String(source)
+            _snapshot!(nb)
+            _preempt_superseded!(nb, (cells[idx],))   # a RUNNING old-source eval is now worthless
+        end
         # Build the new full source with this cell swapped, WITHOUT disturbing report state first —
         # otherwise update_source! compares the new source to itself, sees "unchanged", and never
         # marks the cell stale (so it never re-runs).
