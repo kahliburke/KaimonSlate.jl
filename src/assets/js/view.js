@@ -147,7 +147,7 @@ function cellHeaderInner(c) {
     (c.dupdefs && c.dupdefs.length
       ? `<span class="dupwarn" onclick="window.dupInfo(event,'${c.id}')" title="defined in more than one cell — click for details">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
     (c.backrefs && c.backrefs.length
-      ? `<span class="dupwarn" onclick="window.backrefInfo(event,'${c.id}')" title="used above its definition — click for details">⇅ ${c.backrefs.map(_esc).join(', ')}</span>` : '') +
+      ? `<span class="dupwarn" onclick="window.backrefInfo(event,'${c.id}')" title="used above its definition — click for details">⤵️ ${c.backrefs.map(_esc).join(', ')}</span>` : '') +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +
@@ -446,7 +446,7 @@ function dupInfo(ev, cellId) {
 }
 window.dupInfo = dupInfo;
 
-// Click the ⇅ backref chip → a popup naming each variable this cell uses ABOVE where it's defined.
+// Click the ⤵️ backref chip → a popup naming each variable this cell uses ABOVE where it's defined.
 // Document order is execution order, so the read silently sees a missing (first run) or previous-run
 // value, and editing the definer never recomputes this cell. Click the definer id to jump to it.
 function backrefInfo(ev, cellId) {
