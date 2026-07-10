@@ -39,6 +39,15 @@ slate                 # start (or attach to) the notebook hub + a status TUI
 slate my_analysis.jl  # also open that notebook in the browser (created if missing)
 ```
 
+<div align="center">
+
+<img src="https://github.com/kahliburke/KaimonSlate.jl/releases/download/docs-assets/slate-tui.gif" alt="The slate status TUI — server state, hub URL, Kaimon-extension status, and a live table of open notebooks with their cell / running / stale / error counts" width="640"/>
+
+*The `slate` status TUI: server state, the hub URL, Kaimon-extension status, and a live table of
+your open notebooks. `↑↓`/`enter` opens one, `o` the hub index, `q` quits.*
+
+</div>
+
 ### As a Kaimon extension (recommended)
 
 The full experience — per-notebook gate workers **and** the AI agent. The first time you run `slate`
