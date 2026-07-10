@@ -103,8 +103,9 @@ _memo_cap() = (_MEMO_CAP[] > 0 ? _MEMO_CAP[] : (_MEMO_CAP[] =
         round(Int, v * 1024^3) : _default_memo_cap())))
 function _memo_dir()
     if _MEMO_DIR[] == ""
-        d = joinpath(get(ENV, "HOME", tempdir()), ".cache", "kaimon", "slate-memo")
-        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimon-slate-memo"); mkpath(d); end
+        # Respect XDG_CACHE_HOME (append "kaimonslate" under it — same rationale as Kaimon's cache_dir)
+        d = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate", "memo")
+        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-memo"); mkpath(d); end
         _MEMO_DIR[] = d
     end
     return _MEMO_DIR[]
@@ -124,6 +125,11 @@ function _memo_src_dirs()
             if isfile(man)
                 for m in eachmatch(r"(?m)^\s*path\s*=\s*\"([^\"]+)\"", read(man, String))
                     pd = String(m.captures[1])
+                    # `_replicate_env!` rewrites remote dev paths as literal "~/…" — without
+                    # expanduser the remote worker can't FIND the synced source it should digest,
+                    # so its src_digest fell to the empty-constant while the local one didn't:
+                    # divergent fullkeys, and every transferred memo entry missed (found live).
+                    startswith(pd, "~") && (pd = expanduser(pd))
                     isabspath(pd) || (pd = normpath(joinpath(base, pd)))
                     d = joinpath(pd, "src"); isdir(d) && push!(dirs, d)
                 end
@@ -178,19 +184,33 @@ function _src_digest()
     return h
 end
 
-# Digest of the resolved Manifest (package versions/tree-hashes); cached by mtime. HOST-PORTABLE:
-# dev-dep `path = "…"` lines are EXCLUDED — `_replicate_env!` rewrites them to the host's rsync'd
-# copies, so hashing raw bytes would fork the digest across hosts (and kill every transferred
-# entry) while the version/git-tree-sha1 lines still pin all behavior that matters.
+# Digest of the notebook env's DIRECT deps → resolved versions (Project [deps] minus the
+# worker-infra adds KaimonGate/Revise). HOST-PORTABLE by construction: the remote worker env is
+# the notebook env RESOLVED TOGETHER with that infra, so whole-Manifest bytes can never match
+# across hosts (found live: local 4239… vs remote f48c… made every transferred entry miss).
+# The user's own name→version/tree-sha pairs are the behavior-pinning, host-invariant core.
 const _MANIFEST_DIGEST = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
+const _INFRA_DEPS = ("KaimonGate", "Revise", "ExpressionExplorer")   # mirror _WORKER_INFRA_PKGS (server_history.jl)
 function _manifest_digest()
     try
         proj = Base.active_project(); proj === nothing && return UInt(0)
         man = joinpath(dirname(proj), "Manifest.toml"); isfile(man) || return UInt(0)
         mt = Float64(mtime(man))
         _MANIFEST_DIGEST[][1] == mt && return _MANIFEST_DIGEST[][2]
-        s = replace(read(man, String), r"(?m)^\s*path\s*=\s*\".*\"\s*$" => "")
-        d = hash(s); _MANIFEST_DIGEST[] = (mt, d); return d
+        # Real TOML parsing (via MemoStore's stdlib import — the memo guard covers us): the
+        # notebook's direct deps from Project [deps], each mapped to its resolved
+        # version/tree-sha in the Manifest (format-2 layout: top-level "deps" → name → [entry]).
+        pdeps = sort!([d for d in keys(get(MemoStore.TOML.parsefile(proj), "deps", Dict{String,Any}()))
+                       if !(d in _INFRA_DEPS)])
+        mdeps = get(MemoStore.TOML.parsefile(man), "deps", Dict{String,Any}())
+        h = UInt(0x4d616e00)
+        for dn in pdeps
+            e = get(mdeps, dn, nothing)
+            ver = (e isa Vector && !isempty(e) && e[1] isa AbstractDict) ?
+                  string(get(e[1], "version", ""), get(e[1], "git-tree-sha1", "")) : ""
+            h = hash((dn, ver), h)
+        end
+        _MANIFEST_DIGEST[] = (mt, h); return h
     catch; return UInt(0); end
 end
 
@@ -344,6 +364,9 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
         wh, wn = MemoStore.put_blob(io -> Serialization.serialize(io, wire), root)
         mf = Dict{String,Any}(
             "srckey" => String(cellkey),            # the server half of the key (diagnostics)
+            # what this entry COST to compute — the transfer-vs-recompute heuristic's key input
+            # (bytes are per-binding below; bandwidth comes from the data channel measuring itself)
+            "ms" => (hasproperty(wire, :duration_ms) ? round(Float64(wire.duration_ms); digits = 1) : 0.0),
             "created" => round(Int, time()),
             "julia" => string(VERSION),
             "bindings" => entries,

@@ -36,7 +36,12 @@ import Dates
 # remote spawn undebuggable. So EVERY step of the remote path also appends here, verbatim, with a
 # timestamp. This file is the answer to "where is the record of what happened?" — always on disk,
 # never dependent on how the host logger renders. Read it with `slate.diag` / the worker-log tool.
-const _REMOTE_LOG = joinpath(homedir(), ".cache", "kaimonslate", "remote.log")
+# Slate's LOCAL cache root — respects XDG_CACHE_HOME (append "kaimonslate" under it rather than
+# using it verbatim; same rationale as Kaimon's cache_dir). The REMOTE layout stays literal
+# ".cache/kaimonslate" ($HOME-relative over ssh) — the remote's XDG env isn't cheaply knowable.
+_slate_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate")
+
+const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
 
 function _rlog(msg::AbstractString)
     try
@@ -183,7 +188,7 @@ end
 # Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
 function _ssh_mux_opts()
     get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
-    d = joinpath(homedir(), ".cache", "kaimonslate", "mux")
+    d = joinpath(_slate_cache_dir(), "mux")
     try; mkpath(d); catch; return String[]; end
     return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=120"]
 end
@@ -327,11 +332,14 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     #    records git deps by url+tree-hash → they clone), rsync any dev'd deps' local sources + rewrite
     #    their Manifest paths to the remote copies, then instantiate. Covers registry, GitHub, and dev'd
     #    packages + the project's own /src. (Data files are out of scope for now.)
-    # In every case the worker's env (t.project) ends up with KaimonGate — plus Revise IF the user uses it
-    # locally — resolved TOGETHER with whatever else is there (one env, no stacked-env skew).
+    # In every case the worker's env (t.project) ends up with KaimonGate + ExpressionExplorer (macro-aware
+    # dependency recovery; locally it rides src/worker_ee on LOAD_PATH, which doesn't exist over there) —
+    # plus Revise IF the user uses it locally — resolved TOGETHER with whatever else is there (one env,
+    # no stacked-env skew).
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    infra = _local_has_revise() ? "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"Revise\")]" :
-                                  "[Pkg.PackageSpec(name=\"KaimonGate\")]"
+    infra = _local_has_revise() ?
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"Revise\")]" :
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\")]"
     if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
         _replicate_env!(t)                                    # notebook env + worker infra
     elseif !isempty(parent_project) && isdir(parent_project)
@@ -426,8 +434,9 @@ end
 # The remote script: rewrite each dev dep's Manifest `path` to its rsync'd remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
 function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool)
-    infra = add_revise ? "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"Revise\")]" :
-                         "[Pkg.PackageSpec(name=\"KaimonGate\")]"
+    infra = add_revise ?
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"Revise\")]" :
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\")]"
     io = IOBuffer()
     println(io, "import Pkg, TOML")
     println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
@@ -446,8 +455,10 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     end
     println(io, "Pkg.activate(proj)")
     # Add the worker infra INTO this same env so it resolves against the notebook's exact dependency
-    # versions (no stacked-env skew). KaimonGate is always needed (the gate); Revise only if the user
-    # uses it locally (see `_local_has_revise` at the call site) — mirror their setup, don't force it.
+    # versions (no stacked-env skew). KaimonGate is always needed (the gate); ExpressionExplorer too
+    # (worker-side macro-aware dep recovery — local workers get it via src/worker_ee on LOAD_PATH, but
+    # that path doesn't exist on a remote host); Revise only if the user uses it locally (see
+    # `_local_has_revise` at the call site) — mirror their setup, don't force it.
     # preserve=PRESERVE_ALL keeps the notebook's EXACT pins so the infra can't bump a shared dep and
     # invalidate the notebook's (very expensive, e.g. Makie) precompile cache — that doubles the build.
     # Fall back to a normal add only if the infra genuinely can't be satisfied against those pins.
@@ -529,7 +540,7 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     include(_wk)
     SlateWorker.PARENT_PROJECT[] = raw"$parent"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
-                      curve=$curve, allowed_clients=$allow)
+                      curve=$curve, allowed_clients=$allow, data_port=$(port + 2))
     while true; sleep(3600); end   # serve() returns after starting its loop on a spawned thread; keep alive
     """
 end
@@ -928,6 +939,69 @@ function _write_worker_state!(host, port::Int, state::AbstractString)
     return nothing
 end
 
+# ── Memo push over the blob data channel (worker gate port + 2) ─────────────────────────────
+# "Your session follows you": ship the LOCAL memo entries for the given server memo-keys to a
+# remote worker's CAS, so its cells RESTORE instead of recomputing. Manifest-first dedup ('H'
+# query → only missing blobs move), chunked puts with worker-side sha verify, manifests sent
+# LAST (never referencing blobs that aren't there). Local store scanned with the same regex
+# discipline as the worker manifests (no TOML dep hub-side); fullkeys transfer verbatim —
+# host-portable digests (see worker.jl `_src_digest`) are what make them match over there.
+# v1: plaintext socket (tunnel = SSH-encrypted; CURVE on :direct is a flagged TODO), copy-chunk
+# sends (the mmap zero-copy send is the optimization pass).
+function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String})
+    Z = getfield(_kaimon(), :KaimonGate).ZMQ
+    root = joinpath(_slate_cache_dir(), "memo")   # mirrors worker.jl _memo_dir
+    mdir = joinpath(root, "manifests")
+    isdir(mdir) || return "no local memo store"
+    keyset = Set(srckeys)
+    picked = Tuple{String,String}[]                    # (fullkey, manifest toml)
+    for f in readdir(mdir; join = true)
+        endswith(f, ".toml") || continue
+        s = try; read(f, String); catch; continue; end
+        m = match(r"srckey\s*=\s*\"([0-9a-f]+)\"", s)
+        (m !== nothing && String(m.captures[1]) in keyset) || continue
+        push!(picked, (replace(basename(f), ".toml" => ""), s))
+    end
+    isempty(picked) && return "no matching local entries"
+    hashes = String[]
+    for (_, s) in picked, m in eachmatch(r"blob\s*=\s*\"([0-9a-f]{64})\"", s)
+        push!(hashes, String(m.captures[1]))
+    end
+    unique!(hashes)
+    sock = Z.Socket(Z.REQ)
+    try
+        Z.connect(sock, "tcp://$host_ip:$data_port")
+        req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
+        want = split(req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty = false)
+        sent = 0; nbytes = 0
+        for h in want
+            p = joinpath(root, "blobs", "sha256", h[1:2], String(h))
+            isfile(p) || (_rlog("memo push: missing local blob $h — skipped"); continue)
+            open(p, "r") do io
+                while true
+                    chunk = read(io, 1 << 20)
+                    last = eof(io)
+                    r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(String(h))), UInt8[last ? 0x01 : 0x00], chunk))
+                    startswith(r, "err") && error("memo push $h: $r")
+                    nbytes += length(chunk)
+                    last && break
+                end
+            end
+            sent += 1
+        end
+        for (k, s) in picked
+            r = req(vcat(UInt8['M'], Vector{UInt8}(codeunits(k * "\n" * s))))
+            startswith(r, "err") && error("memo push manifest $k: $r")
+        end
+        deduped = length(hashes) - length(want)
+        msg = "pushed $(sent) blobs ($(nbytes) bytes) + $(length(picked)) manifests, $(deduped) blobs deduped"
+        _rlog("memo push → $host_ip:$data_port — $msg")
+        return msg
+    finally
+        try; Z.close(sock); catch; end
+    end
+end
+
 # ── Attachment record (the hub's local memory of where it left each worker) ─────────────────
 # Written at spawn/reattach, consulted FIRST on the next connect: (host, label) → ports,
 # transport, CURVE server key, routable IP. Every field was learned during the original spawn,
@@ -937,7 +1011,7 @@ end
 # whose success IS the validation. A dead record fails the short dial and demotes to probe →
 # spawn. One flat hand-written JSON file per attachment (regex-read like the worker manifests —
 # ReportEngine deliberately has no JSON dep), keyed by hash(host, label).
-const _ATTACH_DIR = joinpath(homedir(), ".cache", "kaimonslate", "attach")
+const _ATTACH_DIR = joinpath(_slate_cache_dir(), "attach")
 
 _attach_path(host, label) =
     joinpath(_ATTACH_DIR, string(hash((String(host), String(label))); base = 16) * ".json")
