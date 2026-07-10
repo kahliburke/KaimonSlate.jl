@@ -73,7 +73,16 @@ const _NS = Ref{Module}(_new_ns())
 # digesting the cell's source + its upstream cells' sources + relevant @bind values; here we fold in
 # the Revise-tracked `src/` state and the resolved Manifest — making the key TOTAL, so a src edit or a
 # package change invalidates the entry (no silent stale restore). See ANIMATION_PIPELINE_DESIGN.md.
-const _MEMO_OK = try; @eval import Serialization; true; catch; false; end
+# `Serialization` is the (only) codec today; `memostore.jl` (stdlib SHA/TOML, pure — see its
+# header) is the content-addressed blob + manifest layer under it. Both inside the guard: if
+# either is unavailable the worker degrades to memo-off, exactly as before — never fails to boot.
+const _MEMO_OK = try
+    @eval import Serialization
+    include(joinpath(@__DIR__, "memostore.jl"))
+    true
+catch
+    false
+end
 const _MEMO_DIR = Ref{String}("")
 # On-disk ceiling for the durable memo store (LRU-evicted). Configurable — big-data notebooks
 # legitimately cache multi-GB artifacts: `KAIMONSLATE_MEMO_CAP_GB` (forwarded into the worker's env
@@ -169,63 +178,79 @@ function _manifest_digest()
     catch; return UInt(0); end
 end
 
-function _memo_file(cellkey::AbstractString)
+# The FULL entry key: the server's memo_key (cell + upstream sources + binds + assets) with the
+# worker-side src/ and Manifest digests folded in. Names the manifest in the store (fmt 3); the
+# entry's DATA lives in content-addressed blobs the manifest references, so a re-key with
+# unchanged values (e.g. any src/ edit restaling every entry) re-stores only ~1 KB of manifest —
+# every data byte dedups against the blobs already on disk.
+function _memo_fullkey(cellkey::AbstractString)
     sd = _src_digest(); md = _manifest_digest()
     # Opt-in diagnostic: log the two digests that complete the cache key, so a store-run vs a
     # restore-run can be compared to see which one drifts (→ near-total cache misses). KAIMONSLATE_MEMO_DEBUG=1.
     get(ENV, "KAIMONSLATE_MEMO_DEBUG", "") == "1" &&
         @info "slate memo key" cell = String(cellkey) src_digest = string(sd; base = 16) manifest_digest = string(md; base = 16)
-    return joinpath(_memo_dir(), string(hash((String(cellkey), sd, md)); base = 16))
+    return string(hash((String(cellkey), sd, md)); base = 16)
 end
 
-# Bounded LRU: if the store exceeds the cap, delete oldest files until under it.
+# Bound the store to the cap: manifests are the LRU roots (restore touches them), blobs are
+# refcount-swept once no surviving manifest references them — a blob shared by several entries
+# outlives any one entry's eviction. Legacy fmt≤2 flat files are swept too. See MemoStore.gc.
 function _memo_gc()
-    try
-        files = [joinpath(_memo_dir(), f) for f in readdir(_memo_dir())]
-        files = filter(isfile, files)
-        total = sum(filesize, files; init = 0)
-        cap = _memo_cap()
-        total <= cap && return
-        for f in sort(files; by = mtime)
-            sz = filesize(f)               # size BEFORE rm — after, stat reads 0 and `total`
-            rm(f; force = true)            # never shrinks, evicting the ENTIRE store
-            total -= sz
-            total <= cap && break
-        end
-    catch; end
+    _MEMO_OK || return
+    try; MemoStore.gc(_memo_dir(); cap = _memo_cap()); catch; end
 end
 
-# Restore {bindings, wire} for `cellkey`: assign the cell's globals into the namespace, return the wire.
-# An entry snapshots exactly the globals the original run left defined (`_memo_store`), so assigning
-# them all reproduces the post-run namespace faithfully — a declared write ABSENT from the entry was
-# equally absent after the genuine run (a conditional assignment whose branch didn't fire). `fmt == 2`
-# gates out entries from before that contract existed (they could be partial for other reasons — e.g.
-# written while the world-age bug hid fresh bindings); those miss once, re-run, and re-store as fmt 2.
-# Returns nothing (miss) or the wire.
-const _MEMO_FMT = 2
+# Restore the entry for `cellkey`: decode every stored binding + the wire from the manifest's
+# blobs, assign the globals into the namespace, return the wire. An entry snapshots exactly the
+# globals the original run left defined (`_memo_store`), so assigning them all reproduces the
+# post-run namespace faithfully — a declared write ABSENT from the entry was equally absent after
+# the genuine run (a conditional assignment whose branch didn't fire). The manifest fmt gate
+# (MemoStore, fmt 3) drops pre-manifest entries; those miss once, re-run, and re-store. Everything
+# is DECODED before anything is ASSIGNED, so a missing/corrupt blob (partial gc, a concurrent
+# worker's eviction) is a clean miss, never a half-mutated namespace. Returns nothing (miss) or the wire.
 function _memo_restore(cellkey::String)
     _MEMO_OK || return nothing
-    f = _memo_file(cellkey); isfile(f) || return nothing
-    data = try; Serialization.deserialize(f); catch; return nothing; end
-    (data isa NamedTuple && hasproperty(data, :fmt) && data.fmt === _MEMO_FMT &&
-     hasproperty(data, :bindings) && hasproperty(data, :wire)) || return nothing
-    m = _NS[]
-    for (nm, v) in data.bindings
-        try; Core.eval(m, :($(Symbol(nm)) = $v)); catch; return nothing; end
+    root = _memo_dir(); key = _memo_fullkey(cellkey)
+    mf = MemoStore.read_manifest(root, key)
+    mf === nothing && return nothing
+    decode(h) = try
+        MemoStore.with_blob(io -> Serialization.deserialize(io), root, String(h))
+    catch
+        (false, nothing)
     end
-    try; touch(f); catch; end                       # mark as recently used (LRU)
-    return data.wire
+    binds = Tuple{Symbol,Any}[]
+    for b in get(mf, "bindings", Any[])
+        b isa AbstractDict || return nothing
+        ok, v = decode(get(b, "blob", ""))
+        ok || return nothing
+        push!(binds, (Symbol(String(get(b, "name", ""))), v))
+    end
+    w = get(mf, "wire", nothing)
+    w isa AbstractDict || return nothing
+    ok, wire = decode(get(w, "blob", ""))
+    ok || return nothing
+    m = _NS[]
+    for (s, v) in binds
+        try; Core.eval(m, :($s = $v)); catch; return nothing; end
+    end
+    MemoStore.touch_manifest(root, key)             # mark as recently used (LRU root)
+    return wire
 end
 
-# Persist {the cell's defined globals, its wire} — guarded: a value that won't serialize → skip (warn).
-# Snapshots exactly the declared writes that ARE defined post-run. One that isn't (a conditional
-# assignment whose branch didn't fire, or static over-approximation by the dataflow pass) is simply
-# left out — a genuine re-run would leave it equally undefined, so the entry stays faithful. (The old
-# refuse-to-cache guard here meant one phantom write silenced the cache for the whole cell.)
+# Persist the entry: each defined global → its own content-addressed blob (+ one for the wire),
+# tied together by a small TOML manifest under the full key. Per-name blobs mean an unserializable
+# value is diagnosed BY NAME, identical data across entries/cells/notebooks stores once, and a
+# consumer can fetch one binding without the rest (the region-transfer seam). Snapshots exactly
+# the declared writes that ARE defined post-run. One that isn't (a conditional assignment whose
+# branch didn't fire, or static over-approximation by the dataflow pass) is simply left out — a
+# genuine re-run would leave it equally undefined, so the entry stays faithful. A DEFINED value
+# that won't serialize aborts the whole entry (a restore missing it would NOT be faithful); its
+# already-written sibling blobs are simply unreferenced and swept by a later gc.
 function _memo_store(cellkey::String, names::Vector{String}, wire)
     _MEMO_OK || return false
     m = _NS[]
-    binds = Dict{String,Any}()
+    root = _memo_dir(); key = _memo_fullkey(cellkey)
+    entries = Dict{String,Any}[]
     # Read each declared write at the LATEST world age. A global the cell defines for the FIRST
     # time this run lives in a binding partition NEWER than this method's captured (older) world
     # age, so a naive `isdefined`/`getglobal` here would not observe it — and we'd wrongly skip
@@ -239,17 +264,27 @@ function _memo_store(cellkey::String, names::Vector{String}, wire)
             @info "slate memo: a declared write is undefined post-run — cached without it" key = cellkey name = nm
             continue
         end
-        binds[nm] = Base.invokelatest(getglobal, m, s)
+        v = Base.invokelatest(getglobal, m, s)
+        h, n = try
+            MemoStore.put_blob(io -> Serialization.serialize(io, v), root)
+        catch e
+            @info "slate memo: not cached — a binding won't serialize" cell = cellkey name = nm reason = first(split(sprint(showerror, e), '\n'))
+            return false
+        end
+        push!(entries, Dict{String,Any}("name" => nm, "codec" => "jls", "blob" => h, "bytes" => n))
     end
-    f = _memo_file(cellkey); tmp = f * ".tmp"
     try
-        Serialization.serialize(tmp, (fmt = _MEMO_FMT, bindings = binds, wire = wire))   # throws on an unserializable value
-        mv(tmp, f; force = true)
+        wh, wn = MemoStore.put_blob(io -> Serialization.serialize(io, wire), root)
+        MemoStore.write_manifest(root, key, Dict{String,Any}(
+            "srckey" => String(cellkey),            # the server half of the key (diagnostics)
+            "created" => round(Int, time()),
+            "julia" => string(VERSION),
+            "bindings" => entries,
+            "wire" => Dict{String,Any}("codec" => "jls", "blob" => wh, "bytes" => wn)))
         _memo_gc()
         return true
     catch e
         @info "slate memo: not cached" cell = cellkey reason = first(split(sprint(showerror, e), '\n'))
-        try; isfile(tmp) && rm(tmp; force = true); catch; end
         return false
     end
 end

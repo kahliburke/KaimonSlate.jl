@@ -8,6 +8,7 @@ using ReTest
 module Defname;   include("test_defname.jl");   end
 module Demux;     include("test_demux.jl");     end
 module Parsched;  include("test_parsched.jl");  end
+module Memostore; include("test_memostore.jl"); end
 module Parallel;  include("test_parallel.jl");  end
 module Animation; include("test_animation.jl"); end
 module Echarts;   include("test_echarts.jl");   end
@@ -28,7 +29,7 @@ module Export;    include("test_export.jl");    end
 module Publishing; include("test_publishing.jl"); end
 module App;       include("test_app.jl");       end
 
-const _TESTMODS = (Defname, Demux, Parsched, Parallel, Animation, Echarts, Engine, Eval, Deps,
+const _TESTMODS = (Defname, Demux, Parsched, Memostore, Parallel, Animation, Echarts, Engine, Eval, Deps,
                    Bind, Render, Tables, Trace, Complete, History, Agentops, Repro, Slides,
                    Frontmatter, Export, Publishing, App)
 
