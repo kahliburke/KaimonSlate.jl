@@ -81,9 +81,11 @@ using KaimonSlate
 serve_notebook("notebook.jl"; port = 8765)   # blocks; open http://127.0.0.1:8765
 ```
 
-See [PLAN.md](PLAN.md) for the architecture and roadmap.
+See the [Architecture guide](https://kahliburke.github.io/KaimonSlate.jl/dev/architecture) for how
+the pieces fit together.
 
 ## Status
 
-Phase 0 (extraction) complete: 145 tests pass, serves end-to-end. Phase 2
-(per-notebook gate workers + single-server hub) in progress — see PLAN.md.
+Per-notebook gate workers and the single-server hub are in place; the AI agent drives notebooks
+through the `slate.*` tools. See the
+[documentation](https://kahliburke.github.io/KaimonSlate.jl/dev/) for the current feature set.
