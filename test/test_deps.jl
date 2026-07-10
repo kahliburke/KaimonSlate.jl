@@ -2,6 +2,7 @@
 # Needs ExpressionExplorer:
 #   julia --startup-file=no --project=/tmp/report-devenv test/report/test_deps.jl
 using ReTest
+using Random
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
 
@@ -241,6 +242,135 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test findcell(r, "op").deps == deps_before          # unchanged → no spurious restale
         @test !("blank" in findcell(r, "op").deps)
         @test dependents_of(r, Set(["blank"])) == Set(["blank"])   # nothing downstream of a blank cell
+    end
+
+    @testset "macro expansion recovers macro-hidden writes (the @kwdef reactivity hole)" begin
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        # `Base.@kwdef struct` DEFINES the struct name, but static analysis sees only the unexpanded
+        # macrocall — before expansion the write edge is missing, so editing the struct never
+        # restaled its readers. prewarm_macros! (inside eval_stale!) expands in the report module
+        # and recovers the write.
+        r = parse_report("#%% code id=s\nBase.@kwdef struct KwFoo\n    x::Int = 1\nend\n" *
+                         "#%% code id=u\nfoo = KwFoo(x = 2)\n" *
+                         "#%% code id=indep\nq = 1")
+        build_dependencies!(r)
+        @test :macrocall in findcell(r, "s").flags          # flagged as an expansion candidate
+        eval_stale!(r)
+        @test :KwFoo in findcell(r, "s").writes             # recovered definition
+        @test "s" in findcell(r, "u").deps                  # reader now depends on the struct cell
+        @test isempty(findcell(r, "indep").deps)            # unrelated cell untouched
+        @test "u" in dependents_of(r, Set(["s"]))           # editing the struct restales the reader
+
+        # @enum: same shape — `red` used downstream must depend on the @enum cell
+        r2 = parse_report("#%% code id=e\n@enum TrafficColor tc_red tc_green\n" *
+                          "#%% code id=use\nsig = tc_red")
+        build_dependencies!(r2); eval_stale!(r2)
+        @test :tc_red in findcell(r2, "e").writes
+        @test "e" in findcell(r2, "use").deps
+
+        # A macro that only READS must not fabricate writes (the "steal an edge" guard)
+        r3 = parse_report("#%% code id=a\nv = 7\n#%% code id=b\n@show v")
+        build_dependencies!(r3); eval_stale!(r3)
+        @test :v ∉ ReportEngine.cell_definitions(findcell(r3, "b"))
+        @test "a" in findcell(r3, "b").deps                 # the read edge is still there
+
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
+    @testset "notebook-defined macros resolve post-drain (refine_macros!)" begin
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        # The macro doesn't exist until its cell RUNS, so prewarm can't expand it (and must not mark
+        # it tried); refine_macros! after the drain recovers the write and rebuilds the graph.
+        r = parse_report("#%% code id=m\nmacro defit(name)\n    esc(:(\$name = 41))\nend\n" *
+                         "#%% code id=call\n@defit auto_val\n" *
+                         "#%% code id=read\nz = auto_val + 1")
+        build_dependencies!(r)
+        @test isempty(findcell(r, "call").writes)           # invisible before expansion
+        eval_stale!(r)
+        @test :auto_val in findcell(r, "call").writes       # recovered post-drain
+        @test "call" in findcell(r, "read").deps
+        @test "read" in dependents_of(r, Set(["call"]))     # editing @defit's call restales the reader
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
+    @testset "refine_macros! restales readers that raced a recovered producer" begin
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        # In a PARALLEL drain a reader can start before its (not-yet-linked) macro producer and
+        # error; once refinement recovers the write edge, the reader must be restaled so the
+        # re-drain runs it in order. Simulate the race by marking the reader ERRORED post-drain.
+        r = parse_report("#%% code id=m\nmacro mk(name)\n    esc(:(\$name = 5))\nend\n" *
+                         "#%% code id=call\n@mk made_val\n" *
+                         "#%% code id=read\nw = made_val * 2")
+        build_dependencies!(r); eval_stale!(r)
+        @test :made_val in findcell(r, "call").writes
+        findcell(r, "read").state = ReportEngine.ERRORED       # pretend it raced and failed
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED)   # force re-resolution
+        @test refine_macros!(r; restale_racers = true)
+        @test findcell(r, "read").state == STALE               # queued for the follow-up drain
+        # …and without the flag (serial drains can't race) nothing is restaled
+        findcell(r, "read").state = ReportEngine.ERRORED
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED)
+        @test refine_macros!(r)
+        @test findcell(r, "read").state == ReportEngine.ERRORED
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
+    @testset "macroexpand config opt-out keeps the conservative analysis" begin
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+        r = parse_report("#%% code id=s\nBase.@kwdef struct KwOpt\n    x::Int = 1\nend\n" *
+                         "#%% code id=u\nfoo2 = KwOpt(x = 2)")
+        r.meta["macroexpand"] = false
+        build_dependencies!(r); eval_stale!(r)
+        @test :KwOpt ∉ findcell(r, "s").writes              # no recovery when opted out
+        @test isempty(ReportEngine.pending_macro_cells(r))  # and no round-trips queued
+        empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
+    @testset "dependents index: BFS ≡ the old fixpoint (equivalence oracle)" begin
+        # `dependents_of` walks `report.dependents` (the transpose of `deps`, rebuilt by
+        # `build_dependencies!`). Keep the pre-index fixpoint as the reference: any divergence on a
+        # random graph means the index is stale or the transpose is wrong.
+        function reference_dependents(report, ids)
+            stale = Set{String}(ids)
+            changed = true
+            while changed
+                changed = false
+                for c in report.cells
+                    if c.id ∉ stale && !isdisjoint(c.deps, stale)
+                        push!(stale, c.id)
+                        changed = true
+                    end
+                end
+            end
+            return stale
+        end
+        rng = Random.MersenneTwister(7)
+        ok = true
+        for trial in 1:25
+            n = rand(rng, 3:25)
+            io = IOBuffer()
+            for i in 1:n
+                r = rand(rng)
+                if r < 0.08
+                    print(io, "#%% code id=c$i\nx$i = (\n")                    # opaque barrier
+                elseif r < 0.16 && i > 1
+                    print(io, "#%% md id=c$i\nvalue is {{ x$(rand(rng, 1:i-1)) }}\n")  # interpolating md
+                else
+                    reads = i == 1 ? Int[] : unique(rand(rng, 1:i-1, rand(rng, 0:3)))
+                    rhs = isempty(reads) ? "$i" : join(("x$j" for j in reads), " + ")
+                    print(io, "#%% code id=c$i\nx$i = $rhs\n")
+                end
+            end
+            rep = parse_report(String(take!(io)))
+            build_dependencies!(rep)
+            # the transpose really is the transpose of `deps`
+            ok &= all(c -> all(p -> c.id in get(rep.dependents, p, String[]), c.deps), rep.cells)
+            for _ in 1:5
+                seed = Set(("c$(rand(rng, 1:n))" for _ in 1:rand(rng, 1:3)))
+                ok &= dependents_of(rep, seed) == reference_dependents(rep, seed)
+            end
+        end
+        @test ok
     end
 
     @testset "multidef: names defined in 2+ cells are flagged" begin

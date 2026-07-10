@@ -36,16 +36,37 @@ struct ParCell
 end
 
 # `cells` MUST be in document order. Returns id → Set of earlier-cell ids it must wait for.
+# Indexed build — O(V + E + Σ conflicts) instead of the pairwise O(V²) scan. Blocker set per the
+# rule above: earlier opaques (everything earlier if THIS cell is opaque), earlier batch cells in
+# `deps`, and earlier writers of any name this cell reads or writes.
 function par_blockers(cells::Vector{ParCell})
+    idx = Dict{String,Int}(c.id => i for (i, c) in enumerate(cells))
+    writers_of = Dict{Symbol,Vector{Int}}()   # name → indices of cells writing it, ascending doc order
+    for (i, c) in enumerate(cells), w in c.writes
+        push!(get!(Vector{Int}, writers_of, w), i)
+    end
+    opaque_idx = [i for (i, c) in enumerate(cells) if c.opaque]
     blockers = Dict{String,Set{String}}()
     for (i, c) in enumerate(cells)
         b = Set{String}()
-        @inbounds for j in 1:(i - 1)
-            e = cells[j]
-            if e.opaque || c.opaque || (e.id in c.deps) ||
-               !isdisjoint(c.writes, e.writes) ||      # write-write conflict
-               !isdisjoint(c.reads, e.writes)          # c reads what e writes (data dep, belt-and-suspenders)
-                push!(b, e.id)
+        if c.opaque
+            for j in 1:(i - 1)                # opaque waits for everything before it
+                push!(b, cells[j].id)
+            end
+        else
+            for j in opaque_idx               # earlier opaques are barriers for everyone
+                j >= i && break
+                push!(b, cells[j].id)
+            end
+            for d in c.deps                   # data dependency (only deps inside this batch count)
+                j = get(idx, d, 0)
+                0 < j < i && push!(b, d)
+            end
+            for names in (c.writes, c.reads), w in names   # write-write conflict; c reads an earlier write
+                for j in get(writers_of, w, ())
+                    j >= i && break           # ascending, so nothing later matters
+                    push!(b, cells[j].id)
+                end
             end
         end
         blockers[c.id] = b

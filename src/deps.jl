@@ -9,7 +9,8 @@
 
 import ExpressionExplorer as EE
 
-export infer_bindings!, build_dependencies!, dependents_of, update_source!, eval_stale!, refine_usings!, prewarm_usings!
+export infer_bindings!, build_dependencies!, dependents_of, update_source!, eval_stale!,
+       refine_usings!, prewarm_usings!, refine_macros!, prewarm_macros!
 
 # ── Binding inference ────────────────────────────────────────────────────────
 
@@ -222,6 +223,18 @@ function _macrocall_arg_refs!(refs::Set{Symbol}, ex)
     return refs
 end
 
+# Does the AST contain a macrocall the static pass can't see through (any macro outside
+# `_MACRO_SCAN_SKIP` — a dotted `Base.@kwdef` name counts too)? Such a cell gets the runtime
+# `:macrocall` flag so the macro-expansion refinement (`resolve_macros!`) knows to round-trip it.
+function _has_unknown_macrocall(ex)
+    ex isa Expr || return false
+    if ex.head === :macrocall && !isempty(ex.args)
+        name = ex.args[1]
+        (name isa Symbol && name in _MACRO_SCAN_SKIP) || return true
+    end
+    return any(_has_unknown_macrocall, ex.args)
+end
+
 # Notebook-level import map: scan every code cell's source for `@use` declarations → an ordered
 # name→url map on `report.meta["imports"]`. Refreshed on each structural pass (build_dependencies!),
 # so adding/removing a `@use` updates what the shell/export head injects (a live change still needs a
@@ -248,7 +261,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol}}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # No per-cell eviction (a deleted cell / closed notebook never removes its entry), so on a
 # long-lived server this would otherwise grow forever. Entries are small, but cap it — once full,
@@ -265,12 +278,13 @@ function infer_bindings!(cell::Cell)
         empty!(cell.inputs); append!(cell.inputs, hit[5])   # `@asset` file deps (statically extracted)
         empty!(cell.provides); union!(cell.provides, hit[6])   # `using`/`import`-brought names (⊆ writes)
         empty!(cell.mutates); union!(cell.mutates, hit[7])   # in-place-mutated-only names (⊆ writes, ⊄ defines)
+        hit[8] ? push!(cell.flags, :macrocall) : delete!(cell.flags, :macrocall)   # unknown-macro cell (expansion candidate)
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && empty!(_BIND_CACHE)
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates))
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags)
     end
     return cell
 end
@@ -282,7 +296,7 @@ _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_an
 
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
-    delete!(cell.flags, :opaque)
+    delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
     if cell.kind == MARKDOWN
         # A markdown cell "reads" the free variables of its `{{ expr }}` blocks, so
         # it joins the reactive graph and re-renders when they change.
@@ -307,6 +321,9 @@ function _infer_bindings_uncached!(cell::Cell)
     if _has_parse_error(top)
         push!(cell.flags, :opaque); return cell
     end
+    # An unknown macro hides its true bindings from the static pass (see `_macrocall_arg_refs!`);
+    # flag the cell so the expansion refinement can recover them once the macro is resolvable.
+    _has_unknown_macrocall(top) && push!(cell.flags, :macrocall)
     # `@asset "path"` file deps — literal paths anywhere in the cell (sorted+unique for a stable key).
     let ap = _collect_asset_paths!(String[], top)
         isempty(ap) || append!(cell.inputs, sort!(unique!(ap)))
@@ -401,8 +418,19 @@ depends on the most recent prior writer of each name it reads. An `:opaque` cell
 depends on all prior code cells, and all later code cells depend on it (barrier).
 """
 function build_dependencies!(report::Report)
+    mex = get(report.meta, "macroexpand", true) !== false   # per-notebook opt-out (Slate.config)
     for c in report.cells
         infer_bindings!(c)
+        # Union in the reads/writes recovered by macro expansion (`resolve_macros!`) — union-only,
+        # so a dependency can be ADDED but never dropped; without a cache entry the conservative
+        # reads-only scan stands.
+        if mex && :macrocall in c.flags
+            rec = lock(_MACRO_LOCK) do
+                nb = get(_MACRO_BINDS, report.id, nothing)
+                nb === nothing ? nothing : get(nb, c.src_hash, nothing)
+            end
+            rec === nothing || (union!(c.reads, rec[1]); union!(c.writes, rec[2]))
+        end
         empty!(c.deps)
     end
     _scan_imports!(report)                 # notebook-level `@use` import-map declarations → report.meta
@@ -456,6 +484,18 @@ function build_dependencies!(report::Report)
     report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)
     report.meta["multidef_cells"] =                       # name → the cells defining it (for the UI popup)
         Dict{String,Vector{String}}(string(w) => ids for (w, ids) in wcells if length(ids) >= 2)
+    # Derived indexes: id → cell, and the transpose of `deps` (id → its direct dependents). Rebuilt
+    # here — and ONLY here — so a single `build_dependencies!` call leaves every derived structure
+    # consistent. `dependents_of` / `_upstream_closure` / `_memo_key` walk these instead of
+    # re-scanning all cells per call (the old fixpoint was O(V·E) on every edit).
+    empty!(report.byid)
+    empty!(report.dependents)
+    for c in report.cells
+        report.byid[c.id] = c
+    end
+    for c in report.cells, p in c.deps
+        push!(get!(Vector{String}, report.dependents, p), c.id)
+    end
     return report
 end
 
@@ -467,14 +507,12 @@ them. This is the staleness blast radius of changing `ids`.
 """
 function dependents_of(report::Report, ids)
     stale = Set{String}(ids)
-    changed = true
-    while changed
-        changed = false
-        for c in report.cells
-            if c.id ∉ stale && !isdisjoint(c.deps, stale)
-                push!(stale, c.id)
-                changed = true
-            end
+    queue = collect(stale)
+    while !isempty(queue)
+        for d in get(report.dependents, pop!(queue), ())
+            d in stale && continue
+            push!(stale, d)
+            push!(queue, d)
         end
     end
     return stale
@@ -520,14 +558,23 @@ function update_source!(report::Report, new_source::AbstractString)
     # Carry over the footer-borne meta (env packages + the Slate.config per-notebook settings) parsed
     # from the new source, so an external edit to a footer — or its absence — is reflected.
     haskey(newr.meta, "env") ? (report.meta["env"] = newr.meta["env"]) : delete!(report.meta, "env")
-    for k in ("parallel", "threads", "hotreload")
+    for k in ("parallel", "threads", "hotreload", "macroexpand")
         haskey(newr.meta, k) ? (report.meta[k] = newr.meta[k]) : delete!(report.meta, k)
     end
     build_dependencies!(report)
     for id in dependents_of(report, changed)
-        for c in report.cells
-            c.id == id && (c.state = STALE)
-        end
+        c = get(report.byid, id, nothing)
+        c === nothing || (c.state = STALE)
+    end
+    # A changed/removed MACRO DEFINER (a cell writing an `@name`, or a `using`/barrier cell that may
+    # import macros) can alter what its callers expand to — their sources (and cache keys) are
+    # unchanged, so clear the attempt-once set and let the next drain re-expand them. Cached
+    # expansions stay until overwritten (stale-but-useful beats a dropped edge).
+    definerish(c) = :opaque in c.flags || !isempty(c.provides) ||
+                    any(w -> startswith(String(w), "@"), c.writes)
+    if any(c -> c.id in changed && definerish(c), report.cells) ||
+       any(id -> definerish(old_by_id[id]), removed)
+        lock(_MACRO_LOCK) do; delete!(_MACRO_TRIED, report.id); end
     end
     return report
 end
@@ -546,6 +593,7 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
     nbatch > 0 && _emit_run_batch(report.id, nbatch)
     prepare!(kernel, report)
     prewarm_usings!(report, kernel)   # precise graph BEFORE keys are computed → stable memo keys
+    prewarm_macros!(report, kernel)   # …and macro-recovered bindings (package macros expand pre-run)
     # Static markdown (no `{{ }}` interpolations ⇒ no reads) depends on nothing, so render it FIRST.
     # Otherwise it sits STALE behind slow code cells for the whole run — prose looks "unrun" until the
     # end, which reads as broken now that runs stream cell-by-cell.
@@ -560,6 +608,7 @@ function eval_stale!(report::Report, kernel::Kernel = InProcessKernel())
         end
     end
     refine_usings!(report, kernel)   # barrier `using` cells just ran → resolve their exports, precise-ify deps
+    refine_macros!(report, kernel)   # notebook-defined macros now exist → recover macro-hidden writes
     return report
 end
 
@@ -684,5 +733,148 @@ function prewarm_usings!(report::Report, kernel::Kernel = InProcessKernel())
     isempty(paths) && return false
     resolve_usings!(report, kernel, paths) || return false
     rebuild_precise!(report)
+    return true
+end
+
+# ── Macro-expansion refinement (unknown macro → precise reads/writes) ─────────────────────────
+# An unknown macro hides its true bindings: `@kwdef struct Foo … end` DEFINES `Foo`, but static
+# analysis sees only the unexpanded call, so the write edge is missing and editing the struct cell
+# never restales its readers — a silent reactivity hole (`_macrocall_arg_refs!` recovers reads
+# only). The fix mirrors the `using`-refinement round-trip: expand flagged cells in the kernel
+# (where the macros are actually defined — NEVER evaluating, expansion only), re-run EE on the
+# expanded form, and UNION the recovered bindings in at graph-build time. Union-only, so precision
+# can only add edges, never drop one ("staleness never under-invalidates"). Caches are keyed
+# report-id → src-hash; a cell edit re-keys naturally, and `update_source!` clears the tried-set
+# when a macro DEFINER changes so its callers get re-expanded.
+const _MACRO_BINDS = Dict{String,Dict{UInt64,Tuple{Set{Symbol},Set{Symbol}}}}()  # report.id → src_hash → (reads, writes)
+const _MACRO_TRIED = Dict{String,Set{UInt64}}()   # report.id → src_hashes attempted post-drain (failed)
+const _MACRO_LOCK  = ReentrantLock()
+
+# EE analysis of an expanded source string → (reads, writes), or `nothing` on parse/EE failure.
+# Hygiene: expansion manufactures gensyms (`var"#12#self#"`) — any name containing '#' is
+# synthetic, never a notebook binding — and the sanitizer collapses qualified names to `nothing`
+# (see `_sanitize_expansion`); both are dropped from both sets.
+function _expanded_bindings(src::AbstractString)
+    top = try; Meta.parseall(String(src)); catch; return nothing; end
+    _has_parse_error(top) && return nothing
+    stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+    blk = Expr(:block, Any[s for s in stmts if !(s isa LineNumberNode)]...)
+    node = try; EE.compute_reactive_node(blk); catch; return nothing; end
+    clean(names) = Set{Symbol}(n for n in names if n !== :nothing && !occursin('#', String(n)))
+    reads = clean(node.references)
+    writes = clean(_strip_anon(node.definitions))
+    union!(writes, clean(_strip_anon(node.funcdefs_without_signatures)))
+    return (reads, writes)
+end
+
+"Flagged cells whose macro bindings are still unrecovered (no cache entry, not marked tried)."
+function pending_macro_cells(report::Report)
+    get(report.meta, "macroexpand", true) === false && return Cell[]   # per-notebook opt-out
+    out = Cell[]
+    lock(_MACRO_LOCK) do
+        binds = get(_MACRO_BINDS, report.id, nothing)
+        tried = get(_MACRO_TRIED, report.id, nothing)
+        for c in report.cells
+            (c.kind == CODE && :macrocall in c.flags) || continue
+            binds !== nothing && haskey(binds, c.src_hash) && continue
+            tried !== nothing && c.src_hash in tried && continue
+            push!(out, c)
+        end
+    end
+    return out
+end
+
+"""
+    resolve_macros!(report, kernel, cells; mark_tried=false) -> Bool
+
+Round-trip `cells`' sources to the kernel for macro expansion (ONE batched call), re-analyze each
+expanded form, and cache the recovered `(reads, writes)`. Returns `true` iff anything newly
+resolved (the caller rebuilds the graph). With `mark_tried`, a cell whose expansion failed is
+recorded so it isn't round-tripped again (post-drain semantics — its macros had their chance to be
+defined); the pre-run pass leaves failures unmarked so the post-drain pass can retry them.
+"""
+function resolve_macros!(report::Report, kernel::Kernel, cells::Vector{Cell}; mark_tried::Bool = false)
+    isempty(cells) && return false
+    srcs = Dict{String,String}(c.id => c.source for c in cells)
+    expanded = try
+        macroexpand_cells(kernel, report, srcs)
+    catch e
+        # A wire/kernel failure must be VISIBLE (a silent empty result reads as "nothing to
+        # recover" and, post-drain, permanently tried-marks every pending cell).
+        @warn "deps: macroexpand round-trip failed — keeping conservative analysis" report = report.id exception = e
+        Dict{String,String}()
+    end
+    newly = false
+    for c in cells
+        ex = get(expanded, c.id, nothing)
+        binds = ex === nothing ? nothing : _expanded_bindings(ex)
+        lock(_MACRO_LOCK) do
+            if binds === nothing
+                mark_tried && push!(get!(Set{UInt64}, _MACRO_TRIED, report.id), c.src_hash)
+            else
+                get!(Dict{UInt64,Tuple{Set{Symbol},Set{Symbol}}}, _MACRO_BINDS, report.id)[c.src_hash] = binds
+                newly = true
+            end
+        end
+    end
+    return newly
+end
+
+"""
+    prewarm_macros!(report, kernel=InProcessKernel()) -> Bool
+
+Pre-eval macro expansion (peer of [`prewarm_usings!`](@ref)): recover unknown-macro bindings
+BEFORE a run so the graph — and the memo keys derived from it — is precise from the first eval.
+Package macros (`Base.@kwdef`, `@enum`, DataFrames' `@chain`, …) expand here because
+`prewarm_usings!` already imported their modules; notebook-defined macros resolve post-drain in
+[`refine_macros!`](@ref). Failures are NOT marked tried — the macro may get defined during the
+run. Returns `true` iff something newly resolved (deps rebuilt).
+"""
+function prewarm_macros!(report::Report, kernel::Kernel = InProcessKernel())
+    cells = pending_macro_cells(report)
+    isempty(cells) && return false
+    resolve_macros!(report, kernel, cells) || return false
+    rebuild_precise!(report)
+    return true
+end
+
+"""
+    refine_macros!(report, kernel=InProcessKernel()) -> Bool
+
+Post-drain macro expansion (peer of [`refine_usings!`](@ref)): by now every macro a cell could
+define or import has had its chance to exist, so expand the still-pending cells and mark failures
+tried (attempt-once per source; an edit to the cell — or to a macro-defining cell, see
+`update_source!` — clears the way for a retry).
+
+Unlike `refine_usings!` (which only NARROWS), recovering a macro-hidden WRITE **adds** an edge.
+A PARALLEL drain was scheduled without it, so a reader may have raced its producer (errored on
+the not-yet-defined name, or silently consumed the previous run's value) — with
+`restale_racers = true` (the parallel server path) everything downstream of a newly-recovered
+writer is restaled once ("staleness never under-invalidates") and the caller's runner re-arms.
+A serial drain executes in document order — a valid topological order even without the edge —
+so the default skips the restale. Returns `true` iff something newly resolved (deps rebuilt).
+"""
+function refine_macros!(report::Report, kernel::Kernel = InProcessKernel(); restale_racers::Bool = false)
+    cells = pending_macro_cells(report)
+    isempty(cells) && return false
+    resolve_macros!(report, kernel, cells; mark_tried = true) || return false
+    rebuild_precise!(report)
+    restale_racers || return true
+    recovered = Set{String}()   # attempted cells whose recovery included a WRITE (new downstream edges)
+    lock(_MACRO_LOCK) do
+        nb = get(_MACRO_BINDS, report.id, nothing)
+        nb === nothing && return
+        for c in cells
+            rec = get(nb, c.src_hash, nothing)
+            rec !== nothing && !isempty(rec[2]) && push!(recovered, c.id)
+        end
+    end
+    if !isempty(recovered)
+        for id in dependents_of(report, recovered)
+            id in recovered && continue
+            c = get(report.byid, id, nothing)
+            c === nothing || (c.state = STALE)
+        end
+    end
     return true
 end

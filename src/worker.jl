@@ -36,6 +36,7 @@ include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace c
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
 include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (parallel evaluator I/O isolation)
 include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_scheduled — parallel batch scheduler
+include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
 
@@ -465,6 +466,21 @@ function __slate_module_help(name::String)
     m = _doc_scan()
     try; Core.eval(m, Meta.parse("import " * head)); catch; end   # load the package if needed
     return module_help(m, name)
+end
+
+"Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and return
+id → expanded source string. A cell whose expansion yields nothing (parse failure, macro not yet
+defined, expansion threw) is omitted — the server keeps its conservative static analysis for it.
+NOTE: `cells` must be a KEYWORD arg — a single positional `::Dict` param triggers the gate
+dispatcher's raw-Dict fast path, which hands the handler the WHOLE arguments dict instead."
+function __slate_macroexpand(; cells::Dict = Dict{String,Any}())
+    out = Dict{String,String}()
+    nb = _NS[]
+    for (id, src) in cells
+        s = src isa AbstractString ? _expand_cell_source(nb, String(src)) : nothing
+        s === nothing || (out[String(id)] = s)
+    end
+    return out
 end
 
 "The worker project's direct dependencies as `{name, version, uuid, source, origin}` (for eager docs
@@ -907,6 +923,7 @@ function tools()
         KaimonGate.GateTool("__slate_complete", __slate_complete),
         KaimonGate.GateTool("__slate_harvest_docs", __slate_harvest_docs),
         KaimonGate.GateTool("__slate_module_help", __slate_module_help),
+        KaimonGate.GateTool("__slate_macroexpand", __slate_macroexpand),
         KaimonGate.GateTool("__slate_project_deps", __slate_project_deps),
         KaimonGate.GateTool("__slate_env_info", __slate_env_info),
         KaimonGate.GateTool("__slate_fork", __slate_fork),

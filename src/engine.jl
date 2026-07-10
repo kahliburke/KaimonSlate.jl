@@ -164,10 +164,16 @@ mutable struct Report
     cells::Vector{Cell}
     meta::Dict{String,Any}
     mod::Union{Module,Nothing}    # per-report execution namespace (created on eval)
+    # Derived indexes, rebuilt ONLY by `build_dependencies!` (runtime-only, never serialized).
+    # Empty ⟺ `deps` are empty too (both are populated by the same pass), so readers stay
+    # consistent even on a freshly-parsed report.
+    byid::Dict{String,Cell}                  # id → cell
+    dependents::Dict{String,Vector{String}}  # transpose of `deps`: id → cells that list it upstream
 end
 
 Report(id::AbstractString, title::AbstractString) =
-    Report(String(id), String(title), Cell[], Dict{String,Any}(), nothing)
+    Report(String(id), String(title), Cell[], Dict{String,Any}(), nothing,
+           Dict{String,Cell}(), Dict{String,Vector{String}}())
 
 # ── Source format ────────────────────────────────────────────────────────────
 #
@@ -225,9 +231,10 @@ function _parse_controls(s::AbstractString)
     return cols
 end
 
-# Flags Slate manages internally (never written to / read from the header). `:opaque` is re-derived
-# every eval by dependency inference, so it must never be serialized as a tag.
-const _INTERNAL_FLAGS = Set{Symbol}([:opaque])
+# Flags Slate manages internally (never written to / read from the header). `:opaque` and
+# `:macrocall` are re-derived every eval by dependency inference, so they must never be
+# serialized as tags.
+const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
 const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :slide, :notes,
@@ -426,10 +433,14 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # carries its presentation style with it. `publishrepo`/`publishslug` remember WHERE this notebook
 # was last published (owner/name + slug), so the dialog pre-fills and a CI action can read the
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
-const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "agentmodel", "runon",
+const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "macroexpand", "agentmodel", "runon",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
                       "publishrepo", "publishslug", "series", "docid")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
+                           # `macroexpand` = macro-aware dependency analysis (expand unknown macros in
+                           # the kernel to recover their true reads/writes). Off = conservative static
+                           # analysis only, for the rare macro with expansion-time side effects.
+                           "macroexpand" => :bool,
                            "agentmodel" => :string,
                            # `runon` = this notebook's DURABLE run-location override ("host[,transport]"):
                            # a machine-specific ssh alias the author chose to bake in (the *session* and
@@ -533,6 +544,7 @@ include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest for sema
 include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worker)
 include(joinpath(@__DIR__, "format.jl"))    # _format_cell — server-side table cell renderer (JS mirror: fmtCell)
 include(joinpath(@__DIR__, "completion.jl")) # shared REPLCompletions (engine + worker)
+include(joinpath(@__DIR__, "macroexpand.jl")) # shared cell macro-expansion (engine + worker)
 include(joinpath(@__DIR__, "eval.jl"))
 include(joinpath(@__DIR__, "deps.jl"))
 include(joinpath(@__DIR__, "bind.jl"))

@@ -425,10 +425,9 @@ const _CELL_STATS_LOCK = ReentrantLock()
 
 # Transitive upstream ids of `id` (BFS over deps). Callers hold nb.lock (deps stable).
 function _upstream_closure(report, id::String)
-    byid = Dict{String,Any}(c.id => c for c in report.cells)
     seen = Set{String}(); queue = String[id]
     while !isempty(queue)
-        c = get(byid, popfirst!(queue), nothing); c === nothing && continue
+        c = get(report.byid, popfirst!(queue), nothing); c === nothing && continue
         for d in c.deps
             d in seen && continue
             push!(seen, d); push!(queue, d)
@@ -725,6 +724,14 @@ function _run_loop!(nb::LiveNotebook)
         if !isempty(paths) && ReportEngine.resolve_usings!(nb.report, nb.kernel, paths)
             lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
         end
+        # Same pre-run phasing for macro-recovered bindings: package macros (`@kwdef`, `@enum`,
+        # `@chain`, …) are expandable as soon as their modules are imported (just above), so the
+        # graph + memo keys see macro-hidden writes from the FIRST eval. Notebook-defined macros
+        # resolve post-drain (refine_macros! below). Round-trip outside nb.lock, like the usings.
+        pending = lock(nb.lock) do; ReportEngine.pending_macro_cells(nb.report); end
+        if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
+            lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
+        end
         while true
             # Parallel fast-path: hand all stale code cells to the worker at once (opt-in). Falls through
             # to the serial step for markdown, reactive restales, and the 0/1-code-cell case. Held under
@@ -744,7 +751,15 @@ function _run_loop!(nb::LiveNotebook)
         # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the
         # "barrier" marking. Kept off the hot per-cell path — it fires once per drain and no-ops unless
         # a NEW module got resolved.
-        if lock(nb.lock) do; ReportEngine.refine_usings!(nb.report, nb.kernel); end
+        refined = lock(nb.lock) do
+            a = ReportEngine.refine_usings!(nb.report, nb.kernel)
+            # Notebook-defined macros now exist; a PARALLEL drain may have raced a reader past its
+            # just-recovered producer, so restale those — the `again` re-arm below re-drains them.
+            b = ReportEngine.refine_macros!(nb.report, nb.kernel;
+                                            restale_racers = _parallel_enabled(nb))
+            a || b
+        end
+        if refined
             lock(nb.lock) do; nb.version += 1; end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
         end

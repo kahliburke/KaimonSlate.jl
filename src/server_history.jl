@@ -124,6 +124,8 @@ const _CONFIG_UI = (
      choices = String[], global_default = () -> PARALLEL_DEFAULT[], restart = false),
     (key = "hotreload", group = "Execution", label = "Hot-reload /src edits", type = :bool, default = true,
      choices = String[], global_default = nothing, restart = false),
+    (key = "macroexpand", group = "Execution", label = "Macro-aware deps", type = :bool, default = true,
+     choices = String[], global_default = nothing, restart = false),
     (key = "slidelevel", group = "Slides", label = "Slide heading level", type = :int, default = 2,
      choices = String[], global_default = nothing, restart = false),
     (key = "slidetransition", group = "Slides", label = "Slide transition", type = :enum, default = "fade",

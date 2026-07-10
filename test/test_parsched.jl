@@ -1,5 +1,6 @@
 # Unit tests for the pure parallel-readiness core (src/parsched.jl).
 using ReTest
+using Random
 include(joinpath(@__DIR__, "..", "src", "parsched.jl"))
 
 pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
@@ -133,6 +134,47 @@ pc(id; deps = String[], reads = Symbol[], writes = Symbol[], opaque = false) =
         @test !co_runnable(["p1", "p2"], bl)
         @test co_runnable(["p1", "calc"], bl)                      # graphics ∥ pure compute is fine
         @test co_runnable(["p2", "calc"], bl)
+    end
+
+    @testset "par_blockers: indexed build ≡ the old pairwise scan (equivalence oracle)" begin
+        # The indexed par_blockers must yield EXACTLY the sets the original O(V²) pairwise rule
+        # produced. Keep that rule as the reference; random batches probe the interactions
+        # (opaque × deps × write-write × read-write) the handwritten cases above don't.
+        function reference_blockers(cells)
+            blockers = Dict{String,Set{String}}()
+            for (i, c) in enumerate(cells)
+                b = Set{String}()
+                for j in 1:(i - 1)
+                    e = cells[j]
+                    if e.opaque || c.opaque || (e.id in c.deps) ||
+                       !isdisjoint(c.writes, e.writes) ||
+                       !isdisjoint(c.reads, e.writes)
+                        push!(b, e.id)
+                    end
+                end
+                blockers[c.id] = b
+            end
+            return blockers
+        end
+        rng = Random.MersenneTwister(11)
+        pool = [Symbol("s", k) for k in 1:8]
+        ok = true
+        for trial in 1:50
+            n = rand(rng, 1:20)
+            ids = ["c$k" for k in 1:n]
+            cells = ParCell[]
+            for i in 1:n
+                deps = i == 1 ? String[] : unique(rand(rng, ids[1:i-1], rand(rng, 0:2)))
+                rand(rng) < 0.15 && push!(deps, "notinbatch")   # deps may point outside the batch
+                push!(cells, pc(ids[i];
+                                deps = deps,
+                                reads = unique(rand(rng, pool, rand(rng, 0:3))),
+                                writes = unique(rand(rng, pool, rand(rng, 0:2))),
+                                opaque = rand(rng) < 0.12))
+            end
+            ok &= par_blockers(cells) == reference_blockers(cells)
+        end
+        @test ok
     end
 
     @testset "mixed: independent pair after a shared dependency" begin

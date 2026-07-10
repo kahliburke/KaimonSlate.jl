@@ -622,6 +622,24 @@ function module_help(k::GateKernel, report::Report, name::AbstractString)
     return Dict{String,Any}(String(k2) => v for (k2, v) in wire)
 end
 
+function macroexpand_cells(k::GateKernel, report::Report, srcs::AbstractDict)
+    prepare!(k, report)
+    wire = try
+        _tool(k, "__slate_macroexpand", Dict{String,Any}("cells" => Dict{String,String}(srcs)))
+    catch e
+        @warn "slate: __slate_macroexpand gate call failed" notebook = report.id exception = e
+        return Dict{String,String}()
+    end
+    wire === nothing && return Dict{String,String}()
+    # The wire may re-key a returned Dict with SYMBOL keys (same caveat as `_module_exports`);
+    # `pairs` reads both that and a genuine Dict.
+    out = Dict{String,String}()
+    for (k2, v) in pairs(wire)
+        v isa AbstractString && (out[String(k2)] = String(v))
+    end
+    return out
+end
+
 function project_deps(k::GateKernel, report::Report)
     prepare!(k, report)
     wire = try

@@ -255,6 +255,24 @@ module_help(::InProcessKernel, report::Report, name::AbstractString) =
     module_help(report_module(report), name)
 
 """
+    macroexpand_cells(kernel, report, srcs) -> Dict{String,String}
+
+Macro-expand each cell source (`id => source`) in the namespace where cells evaluate —
+recursively, NEVER evaluating — and return `id => expanded source string`. Cells whose
+expansion fails are omitted (the caller keeps its conservative static analysis). The gate
+kernel forwards to its worker, where the notebook's macros are actually defined.
+"""
+function macroexpand_cells(::InProcessKernel, report::Report, srcs::AbstractDict)
+    m = report_module(report)
+    out = Dict{String,String}()
+    for (id, src) in srcs
+        s = _expand_cell_source(m, String(src))
+        s === nothing || (out[String(id)] = s)
+    end
+    return out
+end
+
+"""
     project_deps(kernel, report) -> Vector{Dict}
 
 The notebook project's direct dependencies as `{name, version}` (for eager docs
@@ -306,7 +324,7 @@ end
 # and the resolved Manifest, completing the key so a src/dep/package change invalidates the entry.
 function _memo_key(report::Report, cell::Cell)
     _memoizable(cell) || return ""
-    byid = Dict(c.id => c for c in report.cells)
+    byid = report.byid
     closure = Set{String}(); stack = collect(cell.deps)
     while !isempty(stack)
         id = pop!(stack); (id in closure || !haskey(byid, id)) && continue
@@ -392,6 +410,7 @@ function eval_report!(report::Report; reset::Bool = false, kernel::Kernel = InPr
     reset && reset!(kernel, report)
     prepare!(kernel, report)
     prewarm_usings!(report, kernel)   # precise graph BEFORE keys are computed → stable memo keys
+    prewarm_macros!(report, kernel)   # …and macro-recovered bindings (package macros expand pre-run)
     for cell in report.cells
         eval_cell!(report, cell, kernel)
     end
