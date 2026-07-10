@@ -1192,7 +1192,7 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         # Feed the cost gate: remember this host's measured upstream rate (only from pushes big
         # enough that chunk round-trips, not RTT, dominated the clock).
         nbytes > 4 << 20 && elapsed > 0 && _bw_note!(bw_key, nbytes / elapsed)
-        msg = "pushed $(sent) blobs ($(nbytes) bytes$rate, $(v2 ? "v2 zero-copy" : "v1 copy")) + $(length(picked)) manifests, $(deduped) blobs deduped" *
+        msg = "pushed $(sent) blobs ($(nbytes) bytes in $(round(elapsed; digits = 1))s$rate, $(v2 ? "v2 zero-copy" : "v1 copy")) + $(length(picked)) manifests, $(deduped) blobs deduped" *
               (isempty(skipped) ? "" : "; $(length(skipped)) skipped (recompute cheaper)")
         _rlog("memo push → $host_ip:$data_port ($(isempty(server_key) ? "plaintext" : "CURVE")) — $msg")
         return msg
