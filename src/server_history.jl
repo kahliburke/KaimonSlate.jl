@@ -46,7 +46,7 @@ end
 
 # Infra packages the remote provisioner adds INTO the worker's env (the single-env fix) — filtered out
 # of the notebook's package view + footer so they don't masquerade as the user's own deps.
-const _WORKER_INFRA_PKGS = Set(["KaimonGate", "Revise"])
+const _WORKER_INFRA_PKGS = Set(["KaimonGate", "Revise", "ExpressionExplorer"])
 
 # The notebook's OWN packages (the delta beyond the parent project) as sorted
 # `{name, version, uuid}` — the set difference active − parent − parent-package. Shared by
@@ -327,8 +327,8 @@ end
 const _DBLOB_DIR = Ref{String}("")
 function _dblob_dir()
     if _DBLOB_DIR[] == ""
-        d = joinpath(get(ENV, "HOME", tempdir()), ".cache", "kaimon", "slate-blobs")
-        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimon-slate-blobs"); mkpath(d); end
+        d = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate", "blobs")
+        try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-blobs"); mkpath(d); end
         _DBLOB_DIR[] = d
     end
     return _DBLOB_DIR[]

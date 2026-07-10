@@ -115,7 +115,7 @@ _bump_resolution!() = (Threads.atomic_add!(_RESOLUTION_GEN, 1); nothing)
 # session-only. Best-effort throughout — a missing/corrupt file just means one more round-trip.
 const _USING_DISK = Ref{Union{Nothing,Dict{String,Any}}}(nothing)   # lazy in-memory file image
 const _USING_DISK_MAX = 500
-const _USING_DISK_PATH = Ref(joinpath(homedir(), ".cache", "kaimon", "slate-usings.json"))
+const _USING_DISK_PATH = Ref(joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "usings.json"))
 
 function _using_disk_load()
     lock(_USING_LOCK) do
