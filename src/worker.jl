@@ -75,7 +75,22 @@ const _NS = Ref{Module}(_new_ns())
 # package change invalidates the entry (no silent stale restore). See ANIMATION_PIPELINE_DESIGN.md.
 const _MEMO_OK = try; @eval import Serialization; true; catch; false; end
 const _MEMO_DIR = Ref{String}("")
-const _MEMO_CAP = 2 * 1024^3                       # ~2 GB on-disk ceiling (LRU-evicted)
+# On-disk ceiling for the durable memo store (LRU-evicted). Configurable — big-data notebooks
+# legitimately cache multi-GB artifacts: `KAIMONSLATE_MEMO_CAP_GB` (forwarded into the worker's env
+# by `_spawn_worker!` from the panel/slate.json setting, or set directly). Unset → an ADAPTIVE
+# default: a quarter of the volume's free space, clamped to [2, 20] GB — a flat number is either
+# too small for a workstation or eats a laptop's last gigabytes. Note a SINGLE entry larger than
+# the cap can never stay cached — prefer caching artifact PATHS (DuckDB/parquet files) over giant
+# in-memory values.
+function _default_memo_cap()::Int
+    free = try; Base.diskstat(dirname(_memo_dir())).available; catch; 0; end
+    gb = 1024^3
+    free <= 0 ? 10gb : clamp(round(Int, free ÷ 4), 2gb, 20gb)
+end
+const _MEMO_CAP = Ref{Int}(0)   # resolved lazily — _memo_dir must exist for diskstat
+_memo_cap() = (_MEMO_CAP[] > 0 ? _MEMO_CAP[] : (_MEMO_CAP[] =
+    (v = tryparse(Float64, get(ENV, "KAIMONSLATE_MEMO_CAP_GB", "")); v !== nothing && v > 0 ?
+        round(Int, v * 1024^3) : _default_memo_cap())))
 function _memo_dir()
     if _MEMO_DIR[] == ""
         d = joinpath(get(ENV, "HOME", tempdir()), ".cache", "kaimon", "slate-memo")
@@ -169,10 +184,13 @@ function _memo_gc()
         files = [joinpath(_memo_dir(), f) for f in readdir(_memo_dir())]
         files = filter(isfile, files)
         total = sum(filesize, files; init = 0)
-        total <= _MEMO_CAP && return
+        cap = _memo_cap()
+        total <= cap && return
         for f in sort(files; by = mtime)
-            rm(f; force = true); total -= filesize(f)
-            total <= _MEMO_CAP && break
+            sz = filesize(f)               # size BEFORE rm — after, stat reads 0 and `total`
+            rm(f; force = true)            # never shrinks, evicting the ENTIRE store
+            total -= sz
+            total <= cap && break
         end
     catch; end
 end

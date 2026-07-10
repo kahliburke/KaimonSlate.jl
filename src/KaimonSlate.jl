@@ -236,6 +236,35 @@ function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
     return s
 end
 
+"Configured durable memo-store cap in GB; 0.0 means unset (worker env / adaptive default applies)."
+memo_cap_gb()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "memo_cap_gb", ""))), 0.0)
+
+"""
+    set_memo_cap_gb!(gb; respawn=true) -> Float64
+
+Persist the durable memo-store ceiling (GB) and apply it to future worker spawns; `respawn=true`
+recycles running workers so it takes effect immediately. `0` clears the override back to the
+adaptive default (a quarter of free disk, clamped 2–20 GB). Called by the Kaimon TUI panel.
+"""
+function set_memo_cap_gb!(gb::Real; respawn::Bool = true)
+    v = max(0.0, Float64(gb))
+    ReportEngine.MEMO_CAP_GB[] = v
+    cfg = _slate_config(); v > 0 ? (cfg["memo_cap_gb"] = v) : delete!(cfg, "memo_cap_gb")
+    try
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+    catch e
+        @warn "slate: could not persist memo-cap setting" exception = e
+    end
+    if respawn && _HUB[] !== nothing
+        nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
+        for nb in nbs
+            try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
+        end
+    end
+    @info "slate: memo cap set" gb = v respawned = respawn
+    return v
+end
+
 "The user's onboarding answer for extension registration: \"yes\" | \"dismissed\" | \"\" (not asked)."
 ext_prompt_choice()::String = String(get(_slate_config(), "ext_prompt", ""))
 
@@ -281,6 +310,7 @@ set_run_location_default!(spec::AbstractString) = NotebookServer.set_runon_defau
 function _load_slate_config!()
     s = worker_threads()
     isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
+    ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
     NotebookServer.PARALLEL_DEFAULT[] = parallel_default()
     NotebookServer.RUNON_DEFAULT[] = run_location_default()
     # Install the persist hook so set_runon_default! (from the browser route / gate tool) writes slate.json.

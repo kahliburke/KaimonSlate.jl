@@ -11,6 +11,10 @@ export GateKernel
 # Worker Julia-thread spec ("<compute>,<interactive>"), set by the server from persisted config /
 # the Kaimon TUI panel. Empty → fall back to env / the adaptive default. Read at each worker spawn.
 const WORKER_THREADS = Ref{String}("")
+# Durable memo-store cap in GB (panel/slate.json → here → worker env at spawn). 0 = unset:
+# the worker falls back to KAIMONSLATE_MEMO_CAP_GB from ITS env, else an adaptive default
+# (a quarter of free disk, clamped 2–20 GB — see worker.jl `_memo_cap`).
+const MEMO_CAP_GB = Ref{Float64}(0.0)
 
 # The machine-adaptive default thread spec: min(cores, 8) compute + 1 interactive (idle threads park;
 # the cap avoids oversubscription across several open notebooks). Used both at spawn and to report the
@@ -331,6 +335,9 @@ function _spawn_worker!(k::GateKernel)
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas,
                  "KAIMON_SESSION_LABEL" => k.label)   # worker reports this as its gate-session name (notebook filename)
+    # Memo-store cap: forward the panel/config setting into the worker (its env/adaptive default
+    # applies when unset — passing nothing keeps the worker's own resolution intact).
+    MEMO_CAP_GB[] > 0 && (cmd = addenv(cmd, "KAIMONSLATE_MEMO_CAP_GB" => string(MEMO_CAP_GB[])))
     # Stream the worker's stdout/stderr through a pipe into the log file, flushing
     # each chunk, so the log is tailable in real time. A plain `stdout=<file>`
     # redirect is block-buffered and only lands on disk when the worker exits —
