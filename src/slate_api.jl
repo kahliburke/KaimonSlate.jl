@@ -259,6 +259,27 @@ const SLATE_API = SlateApiEntry[
         run chip. `@progress`/`@withprogress` loops also drive it automatically.
         `for i in 1:n; slate_progress(i/n; msg=\"step \$i\"); end`."""),
 
+    # ── Fingerprints & the memo store ──────────────────────────────────────────────────────────────
+    SlateApiEntry("slate_fingerprint", "Caching", "slate_fingerprint(xs...) -> String",
+        """A canonical, session-stable content hash (SHA-256 hex) of the given value(s), with
+        `isequal`-style semantics: Dicts/Sets are order-independent, `NaN ≡ NaN`, integer widths
+        widen, `missing` and `nothing` stay distinct. The robust way to assert a restored /
+        recomputed / transferred value is REALLY the same — one comparable line across runs,
+        sessions, and worker restarts (unlike `hash`, which leaks Dict order and session state).
+        `slate_fingerprint(df, params)`."""),
+
+    SlateApiEntry("slate_memo_stats", "Caching", "slate_memo_stats() -> (; manifests, blobs, bytes, root)",
+        """Shape of the durable memo store backing this notebook's `cache` tags: entry count,
+        unique content blobs (identical values dedup to ONE blob), total on-disk bytes, and the
+        store root. In-process kernels have no durable store — all zeros."""),
+
+    SlateApiEntry("slate_memo_entries", "Caching", "slate_memo_entries(; name=\"\") -> Vector{NamedTuple}",
+        """The durable memo store's entries, newest first — one row per cached cell result:
+        `(; key, names, bytes, blobs, created)` where `names` are the globals the entry restores
+        and `blobs` their content hashes (a shared hash across rows = deduped storage).
+        `name="x"` filters to entries carrying a binding named `x`. Return it from a cell — or
+        `slate_table(slate_memo_entries())` — to see exactly what a cold open will restore."""),
+
     # ── Cell tags (header) ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("cell tags", "Cell tags", "#%% code id=… <tag> …    (or the 🏷 tag editor)",
         """Per-cell tags travel in the `#%%` header (set them with the 🏷 button in the cell header, or

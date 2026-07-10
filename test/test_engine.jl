@@ -249,3 +249,33 @@ end
     @test rr.meta["threads"] == "4,1"
     @test rr.meta["env"][1]["name"] == "Foo"
 end
+
+@testset "slate_fingerprint: canonical isequal semantics" begin
+    fp = ReportEngine.slate_fingerprint
+    # deterministic + 64 hex chars
+    @test fp([1, 2, 3]) == fp([1, 2, 3])
+    @test occursin(r"^[0-9a-f]{64}$", fp(42))
+    # Dict/Set order independence; Vector order dependence
+    @test fp(Dict(:a => 1, :b => 2)) == fp(Dict(:b => 2, :a => 1))
+    @test fp(Set([3, 1, 2])) == fp(Set([2, 3, 1]))
+    @test fp([1, 2]) != fp([2, 1])
+    # NaN ≡ NaN (any payload); -0.0 ≢ 0.0; Inf signs distinct
+    @test fp(NaN) == fp(reinterpret(Float64, 0x7ff8000000000123))
+    @test fp(-0.0) != fp(0.0)
+    @test fp(Inf) != fp(-Inf)
+    # numeric widening; but Int ≢ Float of same value
+    @test fp(Int32(3)) == fp(3)
+    @test fp(3) != fp(3.0)
+    # missing / nothing distinct; string ≢ symbol; char ≢ 1-char string
+    @test fp(missing) != fp(nothing)
+    @test fp("a") != fp(:a)
+    @test fp('a') != fp("a")
+    # nested structures compose; multiple args ≡ tuple
+    @test fp((a = 1, b = [Dict("x" => nothing)])) == fp((a = 1, b = [Dict("x" => nothing)]))
+    @test fp(1, "two") == fp((1, "two"))
+    # BigInt beyond Int64 range round-trips deterministically
+    @test fp(big(2)^200) == fp(big(2)^100 * big(2)^100)
+    # in-process kernels: memo-store queries degrade to empties (no Main.SlateWorker here)
+    @test ReportEngine.slate_memo_stats().manifests == 0
+    @test isempty(ReportEngine.slate_memo_entries())
+end

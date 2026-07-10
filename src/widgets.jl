@@ -14,6 +14,10 @@
 # Dependency-light (Base + stdlib only) so it loads cleanly into the standalone worker.
 import Base64   # stdlib — for WebPage(obscure=true) base64 packaging
 
+# slate_fingerprint + memo-store introspection — shared notebook helpers injected below
+# (one include here serves both namespaces, mirroring how this file itself is shared).
+include(joinpath(@__DIR__, "fingerprint.jl"))
+
 # A widget spec: its kind (UI tag), display params, and default value. Built by the
 # constructors below at runtime — no syntactic parsing, no `Slider`-name matching.
 struct Widget
@@ -359,6 +363,9 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const slate_query = $slate_query))
     Core.eval(m, :(const slate_refresh = $slate_refresh))
     Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress
+    Core.eval(m, :(const slate_fingerprint = $slate_fingerprint))   # canonical value hash (fingerprint.jl)
+    Core.eval(m, :(const slate_memo_stats = $slate_memo_stats))     # durable memo store: shape
+    Core.eval(m, :(const slate_memo_entries = $slate_memo_entries)) # durable memo store: entry listing
     Core.eval(m, :(const Widget = $Widget))
     Core.eval(m, :(const Choice = $Choice))
     Core.eval(m, :(const Selection = $Selection))
