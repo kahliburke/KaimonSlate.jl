@@ -467,7 +467,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
                    nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
-                   bibctx = nothing, figidx = nothing)
+                   bibctx = nothing, figidx = nothing,
+                   backref::Dict{String,Vector{String}} = Dict{String,Vector{String}}())
     fignums = figidx === nothing ? Dict{String,Int}() : figidx.numbers
     figrefs = figidx === nothing ? Dict{String,Tuple{Int,String}}() : figidx.labels
     # Markdown citations → links to the bibliography cell (per bibstyle), and `[@fig:label]` → a live
@@ -558,6 +559,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     if c.kind == CODE && !isempty(multidef)
         dup = sort!(String[string(w) for w in cell_definitions(c) if string(w) in multidef])
         isempty(dup) || (d["dupdefs"] = dup)
+    end
+    # Names this cell reads at top level ABOVE their definition (the `backref` ordering footgun) —
+    # flagged on the READER; the popup names the definer below so one click fixes the order.
+    if !isempty(backref)
+        br = sort!(String[name for (name, rw) in backref if first(rw) == c.id])
+        isempty(br) || (d["backrefs"] = br)
     end
     # Truncated outputs → append an access bar (open ↗ / editor / download) to the rendered output.
     if c.kind == CODE && c.output !== nothing && !isempty(c.output.overflow)
@@ -668,12 +675,14 @@ function state_json(nb::LiveNotebook)
     bindref, hostednames = _bind_index(nb.report)
     md = Set{String}(get(nb.report.meta, "multidef", String[]))   # names defined in 2+ cells → per-cell flag
     meta["multidefCells"] = get(nb.report.meta, "multidef_cells", Dict{String,Vector{String}}())   # name → defining cells (popup)
+    br = get(nb.report.meta, "backref", Dict{String,Vector{String}}())   # name → [reader, definer] (ordering footgun)
+    meta["backrefCells"] = br
     nbdir = dirname(abspath(nb.path))
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
     bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
     figidx = figure_index(nb.report)            # caption numbering + [@fig:] cross-ref labels
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibctx = bibctx, figidx = figidx) for c in nb.report.cells]
+        cited = cited, bibctx = bibctx, figidx = figidx, backref = br) for c in nb.report.cells]
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
     isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.

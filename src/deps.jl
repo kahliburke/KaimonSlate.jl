@@ -32,6 +32,14 @@ function _is_barrier_expr(ex)
     return any(_is_barrier_expr, ex.args)
 end
 
+# A statement whose REFERENCES are deferred to call time — a function/macro definition (long or
+# short form). Its body may legitimately name globals defined LOWER in the document (resolved when
+# called), so such references are excluded from `reads_now` and never trip the backref diagnostic.
+# Struct definitions are NOT deferred: field types/supertypes evaluate at definition time.
+_is_deferred_def(s) = s isa Expr && (
+    s.head === :function || s.head === :macro ||
+    (s.head === :(=) && s.args[1] isa Expr && s.args[1].head in (:call, :where)))
+
 # Leaf name a dotted/`as` import path binds: `A.B.C` → :C, `M as L` → :L.
 _leaf_name(s::Symbol) = s
 _leaf_name(e::Expr) = e.head === :. ? (e.args[end] isa Symbol ? e.args[end] : nothing) :
@@ -85,6 +93,100 @@ end
 const _USING_EXPORTS = Dict{String,Vector{Symbol}}()   # dotted module path → its exported names
 const _USING_TRIED   = Set{String}()                   # paths already attempted (success or fail)
 const _USING_LOCK    = ReentrantLock()
+
+# ── Durable `using`-export cache (across sessions) ───────────────────────────
+# `_USING_EXPORTS` is session-scoped, so every cold open re-paid a kernel round-trip (import + a
+# possible package load) per bare-`using` module before the graph/memo keys were precise. Persist
+# resolved export sets keyed by "path@version" — a package's exports can genuinely change between
+# versions, so the version IS the invalidation (an upgrade re-keys and re-resolves). Only
+# registry-sourced deps persist: a path-dev'd package has no stable version, so it stays
+# session-only. Best-effort throughout — a missing/corrupt file just means one more round-trip.
+const _USING_DISK = Ref{Union{Nothing,Dict{String,Any}}}(nothing)   # lazy in-memory file image
+const _USING_DISK_MAX = 500
+const _USING_DISK_PATH = Ref(joinpath(homedir(), ".cache", "kaimon", "slate-usings.json"))
+
+function _using_disk_load()
+    lock(_USING_LOCK) do
+        if _USING_DISK[] === nothing
+            d = try
+                p = _USING_DISK_PATH[]
+                isfile(p) ? JSON.parse(read(p, String)) : nothing
+            catch
+                nothing
+            end
+            img = Dict{String,Any}()   # normalize — JSON.parse returns its own AbstractDict flavour
+            d isa AbstractDict && for (k, v) in pairs(d)
+                img[String(k)] = v
+            end
+            _USING_DISK[] = img
+        end
+        return _USING_DISK[]
+    end
+end
+
+function _using_disk_store!(key::String, syms::Vector{Symbol})
+    d = _using_disk_load()
+    lock(_USING_LOCK) do
+        d[key] = Dict{String,Any}("t" => round(Int, time()), "syms" => String[string(s) for s in syms])
+        if length(d) > _USING_DISK_MAX   # bound the file: drop the oldest entries
+            order = sort!(collect(d); by = kv -> (kv[2] isa AbstractDict ? get(kv[2], "t", 0) : 0))
+            for (k, _) in Iterators.take(order, length(d) - _USING_DISK_MAX)
+                delete!(d, k)
+            end
+        end
+        try
+            p = _USING_DISK_PATH[]
+            mkpath(dirname(p))
+            tmp = p * ".tmp.$(getpid())"
+            write(tmp, JSON.json(d))
+            mv(tmp, p; force = true)
+        catch
+        end
+    end
+    return nothing
+end
+
+# ── Provenance-based graphics detection ──────────────────────────────────────
+# The lexical `_GRAPHICS_RE` (graphics_detect.jl) misses an ALIASED or RE-EXPORTED plot verb —
+# `const draw = lines!` in a helper package, a wrapper that plots — and a miss there risks a
+# `ConcurrencyViolationError` crash (two plot cells co-scheduled). Once a Makie-family module's
+# exports are RESOLVED (`_USING_EXPORTS` — prewarm/refine/disk seed), derive "touches graphics"
+# from dependency facts instead: a cell reading (or providing) ANY name a Makie-family module
+# exports is graphics. Name-based, so a user package re-exporting `lines!` is caught the moment
+# its own exports resolve. The regex stays as the resolution-free pre-filter and first-drain
+# backstop (before anything is resolved, bare-`using` barriers serialize conservatively anyway).
+const _GRAPHICS_MODULES = Set{String}(("Makie", "GLMakie", "CairoMakie", "WGLMakie", "RPRMakie"))
+
+"Union of exports of every RESOLVED Makie-family module (empty until one resolves).
+Compute once per pass and reuse — don't call per cell."
+function _graphics_export_names()
+    lock(_USING_LOCK) do
+        out = Set{Symbol}()
+        for (path, syms) in _USING_EXPORTS
+            String(first(split(path, '.'))) in _GRAPHICS_MODULES && union!(out, syms)
+        end
+        return out
+    end
+end
+
+"True when `c` touches Makie's shared global state: lexical match, or provenance — any of its
+reads/provides is an export of a resolved Makie-family module."
+_is_graphics_cell(c::Cell, gnames::Set{Symbol}) =
+    _uses_shared_graphics(c.source) ||
+    (!isempty(gnames) && (!isdisjoint(c.reads, gnames) || !isdisjoint(c.provides, gnames)))
+
+# name → (version, source) for the notebook env's direct deps, via the kernel's project listing
+# (one cheap tool call once the worker is up; in-process kernels return none → session-only).
+function _dep_versions(kernel::Kernel, report::Report)
+    out = Dict{String,Tuple{String,String}}()
+    for d in (try; project_deps(kernel, report); catch; Dict{String,Any}[]; end)
+        d isa AbstractDict || continue
+        g(k) = (v = haskey(d, k) ? d[k] : get(d, Symbol(k), nothing); v === nothing ? "" : String(v))
+        n = g("name")
+        isempty(n) || (out[n] = (g("version"), g("source")))
+    end
+    return out
+end
 
 # The precise write-set for a bare `using` statement IF every module it names is already resolved;
 # `nothing` otherwise (⇒ inference keeps the conservative :opaque barrier). Empty paths (a malformed
@@ -261,16 +363,33 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol}}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
-# No per-cell eviction (a deleted cell / closed notebook never removes its entry), so on a
-# long-lived server this would otherwise grow forever. Entries are small, but cap it — once full,
-# clear and start over rather than track real LRU bookkeeping for a cache this cheap to repopulate
-# (a cleared entry just costs one more `_infer_bindings_uncached!` pass, same as a normal miss).
+# Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
+# evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
+# multi-notebook server periodically re-infer EVERY open cell at once (a latency cliff on the next
+# structural edit). Deleted cells also get targeted eviction in `update_source!`.
 const _BIND_CACHE_MAX = 5000
+const _BIND_TICK = Ref{UInt64}(0)
+const _BIND_TICKS = Dict{String,UInt64}()
+
+# Caller holds _BIND_CACHE_LOCK. Evicts the oldest tenth so evictions amortize (one O(n log n)
+# sweep per ~500 misses at the cap, instead of a 5000-cell re-inference burst).
+function _bind_cache_evict!()
+    order = sort!(collect(_BIND_TICKS); by = last)
+    for (id, _) in Iterators.take(order, max(1, _BIND_CACHE_MAX ÷ 10))
+        delete!(_BIND_CACHE, id)
+        delete!(_BIND_TICKS, id)
+    end
+    return nothing
+end
 function infer_bindings!(cell::Cell)
     h = hash(cell.source) ⊻ hash(cell.kind)
-    hit = lock(_BIND_CACHE_LOCK) do; get(_BIND_CACHE, cell.id, nothing); end
+    hit = lock(_BIND_CACHE_LOCK) do
+        v = get(_BIND_CACHE, cell.id, nothing)
+        v === nothing || (_BIND_TICKS[cell.id] = (_BIND_TICK[] += 1))   # LRU: a hit refreshes recency
+        v
+    end
     if hit !== nothing && hit[1] == h
         empty!(cell.reads);  union!(cell.reads,  hit[2])
         empty!(cell.writes); union!(cell.writes, hit[3])
@@ -279,12 +398,14 @@ function infer_bindings!(cell::Cell)
         empty!(cell.provides); union!(cell.provides, hit[6])   # `using`/`import`-brought names (⊆ writes)
         empty!(cell.mutates); union!(cell.mutates, hit[7])   # in-place-mutated-only names (⊆ writes, ⊄ defines)
         hit[8] ? push!(cell.flags, :macrocall) : delete!(cell.flags, :macrocall)   # unknown-macro cell (expansion candidate)
+        empty!(cell.reads_now); union!(cell.reads_now, hit[9])   # top-level reads (backref diagnostic)
         return cell
     end
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
-        length(_BIND_CACHE) >= _BIND_CACHE_MAX && empty!(_BIND_CACHE)
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags)
+        length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now))
+        _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
 end
@@ -295,7 +416,7 @@ end
 _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_anon__"), names)
 
 function _infer_bindings_uncached!(cell::Cell)
-    empty!(cell.reads); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
+    empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
     delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
     if cell.kind == MARKDOWN
         # A markdown cell "reads" the free variables of its `{{ expr }}` blocks, so
@@ -309,6 +430,7 @@ function _infer_bindings_uncached!(cell::Cell)
                 @debug "deps: markdown {{ }} reactive-node analysis failed" cell = cell.id exception = e
             end
         end
+        union!(cell.reads_now, cell.reads)   # interpolations render immediately → all top-level
         return cell
     end
     cell.kind == CODE || return cell
@@ -357,7 +479,8 @@ function _infer_bindings_uncached!(cell::Cell)
         if rm !== nothing
             push!(cell.writes, rm[1])            # `@reactive x = init` DEFINES x (the reactive producer)
             try
-                union!(cell.reads, EE.compute_reactive_node(Expr(:block, rm[2])).references)
+                refs = EE.compute_reactive_node(Expr(:block, rm[2])).references
+                union!(cell.reads, refs); union!(cell.reads_now, refs)   # init evaluates immediately
                 union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), rm[2]))
             catch e
                 @debug "deps: @reactive init analysis failed" cell = cell.id exception = e
@@ -365,7 +488,8 @@ function _infer_bindings_uncached!(cell::Cell)
         elseif bm !== nothing
             push!(cell.writes, bm[1])
             try
-                union!(cell.reads, EE.compute_reactive_node(Expr(:block, bm[2])).references)
+                refs = EE.compute_reactive_node(Expr(:block, bm[2])).references
+                union!(cell.reads, refs); union!(cell.reads_now, refs)   # widget args evaluate immediately
                 union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), bm[2]))
             catch e
                 @debug "deps: @bind widget-expr reactive-node analysis failed" cell = cell.id exception = e
@@ -399,6 +523,14 @@ function _infer_bindings_uncached!(cell::Cell)
             union!(cell.writes, _strip_anon(node.definitions))
             union!(cell.writes, _strip_anon(node.funcdefs_without_signatures))
             _record_global_mutations!(cell, blk, node.references)
+            # Top-level reads (backref diagnostic): re-analyze only the NON-deferred statements —
+            # a reference inside a function/macro body resolves at call time and must not count.
+            imm = Any[s for s in nonbind if !_is_deferred_def(s)]
+            if !isempty(imm)
+                iblk = Expr(:block, imm...)
+                union!(cell.reads_now, EE.compute_reactive_node(iblk).references)
+                union!(cell.reads_now, _macrocall_arg_refs!(Set{Symbol}(), iblk))
+            end
         catch e
             @debug "deps: cell-body reactive-node analysis failed — falling back to :opaque" cell = cell.id exception = e
             push!(cell.flags, :opaque)
@@ -418,7 +550,10 @@ function _infer_bindings_uncached!(cell::Cell)
         push!(cell.reads, _THEME_SENTINEL)     # a later setter composes onto the earlier one's state
         push!(cell.writes, _THEME_SENTINEL)
         push!(cell.mutates, _THEME_SENTINEL)
-    elseif _uses_shared_graphics(cell.source)
+    elseif _uses_shared_graphics(cell.source) ||
+           (let g = _graphics_export_names()   # provenance: aliased/re-exported plot verbs (see above);
+               !isempty(g) && !isdisjoint(cell.reads, g)   # cache-safe — resolution clears _BIND_CACHE
+           end)
         push!(cell.reads, _THEME_SENTINEL)
     end
     return cell
@@ -453,12 +588,16 @@ function build_dependencies!(report::Report)
     writer = Dict{Symbol,String}()        # name → id of most-recent prior writer
     barrier::Union{String,Nothing} = nothing
     seen = String[]
+    pending_reads = Dict{Symbol,String}() # name → FIRST cell to read it top-level with no prior writer
     for c in report.cells
         if c.kind == MARKDOWN
             # md cells depend on the writers of their interpolation vars (+ barrier),
             # but never write, become a barrier, or enter `seen`.
             for r in c.reads
                 haskey(writer, r) && push!(c.deps, writer[r])
+            end
+            for r in c.reads_now
+                haskey(writer, r) || get!(pending_reads, r, c.id)
             end
             barrier === nothing || push!(c.deps, barrier)
             delete!(c.deps, c.id)
@@ -471,6 +610,9 @@ function build_dependencies!(report::Report)
         c.kind == CODE || continue
         for r in c.reads
             haskey(writer, r) && push!(c.deps, writer[r])
+        end
+        for r in c.reads_now
+            haskey(writer, r) || get!(pending_reads, r, c.id)
         end
         barrier === nothing || push!(c.deps, barrier)
         if :opaque in c.flags
@@ -512,6 +654,20 @@ function build_dependencies!(report::Report)
     for c in report.cells, p in c.deps
         push!(get!(Vector{String}, report.dependents, p), c.id)
     end
+    # Ordering footgun (`backref`, peer of `multidef`): a name read at TOP LEVEL above its only
+    # definer. Edges only point backward, so document order silently swallows that dependency —
+    # the first run errors (or a re-run consumes the PREVIOUS run's value) and editing the definer
+    # never restales the reader. Informational only, no DAG change; deferred (function-body) reads
+    # were excluded at inference (`reads_now`), so `f() = g()` with `g` below never trips it.
+    backref = Dict{String,Vector{String}}()   # name → [reader_id, definer_id] (first reader; final definer)
+    for (name, rid) in pending_reads
+        wid = get(writer, name, nothing)
+        (wid === nothing || wid == rid) && continue          # never written, or self — not an ordering issue
+        wc = report.byid[wid]
+        (name in wc.provides || name in wc.mutates) && continue   # imported/mutated below, not DEFINED below
+        backref[string(name)] = String[rid, wid]
+    end
+    report.meta["backref"] = backref
     return report
 end
 
@@ -567,6 +723,12 @@ function update_source!(report::Report, new_source::AbstractString)
     if !isempty(removed)
         for nc in newr.cells
             isempty(intersect(nc.deps, removed)) || push!(changed, nc.id)
+        end
+        lock(_BIND_CACHE_LOCK) do   # targeted LRU eviction — a deleted cell's entry is dead weight
+            for id in removed
+                delete!(_BIND_CACHE, id)
+                delete!(_BIND_TICKS, id)
+            end
         end
     end
 
@@ -673,6 +835,7 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
     end
     isempty(pending) && return false
     newly = false
+    vers = Dict{String,Tuple{String,String}}()   # fetched lazily — only if something is un-tried
     for p in unique!(pending)
         skip = lock(_USING_LOCK) do; p in _USING_TRIED; end
         skip && continue
@@ -681,6 +844,11 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
             push!(_USING_TRIED, p)
             isempty(syms) || (_USING_EXPORTS[p] = syms; newly = true)   # cache only a real export set
         end
+        if !isempty(syms)   # persist for the next session's cold open (registry versions only)
+            isempty(vers) && (vers = _dep_versions(kernel, report))
+            v, src = get(vers, String(first(split(p, '.'))), ("", ""))
+            !isempty(v) && src == "registry" && _using_disk_store!("$p@$v", syms)
+        end
     end
     newly && rebuild_precise!(report)
     return newly
@@ -688,7 +856,7 @@ end
 
 # Drop memoized :opaque verdicts and rebuild the graph so newly-resolved exports take effect.
 function rebuild_precise!(report::Report)
-    lock(_BIND_CACHE_LOCK) do; empty!(_BIND_CACHE); end
+    lock(_BIND_CACHE_LOCK) do; empty!(_BIND_CACHE); empty!(_BIND_TICKS); end
     build_dependencies!(report)
     return report
 end
@@ -720,7 +888,25 @@ end
 # request needs. Returns `true` iff a module was newly resolved.
 function resolve_usings!(report::Report, kernel::Kernel, paths::Vector{String})
     newly = false
+    vers = _dep_versions(kernel, report)
+    disk = _using_disk_load()
+    remaining = String[]
     for p in paths
+        # Disk hit for the env's EXACT version → seed without the import round-trip. The `using`
+        # cell itself still loads the package when it runs; only the resolution is front-loaded.
+        v, src = get(vers, String(first(split(p, '.'))), ("", ""))
+        rec = (!isempty(v) && src == "registry") ? get(disk, "$p@$v", nothing) : nothing
+        syms = rec isa AbstractDict ? Symbol[Symbol(String(s)) for s in get(rec, "syms", Any[])] : Symbol[]
+        if !isempty(syms)
+            lock(_USING_LOCK) do
+                push!(_USING_TRIED, p); _USING_EXPORTS[p] = syms
+            end
+            newly = true
+        else
+            push!(remaining, p)
+        end
+    end
+    for p in remaining
         out = try; eval_capture(kernel, report, "import " * p, "prewarm:" * p); catch; nothing; end
         (out === nothing || out.exception !== nothing) && continue
         syms = _module_exports(kernel, report, p)
@@ -728,6 +914,8 @@ function resolve_usings!(report::Report, kernel::Kernel, paths::Vector{String})
         lock(_USING_LOCK) do
             push!(_USING_TRIED, p); _USING_EXPORTS[p] = syms
         end
+        v, src = get(vers, String(first(split(p, '.'))), ("", ""))
+        !isempty(v) && src == "registry" && _using_disk_store!("$p@$v", syms)
         newly = true
     end
     return newly

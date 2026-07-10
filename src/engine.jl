@@ -12,6 +12,8 @@ evaluation yet — so it is testable with `Base` alone.
 """
 module ReportEngine
 
+import JSON   # durable `using`-export cache file (deps.jl)
+
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
 export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
@@ -74,6 +76,9 @@ mutable struct Cell
     source::String
     src_hash::UInt64
     reads::Set{Symbol}
+    reads_now::Set{Symbol}        # the subset of `reads` made at TOP LEVEL (not deferred into a
+                                  # function/macro body) — feeds the `backref` ordering diagnostic;
+                                  # never used for edges, so under-approximation is harmless
     writes::Set{Symbol}           # rebindings/definitions ∪ in-place mutations — the full write-set used for
                                   # ordering (most-recent-writer), parallel write-conflicts, and reactive self-trigger
     mutates::Set{Symbol}          # the subset of `writes` reached ONLY via in-place mutation here (x[]=…, x.f=…,
@@ -95,7 +100,7 @@ end
 function Cell(id::AbstractString, kind::CellKind, source::AbstractString)
     src = String(source)
     return Cell(String(id), kind, src, hash(src),
-                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
+                Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{Symbol}(), Set{String}(), String[],
                 STALE, nothing, Set{Symbol}(), BindSpec[], Vector{String}[], CellOutput[], Set{Symbol}())
 end
 

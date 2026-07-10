@@ -8,6 +8,20 @@ include(joinpath(@__DIR__, "..", "src", "engine.jl")); using .ReportEngine
 
 findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
 
+# Mock kernel for the durable using-export cache test: counts import round-trips and serves a
+# fixed fake registry package (top-level — structs can't live inside a @testset).
+mutable struct CountingKernel <: ReportEngine.Kernel
+    evals::Int
+end
+ReportEngine.prepare!(::CountingKernel, r::ReportEngine.Report) = ReportEngine.report_module(r)
+ReportEngine.project_deps(::CountingKernel, ::ReportEngine.Report) =
+    [Dict{String,Any}("name" => "FakeExpPkg", "version" => "1.2.3", "source" => "registry")]
+ReportEngine.eval_capture(k::CountingKernel, r::ReportEngine.Report, ::AbstractString, ::AbstractString = "string") =
+    (k.evals += 1; ReportEngine._eval_capture(ReportEngine.report_module(r), "1"))
+ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractString) =
+    Dict{String,Any}("kind" => "module",
+                     "exports" => Any[Dict{String,Any}("name" => "fk_fun", "kind" => "function")])
+
 @testset "ReportEngine deps" begin
 
     @testset "binding inference: reads / writes" begin
@@ -71,17 +85,31 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test "producer" in findcell(r, "consumer").deps
     end
 
-    @testset "_BIND_CACHE is bounded (no unbounded growth on a long-lived server)" begin
-        empty!(ReportEngine._BIND_CACHE)
+    @testset "_BIND_CACHE is a bounded LRU (no wholesale re-inference cliff)" begin
+        empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
         # Fill past the cap with distinct cell ids; correctness survives the eviction sweep —
         # inference is recomputed (cheap), not skipped or corrupted. One aggregate @test instead of
         # one per cell — thousands of near-identical assertions don't add diagnostic value here.
         n = ReportEngine._BIND_CACHE_MAX + 5
         cells = [Cell("c$i", CODE, "v$i = $i") for i in 1:n]
-        foreach(infer_bindings!, cells)
+        # Touch an early entry right before the overflow inserts: an LRU keeps what was USED,
+        # a clear-on-full would have dumped it with everything else.
+        foreach(infer_bindings!, cells[1:ReportEngine._BIND_CACHE_MAX])
+        infer_bindings!(cells[3])                                     # hit → recency refreshed
+        foreach(infer_bindings!, cells[(ReportEngine._BIND_CACHE_MAX + 1):n])   # overflow → evict oldest tenth
         @test all(i -> Symbol("v$i") in cells[i].writes, 1:n)
         @test length(ReportEngine._BIND_CACHE) <= ReportEngine._BIND_CACHE_MAX
-        empty!(ReportEngine._BIND_CACHE)   # don't leak into other testsets' cache-hit assumptions
+        @test haskey(ReportEngine._BIND_CACHE, "c3")                  # recently-hit entry survived
+        @test haskey(ReportEngine._BIND_CACHE, "c$n")                 # newest survived
+        @test !haskey(ReportEngine._BIND_CACHE, "c1")                 # oldest untouched entry evicted
+        # Targeted eviction: a cell REMOVED by an edit drops its entry immediately.
+        r = parse_report("#%% code id=gone\ngv = 1\n#%% code id=stays\nsv = 2")
+        build_dependencies!(r)
+        @test haskey(ReportEngine._BIND_CACHE, "gone")
+        update_source!(r, "#%% code id=stays\nsv = 2")
+        @test !haskey(ReportEngine._BIND_CACHE, "gone")
+        @test haskey(ReportEngine._BIND_CACHE, "stays")
+        empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)   # don't leak into other testsets
     end
 
     @testset "mutation heuristics add a write (and read)" begin
@@ -324,6 +352,68 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :KwOpt ∉ findcell(r, "s").writes              # no recovery when opted out
         @test isempty(ReportEngine.pending_macro_cells(r))  # and no round-trips queued
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
+    end
+
+    @testset "using-export resolution persists across sessions (disk seed, no round-trip)" begin
+        tmp = joinpath(mktempdir(), "usings.json")
+        oldpath = ReportEngine._USING_DISK_PATH[]
+        ReportEngine._USING_DISK_PATH[] = tmp
+        wipe!() = (empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED);
+                   empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS);
+                   ReportEngine._USING_DISK[] = nothing)
+        try
+            wipe!()
+            src = "#%% code id=u\nusing FakeExpPkg\n#%% code id=r\nfk_fun()"
+            r = parse_report(src); build_dependencies!(r)
+            k1 = CountingKernel(0)
+            @test prewarm_usings!(r, k1)                     # cold: resolves via the kernel…
+            @test k1.evals == 1                              # …paying exactly one import round-trip
+            @test ReportEngine._USING_EXPORTS["FakeExpPkg"] == [:fk_fun]
+            @test "u" in findcell(r, "r").deps               # graph precise from the first run
+            @test isfile(tmp)                                # …and the resolution persisted
+
+            wipe!()                                          # "restart": session caches gone, file stays
+            r2 = parse_report(src); build_dependencies!(r2)
+            k2 = CountingKernel(0)
+            @test prewarm_usings!(r2, k2)                    # warm: seeded straight from disk…
+            @test k2.evals == 0                              # …with ZERO import round-trips
+            @test ReportEngine._USING_EXPORTS["FakeExpPkg"] == [:fk_fun]
+            @test "u" in findcell(r2, "r").deps
+        finally
+            ReportEngine._USING_DISK_PATH[] = oldpath
+            wipe!()
+        end
+    end
+
+    @testset "backref: a top-level read above its definer is flagged (ordering footgun)" begin
+        # Cell A reads x, cell B (below) defines it — edges point backward, so document order
+        # silently swallows the dependency; the diagnostic surfaces it (reader, definer).
+        r = parse_report("#%% code id=a\ny = x + 1\n#%% code id=b\nx = 3")
+        build_dependencies!(r)
+        @test r.meta["backref"] == Dict("x" => ["a", "b"])
+        # reordering clears it
+        r2 = parse_report("#%% code id=b\nx = 3\n#%% code id=a\ny = x + 1")
+        build_dependencies!(r2)
+        @test isempty(r2.meta["backref"])
+        # a forward reference inside a FUNCTION BODY is legit — resolved at call time, never flagged
+        r3 = parse_report("#%% code id=a\nf() = g()\n#%% code id=b\ng() = 1")
+        build_dependencies!(r3)
+        @test isempty(r3.meta["backref"])
+        r3b = parse_report("#%% code id=a\nfunction h()\n    later_val + 1\nend\n#%% code id=b\nlater_val = 2")
+        build_dependencies!(r3b)
+        @test isempty(r3b.meta["backref"])
+        # a name PROVIDED below (import) is availability, not an ordering mistake
+        r4 = parse_report("#%% code id=a\nt = now()\n#%% code id=b\nimport Dates: now")
+        build_dependencies!(r4)
+        @test isempty(r4.meta["backref"])
+        # a name only MUTATED below is not DEFINED below
+        r5 = parse_report("#%% code id=a\ns = sum(acc)\n#%% code id=b\npush!(acc, 1)")
+        build_dependencies!(r5)
+        @test isempty(r5.meta["backref"])
+        # markdown interpolation reads are immediate — prose above its value is the same footgun
+        r6 = parse_report("#%% md id=m\nvalue: {{ shown }}\n#%% code id=d\nshown = 42")
+        build_dependencies!(r6)
+        @test r6.meta["backref"] == Dict("shown" => ["m", "d"])
     end
 
     @testset "global-theme cells wire theme→plot edges (Makie theme reactivity)" begin

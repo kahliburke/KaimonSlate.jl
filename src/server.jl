@@ -655,9 +655,12 @@ end
 # Observables). Mirrors the worker's `__slate_eval_batch`; extracted so it's unit-testable.
 function _batch_specs(code)
     specs = ParCell[]
+    # Lexical regex OR provenance (reads/provides an export of a resolved Makie-family module) —
+    # the provenance half catches aliased/re-exported plot verbs the regex can't (crash-on-miss).
+    gnames = ReportEngine._graphics_export_names()
     for c in code
         w = copy(c.writes)
-        _uses_shared_graphics(c.source) && push!(w, _GRAPHICS_SENTINEL)
+        ReportEngine._is_graphics_cell(c, gnames) && push!(w, _GRAPHICS_SENTINEL)
         push!(specs, ParCell(c.id, copy(c.deps), copy(c.reads), w, (:opaque in c.flags) || _cell_defines(c)))
     end
     return specs

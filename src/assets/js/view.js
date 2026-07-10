@@ -146,6 +146,8 @@ function cellHeaderInner(c) {
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     (c.dupdefs && c.dupdefs.length
       ? `<span class="dupwarn" onclick="window.dupInfo(event,'${c.id}')" title="defined in more than one cell — click for details">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
+    (c.backrefs && c.backrefs.length
+      ? `<span class="dupwarn" onclick="window.backrefInfo(event,'${c.id}')" title="used above its definition — click for details">⇅ ${c.backrefs.map(_esc).join(', ')}</span>` : '') +
     '<span class="hspace"></span>' +
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +
@@ -403,23 +405,13 @@ function onCellPre(index, cell) {
 }
 window.onCellPre = onCellPre;
 
-// Click the ⚠ multidef chip → a popup listing each colliding name and the cells that define it
-// (click a cell id to jump there). Dismissed on outside-click / Escape.
-function dupInfo(ev, cellId) {
-  ev.stopPropagation();
-  const st = window.__slateState || {};
-  const c = (st.cells || []).find(x => x.id === cellId);
-  const mc = st.multidefCells || {};
-  if (!c || !(c.dupdefs && c.dupdefs.length)) return;
+// Shared warning-chip popup: renders `html` in the dupinfo card under the clicked chip, wires
+// `.dupinfo-jump` links to cell navigation, and dismisses on outside-click / Escape.
+function _chipPopup(ev, html) {
   const old = document.getElementById('dupinfo'); if (old) old.remove();
-  const rows = c.dupdefs.map(name =>
-    `<div class="dupinfo-row"><code>${_esc(name)}</code> — defined in ` +
-    (mc[name] || []).map(id => `<a class="dupinfo-jump${id === cellId ? ' self' : ''}" data-cid="${_esc(id)}">${_esc(id)}</a>`).join(', ') +
-    '</div>').join('');
   const pop = document.createElement('div');
   pop.id = 'dupinfo'; pop.className = 'dupinfo';
-  pop.innerHTML = '<div class="dupinfo-h">Defined in multiple cells</div>' + rows +
-    '<div class="dupinfo-foot">One shared namespace — the last cell to run wins. Rename to avoid surprises.</div>';
+  pop.innerHTML = html;
   document.body.appendChild(pop);
   const r = ev.target.getBoundingClientRect();
   pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 12)) + 'px';
@@ -436,7 +428,42 @@ function dupInfo(ev, cellId) {
     document.addEventListener('keydown', esc);
   }, 0);
 }
+
+// Click the ⚠ multidef chip → a popup listing each colliding name and the cells that define it
+// (click a cell id to jump there). Dismissed on outside-click / Escape.
+function dupInfo(ev, cellId) {
+  ev.stopPropagation();
+  const st = window.__slateState || {};
+  const c = (st.cells || []).find(x => x.id === cellId);
+  const mc = st.multidefCells || {};
+  if (!c || !(c.dupdefs && c.dupdefs.length)) return;
+  const rows = c.dupdefs.map(name =>
+    `<div class="dupinfo-row"><code>${_esc(name)}</code> — defined in ` +
+    (mc[name] || []).map(id => `<a class="dupinfo-jump${id === cellId ? ' self' : ''}" data-cid="${_esc(id)}">${_esc(id)}</a>`).join(', ') +
+    '</div>').join('');
+  _chipPopup(ev, '<div class="dupinfo-h">Defined in multiple cells</div>' + rows +
+    '<div class="dupinfo-foot">One shared namespace — the last cell to run wins. Rename to avoid surprises.</div>');
+}
 window.dupInfo = dupInfo;
+
+// Click the ⇅ backref chip → a popup naming each variable this cell uses ABOVE where it's defined.
+// Document order is execution order, so the read silently sees a missing (first run) or previous-run
+// value, and editing the definer never recomputes this cell. Click the definer id to jump to it.
+function backrefInfo(ev, cellId) {
+  ev.stopPropagation();
+  const st = window.__slateState || {};
+  const c = (st.cells || []).find(x => x.id === cellId);
+  const bc = st.backrefCells || {};
+  if (!c || !(c.backrefs && c.backrefs.length)) return;
+  const rows = c.backrefs.map(name => {
+    const w = (bc[name] || [])[1];
+    return `<div class="dupinfo-row"><code>${_esc(name)}</code> — defined below in ` +
+      (w ? `<a class="dupinfo-jump" data-cid="${_esc(w)}">${_esc(w)}</a>` : '?') + '</div>';
+  }).join('');
+  _chipPopup(ev, '<div class="dupinfo-h">Used above its definition</div>' + rows +
+    '<div class="dupinfo-foot">Document order is execution order — move this cell below the definition, or the definition up.</div>');
+}
+window.backrefInfo = backrefInfo;
 
 function _publishState(state) {
   nbState = state;

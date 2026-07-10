@@ -30,6 +30,29 @@ cell(src) = RE.Cell("c", RE.CODE, src)
         @test !NS._cell_defines(cell("a = 1\nb = a + 2\nc = b * 3"))  # several bindings, no defs
     end
 
+    @testset "provenance graphics detection (aliased plot verbs the regex misses)" begin
+        # A helper alias like `const fancyplot! = lines!` defeats the lexical regex — the
+        # crash-on-miss class. Once CairoMakie's exports resolve, provenance catches it.
+        lock(RE._USING_LOCK) do
+            RE._USING_EXPORTS["CairoMakie"] = [:fancyplot!, :lines!]
+        end
+        try
+            g = RE._graphics_export_names()
+            @test :fancyplot! in g
+            mk(id, src) = (c = RE.Cell(id, RE.CODE, src); RE.infer_bindings!(c); c)
+            c1 = mk("gp1", "fancyplot!(data)")
+            @test !RE._uses_shared_graphics(c1.source)      # regex misses the alias…
+            @test RE._is_graphics_cell(c1, g)               # …provenance doesn't
+            @test !RE._is_graphics_cell(mk("gp2", "y = sum(rand(10))"), g)   # pure compute stays pure
+            # end-to-end: the batch specs serialize the aliased cell against another graphics cell
+            specs = NS._batch_specs([mk("ga", "fancyplot!(data)"), mk("gb", "fig = Figure()")])
+            bl = NS.par_blockers(specs)
+            @test !NS.co_runnable(["ga", "gb"], bl)
+        finally
+            lock(RE._USING_LOCK) do; delete!(RE._USING_EXPORTS, "CairoMakie"); end
+        end
+    end
+
     @testset "_preempt_victims: only running pure-compute cells are interruptible" begin
         running(src) = (c = cell(src); c.state = RE.RUNNING; c)
         # a running compute cell is a victim; the guards must hold everything else back
