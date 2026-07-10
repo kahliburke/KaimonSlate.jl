@@ -79,6 +79,7 @@ const _NS = Ref{Module}(_new_ns())
 const _MEMO_OK = try
     @eval import Serialization
     include(joinpath(@__DIR__, "memostore.jl"))
+    include(joinpath(@__DIR__, "memocodecs.jl"))   # value↔bytes: jls fallback + raw/arrow fast paths
     true
 catch
     false
@@ -236,21 +237,28 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[])
         e isa AbstractDict || return nothing
         String(get(e, "name", "")) in unread || return nothing
     end
-    decode(h) = try
-        MemoStore.with_blob(io -> Serialization.deserialize(io), root, String(h))
-    catch
-        (false, nothing)
-    end
     binds = Tuple{Symbol,Any}[]
     for b in get(mf, "bindings", Any[])
         b isa AbstractDict || return nothing
-        ok, v = decode(get(b, "blob", ""))
-        ok || return nothing
+        h = String(get(b, "blob", ""))
+        p = MemoStore.blob_path(root, h)
+        isfile(p) || return nothing
+        # Codec-dispatched decode (path-based: raw/arrow mmap the blob file in place). A codec
+        # whose package isn't loaded yet, or any decode failure, is a clean miss → recompute.
+        v = try
+            _codec_decode(String(get(b, "codec", "jls")), p, get(b, "zc", false) === true)
+        catch
+            return nothing
+        end
         push!(binds, (Symbol(String(get(b, "name", ""))), v))
     end
     w = get(mf, "wire", nothing)
     w isa AbstractDict || return nothing
-    ok, wire = decode(get(w, "blob", ""))
+    ok, wire = try
+        MemoStore.with_blob(io -> Serialization.deserialize(io), root, String(get(w, "blob", "")))
+    catch
+        (false, nothing)
+    end
     ok || return nothing
     m = _NS[]
     for (s, v) in binds
@@ -285,7 +293,7 @@ function _is_display_object(v)
 end
 
 function _memo_store(cellkey::String, names::Vector{String}, wire;
-                     unread::Vector{String} = String[])
+                     unread::Vector{String} = String[], safe::Vector{String} = String[])
     _MEMO_OK || return false
     m = _NS[]
     root = _memo_dir(); key = _memo_fullkey(cellkey)
@@ -310,13 +318,18 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
             @info "slate memo: display object elided (wire image only)" cell = cellkey name = nm
             continue
         end
+        codec = try; _codec_pick(v); catch; "jls"; end
         h, n = try
-            MemoStore.put_blob(io -> Serialization.serialize(io, v), root)
+            MemoStore.put_blob(io -> _codec_encode(io, codec, v), root)
         catch e
-            @info "slate memo: not cached — a binding won't serialize" cell = cellkey name = nm reason = first(split(sprint(showerror, e), '\n'))
+            @info "slate memo: not cached — a binding won't serialize" cell = cellkey name = nm codec = codec reason = first(split(sprint(showerror, e), '\n'))
             return false
         end
-        push!(entries, Dict{String,Any}("name" => nm, "codec" => "jls", "blob" => h, "bytes" => n))
+        # `zc`: the graph proved (at store time) that nothing downstream MUTATES this name, so
+        # restore may hand back a read-only mmap / arrow-backed view instead of a copy. A mutator
+        # added later throws ReadOnlyMemoryError (safe), and one producer re-run re-stores zc=false.
+        push!(entries, Dict{String,Any}("name" => nm, "codec" => codec, "blob" => h, "bytes" => n,
+                                        "zc" => (nm in safe)))
     end
     try
         wh, wn = MemoStore.put_blob(io -> Serialization.serialize(io, wire), root)
@@ -346,7 +359,7 @@ end
 function _eval_one(source::String, filename::String, memo_key::String,
                    memo_names::Vector{String}, memo_threshold::Float64,
                    memo_force::Bool = false, memo_always::Bool = false,
-                   memo_unread::Vector{String} = String[])
+                   memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[])
     cid = replace(filename, r"^cell:" => "")
     # `memo_force` (the ▶ play button): an explicit run request — never satisfy it from the cache.
     # The fresh result still stores below, replacing the entry.
@@ -383,7 +396,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # the serialize cost).
     if !isempty(memo_key) && r.exception === nothing &&
        (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
-        if _memo_store(memo_key, memo_names, r; unread = memo_unread)
+        if _memo_store(memo_key, memo_names, r; unread = memo_unread, safe = memo_safe)
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
             return merge(r, (memo = "stored",))
         end
@@ -398,14 +411,15 @@ persist it after a run that exceeds `memo_threshold` ms."
 function __slate_eval(source::String; filename::String = "string",
                      memo_key::String = "", memo_names::Vector{String} = String[],
                      memo_threshold::Float64 = 0.0, memo_force::Bool = false,
-                     memo_always::Bool = false, memo_unread::Vector{String} = String[])
+                     memo_always::Bool = false, memo_unread::Vector{String} = String[],
+                     memo_safe::Vector{String} = String[])
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
     lock(_CANCEL_LOCK) do; _RUNNING_TASKS[cid] = current_task(); end
     try
         return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force,
-                         memo_always, memo_unread)
+                         memo_always, memo_unread, memo_safe)
     finally
         lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
     end

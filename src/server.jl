@@ -510,12 +510,17 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         # has SINCE gained a reader is treated as a miss, so the re-run re-stores the real object.
         unread = String[string(w) for w in cell.writes
                         if !any(o -> o !== cell && w in o.reads, nb.report.cells)]
+        # Writes no OTHER cell mutates — zero-copy-safe at restore time (mmap / arrow-backed view
+        # instead of a materialized copy; a mutation attempt on one THROWS rather than corrupting
+        # the immutable CAS blob — the graph's `mutates` analysis is the safety proof).
+        safe = String[string(w) for w in cell.writes
+                      if !any(o -> o !== cell && w in o.mutates, nb.report.cells)]
         m = (key = ReportEngine._memo_key(nb.report, cell),
              names = String[string(w) for w in cell.writes],
              threshold = ReportEngine._MEMO_THRESHOLD_MS,
              force = frc,
              always = (:cache in cell.flags),   # `cache` tag → persist regardless of runtime
-             unread = unread)
+             unread = unread, safe = safe)
         (s, cell.src_hash, m)
     end
     out = try

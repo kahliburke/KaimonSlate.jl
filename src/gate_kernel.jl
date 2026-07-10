@@ -513,7 +513,9 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
             "memo_force" => (hasproperty(memo, :force) && memo.force === true),
             "memo_always" => (hasproperty(memo, :always) && memo.always === true),
             # names nothing downstream reads — display objects among them store as wire-image only
-            "memo_unread" => (hasproperty(memo, :unread) ? collect(String, memo.unread) : String[])); timeout = _eval_timeout())
+            "memo_unread" => (hasproperty(memo, :unread) ? collect(String, memo.unread) : String[]),
+            # names nothing downstream MUTATES — restore may zero-copy (mmap/arrow view)
+            "memo_safe" => (hasproperty(memo, :safe) ? collect(String, memo.safe) : String[])); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end

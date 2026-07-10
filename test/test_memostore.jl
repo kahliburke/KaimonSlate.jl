@@ -4,6 +4,7 @@
 using ReTest
 import Serialization
 include(joinpath(@__DIR__, "..", "src", "memostore.jl"))
+include(joinpath(@__DIR__, "..", "src", "memocodecs.jl"))
 
 # A manifest shaped the way the worker writes it (bindings + wire referencing stored blobs).
 mkmanifest(binds::Vector{<:Pair}, wire_h::String) = Dict{String,Any}(
@@ -120,6 +121,25 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
             MemoStore.write_manifest(root, "s1", mkmanifest(["x" => hA], hA))
             st = MemoStore.stats(root)
             @test st.manifests == 1 && st.blobs == 1 && st.bytes > 8
+        end
+    end
+
+    @testset "codecs: pick, raw round-trip, zero-copy mmap enforces immutability" begin
+        mktempdir() do root
+            @test _codec_pick([1.0, 2.0]) == "raw"
+            @test _codec_pick(Dict("a" => 1)) == "jls"        # not an isbits Array → fallback
+            @test _codec_pick(String[]) == "jls"              # empty / non-isbits stay jls
+            a = reshape(collect(1.0:24.0), 2, 3, 4)
+            h, n = MemoStore.put_blob(io -> _codec_encode(io, "raw", a), root)
+            @test n == 64 + sizeof(a)                         # padded header + pure bytes
+            p = MemoStore.blob_path(root, h)
+            @test _codec_decode("raw", p, false) == a          # materialized copy
+            z = _codec_decode("raw", p, true)                  # zero-copy mmap
+            @test z == a && size(z) == size(a)
+            @test_throws ReadOnlyMemoryError (z[1] = 99.0)     # the safety property itself
+            # jls path through the same dispatch
+            hj, _ = MemoStore.put_blob(io -> _codec_encode(io, "jls", Dict("k" => [1, 2])), root)
+            @test _codec_decode("jls", MemoStore.blob_path(root, hj), false) == Dict("k" => [1, 2])
         end
     end
 end
