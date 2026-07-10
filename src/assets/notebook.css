@@ -6,32 +6,32 @@
 :root {
   --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40; --text:#d4d8e8;
   --dim:#6a7090; --accent:#569cd6; --green:#56d364; --red:#e57575; --gold:#ffd700;
-  --orange:#ce9178; --purple:#c586c0; --teal:#4ec9b0;
+  --orange:#ce9178; --purple:#c586c0; --teal:#4ec9b0; --val:#4ec9b0;
   --strong:#fff; --rowstripe:rgba(255,255,255,.02); --ovl:rgba(255,255,255,.06);
   --page-pad:20px;   /* top/side gutter for the content column; reused by the agent drawer */
 }
 html[data-slate-theme="graphite"] {
   --bg:#15171c; --bg2:#1c1f26; --bg3:#23262e; --border:#33373f; --text:#d7dae1;
   --dim:#828b9c; --accent:#6cb6ff; --green:#57d364; --red:#e5797b; --gold:#e3b341;
-  --orange:#e0a071; --purple:#c89be8; --teal:#54c7b8;
+  --orange:#e0a071; --purple:#c89be8; --teal:#54c7b8; --val:#54c7b8;
   --strong:#fff; --rowstripe:rgba(255,255,255,.02); --ovl:rgba(255,255,255,.07);
 }
 html[data-slate-theme="nord"] {
   --bg:#2e3440; --bg2:#3b4252; --bg3:#434c5e; --border:#4c566a; --text:#e5e9f0;
   --dim:#8893a8; --accent:#88c0d0; --green:#a3be8c; --red:#bf616a; --gold:#ebcb8b;
-  --orange:#d08770; --purple:#b48ead; --teal:#8fbcbb;
+  --orange:#d08770; --purple:#b48ead; --teal:#8fbcbb; --val:#8fbcbb;
   --strong:#eceff4; --rowstripe:rgba(255,255,255,.03); --ovl:rgba(255,255,255,.07);
 }
 html[data-slate-theme="dracula"] {
   --bg:#282a36; --bg2:#2f3242; --bg3:#383b4d; --border:#44475a; --text:#f8f8f2;
   --dim:#7081ad; --accent:#bd93f9; --green:#50fa7b; --red:#ff5555; --gold:#f1fa8c;
-  --orange:#ffb86c; --purple:#ff79c6; --teal:#8be9fd;
+  --orange:#ffb86c; --purple:#ff79c6; --teal:#8be9fd; --val:#8be9fd;
   --strong:#fff; --rowstripe:rgba(255,255,255,.03); --ovl:rgba(255,255,255,.07);
 }
 html[data-slate-theme="solarized-dark"] {
   --bg:#002b36; --bg2:#073642; --bg3:#0a4250; --border:#13515f; --text:#93a1a1;
   --dim:#5d737e; --accent:#268bd2; --green:#859900; --red:#dc322f; --gold:#b58900;
-  --orange:#cb4b16; --purple:#6c71c4; --teal:#2aa198;
+  --orange:#cb4b16; --purple:#6c71c4; --teal:#2aa198; --val:#2aa198;
   --strong:#eee8d5; --rowstripe:rgba(255,255,255,.03); --ovl:rgba(255,255,255,.07);
 }
 /* Light themes — note --strong/--rowstripe/--ovl flip to dark-on-light so headings stay legible
@@ -39,13 +39,13 @@ html[data-slate-theme="solarized-dark"] {
 html[data-slate-theme="daylight"] {
   --bg:#ffffff; --bg2:#f5f7fa; --bg3:#eaeef3; --border:#d5dbe3; --text:#222730;
   --dim:#6b7480; --accent:#0969da; --green:#1a7f37; --red:#cf222e; --gold:#9a6700;
-  --orange:#bc4c00; --purple:#8250df; --teal:#0a7b83;
+  --orange:#bc4c00; --purple:#8250df; --teal:#0a7b83; --val:#0a7b83;
   --strong:#0a0d12; --rowstripe:rgba(0,0,0,.025); --ovl:rgba(0,0,0,.06);
 }
 html[data-slate-theme="solarized-light"] {
   --bg:#fdf6e3; --bg2:#eee8d5; --bg3:#e4ddc8; --border:#d3cbb0; --text:#586e75;
   --dim:#93a1a1; --accent:#268bd2; --green:#859900; --red:#dc322f; --gold:#b58900;
-  --orange:#cb4b16; --purple:#6c71c4; --teal:#2aa198;
+  --orange:#cb4b16; --purple:#6c71c4; --teal:#2aa198; --val:#2aa198;
   --strong:#073642; --rowstripe:rgba(0,0,0,.025); --ovl:rgba(0,0,0,.06);
 }
 * { box-sizing:border-box; }
@@ -208,7 +208,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .tv-grp { display:inline-flex; flex-wrap:wrap; align-items:center; gap:5px; }
 .tv-name { color:var(--accent); }
 .tv-res { color:var(--gold); font-style:italic; }
-.tv-val { background:var(--bg3); color:var(--green); border-radius:5px; padding:0 6px;
+.tv-val { background:var(--bg3); color:var(--val); border-radius:5px; padding:0 6px;
   white-space:pre-wrap; word-break:break-word; }
 .tv-arrow { color:var(--dim); font-size:.74rem; }
 /* Loop iteration table: one row per pass, variables as columns (same-iteration values together). */
@@ -282,7 +282,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
    wrapping into an unreadable mess. Opt in to wrapping via Settings → "Wrap text output". */
 .output pre { margin:0; white-space:pre; }
 body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
-.output .out { color:var(--dim); } .output .val { color:var(--green); }
+.output .out { color:var(--dim); } .output .val { color:var(--val); }
 .output .err { color:var(--red); background:rgba(229,117,117,.06); }
 .output .warn { color:var(--gold); background:rgba(255,215,0,.06); font-size:.86rem; }
 .output .err .srcref, .output .warn .srcref { color:var(--accent); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
@@ -373,7 +373,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .slatetable th:hover { color:var(--accent); }
 .slatetable tbody tr:nth-child(even) { background:var(--rowstripe); }
 .slatetable tbody tr:hover { background:rgba(86,156,214,.08); }
-.slatetable td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--green); }
+.slatetable td.num { text-align:right; font-variant-numeric:tabular-nums; color:var(--val); }
 /* explicit per-column alignment (from ColumnDef.align) — declared AFTER .num so an override wins */
 .slatetable td.align-left { text-align:left; }
 .slatetable td.align-center { text-align:center; }
@@ -386,6 +386,25 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   border-radius:5px; padding:1px 5px; font-size:.74rem; font-family:inherit; }
 .disp.img img { max-width:min(100%, var(--fig-max, 980px)); height:auto; border-radius:4px; display:block; margin-inline:auto; }
 .disp.html table { border-collapse:collapse; } .disp.html td,.disp.html th { border:1px solid var(--border); padding:3px 8px; }
+/* DataFrames.jl HTML output (a bare `df` / `eachrow(df)[i]` return): the stock emit is a cramped
+   full-grid with a bold row column and a shouting eltype header. Restyle into the notebook idiom —
+   dim caption + eltype row, header on bg3, horizontal rules only, zebra + hover, tabular numerals.
+   (!important where DataFrames sets inline styles: table margin, rowLabel bold.) Non-DataFrames
+   HTML tables keep the bordered fallback above. */
+.disp.html div:has(+ div.data-frame) span { color:var(--dim); font-size:.72rem; }
+.disp.html div.data-frame { display:inline-block; max-width:100%; overflow-x:auto;
+  border:1px solid var(--border); border-radius:8px; }
+.disp.html table.data-frame { margin:0 !important; border-collapse:collapse;
+  font-size:.86rem; font-variant-numeric:tabular-nums; }
+.disp.html table.data-frame td, .disp.html table.data-frame th { border:0; padding:4px 12px; }
+.disp.html table.data-frame thead th { background:var(--bg3); }
+.disp.html table.data-frame thead tr:nth-child(2) th { font-weight:400; color:var(--dim);
+  font-size:.72rem; padding-top:0; }
+.disp.html table.data-frame tbody tr { border-top:1px solid var(--border); }
+.disp.html table.data-frame tbody tr:nth-child(even) { background:rgba(128,128,128,.06); }
+.disp.html table.data-frame tbody tr:hover { background:rgba(128,128,128,.12); }
+.disp.html table.data-frame .rowLabel, .disp.html table.data-frame .stubheadLabel {
+  color:var(--dim); font-weight:400 !important; }
 .disp.latex { overflow-x:auto; padding:6px 2px; } .disp.latex .katex-display { margin:.3em 0; }
 .disp.latex .katex { font-size:1.3em; }                 /* output equations: match markdown display math */
 .md .katex { font-size:1.12em; }                        /* markdown math: a touch above body text */
@@ -396,7 +415,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
 .md code { background:var(--bg3); padding:1px 5px; border-radius:4px; }
 .md .phantom { color:var(--dim); }
-.md .ival { color:var(--green); font-family:'Cascadia Code',monospace; }   /* {{ }} scalar */
+.md .ival { color:var(--val); font-family:'Cascadia Code',monospace; }   /* {{ }} scalar */
 .md .interr { color:var(--red); font-family:'Cascadia Code',monospace; }   /* {{ }} error */
 .md .disp.img img { max-width:min(100%, var(--fig-max, 980px)); height:auto; border-radius:4px; }       /* {{ plot }} */
 .md .ichart { height:300px; margin:8px 0; }                                 /* {{ echart(…) }} */
@@ -529,7 +548,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .widget input[type=range] { flex:1; accent-color:var(--purple); }
 .widget input[type=text], .widget input[type=number], .widget select {
   background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
-.wval { font-family:'Cascadia Code',monospace; color:var(--green); min-width:48px; text-align:right; }
+.wval { font-family:'Cascadia Code',monospace; color:var(--val); min-width:48px; text-align:right; }
 /* Control strip: bound widgets surfaced *with* a cell's output (presentation layer). */
 .controls { display:flex; flex-wrap:wrap; align-items:stretch; gap:8px; padding:10px 14px;
             border-top:1px solid var(--border); background:linear-gradient(var(--bg3),var(--bg2)); }
@@ -839,6 +858,13 @@ body.modkey .cm-content { cursor: pointer; }
   padding:4px 11px; cursor:pointer; font-size:.75rem; }
 .dagcard-acts button:hover { border-color:var(--accent); color:var(--accent); }
 #dagheat.on { background:var(--accent); color:#fff; }
+#dagregions.on { background:var(--accent); color:#fff; }
+/* 🖧 region-map legend — floats over the pane corner while the overlay is on */
+.dagregleg { position:absolute; left:10px; bottom:10px; z-index:6; display:flex; gap:10px; flex-wrap:wrap;
+  background:color-mix(in srgb, var(--bg) 85%, transparent); border:1px solid var(--border);
+  border-radius:8px; padding:5px 10px; font-size:.72rem; color:var(--text); pointer-events:none; }
+.dagregleg span { display:inline-flex; align-items:center; gap:5px; }
+.dagregleg i { width:10px; height:10px; border-radius:3px; display:inline-block; }
 /* ⚙ graph display settings — click popover with checkboxes */
 .daggear { position:relative; cursor:pointer; }
 .daggearpop { display:none; position:absolute; right:-6px; top:calc(100% + 8px); width:280px; z-index:7;
@@ -1094,7 +1120,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .chip .ctype { color:var(--dim); font-size:.72rem; }
 .chip .cright { margin-left:auto; display:flex; align-items:center; gap:8px; }
 .chip .chost { color:var(--gold); font-size:.72rem; }
-.chip .pval { color:var(--green); font-family:'Cascadia Code',monospace; }
+.chip .pval { color:var(--val); font-family:'Cascadia Code',monospace; }
 .chip.hosted { opacity:.7; }
 .modal-bg { position:fixed; inset:0; background:rgba(5,8,16,.66); display:none; align-items:center; justify-content:center; z-index:50; }
 .modal-bg.show { display:flex; }

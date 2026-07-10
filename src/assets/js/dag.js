@@ -271,6 +271,45 @@ function dagHeat() {
 }
 function _dagHeatBtn() { const b = document.getElementById('dagheat'); if (b) b.classList.toggle('on', _dagHeatOn); }
 
+// 🖧 region map — fills recolor by WHERE each cell runs: the main kernel stays neutral, every
+// remote region gets a stable hue, and a floating legend names the hosts. The global answer to
+// "which cells live where" (the per-cell badge answers it one node at a time).
+let _dagRegionsOn = (() => { try { return localStorage.getItem('slateDagRegions') === '1'; } catch (_) { return false; } })();
+function dagRegions() {
+  _dagRegionsOn = !_dagRegionsOn;
+  try { localStorage.setItem('slateDagRegions', _dagRegionsOn ? '1' : '0'); } catch (_) {}
+  _dagRegionsBtn(); _dagRegionLegend();
+  _dagQueue();
+}
+function _dagRegionsBtn() { const b = document.getElementById('dagregions'); if (b) b.classList.toggle('on', _dagRegionsOn); }
+const _DAG_REGION_HUES = ['#4f7cf0', '#3fb96e', '#c07ae8', '#e8a13f', '#3fbdc0', '#e86a8a'];
+// A cell's region for the overlay: the server's ranOn truth when it has run (auto-follow
+// included), else the planned region from its tags — so the map is meaningful pre-run too.
+function _dagCellRegion(c) {
+  const st = c.stats;
+  if (st && st.ranOn) return st.ranOn === 'local' ? '' : st.ranOn;
+  const tags = c.tags || [];
+  for (const t of tags) if (t.startsWith('region=')) return t.slice(7);
+  return tags.includes('remote') ? 'default' : '';
+}
+// Stable name → hue over the regions present in this notebook (sorted, so colors don't dance).
+function _dagRegionNames() {
+  const cs = _dagCtx ? Object.values(_dagCtx.m.byId) : [];
+  return [...new Set(cs.map(_dagCellRegion).filter(Boolean))].sort();
+}
+function _dagRegionHue(name) {
+  if (!name) return null;
+  return _DAG_REGION_HUES[Math.max(0, _dagRegionNames().indexOf(name)) % _DAG_REGION_HUES.length];
+}
+function _dagRegionLegend() {
+  const pane = document.getElementById('dagpane') || document.getElementById('dag');
+  let el = document.getElementById('dagregleg');
+  if (!_dagRegionsOn || !pane) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'dagregleg'; el.className = 'dagregleg'; pane.appendChild(el); }
+  el.innerHTML = `<span><i style="background:#3a3f55"></i>main (local)</span>` +
+    _dagRegionNames().map(n => `<span><i style="background:${_dagRegionHue(n)}"></i>${n}</span>`).join('');
+}
+
 function _dagState(c) { return _dagRunning.has(c.id) ? 'running' : (c.state || 'stale'); }
 
 // Hover lineage with DIRECTION + DISTANCE: edges on paths into the node (upstream)
@@ -511,6 +550,7 @@ function _dagOption() {
   const stOf = id => _dagState(m.byId[id]);
   _dagAnyRunning = m.nodes.some(c => _dagState(c) === 'running');
   _dagCtx = { m, L, P };
+  _dagRegionLegend();                              // regions-overlay legend follows every re-render
   _dagHoverIdx = _dagLineageIdx(L, _dagHoverId);   // keep hover lineage valid across live re-renders
   const cnt = document.getElementById('dagcount');
   if (cnt) cnt.textContent = `${L.nodes.length} cells · ${L.links.length} edges`;
@@ -687,7 +727,11 @@ function _dagOption() {
           const col = _dagColor(P, s);
           const sel = _dagSel === c.id;
           const K = _DAG_KINDS[b.kind];
-          const baseFill = _dagHeatOn ? _dagRamp(heatT(c)) : P.bg3;   // uniform card; the wedge carries the type
+          // uniform card; the wedge carries the type. 🔥 heat and 🖧 regions recolor the fill —
+          // regions win when both are on (a location question beats a cost question).
+          const regHue = _dagRegionsOn ? _dagRegionHue(_dagCellRegion(c)) : null;
+          const baseFill = regHue ? _dagMix(P.bg3, regHue, 0.38)
+                         : _dagHeatOn ? _dagRamp(heatT(c)) : P.bg3;
           const fill = running ? _dagMix(baseFill, P.run, 0.10) : baseFill;
           const p = api.coord([nd.x, nd.y]);
           const pw = api.size([b.w, 0])[0], ph = api.size([0, b.h])[1];
@@ -1155,7 +1199,7 @@ function dagFit() {
 
 // Esc closes (card first, then the pane); selecting a cell highlights its node.
 (() => {
-  _dagDirBtn(); _dagHeatBtn();                      // reflect persisted preferences
+  _dagDirBtn(); _dagHeatBtn(); _dagRegionsBtn();    // reflect persisted preferences
   document.addEventListener('click', () => {        // ⚙ popover closes on outside click
     const gp = document.getElementById('daggearpop'); if (gp) gp.classList.remove('open');
   });

@@ -619,26 +619,30 @@ function create_tools(GateTool::Type)
     """
         region_on(notebook, host) -> String
 
-    Run this notebook's `remote`-tagged cells on `host` (a `Host` from ~/.ssh/config;
-    "host[,transport[,port,stream]]", same grammar as run_on) while everything else keeps
-    running on the main kernel — the region runner. Boundary values cross automatically as
-    content-addressed blobs over the data channel (a DataFrame crosses as Arrow IPC; unchanged
-    values dedup to nothing), so a huge frame produced AND consumed inside the region never
-    moves — only what local cells actually read does. Tag cells with `remote` (edit_cell tags).
-    Durable (written to the notebook footer). `host=""` clears the region — tagged cells run on
-    the main kernel again. Pure `using` cells run on BOTH kernels; keep `@bind` cells local.
+    Run tagged cells on other machines while everything else stays on the main kernel — the
+    region runner. `host` grammars: "host[,transport[,port,stream]]" (same as run_on) = the
+    DEFAULT region, targeted by the `remote` cell tag; or the multi-region form
+    "name:spec;name2:spec2" (e.g. "gpu:hetzner-a100,direct;bigmem:slate-remote"), targeted by
+    `region=name` tags. Boundary values cross automatically as content-addressed blobs (a
+    DataFrame crosses as Arrow IPC; unchanged values dedup to nothing), so a huge frame produced
+    AND consumed inside one region never moves — only what other sides actually read does.
+    Mutations auto-follow their data. Durable (notebook footer). `host=""` clears all regions.
+    Pure `using` cells run on every side; keep `@bind` cells on the main kernel.
     """
     function region_on(notebook::String, host::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         h = strip(host)
-        NotebookServer._teardown_region!(nb)          # a live region (old host) detaches warm
+        NotebookServer._teardown_region!(nb)          # live region kernels (old spec) detach warm
         lock(nb.lock) do
             isempty(h) ? delete!(nb.report.meta, "regionon") : (nb.report.meta["regionon"] = String(h))
             NotebookServer._persist!(nb)
         end
-        isempty(h) && return "✅ region cleared — `remote`-tagged cells run on the main kernel again."
-        n = count(c -> :remote in c.flags, nb.report.cells)
-        return "✅ $(basename(nb.path)): `remote`-tagged cells ($n now) run on '$h'. The region worker spawns/adopts on the next run; tag cells with edit_cell(tags=\"remote\")."
+        isempty(h) && return "✅ regions cleared — all cells run on the main kernel again."
+        specs = NotebookServer._region_specs(nb)
+        n = count(c -> !isempty(NotebookServer._cell_region(c)), nb.report.cells)
+        return "✅ $(basename(nb.path)): regions " * join(sort!(collect(keys(specs))), ", ") *
+               " configured ($n cell(s) tagged now). Workers spawn/adopt on the next run; tag " *
+               "cells with `remote` (default region) or `region=<name>`."
     end
 
     """
