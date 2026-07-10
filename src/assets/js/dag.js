@@ -183,7 +183,9 @@ function _dagBlock(c) {
 // Layout direction: 'auto' picks by pane aspect (tall split pane → top-down ranks;
 // wide pane → left→right). Toggleable + persisted.
 let _dagDirPref = (() => { try { return localStorage.getItem('slateDagDir') || 'auto'; } catch (_) { return 'auto'; } })();
-const _dagDir = (w, h) => _dagDirPref === 'auto' ? (h > w ? 'TB' : 'LR') : _dagDirPref;
+// auto BIASES toward top-down (vertical stacking reads best); only a clearly-wide pane
+// flips to LR, and the 1.35 threshold keeps the divider from toggling layouts at square.
+const _dagDir = (w, h) => _dagDirPref === 'auto' ? (w > h * 1.35 ? 'LR' : 'TB') : _dagDirPref;
 function dagDir() {
   _dagDirPref = _dagDirPref === 'auto' ? 'LR' : _dagDirPref === 'LR' ? 'TB' : 'auto';
   try { localStorage.setItem('slateDagDir', _dagDirPref); } catch (_) {}
@@ -357,24 +359,40 @@ function _dagOption() {
   const m = _dagModel(st.cells || []);
   const el = document.getElementById('dagcanvas');
   const w = el.clientWidth || 800, h = el.clientHeight || 400;
-  const L = _dagLayoutCached(m, w, h, _dagDir(w, h));
+  const dir = _dagDir(w, h);
+  const L = _dagLayoutCached(m, w, h, dir);
   // The memoized layout captured cell OBJECTS as they were at layout time; a celldone patch
   // swaps fresh objects into nbState (new state/duration/stats). Re-bind every node to the
   // CURRENT cell so geometry is reused but state/text are never stale. (Cell state is
   // deliberately not in the layout key — a state flip must not re-run dagre.)
   L.nodes.forEach(n => { const cur = m.byId[n.c.id]; if (cur) { n.c = cur; n.b = _dagBlock(cur); } });
   const P = _dagPalette();
-  // Straight-edge fallback (wrapped ranks, whisper edges): border-clipped segments —
-  // center-to-center lines would bury the arrowhead behind the target block.
+  // Edge fallback (wrapped ranks, whisper edges): S-CURVES that leave the source's
+  // outflow border and enter the target's inflow border (bottom→top in TB), so edges
+  // keep the routed look — smooth, arrowheads landing square on the border — even
+  // when node positions came from rank-wrapping rather than dagre.
+  const tb = dir === 'TB';
   const ndOf = {}; L.nodes.forEach(n => { ndOf[n.c.id] = n; });
   L.links.forEach(l => {
     if (l.pts) return;
     const a = ndOf[l.s], z = ndOf[l.t];
     if (!a || !z) { l.pts = [[0, 0], [0, 0]]; return; }
-    const dx = z.x - a.x, dy = z.y - a.y;
-    const clip = n => Math.min(dx ? Math.abs((n.b.w / 2 + 5) / dx) : 9, dy ? Math.abs((n.b.h / 2 + 5) / dy) : 9, 0.45);
-    const tA = clip(a), tB = clip(z);
-    l.pts = [[a.x + dx * tA, a.y + dy * tA], [z.x - dx * tB, z.y - dy * tB]];
+    const fwd = tb ? z.y - z.b.h / 2 > a.y + a.b.h / 2 : z.x - z.b.w / 2 > a.x + a.b.w / 2;
+    if (tb && fwd) {
+      const sy = a.y + a.b.h / 2, ty = z.y - z.b.h / 2;
+      const bend = Math.max(10, Math.min(30, (ty - sy) * 0.3));
+      l.pts = [[a.x, sy], [a.x, sy + bend], [z.x, ty - bend], [z.x, ty]];
+    } else if (!tb && fwd) {
+      const sx = a.x + a.b.w / 2, tx = z.x - z.b.w / 2;
+      const bend = Math.max(10, Math.min(30, (tx - sx) * 0.3));
+      l.pts = [[sx, a.y], [sx + bend, a.y], [tx - bend, z.y], [tx, z.y]];
+    } else {
+      // non-forward (rare: aside/whisper geometry) — border-clipped straight segment
+      const dx = z.x - a.x, dy = z.y - a.y;
+      const clip = n => Math.min(dx ? Math.abs((n.b.w / 2 + 5) / dx) : 9, dy ? Math.abs((n.b.h / 2 + 5) / dy) : 9, 0.45);
+      const tA = clip(a), tB = clip(z);
+      l.pts = [[a.x + dx * tA, a.y + dy * tA], [z.x - dx * tB, z.y - dy * tB]];
+    }
   });
   const stOf = id => _dagState(m.byId[id]);
   _dagAnyRunning = m.nodes.some(c => _dagState(c) === 'running');
