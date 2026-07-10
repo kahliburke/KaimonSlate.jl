@@ -86,9 +86,15 @@ end
 # and surface as a worker bind error rather than silent crosstalk.
 const _GATE_PORT = Ref(9100)
 const _PORT_LOCK = ReentrantLock()
-function _next_ports()
+# Each worker owns THREE consecutive ports: main REP, stream PUB, and (remote) the blob data
+# channel at port+2 — so the stride is 3, not 2 (a 2-stride hands the next worker the previous
+# one's data port: ZMQ bind fails and the worker dies at boot; seen live). `floor` lets a caller
+# who KNOWS ports are taken (the remote roster — warm workers survive an extension restart,
+# which resets this counter) push the counter past them first.
+function _next_ports(; floor::Int = 0)
     lock(_PORT_LOCK) do            # atomic bump — concurrent spawns must not grab the same port
-        p = _GATE_PORT[]; _GATE_PORT[] += 2
+        _GATE_PORT[] = max(_GATE_PORT[], floor)
+        p = _GATE_PORT[]; _GATE_PORT[] += 3
         return (p, p + 1)
     end
 end
@@ -194,6 +200,12 @@ end
 const _GATE_SESSION = Dict{String,String}()
 const _POLLER = Ref{Any}(nothing)
 
+# report id → the worker's latest telemetry sample (raw JSON from its 2s `slate_telemetry`
+# PUB) + hub arrival time. Overwritten in place — only the newest sample matters. Idle/detached
+# workers surface theirs via `list_remote_workers` (the `.stats` sidecar) instead.
+const _WORKER_STATS = Dict{String,Tuple{String,Float64}}()
+worker_stats(report_id::AbstractString) = get(_WORKER_STATS, String(report_id), nothing)
+
 # Pull the next batch of gate-stream messages. Prefer the event-driven blocking
 # `wait_stream_messages!` (parks on the SUB FDs — near-zero idle CPU) when the Kaimon build
 # provides it; otherwise fall back to the non-blocking `drain_stream_messages!` + a short sleep.
@@ -256,6 +268,8 @@ function _ensure_poller!()
                             prog[(rid, String(parts[1]))] =
                                 (something(tryparse(Float64, parts[2]), 0.0), String(parts[4]), parts[3] == "1")
                         end
+                    elseif m.channel == "slate_telemetry"     # worker's 2s sample — latest only
+                        _WORKER_STATS[rid] = (String(m.data), time())
                     end
                 end
                 for (rid, vars) in pending
@@ -393,6 +407,12 @@ end
 # drop its routing entry, and clear conn/proc. Killing the process EOFs its stdout pipe, which
 # ends the log-pump task (no leak). Shared by respawn (prepare!) and shutdown!.
 function _kill_worker!(k::GateKernel; kill_remote::Bool = false)
+    # Detaching from a spawned-remote worker PARKS the wire: the live conn + tunnel move into the
+    # park cache (see `park_remote!`) so reopening this notebook skips tunnel + dial entirely.
+    # The park owns them from here — teardown must not close the tunnel, and the disconnect
+    # below must not fire. Everything else (sync stop, state=idle) still runs via teardown.
+    parked = !kill_remote && k.target isa RemoteTarget && park_remote!(k)
+    parked && (k.tunnel = nothing)
     # Remote target: close the supervised tunnel and stop the /src sync; the worker itself is
     # detached (kept warm for reattach) unless `kill_remote` — see `teardown_remote!`.
     (k.target isa RemoteTarget || k.tunnel !== nothing) && teardown_remote!(k; kill = kill_remote)
@@ -403,7 +423,7 @@ function _kill_worker!(k::GateKernel; kill_remote::Bool = false)
         # reader keeps `recv`-ing on the now-dead worker port — throwing every iteration (an
         # exception-driven busy-poll) — and each respawn leaks another context. That accumulation is
         # what pegged the extension at ~70% CPU across a handful of leaked reader loops.
-        try; _kaimon().disconnect!(k.conn); catch; end
+        parked || (try; _kaimon().disconnect!(k.conn); catch; end)
     end
     p = k.proc
     if p !== nothing

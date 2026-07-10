@@ -503,14 +503,29 @@ function create_tools(GateTool::Type)
         io = IOBuffer(); println(io, "Workers on '$h':")
         for w in ws
             mf = w["manifest"]
-            nbk = ReportEngine._manifest_get(mf, "notebook"); nbk = isempty(nbk) ? "?" : nbk
+            pool = ReportEngine._manifest_get(mf, "pool") == "1"
+            nbk = ReportEngine._manifest_get(mf, "notebook"); nbk = isempty(nbk) ? (pool ? "—" : "?") : nbk
             spawned = ReportEngine._manifest_get(mf, "spawned")
             la = w["lastActivity"]; age = la == 0 ? "never" : string(round(Int, (time() - la) / 60), "m ago")
             # lifecycle sidecar: attached (a hub is using it) / idle (detached, warm, adoptable)
             st = get(w, "state", "")
             badge = !w["alive"] ? "⚪ stopped" :
-                    st == "idle" ? "🟡 idle (warm)" : st == "attached" ? "🟢 attached" : "🟢 running"
+                    st == "idle" ? (pool ? "🔵 pool (warm, adoptable)" : "🟡 idle (warm)") :
+                    st == "attached" ? "🟢 attached" : "🟢 running"
             println(io, "  • port $(w["port"])  $badge  notebook=$(nbk)  last activity: $age", isempty(spawned) ? "" : "  (spawned $spawned)")
+            # latest telemetry sample (2s sampler → .stats sidecar); numbers are unquoted JSON
+            stj = get(w, "stats", "")
+            if !isempty(stj)
+                g(key) = (m = match(Regex("\"" * key * "\":(-?[0-9.]+)"), stj); m === nothing ? nothing : m.captures[1])
+                mb(v) = string(round(parse(Float64, v) / 2^20; digits = 1), "MB")
+                cpu = g("cpu"); rss = g("rss"); memo = g("memo_bytes"); ev = g("evals")
+                parts = String[]
+                (cpu !== nothing && cpu != "-1.0") && push!(parts, "cpu $(cpu)%")
+                rss === nothing || push!(parts, "rss $(mb(rss))")
+                memo === nothing || push!(parts, "memo $(mb(memo))")
+                ev === nothing || push!(parts, "$(ev) running")
+                isempty(parts) || println(io, "      stats: ", join(parts, " · "))
+            end
         end
         println(io, "\nReap one with reap_worker(host, port).")
         return String(take!(io))
@@ -526,6 +541,102 @@ function create_tools(GateTool::Type)
         h = strip(host); isempty(h) && return "Give an ssh host."
         ReportEngine.reap_remote_worker(h, port)
         return "✅ reaped worker-$port on '$h' (process killed, files removed)."
+    end
+
+    """
+        warm_pool(host::String; n=1, preload="", transport="tunnel") -> String
+
+    Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a booted Julia
+    process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
+    additionally replicates that env on the host and imports its packages while idle. Opening a
+    notebook whose parent project matches `preload` then ADOPTS a pool worker (~1s: dial +
+    namespace swap — packages and memo store survive) instead of paying the ~90s cold boot, and
+    the pool refills itself in the background. `n=0` drains: idle pool workers are reaped;
+    attached workers are never touched. Blocking on first run (provisioning); safe to re-run —
+    it reconciles toward `n`. See the roster with `remote_workers`.
+    """
+    function warm_pool(host::String; n::Int = 1, preload::String = "", transport::String = "tunnel")::String
+        h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
+        tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
+        return ReportEngine.warm_pool!(h; n = n, preload = String(strip(preload)), transport = tr)
+    end
+
+    """
+        pools() -> String
+
+    The remote-execution state at a glance, no ssh: every configured warm pool (host, target
+    size, preload env, transport — what `warm_pool` was told to maintain) and every parked
+    wire (a live connection kept across a notebook close for instant reattach). For the LIVE
+    per-host roster — which workers actually run, their state and telemetry — use
+    `remote_workers(host)`; for one notebook's placement use `whereis(notebook)`.
+    """
+    function pools()::String
+        cfgs = ReportEngine.pool_configs()
+        parked = ReportEngine.parked_wires()
+        isempty(cfgs) && isempty(parked) &&
+            return "No warm pools configured and no parked wires. Start one with warm_pool(host; n, preload)."
+        io = IOBuffer()
+        if !isempty(cfgs)
+            println(io, "Configured pools (desired state; live roster → remote_workers(host)):")
+            for c in cfgs
+                println(io, "  • $(c.host)  n=$(c.n)  transport=$(c.transport)  preload=",
+                        isempty(c.preload) ? "(none — bare workers)" : c.preload)
+            end
+        end
+        if !isempty(parked)
+            println(io, "Parked wires (live conns kept across close — reattach is ~0 network):")
+            for p in parked
+                println(io, "  • $(p.label) → $(p.host):$(p.port)  (idle $(p.idle_s)s)")
+            end
+        end
+        return String(take!(io))
+    end
+
+    """
+        whereis(notebook) -> String
+
+    Where this notebook's cells execute RIGHT NOW: local worker (pid/port) or remote host —
+    with transport, ports (main/stream/data), connection state, and for a remote worker its
+    lifecycle state, pool provenance (adopted from a warm pool?), and latest telemetry
+    (cpu/rss/memo). The placement queries: `pools()` for the hub view, `remote_workers(host)`
+    for a host's full roster.
+    """
+    function whereis(notebook::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        k = nb.kernel
+        k isa ReportEngine.GateKernel || return "'$notebook' runs IN-PROCESS (no worker — standalone/fallback kernel $(typeof(k)))."
+        io = IOBuffer()
+        t = k.target
+        if t isa ReportEngine.RemoteTarget
+            println(io, "'$notebook' runs REMOTELY on '$(t.ssh_host)' (transport=$(t.transport))")
+            println(io, "  ports: main $(k.port) · stream $(k.stream_port) · data $(k.port + 2)  (remote env: $(t.project))")
+            println(io, "  connection: ", k.conn === nothing ? "not connected (connects on next run)" :
+                        "live" * (k.tunnel === nothing ? " (direct CURVE)" : " (ssh tunnel)"))
+            # one ssh probe for the worker's own view: lifecycle state, pool provenance, telemetry
+            w = nothing
+            try
+                for x in ReportEngine.list_remote_workers(t.ssh_host)
+                    x["port"] == k.port && (w = x; break)
+                end
+            catch
+            end
+            if w !== nothing
+                mf = w["manifest"]
+                prov = ReportEngine._manifest_get(mf, "adopted") == "1" ? "adopted from the warm pool" :
+                       ReportEngine._manifest_get(mf, "pool") == "1" ? "warm-pool member (unadopted)" : "spawned for this notebook"
+                println(io, "  worker: ", w["alive"] === true ? "alive" : "NOT RUNNING", " · state=$(get(w, "state", "?")) · $prov")
+                stj = get(w, "stats", "")
+                isempty(stj) || println(io, "  stats: ", stj)
+            end
+        elseif k.remote
+            println(io, "'$notebook' is ATTACHED to a pre-running worker at 127.0.0.1:$(k.port) (stream $(k.stream_port)) — not managed by this hub.")
+        else
+            alive = k.proc !== nothing && (try; Base.process_running(k.proc); catch; false; end)
+            println(io, "'$notebook' runs LOCALLY: worker port $(k.port) (stream $(k.stream_port)), ",
+                    alive ? "pid $(getpid(k.proc))" : "no live process (spawns on next run)")
+            println(io, "  env: $(k.project)")
+        end
+        return String(take!(io))
     end
 
     """
@@ -1168,6 +1279,9 @@ function create_tools(GateTool::Type)
         GateTool("check_remote", check_remote),
         GateTool("remote_workers", remote_workers),
         GateTool("reap_worker", reap_worker),
+        GateTool("warm_pool", warm_pool),
+        GateTool("pools", pools),
+        GateTool("whereis", whereis),
         GateTool("read", read_cells),
         GateTool("add_cell", add_cell),
         GateTool("edit_cell", edit_cell),

@@ -595,6 +595,16 @@ end
 "Discard the namespace (full rebuild)."
 __slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _NS[] = _new_ns(); true)
 
+"Adopt this worker for a notebook (warm-pool handoff): point `PARENT_PROJECT` at the remote
+project dir and swap in a fresh namespace. Loaded packages + the memo store survive — that is
+the warmth a pool worker exists to hold; only the (empty) namespace is discarded."
+function __slate_adopt(parent::String)
+    PARENT_PROJECT[] = parent
+    _NS[] = _new_ns()
+    @info "slate: adopted by a notebook" parent = parent
+    return true
+end
+
 # Flat scalar args only (the gate reflects the signature into an MCP schema — a
 # nested-Dict argument doesn't validate, so we pass page params individually).
 "Fetch one page of a registered paged table (server-paged tables / `slate_query`)."
@@ -1106,6 +1116,7 @@ function tools()
         KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
+        KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_complete", __slate_complete),
@@ -1191,15 +1202,67 @@ function _blob_server!(host::String, port::Int)
     end
 end
 
+# Total on-disk bytes under `d` (memo-store sample). Best-effort: a file vanishing mid-walk counts 0.
+function _dir_bytes(d::AbstractString)
+    n = 0
+    isdir(d) || return 0
+    for (root, _, files) in walkdir(d)
+        for f in files
+            n += try; filesize(joinpath(root, f)); catch; 0; end
+        end
+    end
+    return n
+end
+
+# ── Telemetry: one sample every 2s — PUBbed on the stream socket (an attached hub sees it live)
+# AND stamped into the `.stats` sidecar next to the worker script, atomically (the roster probe
+# cats it, so an IDLE pool worker still shows cpu/rss in `list_remote_workers`). Linux /proc for
+# cpu%/rss (remote workers are the audience); elsewhere cpu is -1 and rss falls back to maxrss.
+# The memo-store walk is the one non-trivial sample, so it refreshes every 15th tick (~30s).
+function _telemetry_loop!(stats_path::String)
+    mkpath(dirname(stats_path))
+    pagesz = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 30)) : 4096   # _SC_PAGESIZE
+    clk    = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 2))  : 100   # _SC_CLK_TCK
+    cputime() = try
+        s = read("/proc/self/stat", String)
+        rest = split(s[findlast(')', s)+2:end])        # stat fields from 3 on (comm may hold spaces)
+        (parse(Int, rest[12]) + parse(Int, rest[13])) / clk   # utime + stime (fields 14/15)
+    catch; -1.0; end
+    rssbytes() = try
+        parse(Int, split(read("/proc/self/statm", String))[2]) * pagesz
+    catch; Int(Sys.maxrss()); end
+    lastc = cputime(); lastw = time(); memo = -1; tick = 0
+    while true
+        sleep(2.0)
+        tick += 1
+        c = cputime(); w = time()
+        cpu = (c >= 0 && lastc >= 0 && w > lastw) ? round(100 * (c - lastc) / (w - lastw); digits = 1) : -1.0
+        lastc = c; lastw = w
+        (memo < 0 || tick % 15 == 0) && (memo = _dir_bytes(joinpath(_memo_dir(), "blobs")))
+        evals = lock(_CANCEL_LOCK) do; length(_RUNNING_TASKS); end
+        gcms = round(Int, Base.gc_num().total_time / 1e6)
+        line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
+               "\"memo_bytes\":$memo,\"ts\":$(round(Int, time()))}"
+        try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
+        try
+            tmp = stats_path * ".tmp"
+            write(tmp, line); mv(tmp, stats_path; force = true)
+        catch
+        end
+    end
+end
+
 """
     start(; host="127.0.0.1", port, stream_port)
 
 Run the worker gate over TCP, exposing the capture tools. Blocks (this is the
-worker process's main loop).
+worker process's main loop). `warm_deps=true` (pool workers) background-imports every direct
+dep of the active project so package-load time is paid while idle; `stats_path` (remote
+workers) turns on the 2s telemetry sampler writing that sidecar + PUBbing `slate_telemetry`.
 """
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                curve::Bool = false, allowed_clients::Vector{String} = String[],
-               data_port::Int = 0)
+               data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "")
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
@@ -1235,6 +1298,28 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         @info "slate worker: eval pipeline prewarmed" ms = round(Int, (time() - t0) * 1000)
     catch e
         @warn "slate worker: prewarm failed (harmless — first cell just pays the JIT)" exception = e
+    end
+    # Pool warmth: pay package-load time NOW, while idle — import every direct dep of the active
+    # project (which provisioning populated from the preload env). A failing dep is logged, not
+    # fatal: the adopting notebook's own `using` cell will surface the real error with context.
+    warm_deps && Threads.@spawn try
+        t0 = time(); n = 0
+        for name in sort!(collect(keys(Pkg.project().dependencies)))
+            name in ("KaimonGate", "Revise", "ExpressionExplorer") && continue
+            try
+                Base.require(Main, Symbol(name)); n += 1
+            catch e
+                @warn "slate worker: warm-deps import failed" pkg = name exception = e
+            end
+        end
+        @info "slate worker: warm deps loaded" pkgs = n ms = round(Int, (time() - t0) * 1000)
+    catch e
+        @warn "slate worker: warm-deps pass died" exception = e
+    end
+    isempty(stats_path) || Threads.@spawn try
+        _telemetry_loop!(stats_path)
+    catch e
+        @warn "slate worker: telemetry sampler died" exception = e
     end
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a

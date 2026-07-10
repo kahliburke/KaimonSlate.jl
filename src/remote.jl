@@ -524,7 +524,7 @@ end
 # + worker payload via `homedir()` on the remote, includes the payload, and serves. For :direct it
 # serves CURVE and allow-lists ONLY the hub's client pubkey (mutual auth: hub pins the server key).
 function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, parent::String,
-                               client_pub::String)
+                               client_pub::String; warm_deps::Bool = false)
     bind = t.transport === :direct ? "0.0.0.0" : "127.0.0.1"
     curve = t.transport === :direct                       # tunnel = SSH-encrypted, CURVE redundant
     allow = curve ? "String[raw\"$client_pub\"]" : "String[]"
@@ -540,7 +540,9 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     include(_wk)
     SlateWorker.PARENT_PROJECT[] = raw"$parent"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
-                      curve=$curve, allowed_clients=$allow, data_port=$(port + 2))
+                      curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
+                      warm_deps=$warm_deps,
+                      stats_path=joinpath(homedir(), raw"$_REMOTE_WORKER", "worker-$port.stats"))
     while true; sleep(3600); end   # serve() returns after starting its loop on a spawned thread; keep alive
     """
 end
@@ -554,6 +556,53 @@ function _hub_client_pubkey()::String
     catch
         return ""
     end
+end
+
+# Ship a worker boot script to the host and launch it detached (setsid/nohup), then write its
+# manifest + state sidecar. Fire-and-forget: callers dial the port to learn whether the worker
+# actually came up. Shared by the notebook spawn path and `warm_pool!` — a pool worker is just
+# a launch with no notebook (`label=""`, `pool=true`, state starts at `idle`, and `warm_deps`
+# pays the preload env's package loads while nobody is attached).
+function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
+                         label::AbstractString, parent::AbstractString,
+                         threads::AbstractString = "", pool::Bool = false,
+                         warm_deps::Bool = false)
+    host = t.ssh_host
+    hubkey = _hub_client_pubkey()
+    script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps)
+
+    # Ship the worker script as a FILE (verified: `-e` + nested-ssh quoting mangles it) and launch it
+    # detached so it outlives the ssh exec. `setsid` gives a clean new session but is Linux-only
+    # (absent on macOS), so we fall back to plain `nohup … &`, which — with stdio redirected to the
+    # log file — also survives the ssh channel closing. Paths are $HOME-relative (ssh login cwd).
+    remote_script = "$_REMOTE_WORKER/worker-$port.jl"
+    logf = "$_REMOTE_WORKER/worker-$port.log"
+    tmp = tempname()
+    write(tmp, script)
+    try
+        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
+    finally
+        rm(tmp; force = true)
+    end
+    nthreads = effective_worker_threads(threads)
+    proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
+    jl = "julia --project=$proj --startup-file=no --threads=$nthreads $remote_script"
+    launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+    _rlog("spawn: launching $(pool ? "POOL " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)\n    remote log: $host:$logf")
+    # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
+    # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
+    _ssh_ok(host, `$launch`) ||
+        _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
+    # Record who/what this worker serves so it's self-describing (list/reconnect/reap/adopt all read
+    # this). `project` (the worker's --project env dir) is what pool adoption matches on.
+    fields = ["notebook" => String(label), "parent" => String(parent), "hub" => gethostname(),
+              "transport" => string(t.transport), "project" => t.project,
+              "port" => string(port), "stream_port" => string(stream_port),
+              "client_pubkey" => hubkey, "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")]
+    pool && push!(fields, "pool" => "1")
+    _write_worker_manifest!(host, port, fields)
+    _write_worker_state!(host, port, pool ? "idle" : "attached")
+    return nothing
 end
 
 """
@@ -638,6 +687,34 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         return (r.conn, r.tunnel)
     end
 
+    # 0. Parked wire: the live conn + tunnel we deliberately kept across the last close (detach
+    #    parks instead of disconnecting — see `park_remote!`). One cheap gate call validates it;
+    #    a live answer means reattach touches the network ZERO times before the first eval (a
+    #    fresh dial is ~5 RTTs ≈ 370ms on a WAN link, measured). Dead → close, demote to record.
+    parked = unpark_remote!(host, k.label)
+    if parked !== nothing
+        k.port = parked.port; k.stream_port = parked.stream_port
+        k.conn = parked.conn; k.tunnel = parked.tunnel
+        alive = try
+            _tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 5.0)
+            true
+        catch e
+            _rlog("park: parked wire for '$(k.label)' on $host is dead ($(first(sprint(showerror, e), 120))) — demoting to record")
+            k.conn = nothing; k.tunnel = nothing
+            _close_parked!(parked)
+            false
+        end
+        if alive
+            # keep the record's CURVE key/ip (learned at spawn) — attached! rewrites the record,
+            # and blanking them would put ssh back on the NEXT cold reattach's path.
+            old = _attach_lookup(host, k.label)
+            r = (conn = parked.conn, tunnel = parked.tunnel, err = "",
+                 server_key = old === nothing ? "" : String(old.server_key),
+                 remote_ip = old === nothing ? "" : String(old.remote_ip))
+            return attached!(r, "park")
+        end
+    end
+
     # 1. Record-first: the hub's own memory of where it left this notebook's worker — no probe,
     #    no ssh at all before the dial itself, whose success IS the validation. Short deadline:
     #    a live worker answers in well under a second; anything else is stale → demote.
@@ -667,45 +744,68 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — falling back to a fresh spawn")
     end
 
+    # 2.5 Adoption: no worker of OURS is serving this notebook — but a warm POOL worker with the
+    #     right env + transport can become ours: dial it, have it swap in a fresh namespace
+    #     (loaded packages + memo store survive — the warmth the pool exists to hold), rewrite
+    #     its manifest to this notebook. Any failure falls through to a fresh spawn. The claim
+    #     set stops two notebooks opening concurrently from adopting the same worker.
+    pool = nothing
+    try; pool = _claim_pool_worker!(host, t.project, t.transport); catch e; _rlog("adopt: pool scan failed ($(sprint(showerror, e)))"); end
+    if pool !== nothing
+        k.port = pool.port; k.stream_port = pool.stream_port
+        _rlog("adopt: pool worker-$(pool.port) on $host matches env $(t.project) — adopting for '$(k.label)'")
+        r = dial(pool.port, pool.stream_port; deadline = 15.0)
+        adopted = false
+        if r.conn !== nothing
+            adopted = try
+                k.conn = r.conn                     # _tool needs the conn on the kernel
+                _tool(k, "__slate_adopt", Dict{String,Any}("parent" => t.project); timeout = 15.0)
+                true
+            catch e
+                _rlog("adopt: worker-$(pool.port) refused adoption ($(sprint(showerror, e))) — falling back to fresh spawn")
+                k.conn = nothing
+                try; _kaimon().disconnect!(r.conn); catch; end
+                r.tunnel === nothing || (try; close_tunnel(r.tunnel); catch; end)
+                false
+            end
+        else
+            _rlog("adopt: pool worker-$(pool.port) didn't answer the 15s dial — falling back to fresh spawn")
+        end
+        if adopted
+            port = k.port; sp = k.stream_port
+            Threads.@spawn begin   # identity rewrite + replenish — neither belongs on the hot path
+                try
+                    _write_worker_manifest!(host, port, [
+                        "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
+                        "transport" => string(t.transport), "project" => t.project,
+                        "port" => string(port), "stream_port" => string(sp),
+                        "client_pubkey" => _hub_client_pubkey(),
+                        "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), "adopted" => "1",
+                    ])
+                catch e
+                    _rlog("adopt: manifest rewrite failed ($(sprint(showerror, e)))")
+                end
+                # claim held until the manifest no longer says pool=1 — else a concurrent open
+                # could rescan the roster mid-rewrite and adopt this worker a second time
+                _release_pool_claim!(host, port)
+                try; _pool_reconcile!(host); catch e; _rlog("pool: replenish after adopt failed ($(sprint(showerror, e)))"); end
+            end
+            return attached!(r, "adopt")
+        end
+        _release_pool_claim!(host, pool.port)
+        k.conn = nothing
+    end
+
     provision_remote!(t, parent_project)
     start_sync!(t, parent_project)
     begin
         # Remote ports for this worker (loopback-bound for :tunnel, 0.0.0.0 for :direct). Pinned when the
         # target names them (needed for :direct behind a firewall — you must know which ports to open);
-        # otherwise auto-assigned from _next_ports (9100+).
-        port, stream_port = t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) : _next_ports()
+        # otherwise auto-assigned from _next_ports (9100+), floored above the host's live roster.
+        port, stream_port = t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
+                            _next_ports(floor = try; _port_floor(host); catch; 0; end)
         k.port = port; k.stream_port = stream_port
-        script = _remote_worker_script(t, port, stream_port, t.project, _hub_client_pubkey())
-
-        # Ship the worker script as a FILE (verified: `-e` + nested-ssh quoting mangles it) and launch it
-        # detached so it outlives the ssh exec. `setsid` gives a clean new session but is Linux-only
-        # (absent on macOS), so we fall back to plain `nohup … &`, which — with stdio redirected to the
-        # log file — also survives the ssh channel closing. Paths are $HOME-relative (ssh login cwd).
-        remote_script = "$_REMOTE_WORKER/worker-$port.jl"
-        logf = "$_REMOTE_WORKER/worker-$port.log"
-        tmp = tempname()
-        write(tmp, script)
-        try
-            run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
-        finally
-            rm(tmp; force = true)
-        end
-        threads = effective_worker_threads(k.threads)
-        proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
-        jl = "julia --project=$proj --startup-file=no --threads=$threads $remote_script"
-        launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
-        _rlog("spawn: launching worker on $host  (port=$port stream=$stream_port threads=$threads)\n    remote log: $host:$logf")
-        # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
-        # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
-        _ssh_ok(host, `$launch`) ||
-            _rlog("spawn: worker launch returned nonzero on $host (it may still be starting)")
-        # Record who/what this worker serves so it's self-describing (list/reconnect/reap all read this).
-        _write_worker_manifest!(host, port, [
-            "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
-            "transport" => string(t.transport), "port" => string(port), "stream_port" => string(stream_port),
-            "client_pubkey" => _hub_client_pubkey(), "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"),
-        ])
-        _write_worker_state!(host, port, "attached")
+        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads)
 
         # Cold spawn: the dial deadline covers remote Julia boot + KaimonGate load (~90s).
         r = dial(port, stream_port; deadline = 120.0)
@@ -778,8 +878,9 @@ function teardown_remote!(k; kill::Bool = false)
             # matches — a normal outcome, not a failure — so route it through the quiet predicate, not _ssh_ok.
             _rlog("teardown: closing tunnel + sync, killing remote worker-$(k.port).jl on $(t.ssh_host)")
             try; _ssh_test(t.ssh_host, `pkill -f $("worker-" * string(k.port) * ".jl")`); catch; end
-            try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state")`); catch; end
+            try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state") $("$_REMOTE_WORKER/worker-$(k.port).stats")`); catch; end
             try; _attach_clear!(t.ssh_host, k.label); catch; end   # a killed worker must not be re-dialed from the record
+            try; _evict_parked!(t.ssh_host; label = k.label, port = k.port); catch; end   # …nor via a parked wire
         else
             _rlog("teardown: detaching from worker-$(k.port) on $(t.ssh_host) — worker stays warm (state=idle)")
             _write_worker_state!(t.ssh_host, k.port, "idle")
@@ -1048,6 +1149,251 @@ end
 
 _attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true); catch; end; nothing)
 
+# ── Warm worker pool (Phase B) ───────────────────────────────────────────────────────────────
+# `warm_pool!(host; n, preload)` keeps `n` notebook-less workers running warm on the host —
+# process up, gate serving, eval path prewarmed, and (with `preload`) the env's packages already
+# imported — so opening a notebook there ADOPTS one (~1s: dial + namespace swap) instead of
+# paying the ~90s boot. Desired state persists hub-side (one flat JSON per host, same no-dep
+# regex discipline as the manifests); replenishment is hub-driven — every adoption triggers a
+# background `_pool_reconcile!`, so the pool refills while the user is already working.
+
+const _POOL_DIR = joinpath(_slate_cache_dir(), "pool")
+_pool_path(host) = joinpath(_POOL_DIR, replace(String(host), r"[^A-Za-z0-9._-]" => "_") * ".json")
+
+function _pool_config!(host; n::Int, preload::AbstractString, transport::Symbol)
+    esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"")
+    body = "{\"host\":\"$(esc(host))\",\"n\":\"$n\",\"preload\":\"$(esc(preload))\",\"transport\":\"$transport\"}"
+    mkpath(_POOL_DIR)
+    p = _pool_path(host); tmp = p * ".tmp"
+    write(tmp, body); mv(tmp, p; force = true)
+    return nothing
+end
+
+function _pool_config(host)
+    p = _pool_path(host)
+    isfile(p) || return nothing
+    s = try; read(p, String); catch; return nothing; end
+    n = tryparse(Int, _manifest_get(s, "n")); n === nothing && return nothing
+    tr = _manifest_get(s, "transport")
+    return (n = n, preload = _manifest_get(s, "preload"),
+            transport = Symbol(isempty(tr) ? "tunnel" : tr))
+end
+
+# Every configured pool, host included — the hub's desired state (what `warm_pool!` was told),
+# NOT the live roster (ask `list_remote_workers` for that). Sorted by host for stable output.
+function pool_configs()
+    out = NamedTuple[]
+    isdir(_POOL_DIR) || return out
+    for f in sort!(readdir(_POOL_DIR; join = true))
+        endswith(f, ".json") || continue
+        s = try; read(f, String); catch; continue; end
+        h = _manifest_get(s, "host"); isempty(h) && continue
+        cfg = _pool_config(h); cfg === nothing && continue
+        push!(out, (host = h, n = cfg.n, preload = cfg.preload, transport = cfg.transport))
+    end
+    return out
+end
+
+# Snapshot of the parked wires (host, label, port, idle seconds) — for the query surface.
+function parked_wires()
+    lock(_PARK_LOCK) do
+        [(host = k[1], label = k[2], port = p.port, idle_s = round(Int, time() - p.since))
+         for (k, p) in _PARKED]
+    end
+end
+
+# The pool's RemoteTarget: env dir keyed by the preload project's basename — the SAME formula
+# `_select_kernel` uses for a notebook's parent (server.jl), which is exactly what makes a pool
+# worker adoptable: matching basename ⇒ matching remote env dir ⇒ matching --project.
+_pool_target(host, cfg) = RemoteTarget(String(host); transport = cfg.transport,
+    project = "~/.cache/kaimonslate/remote/" * (isempty(cfg.preload) ? "detached" : basename(rstrip(cfg.preload, '/'))),
+    origin_env = cfg.preload)
+
+# In-flight adoption claims (hub-local — only THIS hub adopts its own pool workers). The state
+# sidecar flips to `attached` asynchronously after adoption, so without a claim two notebooks
+# opening at once could both scan the roster, see the same idle worker, and both reset it.
+const _POOL_CLAIMS = Set{Tuple{String,Int}}()
+const _POOL_CLAIM_LOCK = ReentrantLock()
+
+_pool_claimed(host, port::Int) =
+    lock(_POOL_CLAIM_LOCK) do; (String(host), port) in _POOL_CLAIMS; end
+_release_pool_claim!(host, port::Int) =
+    (lock(_POOL_CLAIM_LOCK) do; delete!(_POOL_CLAIMS, (String(host), port)); end; nothing)
+
+# Find + claim an adoptable pool worker: alive, idle, spawned by THIS hub, same transport
+# (bind/CURVE mode is fixed at boot) and same env dir (--project is fixed at boot). First
+# unclaimed match wins — pool members are interchangeable. Returns (port, stream_port) | nothing.
+function _claim_pool_worker!(host, rproj, transport::Symbol)
+    seen = 0   # pool members that were alive+idle but didn't fit — logged so a mismatch isn't silent
+    for w in list_remote_workers(host)
+        w["alive"] === true || continue
+        get(w, "state", "") == "idle" || continue
+        mf = w["manifest"]
+        _manifest_get(mf, "pool") == "1" || continue
+        _manifest_get(mf, "hub") == gethostname() || continue
+        seen += 1
+        _manifest_get(mf, "transport") == string(transport) || continue
+        _manifest_get(mf, "project") == String(rproj) || continue
+        sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
+        port = w["port"]
+        claimed = lock(_POOL_CLAIM_LOCK) do
+            (String(host), port) in _POOL_CLAIMS && return false
+            push!(_POOL_CLAIMS, (String(host), port)); true
+        end
+        claimed || continue
+        return (port = port, stream_port = sp)
+    end
+    seen > 0 && _rlog("adopt: $seen warm pool worker(s) on $host, but none match env=$rproj transport=$transport — check warm_pool!'s preload (its basename must equal the notebook's parent project's)")
+    return nothing
+end
+
+"""
+    warm_pool!(host; n = 1, preload = "", transport = :tunnel) -> String
+
+Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a running Julia
+process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
+additionally replicates that env remotely and imports its packages while idle — so a notebook
+whose parent is that project opens in ~a second instead of ~90. Adoption wipes only the
+namespace; packages and the memo store survive. The pool refills itself after every adoption.
+`n = 0` drains: idle pool workers are reaped (attached/adopted ones are never touched).
+Blocking (provision + launch); safe to re-run — it reconciles toward `n`.
+"""
+function warm_pool!(host::AbstractString; n::Int = 1, preload::AbstractString = "",
+                    transport::Symbol = :tunnel)
+    h = String(strip(String(host)))
+    isempty(h) && return "give an ssh host"
+    n >= 0 || return "n must be ≥ 0"
+    transport in (:tunnel, :direct) || return "transport must be :tunnel or :direct"
+    pl = strip(String(preload))
+    pl = isempty(pl) ? "" : abspath(expanduser(String(pl)))
+    (isempty(pl) || isdir(pl)) || return "preload project dir not found: $pl"
+    _pool_config!(h; n = n, preload = pl, transport = transport)
+    _rlog("═══ WARM POOL: $h → n=$n preload=$(isempty(pl) ? "(none)" : pl) transport=$transport ═══")
+    return _pool_reconcile!(h)
+end
+
+# Drive the host toward the configured pool size: reap dead pool litter and stale-env idlers,
+# launch the deficit (one provision pass covers them all), trim any excess idlers. Never touches
+# an attached worker, a claimed worker, or anything not pool-tagged by this hub.
+function _pool_reconcile!(host)
+    cfg = _pool_config(host)
+    cfg === nothing && return "no pool configured for '$host' — call warm_pool!(host; n, preload)"
+    t = _pool_target(host, cfg)
+    roster = list_remote_workers(host)
+    mine = [w for w in roster
+            if _manifest_get(w["manifest"], "pool") == "1" &&
+               _manifest_get(w["manifest"], "hub") == gethostname()]
+    dead  = [w for w in mine if w["alive"] !== true]
+    stale = [w for w in mine if w["alive"] === true && get(w, "state", "") == "idle" &&
+                                _manifest_get(w["manifest"], "project") != t.project &&
+                                !_pool_claimed(host, w["port"])]
+    for w in vcat(dead, stale)                       # litter: dead members + idlers of an old preload env
+        reap_remote_worker(host, w["port"])
+    end
+    warm = [w for w in mine if w["alive"] === true && get(w, "state", "") == "idle" &&
+                               _manifest_get(w["manifest"], "project") == t.project &&
+                               !_pool_claimed(host, w["port"])]
+    deficit = cfg.n - length(warm)
+    cleaned = isempty(dead) && isempty(stale) ? "" : " (cleaned $(length(dead)) dead, $(length(stale)) stale-env)"
+    if deficit > 0
+        provision_remote!(t, cfg.preload)            # idempotent; one pass covers every launch below
+        floor = _port_floor(host; workers = roster)  # never deal a live worker's ports (see _port_floor)
+        for _ in 1:deficit
+            port, sp = _next_ports(; floor)
+            _launch_worker!(t, port, sp; label = "", parent = "", pool = true,
+                            warm_deps = !isempty(cfg.preload))
+        end
+        return "pool[$host]: launched $deficit worker(s) → $(cfg.n) warm, env $(t.project)$cleaned"
+    elseif deficit < 0
+        for w in warm[1:(-deficit)]
+            reap_remote_worker(host, w["port"])
+        end
+        return "pool[$host]: reaped $(-deficit) excess idle worker(s) → $(cfg.n) warm$cleaned"
+    end
+    return "pool[$host]: $(length(warm)) warm — nothing to do$cleaned"
+end
+
+# ── Parked connections (detach keeps the wire) ───────────────────────────────────────────────
+# Closing a notebook DETACHES its remote worker (stays warm); parking ALSO keeps the hub side of
+# the wire — the live ZMQ conn + supervised tunnel, keyed (host, label) — so the next open of
+# that notebook skips tunnel setup AND the CURVE/dial handshake entirely (~5 RTTs ≈ 370ms on a
+# measured WAN link → ~0). TTL-swept: a parked tunnel is a live ssh process, so idle parks close
+# after KAIMONSLATE_PARK_TTL seconds (default 30min); the worker itself stays warm either way —
+# expiry just demotes the next reattach to the record path.
+mutable struct ParkedRemote
+    conn::Any
+    tunnel::Any
+    port::Int
+    stream_port::Int
+    since::Float64
+end
+
+const _PARKED = Dict{Tuple{String,String},ParkedRemote}()
+const _PARK_LOCK = ReentrantLock()
+const _PARK_SWEEPER = Ref{Any}(nothing)
+
+_park_ttl() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_PARK_TTL", "")), 1800.0)
+
+# Take ownership of the kernel's conn + tunnel at detach time. Returns true when parked (the
+# caller must then NOT disconnect the conn or close the tunnel — the park owns them now).
+function park_remote!(k)
+    t = k.target
+    (t isa RemoteTarget && k.conn !== nothing && k.port != 0) || return false
+    lock(_PARK_LOCK) do
+        old = pop!(_PARKED, (t.ssh_host, k.label), nothing)   # shouldn't exist — close is serialized
+        old === nothing || _close_parked!(old)
+        _PARKED[(t.ssh_host, k.label)] = ParkedRemote(k.conn, k.tunnel, k.port, k.stream_port, time())
+    end
+    _ensure_park_sweeper!()
+    _rlog("park: keeping the wire to worker-$(k.port) on $(t.ssh_host) warm for '$(k.label)' (ttl $(round(Int, _park_ttl()))s)")
+    return true
+end
+
+unpark_remote!(host, label) =
+    lock(_PARK_LOCK) do; pop!(_PARKED, (String(host), String(label)), nothing); end
+
+function _close_parked!(p::ParkedRemote)
+    try; _kaimon().disconnect!(p.conn); catch; end
+    p.tunnel === nothing || (try; close_tunnel(p.tunnel); catch; end)
+    return nothing
+end
+
+# Kill-path hygiene: a parked wire to a worker that is being killed/reaped must not linger —
+# match by label (teardown kill) or by port (reap from the roster).
+function _evict_parked!(host; port::Int = 0, label::AbstractString = "")
+    lock(_PARK_LOCK) do
+        for key in collect(keys(_PARKED))
+            key[1] == String(host) || continue
+            p = _PARKED[key]
+            ((!isempty(label) && key[2] == String(label)) || (port != 0 && p.port == port)) || continue
+            delete!(_PARKED, key)
+            _close_parked!(p)
+            _rlog("park: evicted wire to worker-$(p.port) on $host ('$(key[2])')")
+        end
+    end
+    return nothing
+end
+
+function _ensure_park_sweeper!()
+    _PARK_SWEEPER[] === nothing || return nothing
+    _PARK_SWEEPER[] = Timer(60.0; interval = 60.0) do _
+        try
+            ttl = _park_ttl()
+            lock(_PARK_LOCK) do
+                for key in collect(keys(_PARKED))
+                    p = _PARKED[key]
+                    time() - p.since > ttl || continue
+                    delete!(_PARKED, key)
+                    _close_parked!(p)
+                    _rlog("park: TTL expired — wire to worker-$(p.port) on $(key[1]) closed (worker stays warm; next open uses the record)")
+                end
+            end
+        catch
+        end
+    end
+    return nothing
+end
+
 # The probe (one POSIX-sh command string, sent as a SINGLE ssh argv token like the launch line)
 # that enumerates workers: for each `worker-<port>.json` it emits port, liveness (pgrep), the
 # log's mtime (last activity) and size, the state sidecar, and the raw manifest — delimited with
@@ -1071,7 +1417,8 @@ for f in worker-*.json; do
   fi
   st=""; [ -f "worker-$port.state" ] && st=$(cat "worker-$port.state" 2>/dev/null)
   body=$(tr -d '\n\r' < "$f" 2>/dev/null); [ -n "$body" ] || body='{}'
-  printf '%s\037%s\037%s\037%s\037%s\037%s\036' "$port" "$alive" "$mt" "$sz" "$st" "$body"
+  tj=""; [ -f "worker-$port.stats" ] && tj=$(tr -d '\n\r' < "worker-$port.stats" 2>/dev/null)
+  printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\036' "$port" "$alive" "$mt" "$sz" "$st" "$body" "$tj"
 done
 printf '\003'
 """
@@ -1082,8 +1429,9 @@ printf '\003'
 Enumerate the workers Slate has spawned on `host`, each: `port`, `alive` (process running), `lastActivity`
 (unix mtime of its log = last computation), `logBytes`, `state`/`stateSince` (lifecycle sidecar:
 "attached"/"idle" + unix ts; "" for a pre-sidecar worker — advisory, a hub crash leaves a stale
-"attached"), and `manifest` (raw JSON string — the browser parses it for who/what/when). Reads the
-on-host manifests over one ssh call. `[]` if unreachable/none.
+"attached"), `manifest` (raw JSON string — the browser parses it for who/what/when), and `stats`
+(the worker's latest 2s telemetry sample: cpu/rss/gc_ms/evals/memo_bytes/ts as raw JSON; "" for a
+pre-telemetry worker). Reads the on-host manifests over one ssh call. `[]` if unreachable/none.
 """
 function list_remote_workers(host)
     sh = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
@@ -1107,6 +1455,8 @@ function list_remote_workers(host)
             "state" => isempty(sw) ? "" : String(sw[1]),
             "stateSince" => length(sw) > 1 ? something(tryparse(Int, sw[2]), 0) : 0,
             "manifest" => String(strip(parts[6])),
+            # latest telemetry sample (raw JSON from the worker's 2s sampler; "" pre-telemetry)
+            "stats" => length(parts) >= 7 ? String(strip(parts[7])) : "",
         ))
     end
     return workers
@@ -1117,6 +1467,21 @@ end
 function _manifest_get(json::AbstractString, key::AbstractString)
     m = match(Regex("\"" * key * "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\""), json)
     m === nothing ? "" : replace(replace(m.captures[1], "\\\"" => "\""), "\\\\" => "\\")
+end
+
+# The first auto-assign port safely ABOVE everything the host's roster occupies (each worker owns
+# port..port+2). Warm workers survive an extension restart — which resets the local port counter —
+# so a fresh spawn must not trust the counter alone: without this floor it re-deals a live worker's
+# ports and the new worker dies at boot on ZMQ bind. `workers` = a roster already in hand (avoid a
+# second ssh probe), else it's fetched.
+function _port_floor(host; workers = nothing)
+    ws = workers === nothing ? list_remote_workers(host) : workers
+    top = 0
+    for w in ws
+        w["alive"] === true || continue        # a dead worker's ports are free
+        top = max(top, Int(w["port"]) + 2)
+    end
+    return top == 0 ? 0 : top + 1
 end
 
 # Find a LIVE worker on `host` already serving this exact notebook (same label + parent) spawned by THIS
@@ -1145,7 +1510,9 @@ never auto-reaps (a worker may hold results worth keeping). Returns true if the 
 """
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
+    try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
+    try; _release_pool_claim!(host, port); catch; end
     try; _ssh_test(host, `pkill -f $("worker-" * string(port) * ".jl")`); catch; end
-    try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state")`); catch; end
+    try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`); catch; end
     return true
 end
