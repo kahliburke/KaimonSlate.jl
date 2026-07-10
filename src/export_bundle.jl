@@ -403,6 +403,30 @@ function _read_bundle_b64(text::AbstractString)
     return b64
 end
 
+# The verbatim `Slate.bundle` (+ `Slate.preview`) footer blocks present in `text`, in file order,
+# or "" if none. These are the SELF-CONTAINED env artifacts: `serialize_report` emits only the
+# lightweight env/config footers, so a persist (any edit / save / config toggle) over a standalone
+# `.jl` would strip its bundle — silently turning a reproducible artifact into a notebook that no
+# longer `expand`s or reconstructs its env on another machine (beta report, 2026-07). `_persist!`
+# re-appends what this returns so the artifact survives edits. Carried verbatim (no re-encode): the
+# embedded env is edit-independent, and a preview only goes briefly stale before live cells replace
+# it on the next hydrate. CRLF-tolerant (the markers are matched as a prefix; trailing \r stripped).
+function _carry_env_footers(text::AbstractString)
+    lines = split(text, '\n')
+    io = IOBuffer(); wrote = false
+    for (openm, closem) in ((_BUNDLE_OPEN, _BUNDLE_CLOSE), (_PREVIEW_OPEN, _PREVIEW_CLOSE))
+        oi = findfirst(l -> startswith(l, openm), lines)
+        oi === nothing && continue
+        rest = @view lines[(oi + 1):end]
+        ci = findfirst(l -> startswith(l, closem), rest)
+        lasti = ci === nothing ? length(lines) : oi + ci
+        wrote && println(io)
+        for i in oi:lasti; println(io, rstrip(lines[i], ['\r'])); end
+        wrote = true
+    end
+    return String(take!(io))
+end
+
 # True if `text` carries a `Slate.bundle` footer (cheap marker scan, no base64 decode).
 _has_bundle(text::AbstractString) = occursin(_BUNDLE_OPEN, text)
 

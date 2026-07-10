@@ -37,6 +37,19 @@ _is_server_write(report_id, h::UInt64) =
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
 function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
     s = serialize_report(nb.report)
+    # Preserve a self-contained `.jl`'s env artifacts. `serialize_report` writes only the lightweight
+    # env/config footers, so without this the FIRST edit-save silently strips the `Slate.bundle` (and
+    # `Slate.preview`) footer — the file stops being self-contained: it no longer `expand`s, and a
+    # detached open can't reconstruct its env (stdlibs included). Carry the verbatim footers from the
+    # current on-disk file forward. Idempotent: once carried, the next serialize re-finds them here.
+    try
+        if isfile(nb.path)
+            carry = _carry_env_footers(read(nb.path, String))
+            isempty(carry) || (s = rstrip(s, '\n') * "\n\n" * carry * "\n")
+        end
+    catch e
+        @warn "KaimonSlate: could not preserve bundle footer on save" exception = (e, catch_backtrace())
+    end
     _note_server_write!(nb.report.id, hash(s))   # register BEFORE writing: a watcher tick fired by
     write(nb.path, s)                             # this write must recognize it as OURS, not external
     nb.version += 1                               # every in-app commit advances the version (CAS basis)

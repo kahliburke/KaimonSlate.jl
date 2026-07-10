@@ -238,6 +238,33 @@ end
         @test r.cells[1].id == "a"
     end
 
+    @testset "persist preserves the bundle footer (edit-save data-loss regression)" begin
+        # serialize_report drops Slate.bundle/preview, so a persist over a standalone `.jl` used to
+        # strip the bundle on the FIRST edit — the file silently stopped being self-contained (no
+        # longer expands; detached open can't reconstruct its env). `_persist!` now carries the
+        # footers forward via `_carry_env_footers`; here we exercise that helper directly.
+        withpreview = standalone * "\n" * _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE, "v1",
+                                                        Base64.base64encode("preview-bytes"))
+        r = parse_report(withpreview)                     # the notebook as the server holds it (footers stripped)
+        @test !occursin("Slate.bundle", serialize_report(r))   # the naked serialization has neither
+        @test !occursin("Slate.preview", serialize_report(r))
+        # Simulate the fixed persist: append the carried footers from the on-disk artifact.
+        carry = _carry_env_footers(withpreview)
+        saved = rstrip(serialize_report(r), '\n') * "\n\n" * carry * "\n"
+        @test occursin("Slate.bundle", saved) && occursin("Slate.preview", saved)
+        # Idempotent: a second save re-finds and re-appends exactly one of each (no accumulation).
+        carry2 = _carry_env_footers(saved)
+        saved2 = rstrip(serialize_report(r), '\n') * "\n\n" * carry2 * "\n"
+        @test length(collect(eachmatch(Regex(_BUNDLE_OPEN), saved2))) == 1
+        @test length(collect(eachmatch(Regex(_PREVIEW_OPEN), saved2))) == 1
+        # The re-saved artifact still expands — the whole point.
+        sj = joinpath(mktempdir(), "resaved.standalone.jl"); write(sj, saved2)
+        tdir = expand(sj)
+        @test isfile(joinpath(tdir, "Project.toml")) && isfile(joinpath(tdir, "Manifest.toml"))
+        # No footer at all → carry is empty, nothing appended (ordinary notebooks unaffected).
+        @test isempty(_carry_env_footers("#%% code id=a\nx = 1\n"))
+    end
+
     @testset "expand reinflates the project tree" begin
         sj = joinpath(mktempdir(), "demo.standalone.jl")
         write(sj, standalone)
