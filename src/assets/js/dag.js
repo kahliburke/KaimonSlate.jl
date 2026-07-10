@@ -130,10 +130,15 @@ function _dagModel(cells) {
     ids.forEach((id, i) => { slot[id] = i; });
   });
 
+  // Opaque cells (parse error / barrier expressions) carry FABRICATED barrier deps — every
+  // prior cell + every later cell. Those aren't dataflow: draw them as whispers, never as
+  // routed edges, or one typo turns the whole graph into a hub-and-spoke tangle.
+  const opaque = new Set(nodes.filter(c => c.opaque).map(c => c.id));
   const links = [];
   nodes.forEach(c => (byId[c.id].deps || []).forEach(d => {
     if (!inc.has(d)) return;
-    links.push({ source: d, target: c.id, dim: setup.has(d) });   // dim: drawn faint, ignored by layout
+    links.push({ source: d, target: c.id,
+                 dim: setup.has(d) || opaque.has(d) || opaque.has(c.id) });   // dim: faint, ignored by layout
   }));
   if (!_dagIsoOn) {
     // isolated cells (no edges at all once setup is filtered — e.g. a theme cell) hide too;
@@ -520,6 +525,7 @@ function _dagOption() {
     const rows = [`<b>${c.id}</b> — <span style="color:${_dagColor(P, s)}">${s}</span>${dur}` +
                   ` <span style="color:${P.dim}">· ${_dagKind(c)}</span>`];
     if (defs.length) rows.push(`<code>${defs.slice(0, 5).join(', ')}</code>${defs.length > 5 ? ` <span style="color:${P.dim}">+${defs.length - 5}</span>` : ''}`);
+    if (c.opaque) rows.push(`<span style="color:${P.errored}">⚠ unparseable — dependencies unknown (treated as a barrier)</span>`);
     if (c.stats) rows.push(`<span style="color:${P.dim}">Σ ${_dagFmtMs(c.stats.total_ms)} · ×${c.stats.evals}${c.stats.pulls ? ` · ↓${c.stats.pulls}` : ''}</span>`);
     return rows.join('<br>');
   };
@@ -825,6 +831,7 @@ function _dagCard(id, cx, cy) {
       `<span class="dagcard-kico">${K.icon || '·'}</span><b class="dagcard-jump" title="jump to this cell in the notebook">${_esc(c.id)}</b>` +
       `<span class="dagcard-st" style="color:${_dagColor(P, s)}">${s}</span>` +
       `<span class="dagcard-kind" style="color:${K.hue}">${kind}</span></div>` +
+    (c.opaque ? `<div class="dagcard-dim">⚠ this cell couldn’t be parsed — its dependencies are unknown, so the engine treats it as a barrier (everything below it is conservatively stale). Its graph edges are shown faded.</div>` : '') +
     (err ? `<pre class="dagcard-err">${_esc(err)}</pre>` : '') +
     (prev ? `<div class="dagcard-sec">output</div>${prev}` : '') +
     (chips.length

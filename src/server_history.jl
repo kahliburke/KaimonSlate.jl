@@ -525,7 +525,11 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         d["output"] = _bib_card_html(file, n, es, nbid, cited, nums)  # card instead of raw BibTeX
     end
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
-    # `:opaque` is inferred each eval, not a user tag, so it's excluded.
+    # `:opaque` is inferred each eval, not a user tag, so it's excluded from tags — but shipped
+    # as its own field: an opaque cell (parse error / barrier expr) has FABRICATED barrier deps
+    # (all prior cells + all later cells depend on it), and the DAG must not draw those as real
+    # dataflow edges.
+    (:opaque in c.flags) && (d["opaque"] = true)
     d["tags"] = sort!(String[string(f) for f in c.flags if f !== :opaque])
     # Live run statistics (session-scoped, keyed by notebook id) — the DAG heat map + stats card.
     # Only present once the cell has completed at least one run this session.
