@@ -981,23 +981,6 @@ const _MACRO_BINDS = Dict{String,Dict{UInt64,Tuple{Set{Symbol},Set{Symbol}}}}() 
 const _MACRO_TRIED = Dict{String,Set{UInt64}}()   # report.id → src_hashes attempted post-drain (failed)
 const _MACRO_LOCK  = ReentrantLock()
 
-# EE analysis of an expanded source string → (reads, writes), or `nothing` on parse/EE failure.
-# Hygiene: expansion manufactures gensyms (`var"#12#self#"`) — any name containing '#' is
-# synthetic, never a notebook binding — and the sanitizer collapses qualified names to `nothing`
-# (see `_sanitize_expansion`); both are dropped from both sets.
-function _expanded_bindings(src::AbstractString)
-    top = try; Meta.parseall(String(src)); catch; return nothing; end
-    _has_parse_error(top) && return nothing
-    stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
-    blk = Expr(:block, Any[s for s in stmts if !(s isa LineNumberNode)]...)
-    node = try; EE.compute_reactive_node(blk); catch; return nothing; end
-    clean(names) = Set{Symbol}(n for n in names if n !== :nothing && !occursin('#', String(n)))
-    reads = clean(node.references)
-    writes = clean(_strip_anon(node.definitions))
-    union!(writes, clean(_strip_anon(node.funcdefs_without_signatures)))
-    return (reads, writes)
-end
-
 "Flagged cells whose macro bindings are still unrecovered (no cache entry, not marked tried)."
 function pending_macro_cells(report::Report)
     get(report.meta, "macroexpand", true) === false && return Cell[]   # per-notebook opt-out
@@ -1033,12 +1016,11 @@ function resolve_macros!(report::Report, kernel::Kernel, cells::Vector{Cell}; ma
         # A wire/kernel failure must be VISIBLE (a silent empty result reads as "nothing to
         # recover" and, post-drain, permanently tried-marks every pending cell).
         @warn "deps: macroexpand round-trip failed — keeping conservative analysis" report = report.id exception = e
-        Dict{String,String}()
+        Dict{String,Tuple{Set{Symbol},Set{Symbol}}}()
     end
     newly = false
     for c in cells
-        ex = get(expanded, c.id, nothing)
-        binds = ex === nothing ? nothing : _expanded_bindings(ex)
+        binds = get(expanded, c.id, nothing)   # already analyzed WHERE the macros live (macroexpand.jl)
         lock(_MACRO_LOCK) do
             if binds === nothing
                 mark_tried && push!(get!(Set{UInt64}, _MACRO_TRIED, report.id), c.src_hash)

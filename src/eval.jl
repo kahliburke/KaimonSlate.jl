@@ -266,19 +266,20 @@ caller — nothing to preempt — so the base method no-ops; the gate kernel for
 cancel_cells(::Kernel, ::Report, ids) = 0
 
 """
-    macroexpand_cells(kernel, report, srcs) -> Dict{String,String}
+    macroexpand_cells(kernel, report, srcs) -> Dict{String,Tuple{Set{Symbol},Set{Symbol}}}
 
 Macro-expand each cell source (`id => source`) in the namespace where cells evaluate —
-recursively, NEVER evaluating — and return `id => expanded source string`. Cells whose
-expansion fails are omitted (the caller keeps its conservative static analysis). The gate
-kernel forwards to its worker, where the notebook's macros are actually defined.
+recursively, NEVER evaluating — and ANALYZE the expansion there, returning
+`id => (reads, writes)`. Cells whose expansion/analysis fails are omitted (the caller keeps
+its conservative static analysis). The gate kernel forwards to its worker, where the
+notebook's macros are actually defined; only name lists cross the wire (see macroexpand.jl).
 """
 function macroexpand_cells(::InProcessKernel, report::Report, srcs::AbstractDict)
     m = report_module(report)
-    out = Dict{String,String}()
+    out = Dict{String,Tuple{Set{Symbol},Set{Symbol}}}()
     for (id, src) in srcs
-        s = _expand_cell_source(m, String(src))
-        s === nothing || (out[String(id)] = s)
+        b = _expanded_bindings_of(EE, _expand_cell_statements(m, String(src)))
+        b === nothing || (out[String(id)] = b)
     end
     return out
 end

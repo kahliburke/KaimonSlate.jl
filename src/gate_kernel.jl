@@ -34,6 +34,10 @@ const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
 # notebook's parent-project /src without adding Revise to the user's project. Stacked AFTER
 # the notebook project on LOAD_PATH so the notebook's own deps always win.
 const _REVISE_ENV = joinpath(@__DIR__, "worker_revise")
+# Slate-owned env carrying ONLY ExpressionExplorer (same pinned version as the engine's), so the
+# worker can analyze macro EXPANSIONS where the macros live (see macroexpand.jl) without adding
+# EE to the user's project. Placed after the notebook project like the Revise env.
+const _EE_ENV = joinpath(@__DIR__, "worker_ee")
 
 # ── Worker KaimonGate env ──────────────────────────────────────────────────────
 # The worker imports KaimonGate (the ZMQ bridge) from LOAD_PATH[1]. Pointing that at
@@ -294,6 +298,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     return """
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
     insert!(LOAD_PATH, 3, $(repr(_REVISE_ENV)))   # slate-owned Revise — after the notebook project (@), before globals
+    insert!(LOAD_PATH, 4, $(repr(_EE_ENV)))       # slate-owned ExpressionExplorer — macro-aware deps (worker.jl _EE_OK)
     import KaimonGate
     # Load Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
     # KaimonGate.serve auto-starts a watcher that PUBs `files_changed` on Revise.revision_event.
@@ -653,14 +658,19 @@ function macroexpand_cells(k::GateKernel, report::Report, srcs::AbstractDict)
         _tool(k, "__slate_macroexpand", Dict{String,Any}("cells" => Dict{String,String}(srcs)))
     catch e
         @warn "slate: __slate_macroexpand gate call failed" notebook = report.id exception = e
-        return Dict{String,String}()
+        return Dict{String,Tuple{Set{Symbol},Set{Symbol}}}()
     end
-    wire === nothing && return Dict{String,String}()
-    # The wire may re-key a returned Dict with SYMBOL keys (same caveat as `_module_exports`);
-    # `pairs` reads both that and a genuine Dict.
-    out = Dict{String,String}()
+    out = Dict{String,Tuple{Set{Symbol},Set{Symbol}}}()
+    wire === nothing && return out
+    # The wire may re-key Dicts with SYMBOL keys (same caveat as `_module_exports`) — `pairs` +
+    # dual-key lookup read both shapes.
+    _names(v, key) = begin
+        x = v isa AbstractDict ? (haskey(v, key) ? v[key] : get(v, Symbol(key), nothing)) : nothing
+        x isa AbstractVector ? Set{Symbol}(Symbol(String(s)) for s in x) : nothing
+    end
     for (k2, v) in pairs(wire)
-        v isa AbstractString && (out[String(k2)] = String(v))
+        r = _names(v, "reads"); w = _names(v, "writes")
+        (r === nothing || w === nothing) || (out[String(k2)] = (r, w))
     end
     return out
 end

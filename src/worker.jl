@@ -320,7 +320,16 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
         end
         codec = try; _codec_pick(v); catch; "jls"; end
         h, n = try
-            MemoStore.put_blob(io -> _codec_encode(io, codec, v), root)
+            try
+                MemoStore.put_blob(io -> _codec_encode(io, codec, v), root)
+            catch e1
+                # A fast codec choking on an exotic value (e.g. Arrow vs a custom column type)
+                # must not cost the entry — demote THIS NAME to jls and keep going.
+                codec == "jls" && rethrow()
+                @info "slate memo: $(codec) encode failed — falling back to jls" name = nm reason = first(split(sprint(showerror, e1), '\n'))
+                codec = "jls"
+                MemoStore.put_blob(io -> _codec_encode(io, "jls", v), root)
+            end
         catch e
             @info "slate memo: not cached — a binding won't serialize" cell = cellkey name = nm codec = codec reason = first(split(sprint(showerror, e), '\n'))
             return false
@@ -606,17 +615,34 @@ function __slate_module_help(name::String)
     return module_help(m, name)
 end
 
-"Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and return
-id → expanded source string. A cell whose expansion yields nothing (parse failure, macro not yet
-defined, expansion threw) is omitted — the server keeps its conservative static analysis for it.
+# ExpressionExplorer for macro-aware analysis, delivered by the slate-owned `worker_ee` env on
+# LOAD_PATH (after the notebook project — a notebook's own EE wins). Guarded like Serialization:
+# absent (env build failure, offline first-instantiate) → no macro recovery, the server keeps its
+# conservative analysis; never a boot failure.
+const _EE_OK = try
+    @eval import ExpressionExplorer
+    true
+catch e
+    @warn "slate: ExpressionExplorer unavailable — macro-aware dependency recovery disabled" error = sprint(showerror, e)
+    false
+end
+
+"Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and ANALYZE
+them right here, where the macros live — returns id → {reads, writes} name lists. A cell whose
+expansion/analysis yields nothing (parse failure, macro not yet defined) is omitted — the server
+keeps its conservative static analysis for it.
 NOTE: `cells` must be a KEYWORD arg — a single positional `::Dict` param triggers the gate
 dispatcher's raw-Dict fast path, which hands the handler the WHOLE arguments dict instead."
 function __slate_macroexpand(; cells::Dict = Dict{String,Any}())
-    out = Dict{String,String}()
+    out = Dict{String,Any}()
+    _EE_OK || return out
     nb = _NS[]
     for (id, src) in cells
-        s = src isa AbstractString ? _expand_cell_source(nb, String(src)) : nothing
-        s === nothing || (out[String(id)] = s)
+        src isa AbstractString || continue
+        b = _expanded_bindings_of(ExpressionExplorer, _expand_cell_statements(nb, String(src)))
+        b === nothing || (out[String(id)] = Dict{String,Any}(
+            "reads" => String[string(s) for s in b[1]],
+            "writes" => String[string(s) for s in b[2]]))
     end
     return out
 end
@@ -1075,6 +1101,73 @@ function tools()
     ]
 end
 
+# ── Blob data channel (the third socket — gate port + 2) ─────────────────────────────────────
+# Bulk memo blobs move HERE so they can never head-of-line-block the control gate (a 5 GB Arrow
+# shipment must not queue ahead of a cell result). v1 protocol: strict REQ/REP alternation
+# (backpressure for free), one self-framed message per request:
+#   'H' <hex,hex,…>                  → reply: comma-joined hashes we DON'T have (the dedup query)
+#   'P' <64-hex><u8 last><chunk…>    → reply "ok"/"done"/"err:…" — chunks stream into a tmp,
+#                                      sha256-verified on the last one, atomic-renamed into the
+#                                      CAS: a corrupt/truncated transfer never lands.
+#   'M' <fullkey>\n<toml…>           → reply "ok" — manifest written; senders order it LAST so a
+#                                      manifest can never reference blobs that aren't there yet.
+# ZMQ rides KaimonGate's own dependency (the worker adds none). v1 is PLAINTEXT on :direct
+# (tunnel transport is SSH-encrypted end to end) — CURVE on this socket is a flagged TODO.
+# v1 sends copy chunks; the mmap zero-copy send is the optimization pass on the hub side.
+function _blob_server!(host::String, port::Int)
+    Z = KaimonGate.ZMQ
+    sock = Z.Socket(Z.REP)
+    Z.bind(sock, "tcp://$host:$port")
+    root = _memo_dir()
+    open_tmps = Dict{String,Tuple{IOStream,String}}()   # hash → (io, tmppath)
+    @info "slate worker: blob data channel listening" port = port
+    while true
+        reply = try
+            data = copy(Z.recv(sock))
+            cmd = Char(data[1])
+            if cmd == 'H'
+                hs = split(String(data[2:end]), ","; keepempty = false)
+                join([h for h in hs if !MemoStore.has_blob(root, String(h))], ",")
+            elseif cmd == 'P'
+                h = String(data[2:65]); last = data[66] == 0x01
+                io, tmp = get!(open_tmps, h) do
+                    bdir = joinpath(root, "blobs"); mkpath(bdir)
+                    t = tempname(bdir)
+                    (open(t, "w"), t)
+                end
+                write(io, @view data[67:end])
+                if last
+                    close(io); delete!(open_tmps, h)
+                    got = bytes2hex(open(MemoStore.SHA.sha256, tmp))
+                    if got == h
+                        dest = MemoStore.blob_path(root, h)
+                        mkpath(dirname(dest)); mv(tmp, dest; force = true)
+                        "done"
+                    else
+                        rm(tmp; force = true)
+                        "err: hash mismatch (got $got)"
+                    end
+                else
+                    "ok"
+                end
+            elseif cmd == 'M'
+                s = String(data[2:end])
+                nl = findfirst('\n', s)
+                key = s[1:nl-1]
+                p = MemoStore.manifest_path(root, key)
+                mkpath(dirname(p))
+                tmp = p * ".tmp"; write(tmp, s[nl+1:end]); mv(tmp, p; force = true)
+                "ok"
+            else
+                "err: unknown cmd"
+            end
+        catch e
+            "err: " * first(split(sprint(showerror, e), '\n'))
+        end
+        try; Z.send(sock, reply); catch; end   # REP must always answer or the channel wedges
+    end
+end
+
 """
     start(; host="127.0.0.1", port, stream_port)
 
@@ -1082,7 +1175,8 @@ Run the worker gate over TCP, exposing the capture tools. Blocks (this is the
 worker process's main loop).
 """
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
-               curve::Bool = false, allowed_clients::Vector{String} = String[])
+               curve::Bool = false, allowed_clients::Vector{String} = String[],
+               data_port::Int = 0)
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
@@ -1097,6 +1191,12 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                      allow_restart = false, spawned_by = "slate",
                      curve = curve, allowed_clients = allowed_clients)
     _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
+    # The blob data channel (port+2): bulk memo transfer that never queues ahead of cell results.
+    data_port > 0 && Threads.@spawn try
+        _blob_server!(host, data_port)
+    catch e
+        @warn "slate worker: blob channel died" port = data_port exception = e
+    end
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
     # Prewarm the eval path: the FIRST run through `_eval_one`/`run_capture` pays ~4s of JIT
     # (measured — eval/capture/demux/repr machinery all compiling), which otherwise lands under
