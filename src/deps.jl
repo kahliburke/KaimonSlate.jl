@@ -596,6 +596,27 @@ function _manual_needs(flags::AbstractSet{Symbol})
 end
 _manual_needs(c::Cell) = _manual_needs(c.flags)
 
+# Manual mutation declarations (`mutates=name1,name2` header tag): user-asserted in-place effects
+# the static analysis can't see — `update!(df)` through a function call, mutation via an alias.
+# Folded into `cell.mutates` by `build_dependencies!`, where the EXISTING machinery takes over:
+# ordering + restale of readers, memo entries snapshotting the post-mutation value, zero-copy
+# restore safety, and — at a region boundary — mutation-follows-data routing plus transfer-token
+# invalidation (an undeclared hidden mutation there doesn't just go stale, it FORKS the replicas,
+# which is why this tag exists). The sibling of `needs=`: that asserts an edge, this asserts what
+# the edge means.
+function _manual_mutates(flags::AbstractSet{Symbol})
+    out = Symbol[]
+    for f in flags
+        s = String(f)
+        startswith(s, "mutates=") || continue
+        for t in eachsplit(chopprefix(s, "mutates="), ',')
+            isempty(t) || push!(out, Symbol(t))
+        end
+    end
+    return out
+end
+_manual_mutates(c::Cell) = _manual_mutates(c.flags)
+
 """
     build_dependencies!(report) -> report
 
@@ -617,6 +638,13 @@ function build_dependencies!(report::Report)
                 nb === nothing ? nothing : get(nb, c.src_hash, nothing)
             end
             rec === nothing || (union!(c.reads, rec[1]); union!(c.writes, rec[2]))
+        end
+        # `mutates=` declarations: assert the in-place effects analysis can't see (f!(x) through a
+        # call, aliases). Mirrors the native analysis invariant `mutates ⊆ writes`: a mutator IS a
+        # writer, so later readers chain off it (ordering + restale), and it's also a READ (ordered
+        # after the original writer).
+        for m in _manual_mutates(c)
+            push!(c.mutates, m); push!(c.writes, m); push!(c.reads, m)
         end
         empty!(c.deps)
     end

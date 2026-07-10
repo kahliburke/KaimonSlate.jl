@@ -975,6 +975,7 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         had_cache = :cache in c.flags
         had_nocache = :nocache in c.flags
         had_needs = sort!(ReportEngine._manual_needs(c.flags))
+        had_mut = sort!(ReportEngine._manual_mutates(c.flags))
         want = _parse_tag_symbols(tags)
         keep = Set(f for f in c.flags if f === :opaque)        # re-derived each eval — keep it
         empty!(c.flags); union!(c.flags, keep); union!(c.flags, want)
@@ -983,10 +984,11 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         # effect on the next auto-run instead of silently waiting for an unrelated source edit
         # (seen live: a freshly cache-tagged cell stayed fresh and its value never persisted).
         (had_cache != (:cache in c.flags) || had_nocache != (:nocache in c.flags)) && (c.state = STALE)
-        # A `needs=` change rewires the graph: rebuild deps now (the DAG view reads them from the
-        # next state pull, not the next run) and restale the cell so it re-runs under the new
-        # ordering — its completion then restales dependents through the ordinary reactive path.
-        if had_needs != sort!(ReportEngine._manual_needs(c.flags))
+        # A `needs=` or `mutates=` change rewires the graph: rebuild deps now (the DAG view reads
+        # them from the next state pull, not the next run) and restale the cell so it re-runs under
+        # the new ordering — its completion restales dependents through the ordinary reactive path.
+        if had_needs != sort!(ReportEngine._manual_needs(c.flags)) ||
+           had_mut != sort!(ReportEngine._manual_mutates(c.flags))
             build_dependencies!(nb.report)
             c.state = STALE
         end

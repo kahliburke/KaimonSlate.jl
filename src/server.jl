@@ -618,6 +618,16 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_remote::Bool 
             (o !== cell && r in o.mutates && _cell_side_remote(nb, o) == src_side && o.output !== nothing) &&
                 (token *= string('+', o.src_hash, ':', objectid(o.output)))
         end
+        # Manual `needs=` edges harden the boundary too: a linked predecessor running on the
+        # writer's side may be the hidden mutator the edge exists to declare — fold its runs in,
+        # so the single-kernel edge workaround keeps working across a region boundary. A false
+        # positive just re-ships an unchanged value, which content addressing dedups.
+        for t in ReportEngine._manual_needs(cell)
+            j = _index_of(nb.report.cells, t); j === nothing && continue
+            o = nb.report.cells[j]
+            (o.output !== nothing && _cell_side_remote(nb, o) == src_side) &&
+                (token *= string('~', o.src_hash, ':', objectid(o.output)))
+        end
         key = string(dst_remote ? "region" : "main", ':', r)
         seen = lock(_REGION_LOCK) do; get(get(_REGION_SYNCED, nb.id, Dict{String,String}()), key, ""); end
         seen == token && continue
@@ -687,10 +697,10 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         # the immutable CAS blob — the graph's `mutates` analysis is the safety proof).
         safe = String[string(w) for w in cell.writes
                       if !any(o -> o !== cell && w in o.mutates, nb.report.cells)]
-        # The entry snapshots the cell's writes AND its mutation targets: a mutator's effect
-        # lives in the mutated value, and an entry without it would restore the PRE-mutation
-        # namespace while downstream entries (keyed over this cell's source) carry post-mutation
-        # results — a silently stale `df` for any new reader.
+        # Snapshot writes ∪ mutates. The analysis maintains mutates ⊆ writes (a mutator IS a
+        # writer), so this union normally adds nothing — it ENFORCES the property the entry's
+        # faithfulness depends on: an entry missing a mutated name restores the pre-mutation
+        # namespace while downstream entries carry post-mutation results.
         m = (key = ReportEngine._memo_key(nb.report, cell),
              names = unique!(String[string(w) for w in Iterators.flatten((cell.writes, cell.mutates))]),
              threshold = ReportEngine._MEMO_THRESHOLD_MS,

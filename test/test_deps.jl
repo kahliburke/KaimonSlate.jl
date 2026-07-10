@@ -85,6 +85,22 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "producer" in findcell(r, "consumer").deps
     end
 
+    @testset "manual mutation declarations (`mutates=` header tag)" begin
+        # Tag grammar mirrors needs=; declared names land in cell.mutates AND cell.reads
+        # (a mutation is also a read — ordering vs the writer needs the edge).
+        @test ReportEngine._manual_mutates(Set([Symbol("mutates=df,v"), :cache])) |> sort == [:df, :v]
+        @test ReportEngine._manual_mutates(Set([Symbol("mutates="), :nocache])) == Symbol[]
+        r = parse_report("#%% code id=mk\ndf = 1\n" *
+                         "#%% code id=hid mutates=df\nupdate(df)\n" *   # no bang — analysis alone can't see it
+                         "#%% code id=rd\nz = df + 1")
+        build_dependencies!(r)
+        hid = findcell(r, "hid")
+        @test :df in hid.mutates
+        @test :df in hid.reads
+        @test "mk" in hid.deps                       # ordered after the writer
+        @test "rd" in dependents_of(r, ["hid"])       # readers restale when the mutator re-runs
+    end
+
     @testset "manual edges (`needs=` header tag)" begin
         # Tag grammar: comma list, multiple tokens union, empty segments dropped.
         @test ReportEngine._manual_needs(Set([Symbol("needs=a,b"), Symbol("needs=c"), :cache])) |> sort ==

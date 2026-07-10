@@ -424,8 +424,8 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     # filename = `cell:<id>` → backtrace frames read `cell:<id>:N`, so an error in code defined in
     # ANOTHER cell still names its source cell (cross-cell error jump). Trace wrap shifts no lines
     # (`begin ` is on the cell's line 1), so the recorded line numbers stay 1:1 with the source.
-    # names = writes + MUTATES: a mutator's effect lives in the mutated value — an entry without
-    # it restores the pre-mutation namespace while downstream entries carry post-mutation results.
+    # names = writes ∪ mutates (mutates ⊆ writes natively — the union enforces the invariant the
+    # entry's faithfulness depends on; see the server-side twin in _eval_one!).
     memo = (key = _memo_key(report, cell),
             names = unique!(String[string(w) for w in Iterators.flatten((cell.writes, cell.mutates))]),
             threshold = _MEMO_THRESHOLD_MS,
