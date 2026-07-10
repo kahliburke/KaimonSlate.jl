@@ -85,6 +85,35 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "producer" in findcell(r, "consumer").deps
     end
 
+    @testset "redundant `using` unlocks memoization (`:using_redundant`)" begin
+        # A `using X; v = solve()` cell is normally unmemoizable (it provides X's names). But when
+        # X is already in scope from an UPSTREAM `using X`, this cell's import is a no-op the anchor
+        # covers, so it becomes memoizable. Mock the resolved exports so the usings aren't opaque.
+        empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+        ReportEngine._USING_EXPORTS["FakeMemoPkg"] = [:fakesolve]
+        ReportEngine._USING_EXPORTS["OtherMemoPkg"] = [:othername]
+        try
+            r = parse_report("#%% code id=anchor\nusing FakeMemoPkg\n" *
+                             "#%% code id=heavy\nusing FakeMemoPkg\nv = fakesolve()\n" *
+                             "#%% code id=novel\nusing FakeMemoPkg, OtherMemoPkg\nw = 1\n")
+            build_dependencies!(r)
+            anchor = findcell(r, "anchor"); heavy = findcell(r, "heavy"); novel = findcell(r, "novel")
+            @test :fakesolve in anchor.provides
+            @test !(:using_redundant in anchor.flags)      # FIRST provider — the anchor, must run
+            @test !ReportEngine._memoizable(anchor)
+            @test :fakesolve in heavy.provides             # heavy re-provides fakesolve (redundantly)
+            @test :using_redundant in heavy.flags          # every provided name anchored upstream
+            @test ReportEngine._memoizable(heavy)          # …so it memoizes despite providing
+            @test :v in heavy.writes && !(:v in heavy.provides)   # the genuinely-defined value
+            @test !(:using_redundant in novel.flags)       # OtherMemoPkg is NOVEL here → not redundant
+            @test !ReportEngine._memoizable(novel)
+        finally
+            delete!(ReportEngine._USING_EXPORTS, "FakeMemoPkg")
+            delete!(ReportEngine._USING_EXPORTS, "OtherMemoPkg")
+            empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
+        end
+    end
+
     @testset "manual mutation declarations (`mutates=` header tag)" begin
         # Tag grammar mirrors needs=; declared names land in cell.mutates AND cell.reads
         # (a mutation is also a read — ordering vs the writer needs the edge).

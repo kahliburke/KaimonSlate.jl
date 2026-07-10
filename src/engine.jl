@@ -239,7 +239,7 @@ end
 # Flags Slate manages internally (never written to / read from the header). `:opaque` and
 # `:macrocall` are re-derived every eval by dependency inference, so they must never be
 # serialized as tags.
-const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall])
+const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
 const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :slide, :notes,

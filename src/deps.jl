@@ -714,6 +714,27 @@ function build_dependencies!(report::Report)
     report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)
     report.meta["multidef_cells"] =                       # name → the cells defining it (for the UI popup)
         Dict{String,Vector{String}}(string(w) => ids for (w, ids) in wcells if length(ids) >= 2)
+    # Redundant `using`/`import` ⇒ memoizable. A cell that mixes a `using X` with real compute is
+    # normally unmemoizable: it PROVIDES X's names, and restoring cached values would skip the
+    # `using` (method-table effects), so `_memoizable` bails on any provider. But when every name
+    # the cell provides is ALREADY in scope from an UPSTREAM cell (a `using X` earlier — common:
+    # a per-section setup re-imports what a later heavy cell re-`using`s), this cell's `using` is a
+    # NO-OP: skipping it on restore is safe, because the upstream anchor runs and keeps X loaded.
+    # Doc-order sweep (sibling of the multidef sweep above): a code cell whose EVERY provided name
+    # was already provided upstream is flagged `:using_redundant`, which `_memoizable` honours to
+    # cache the cell's genuinely-defined values (the memo snapshot excludes `provides`). The FIRST
+    # provider of a name is never redundant → stays a barrier that runs → anchors the name; a cell
+    # that introduces even ONE novel name stays unmemoized (skipping it would leave that name
+    # undefined downstream). Unlocks e.g. `using KrylovKit; E0,ψ0 = solve(...)` when a cheap
+    # upstream setup already did `using KrylovKit`.
+    provided_upstream = Set{Symbol}()
+    for c in report.cells
+        c.kind == CODE || continue
+        delete!(c.flags, :using_redundant)
+        (!isempty(c.provides) && all(n -> n in provided_upstream, c.provides)) &&
+            push!(c.flags, :using_redundant)
+        union!(provided_upstream, c.provides)
+    end
     # Derived indexes: id → cell, and the transpose of `deps` (id → its direct dependents). Rebuilt
     # here — and ONLY here — so a single `build_dependencies!` call leaves every derived structure
     # consistent. `dependents_of` / `_upstream_closure` / `_memo_key` walk these instead of

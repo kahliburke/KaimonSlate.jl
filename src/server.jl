@@ -819,23 +819,30 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
             ids !== nothing && cell.id in ids ?
                 (delete!(ids, cell.id); isempty(ids) && delete!(_FORCE_RUN, nb.id); true) : false
         end
+        # The cell's genuinely-DEFINED names: writes minus `provides` (names brought in by
+        # `using`/`import`). A provided name is a function/module reference, not a value to cache —
+        # snapshotting it would try to serialize a function, and restoring it is a no-op the anchor
+        # already covers. Matters for `:using_redundant` cells (a `using X; v = solve()` whose X is
+        # anchored upstream): only `v` is cached, not X's exports. For ordinary cells provides is
+        # empty, so this is a no-op.
+        defs = Set{Symbol}(w for w in cell.writes if !(w in cell.provides))
         # Writes no OTHER cell reads — eligible for display-object elision at store time (the
         # worker decides by TYPE: a Makie Figure nobody reads stores as its wire image only, not
         # a multi-MB scene graph). Passed at restore time too: an entry that elided a name which
         # has SINCE gained a reader is treated as a miss, so the re-run re-stores the real object.
-        unread = String[string(w) for w in cell.writes
+        unread = String[string(w) for w in defs
                         if !any(o -> o !== cell && w in o.reads, nb.report.cells)]
         # Writes no OTHER cell mutates — zero-copy-safe at restore time (mmap / arrow-backed view
         # instead of a materialized copy; a mutation attempt on one THROWS rather than corrupting
         # the immutable CAS blob — the graph's `mutates` analysis is the safety proof).
-        safe = String[string(w) for w in cell.writes
+        safe = String[string(w) for w in defs
                       if !any(o -> o !== cell && w in o.mutates, nb.report.cells)]
-        # Snapshot writes ∪ mutates. The analysis maintains mutates ⊆ writes (a mutator IS a
-        # writer), so this union normally adds nothing — it ENFORCES the property the entry's
+        # Snapshot the defined names ∪ mutates. The analysis maintains mutates ⊆ writes (a mutator
+        # IS a writer), so this union normally adds nothing — it ENFORCES the property the entry's
         # faithfulness depends on: an entry missing a mutated name restores the pre-mutation
         # namespace while downstream entries carry post-mutation results.
         m = (key = ReportEngine._memo_key(nb.report, cell),
-             names = unique!(String[string(w) for w in Iterators.flatten((cell.writes, cell.mutates))]),
+             names = unique!(String[string(w) for w in Iterators.flatten((defs, cell.mutates))]),
              threshold = ReportEngine._MEMO_THRESHOLD_MS,
              force = frc,
              always = (:cache in cell.flags),   # `cache` tag → persist regardless of runtime
