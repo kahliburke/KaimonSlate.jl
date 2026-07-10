@@ -854,9 +854,20 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
     return newly
 end
 
-# Drop memoized :opaque verdicts and rebuild the graph so newly-resolved exports take effect.
+# Drop memoized inference verdicts for THIS report's cells and rebuild the graph so
+# newly-resolved exports / macro expansions take effect. Scoped eviction: the bind cache is
+# shared across every open notebook, so a wholesale `empty!` here made one notebook's refinement
+# re-infer every OTHER notebook's cells on their next edit (the same latency cliff the LRU
+# eviction exists to avoid). Cross-notebook id collisions (two notebooks both naming a cell
+# `theme`) evict a stranger's entry — the src-hash validation makes that cost one re-inference,
+# never a wrong result.
 function rebuild_precise!(report::Report)
-    lock(_BIND_CACHE_LOCK) do; empty!(_BIND_CACHE); empty!(_BIND_TICKS); end
+    lock(_BIND_CACHE_LOCK) do
+        for c in report.cells
+            delete!(_BIND_CACHE, c.id)
+            delete!(_BIND_TICKS, c.id)
+        end
+    end
     build_dependencies!(report)
     return report
 end

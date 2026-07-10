@@ -109,6 +109,14 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         update_source!(r, "#%% code id=stays\nsv = 2")
         @test !haskey(ReportEngine._BIND_CACHE, "gone")
         @test haskey(ReportEngine._BIND_CACHE, "stays")
+        # rebuild_precise! evicts ONLY its own report's cells — one notebook's refinement must not
+        # force every other open notebook to re-infer (the cache is shared across notebooks).
+        other = parse_report("#%% code id=bystander\nbv = 9")
+        build_dependencies!(other)
+        @test haskey(ReportEngine._BIND_CACHE, "bystander")
+        ReportEngine.rebuild_precise!(r)
+        @test haskey(ReportEngine._BIND_CACHE, "bystander")   # untouched by r's rebuild
+        @test haskey(ReportEngine._BIND_CACHE, "stays")       # r's cells re-cached by the rebuild
         empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)   # don't leak into other testsets
     end
 
