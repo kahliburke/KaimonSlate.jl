@@ -527,6 +527,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # All user-facing tags (known behaviour tags + free-form) for the cell-header tag editor;
     # `:opaque` is inferred each eval, not a user tag, so it's excluded.
     d["tags"] = sort!(String[string(f) for f in c.flags if f !== :opaque])
+    # Live run statistics (session-scoped, keyed by notebook id) — the DAG heat map + stats card.
+    # Only present once the cell has completed at least one run this session.
+    if !isempty(nbid)
+        st = _cell_stats_json(nbid, c.id)
+        st === nothing || (d["stats"] = st)
+    end
     if c.output !== nothing && c.output.exception !== nothing
         el = ReportRender._cell_error_line(c.output, c.id)   # offending cell line → editor highlight + jump
         el === nothing || (d["errorLine"] = el)

@@ -470,7 +470,8 @@ function _wire_to_output(wire)
     animations = hasproperty(wire, :animations) ? collect(wire.animations) : Any[]
     return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
                       binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms),
-                      collect(wire.trace), String(wire.stderr), overflow, animations)
+                      collect(wire.trace), String(wire.stderr), overflow, animations,
+                      hasproperty(wire, :memo) ? String(wire.memo) : "")
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string")

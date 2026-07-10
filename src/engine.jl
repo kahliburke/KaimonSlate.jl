@@ -51,14 +51,17 @@ struct CellOutput
     stderr::String                # captured stderr / `@warn` output (shown as a warnings block)
     overflow::Vector{Any}         # full results saved to disk when an output was truncated (kind,path,bytes,clipped)
     animations::Vector{Any}       # animate(…) payloads (manifest + frame/LUT bytes); blob'd server-side
+    memo::String                  # durable-cache outcome of this run: "" | "restored" | "stored"
 end
-# Back-compat constructors (callers that omit trace/stderr, or trace/stderr but not overflow/animations).
+# Back-compat constructors (callers that omit trace/stderr, or trace/stderr but not overflow/animations/memo).
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[], Any[])
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[], Any[], "")
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[], Any[])
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[], Any[], "")
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, Any[])
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, Any[], "")
+CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations) =
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, "")
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);

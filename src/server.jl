@@ -401,6 +401,92 @@ function _next_stale_cell(report)
     return nothing
 end
 
+# ── Per-cell run statistics (session-scoped) ──────────────────────────────────────────────────────
+# Updated at every cell-completion merge and embedded in cell_json["stats"], so the DAG's heat map
+# and stats card stream live over the same celldone/refresh events as everything else. `pulls`
+# counts downstream USE: every time a dependent cell actually computes, each cell in its upstream
+# dependency closure gets a tick — "how often were this cell's definitions consumed downstream".
+mutable struct CellStats
+    evals::Int              # actual computations (memo restores excluded)
+    restores::Int           # durable-cache restores (no recompute)
+    pulls::Int              # downstream evals that consumed this cell's definitions
+    total_ms::Float64       # accumulated compute time (evals only)
+    sumsq::Float64          # Σ duration² — std dev without a history
+    min_ms::Float64
+    max_ms::Float64
+    recent::Vector{Float64} # ring of recent durations → percentiles
+    last_ms::Float64
+    last_ts::Float64        # epoch seconds of the last completion
+    last_memo::String       # "" | "restored" | "stored"
+end
+CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "")
+const _CELL_STATS = Dict{String,Dict{String,CellStats}}()   # nb.id → cell.id → stats
+const _CELL_STATS_LOCK = ReentrantLock()
+
+# Transitive upstream ids of `id` (BFS over deps). Callers hold nb.lock (deps stable).
+function _upstream_closure(report, id::String)
+    byid = Dict{String,Any}(c.id => c for c in report.cells)
+    seen = Set{String}(); queue = String[id]
+    while !isempty(queue)
+        c = get(byid, popfirst!(queue), nothing); c === nothing && continue
+        for d in c.deps
+            d in seen && continue
+            push!(seen, d); push!(queue, d)
+        end
+    end
+    return seen
+end
+
+# Record a completed run. Called at the merge points (serial + parallel) BEFORE the celldone
+# broadcast, so the pushed cell_json already carries the fresh numbers. Callers hold nb.lock.
+function _stats_record!(nb::LiveNotebook, cell)
+    out = cell.output; out === nothing && return nothing
+    lock(_CELL_STATS_LOCK) do
+        stats = get!(Dict{String,CellStats}, _CELL_STATS, nb.id)
+        s = get!(CellStats, stats, cell.id)
+        s.last_ts = time(); s.last_ms = out.duration_ms; s.last_memo = out.memo
+        if out.memo == "restored"
+            s.restores += 1
+        else
+            s.evals += 1
+            s.total_ms += out.duration_ms; s.sumsq += out.duration_ms^2
+            s.min_ms = min(s.min_ms, out.duration_ms); s.max_ms = max(s.max_ms, out.duration_ms)
+            push!(s.recent, out.duration_ms)
+            length(s.recent) > 64 && popfirst!(s.recent)
+        end
+        if out.memo != "restored" && out.exception === nothing
+            for up in _upstream_closure(nb.report, cell.id)
+                get!(CellStats, stats, up).pulls += 1
+            end
+        end
+    end
+    return nothing
+end
+
+# The JSON view for cell_json["stats"] (nothing when the cell has never completed). Percentiles are
+# over the recent ring (last ≤64 computes) — labeled "recent", not lifetime.
+function _cell_stats_json(nbid::AbstractString, cid::AbstractString)
+    lock(_CELL_STATS_LOCK) do
+        nbstats = get(_CELL_STATS, String(nbid), nothing)
+        nbstats === nothing && return nothing
+        s = get(nbstats, String(cid), nothing)
+        s === nothing && return nothing
+        n = s.evals
+        mean = n > 0 ? s.total_ms / n : 0.0
+        sd = n > 1 ? sqrt(max(0.0, s.sumsq / n - mean^2)) : 0.0
+        q = sort(s.recent)
+        pct = p -> isempty(q) ? 0.0 : q[clamp(ceil(Int, p * length(q)), 1, length(q))]
+        r1(x) = round(x; digits = 1)
+        return Dict{String,Any}(
+            "evals" => n, "restores" => s.restores, "pulls" => s.pulls,
+            "total_ms" => r1(s.total_ms), "mean_ms" => r1(mean), "std_ms" => r1(sd),
+            "min_ms" => n > 0 ? r1(s.min_ms) : 0.0, "max_ms" => r1(s.max_ms),
+            "p50_ms" => r1(pct(0.5)), "p90_ms" => r1(pct(0.9)),
+            "last_ms" => r1(s.last_ms), "last_ts" => r1(s.last_ts), "memo" => s.last_memo,
+            "recent" => [r1(x) for x in s.recent])   # the raw ring — the stats card's sparkline
+    end
+end
+
 # Evaluate ONE cell with the lock-release discipline. Markdown (fast interp) runs under the lock;
 # code marks RUNNING + announces under the lock, evals WITHOUT it, then merges under the lock iff the
 # cell still exists unchanged (src_hash match) — else the result is from a superseded run, discarded.
@@ -442,6 +528,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         end
         c.output = out; c.binds = out.binds
         c.state = out.exception === nothing ? FRESH : ERRORED
+        _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
     end
     return nothing
@@ -619,6 +706,7 @@ function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::Abstract
         end
         c.output = out; c.binds = out.binds
         c.state = out.exception === nothing ? FRESH : ERRORED
+        _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
     end
     return nothing

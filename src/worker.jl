@@ -252,7 +252,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
         w = _memo_restore(memo_key)
         if w !== nothing
             @info "slate memo: restored (no recompute)" cell = cid
-            return w
+            return merge(w, (memo = "restored",))   # tell the server this run came from the durable cache
         end
     end
     local r
@@ -281,8 +281,10 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # the serialize cost).
     if !isempty(memo_key) && r.exception === nothing &&
        (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
-        _memo_store(memo_key, memo_names, r) &&
+        if _memo_store(memo_key, memo_names, r)
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
+            return merge(r, (memo = "stored",))
+        end
     end
     return r
 end
