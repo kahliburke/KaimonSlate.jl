@@ -562,6 +562,39 @@ function create_tools(GateTool::Type)
     end
 
     """
+        memo_trace(notebook; cell="") -> String
+
+    What the durable memo cache DID on each cell's latest eval — the direct probe for "why did
+    this cell (not) restore?". Per cell: action (restored / stored / recomputed / unkeyed), the
+    full cache key with its src- and manifest-digest components (compare across hosts to spot a
+    key drift), the per-binding blobs (name/codec/bytes/sha) read or written, and the exact miss
+    reason on a recompute (no manifest / blob missing / decode failed / below threshold / …).
+    `cell=""` returns every recorded cell. Reads the LIVE worker — run a cell first.
+    """
+    function memo_trace(notebook::String; cell::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        k = nb.kernel
+        k isa ReportEngine.GateKernel || return "In-process kernel — no durable memo layer to trace."
+        t = try
+            ReportEngine.memo_trace(k, strip(cell))
+        catch e
+            return "memo_trace failed: $(first(sprint(showerror, e), 200))"
+        end
+        t === nothing && return "Worker not connected — run a cell first."
+        fmt(d) = join(sort!(["  $k2: $(v2 isa AbstractVector ? join((string(x) for x in v2), "; ") : v2)"
+                             for (k2, v2) in d]), "\n")
+        if !isempty(strip(cell))
+            return "memo trace — cell '$cell':\n" * fmt(t)
+        end
+        isempty(t) && return "No memoized evals recorded yet this worker session."
+        io = IOBuffer()
+        for cid in sort!(collect(keys(t)))
+            println(io, "• $cid:\n", fmt(t[cid]))
+        end
+        return String(take!(io))
+    end
+
+    """
         pools() -> String
 
     The remote-execution state at a glance, no ssh: every configured warm pool (host, target
@@ -1282,6 +1315,7 @@ function create_tools(GateTool::Type)
         GateTool("warm_pool", warm_pool),
         GateTool("pools", pools),
         GateTool("whereis", whereis),
+        GateTool("memo_trace", memo_trace),
         GateTool("read", read_cells),
         GateTool("add_cell", add_cell),
         GateTool("edit_cell", edit_cell),

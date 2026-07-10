@@ -832,6 +832,13 @@ function assign_bind!(k::GateKernel, report::Report, name::Symbol, value)
     end
 end
 
+# The worker's memo decision record for one cell (or all: cell = "") — see worker.jl _MEMO_TRACE.
+# Requires a live conn (the record lives IN the worker); nothing when the worker isn't up.
+function memo_trace(k::GateKernel, cell::AbstractString = "")
+    k.conn === nothing && return nothing
+    return _tool(k, "__slate_memo_trace", Dict{String,Any}("cell" => String(cell)); timeout = 30.0)
+end
+
 # Reset the worker namespace and mark every cell stale (mirrors `reset_module!`).
 function reset!(k::GateKernel, report::Report)
     k.conn === nothing || (try; _tool(k, "__slate_reset", Dict{String,Any}()); catch; end)

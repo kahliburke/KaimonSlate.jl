@@ -76,12 +76,14 @@ const _NS = Ref{Module}(_new_ns())
 # `Serialization` is the (only) codec today; `memostore.jl` (stdlib SHA/TOML, pure — see its
 # header) is the content-addressed blob + manifest layer under it. Both inside the guard: if
 # either is unavailable the worker degrades to memo-off, exactly as before — never fails to boot.
+const _MEMO_ERR = Ref{Any}(nothing)   # why the memo layer failed to load (surfaced at boot + in traces)
 const _MEMO_OK = try
     @eval import Serialization
     include(joinpath(@__DIR__, "memostore.jl"))
     include(joinpath(@__DIR__, "memocodecs.jl"))   # value↔bytes: jls fallback + raw/arrow fast paths
     true
-catch
+catch e
+    _MEMO_ERR[] = e
     false
 end
 const _MEMO_DIR = Ref{String}("")
@@ -219,13 +221,44 @@ end
 # entry's DATA lives in content-addressed blobs the manifest references, so a re-key with
 # unchanged values (e.g. any src/ edit restaling every entry) re-stores only ~1 KB of manifest —
 # every data byte dedups against the blobs already on disk.
-function _memo_fullkey(cellkey::AbstractString)
+function _memo_key_parts(cellkey::AbstractString)
     sd = _src_digest(); md = _manifest_digest()
+    return (fullkey = string(hash((String(cellkey), sd, md)); base = 16),
+            src_digest = string(sd; base = 16), manifest_digest = string(md; base = 16))
+end
+
+function _memo_fullkey(cellkey::AbstractString)
+    p = _memo_key_parts(cellkey)
     # Opt-in diagnostic: log the two digests that complete the cache key, so a store-run vs a
     # restore-run can be compared to see which one drifts (→ near-total cache misses). KAIMONSLATE_MEMO_DEBUG=1.
     get(ENV, "KAIMONSLATE_MEMO_DEBUG", "") == "1" &&
-        @info "slate memo key" cell = String(cellkey) src_digest = string(sd; base = 16) manifest_digest = string(md; base = 16)
-    return string(hash((String(cellkey), sd, md)); base = 16)
+        @info "slate memo key" cell = String(cellkey) src_digest = p.src_digest manifest_digest = p.manifest_digest
+    return p.fullkey
+end
+
+# ── Memo trace: the durable-cache decision record, per cell ──────────────────────────────────
+# Every memoized eval leaves a small record of WHAT the memo layer did and WHY — action
+# (restored/stored/recomputed/forced/off/unkeyed), the full key and its component digests, the
+# per-binding blobs (name/codec/bytes/sha) it read or wrote, and the miss reason when it fell
+# through to a recompute. This turns cache debugging from "mint a rand token and diff it across
+# hosts" into one direct question: `slate.memo_trace(notebook, cell)`. Always on — it's a few
+# strings per cell (the digests are mtime-cached), keyed by cell id, latest eval wins.
+const _MEMO_TRACE = Dict{String,Dict{String,Any}}()
+const _MEMO_TRACE_LOCK = ReentrantLock()
+
+_trace_commit!(cid::String, tr::Dict{String,Any}) =
+    (tr["ts"] = round(Int, time()); lock(_MEMO_TRACE_LOCK) do; _MEMO_TRACE[cid] = tr; end; nothing)
+
+"Memo decision record for `cell` (or all cells when empty): what the durable cache did on the
+latest eval — restored/stored/recomputed + why, the full key, its src/manifest digests, and the
+blobs involved. The direct probe for 'why did this cell (not) restore?'. (`cell` is a kwarg —
+GateTool drops optional positionals.)"
+function __slate_memo_trace(; cell::String = "")
+    lock(_MEMO_TRACE_LOCK) do
+        isempty(cell) ? Dict{String,Any}(k => copy(v) for (k, v) in _MEMO_TRACE) :
+        haskey(_MEMO_TRACE, cell) ? copy(_MEMO_TRACE[cell]) :
+        Dict{String,Any}("action" => "none", "note" => "no memoized eval recorded for cell '$cell' this session")
+    end
 end
 
 # Bound the store to the cap: manifests are the LRU roots (restore touches them), blobs are
@@ -244,47 +277,61 @@ end
 # (MemoStore, fmt 3) drops pre-manifest entries; those miss once, re-run, and re-store. Everything
 # is DECODED before anything is ASSIGNED, so a missing/corrupt blob (partial gc, a concurrent
 # worker's eviction) is a clean miss, never a half-mutated namespace. Returns nothing (miss) or the wire.
-function _memo_restore(cellkey::String; unread::Vector{String} = String[])
-    _MEMO_OK || return nothing
+function _memo_restore(cellkey::String; unread::Vector{String} = String[],
+                       trace::Union{Nothing,Dict{String,Any}} = nothing)
+    # `trace` (when given) receives the decision detail — a hit's per-binding blobs, or the exact
+    # miss reason. `miss(why)` centralizes the fall-through so no exit forgets to explain itself.
+    miss(why) = (trace === nothing || (trace["miss"] = why); nothing)
+    _MEMO_OK || return miss("memo layer disabled (see worker boot log)")
     root = _memo_dir(); key = _memo_fullkey(cellkey)
     mf = MemoStore.read_manifest(root, key)
-    mf === nothing && return nothing
+    mf === nothing && return miss("no manifest for fullkey $key")
     # An entry that ELIDED a display object (stored the wire image, not the object — see
     # `_memo_store`) is only faithful while that name stays UNREAD. A reader added since means the
     # real object is needed → treat as a miss; the re-run re-stores WITH the object (its name is no
     # longer in `unread`). Self-healing, no key games.
     for e in get(mf, "elided", Any[])
-        e isa AbstractDict || return nothing
-        String(get(e, "name", "")) in unread || return nothing
+        e isa AbstractDict || return miss("malformed manifest (elided entry)")
+        nm = String(get(e, "name", ""))
+        nm in unread || return miss("elided display object '$nm' now has a reader — re-run stores the real object")
     end
     binds = Tuple{Symbol,Any}[]
+    restored = Dict{String,Any}[]
     for b in get(mf, "bindings", Any[])
-        b isa AbstractDict || return nothing
-        h = String(get(b, "blob", ""))
+        b isa AbstractDict || return miss("malformed manifest (binding entry)")
+        h = String(get(b, "blob", "")); nm = String(get(b, "name", ""))
         p = MemoStore.blob_path(root, h)
-        isfile(p) || return nothing
+        isfile(p) || return miss("binding '$nm' blob missing on disk ($(first(h, 12))…)")
         # Codec-dispatched decode (path-based: raw/arrow mmap the blob file in place). A codec
         # whose package isn't loaded yet, or any decode failure, is a clean miss → recompute.
+        codec = String(get(b, "codec", "jls"))
         v = try
-            _codec_decode(String(get(b, "codec", "jls")), p, get(b, "zc", false) === true)
-        catch
-            return nothing
+            _codec_decode(codec, p, get(b, "zc", false) === true)
+        catch e
+            return miss("binding '$nm' $codec decode failed: $(first(sprint(showerror, e), 120))")
         end
-        push!(binds, (Symbol(String(get(b, "name", ""))), v))
+        push!(binds, (Symbol(nm), v))
+        push!(restored, Dict{String,Any}("name" => nm, "codec" => codec,
+                                         "bytes" => get(b, "bytes", 0), "blob" => first(h, 12)))
     end
     w = get(mf, "wire", nothing)
-    w isa AbstractDict || return nothing
+    w isa AbstractDict || return miss("malformed manifest (no wire)")
     ok, wire = try
         MemoStore.with_blob(io -> Serialization.deserialize(io), root, String(get(w, "blob", "")))
     catch
         (false, nothing)
     end
-    ok || return nothing
+    ok || return miss("wire blob missing or undeserializable")
     m = _NS[]
     for (s, v) in binds
-        try; Core.eval(m, :($s = $v)); catch; return nothing; end
+        try; Core.eval(m, :($s = $v)); catch; return miss("assigning restored global '$s' failed"); end
     end
     MemoStore.touch_manifest(root, key)             # mark as recently used (LRU root)
+    if trace !== nothing
+        trace["bindings"] = restored
+        trace["stored_ms"] = get(mf, "ms", 0.0)      # what the entry originally cost to compute
+        trace["created"] = get(mf, "created", 0)
+    end
     return wire
 end
 
@@ -313,8 +360,10 @@ function _is_display_object(v)
 end
 
 function _memo_store(cellkey::String, names::Vector{String}, wire;
-                     unread::Vector{String} = String[], safe::Vector{String} = String[])
-    _MEMO_OK || return false
+                     unread::Vector{String} = String[], safe::Vector{String} = String[],
+                     trace::Union{Nothing,Dict{String,Any}} = nothing)
+    fail(why) = (trace === nothing || (trace["store_fail"] = why); false)
+    _MEMO_OK || return fail("memo layer disabled (see worker boot log)")
     m = _NS[]
     root = _memo_dir(); key = _memo_fullkey(cellkey)
     entries = Dict{String,Any}[]
@@ -352,7 +401,7 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
             end
         catch e
             @info "slate memo: not cached — a binding won't serialize" cell = cellkey name = nm codec = codec reason = first(split(sprint(showerror, e), '\n'))
-            return false
+            return fail("binding '$nm' won't serialize ($codec): $(first(sprint(showerror, e), 120))")
         end
         # `zc`: the graph proved (at store time) that nothing downstream MUTATES this name, so
         # restore may hand back a read-only mmap / arrow-backed view instead of a copy. A mutator
@@ -374,10 +423,16 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
         isempty(elided) || (mf["elided"] = elided)  # restore checks these against CURRENT readers
         MemoStore.write_manifest(root, key, mf)
         _memo_gc()
+        if trace !== nothing
+            trace["bindings"] = [Dict{String,Any}("name" => e["name"], "codec" => e["codec"],
+                                                  "bytes" => e["bytes"], "blob" => first(String(e["blob"]), 12))
+                                 for e in entries]
+            isempty(elided) || (trace["elided"] = [String(e["name"]) for e in elided])
+        end
         return true
     catch e
         @info "slate memo: not cached" cell = cellkey reason = first(split(sprint(showerror, e), '\n'))
-        return false
+        return fail("manifest/wire write failed: $(first(sprint(showerror, e), 120))")
     end
 end
 
@@ -393,14 +448,25 @@ function _eval_one(source::String, filename::String, memo_key::String,
                    memo_force::Bool = false, memo_always::Bool = false,
                    memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[])
     cid = replace(filename, r"^cell:" => "")
+    # The decision record for this eval (see _MEMO_TRACE): filled in as the memo layer acts,
+    # committed at every exit — `slate.memo_trace` reads it back.
+    tr = Dict{String,Any}("srckey" => memo_key)
+    if !isempty(memo_key) && _MEMO_OK
+        p = _memo_key_parts(memo_key)
+        tr["fullkey"] = p.fullkey; tr["src_digest"] = p.src_digest; tr["manifest_digest"] = p.manifest_digest
+    end
     # `memo_force` (the ▶ play button): an explicit run request — never satisfy it from the cache.
     # The fresh result still stores below, replacing the entry.
     if !isempty(memo_key) && !memo_force
-        w = _memo_restore(memo_key; unread = memo_unread)
+        w = _memo_restore(memo_key; unread = memo_unread, trace = tr)
         if w !== nothing
             @info "slate memo: restored (no recompute)" cell = cid
+            tr["action"] = "restored"
+            _trace_commit!(cid, tr)
             return merge(w, (memo = "restored",))   # tell the server this run came from the durable cache
         end
+    elseif !isempty(memo_key) && memo_force
+        tr["miss"] = "explicit ▶ run (memo_force) — restore skipped, fresh result re-stores"
     end
     local r
     try
@@ -428,11 +494,24 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # the serialize cost).
     if !isempty(memo_key) && r.exception === nothing &&
        (memo_always || (memo_threshold > 0 && r.duration_ms >= memo_threshold))
-        if _memo_store(memo_key, memo_names, r; unread = memo_unread, safe = memo_safe)
+        if _memo_store(memo_key, memo_names, r; unread = memo_unread, safe = memo_safe, trace = tr)
             @info "slate memo: cached" cell = cid ms = round(r.duration_ms; digits = 1)
+            tr["action"] = "stored"; tr["ms"] = round(r.duration_ms; digits = 1)
+            _trace_commit!(cid, tr)
             return merge(r, (memo = "stored",))
         end
+        tr["action"] = "recomputed"                  # ran fine but the store itself failed (see store_fail)
+    elseif isempty(memo_key)
+        tr["action"] = "unkeyed"
+        tr["note"] = "no memo key — cell not memoizable (markdown/using/binds/volatile) or memo off hub-side"
+    elseif r.exception !== nothing
+        tr["action"] = "recomputed"; tr["note"] = "cell errored — errors are never cached"
+    else
+        tr["action"] = "recomputed"
+        tr["note"] = "below threshold ($(round(r.duration_ms; digits = 1))ms < $(memo_threshold)ms) and no `cache` tag"
     end
+    tr["ms"] = round(r.duration_ms; digits = 1)
+    _trace_commit!(cid, tr)
     return r
 end
 
@@ -1117,6 +1196,7 @@ function tools()
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
+        KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_complete", __slate_complete),
@@ -1284,6 +1364,9 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         @warn "slate worker: blob channel died" port = data_port exception = e
     end
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
+    # A memo-off worker used to be SILENT (every store/restore just returned early) — the single
+    # hardest-to-spot degradation, since cells still run fine and only recompute. Say it once, loudly.
+    _MEMO_OK || @warn "slate worker: durable memo DISABLED — cache tags and restores are no-ops" exception = _MEMO_ERR[]
     # Prewarm the eval path: the FIRST run through `_eval_one`/`run_capture` pays ~4s of JIT
     # (measured — eval/capture/demux/repr machinery all compiling), which otherwise lands under
     # the user's first cell. Compile it NOW, in the background: the port is already serving, so

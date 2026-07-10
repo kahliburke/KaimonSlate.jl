@@ -617,10 +617,12 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
         r === nothing || return r
-        edit_cell!(nb, id, source; announce = true)   # show the edited source before its eval finishes
-        # Replace the cell's user tags when a spec is given; empty = leave existing tags untouched
-        # (so an ordinary source edit never silently wipes tags).
+        # Tags FIRST: the edit below marks the cell stale and its eval can begin immediately, so
+        # tags applied after it race the run — a freshly `cache`-tagged cell would evaluate once
+        # more under its OLD flags (seen live: the tagged run didn't persist). Empty = leave
+        # existing tags untouched (so an ordinary source edit never silently wipes tags).
         isempty(strip(String(tags))) || set_cell_tags!(nb, id, tags)
+        edit_cell!(nb, id, source; announce = true)   # show the edited source before its eval finishes
         return nothing
     end
     rej === nothing || return rej
@@ -946,10 +948,24 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         i = _index_of(nb.report.cells, id); i === nothing && return nb
         c = nb.report.cells[i]
         had_trace = :trace in c.flags
+        had_cache = :cache in c.flags
+        had_nocache = :nocache in c.flags
+        had_needs = sort!(ReportEngine._manual_needs(c.flags))
         want = _parse_tag_symbols(tags)
         keep = Set(f for f in c.flags if f === :opaque)        # re-derived each eval — keep it
         empty!(c.flags); union!(c.flags, keep); union!(c.flags, want)
         (had_trace != (:trace in c.flags)) && (c.state = STALE)
+        # Flipping cache/nocache changes what the NEXT eval persists — restale so the tag takes
+        # effect on the next auto-run instead of silently waiting for an unrelated source edit
+        # (seen live: a freshly cache-tagged cell stayed fresh and its value never persisted).
+        (had_cache != (:cache in c.flags) || had_nocache != (:nocache in c.flags)) && (c.state = STALE)
+        # A `needs=` change rewires the graph: rebuild deps now (the DAG view reads them from the
+        # next state pull, not the next run) and restale the cell so it re-runs under the new
+        # ordering — its completion then restales dependents through the ordinary reactive path.
+        if had_needs != sort!(ReportEngine._manual_needs(c.flags))
+            build_dependencies!(nb.report)
+            c.state = STALE
+        end
         _persist!(nb)
     end
     return nb
