@@ -193,6 +193,35 @@ function _collect_use_imports!(dict::AbstractDict, ex)
     return dict
 end
 
+# ExpressionExplorer swallows an UNKNOWN macro's arguments whole: `@chain rotations begin … end`
+# yields only `@chain` as a reference — the `rotations` dataflow edge (and every function the block
+# calls) silently vanishes from the reactive graph, breaking recompute order, the deps viewer, and
+# memo-key closures alike. Until the macro can be expanded for real (worker-side macroexpand, which
+# also recovers WRITES — e.g. `@kwdef struct Foo`), over-approximate: scan every macrocall's
+# arguments as ordinary expressions and take their REFERENCES as reads. Writes are deliberately NOT
+# taken — fabricating producers from unexpanded macro args could steal an edge from a true definer.
+# Slate's own handler macros are excluded: their bodies get bespoke analysis (`@onclick`'s control
+# is intentionally NOT a read), and `@asset`/`@use` args are literals collected separately.
+const _MACRO_SCAN_SKIP = Set{Symbol}((Symbol("@bind"), Symbol("@reactive"), Symbol("@onclick"),
+    Symbol("@onchange"), Symbol("@asset"), Symbol("@use")))
+function _macrocall_arg_refs!(refs::Set{Symbol}, ex)
+    ex isa Expr || return refs
+    if ex.head === :macrocall && !isempty(ex.args)
+        name = ex.args[1]
+        (name isa Symbol && name in _MACRO_SCAN_SKIP) && return refs
+        args = Any[a for a in ex.args[3:end] if !(a isa LineNumberNode)]
+        try
+            union!(refs, EE.compute_reactive_node(Expr(:block, args...)).references)
+        catch e
+            @debug "deps: macrocall arg-scan failed" exception = e
+        end
+        foreach(a -> _macrocall_arg_refs!(refs, a), args)   # nested macrocalls swallow again — recurse
+    else
+        foreach(a -> _macrocall_arg_refs!(refs, a), ex.args)
+    end
+    return refs
+end
+
 # Notebook-level import map: scan every code cell's source for `@use` declarations → an ordered
 # name→url map on `report.meta["imports"]`. Refreshed on each structural pass (build_dependencies!),
 # so adding/removing a `@use` updates what the shell/export head injects (a live change still needs a
@@ -312,6 +341,7 @@ function _infer_bindings_uncached!(cell::Cell)
             push!(cell.writes, rm[1])            # `@reactive x = init` DEFINES x (the reactive producer)
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, rm[2])).references)
+                union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), rm[2]))
             catch e
                 @debug "deps: @reactive init analysis failed" cell = cell.id exception = e
             end
@@ -319,6 +349,7 @@ function _infer_bindings_uncached!(cell::Cell)
             push!(cell.writes, bm[1])
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, bm[2])).references)
+                union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), bm[2]))
             catch e
                 @debug "deps: @bind widget-expr reactive-node analysis failed" cell = cell.id exception = e
             end
@@ -347,6 +378,7 @@ function _infer_bindings_uncached!(cell::Cell)
         try
             node = EE.compute_reactive_node(blk)
             union!(cell.reads, node.references)
+            union!(cell.reads, _macrocall_arg_refs!(Set{Symbol}(), blk))   # see through unknown macros (reads only)
             union!(cell.writes, _strip_anon(node.definitions))
             union!(cell.writes, _strip_anon(node.funcdefs_without_signatures))
             _record_global_mutations!(cell, blk, node.references)

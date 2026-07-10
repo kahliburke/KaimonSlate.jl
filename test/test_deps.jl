@@ -37,6 +37,39 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test :vals in c.writes              # the real write is still there
     end
 
+    @testset "unknown macro arguments still contribute reads (@chain et al.)" begin
+        # ExpressionExplorer swallows an unknown macro's args whole — `@chain rotations begin … end`
+        # used to yield ONLY `@chain` as a reference, silently dropping the `rotations` dataflow
+        # edge (broken recompute order + wrong memo closures). The arg-scan over-approximates reads.
+        c = Cell("c", CODE, "out = @chain rotations begin\n    subset(:linked)\n    groupby(:origin)\nend")
+        infer_bindings!(c)
+        @test :rotations in c.reads
+        @test :subset in c.reads && :groupby in c.reads   # block calls are reads too (using-refined deps)
+        @test :out in c.writes
+        @test Symbol("@chain") in c.reads                 # the macro itself stays a dep
+
+        # nested macrocalls: the inner one's args are scanned as well
+        c = Cell("c", CODE, "r = @outer begin\n    @inner df\nend"); infer_bindings!(c)
+        @test :df in c.reads
+
+        # writes are NOT taken from unexpanded macro args — no fabricated producers (an
+        # assignment target inside a macro is neither a write nor a read until tier-2 expansion)
+        c = Cell("c", CODE, "@someunknownmacro q = 1"); infer_bindings!(c)
+        @test :q ∉ c.writes
+
+        # slate handler macros keep their bespoke semantics: @onclick's control is NOT a read
+        c = Cell("c", CODE, "@onclick btn begin\n    counter[] = counter[] + step\nend")
+        infer_bindings!(c)
+        @test :step in c.reads
+        @test :btn ∉ c.reads
+
+        # end-to-end: the dependency edge exists — the @chain consumer follows its producer
+        r = parse_report("#%% code id=producer\nrotations = 1:10\n" *
+                         "#%% code id=consumer\ncurve = @chain rotations begin\n    sum\nend")
+        build_dependencies!(r)
+        @test "producer" in findcell(r, "consumer").deps
+    end
+
     @testset "_BIND_CACHE is bounded (no unbounded growth on a long-lived server)" begin
         empty!(ReportEngine._BIND_CACHE)
         # Fill past the cap with distinct cell ids; correctness survives the eviction sweep —
