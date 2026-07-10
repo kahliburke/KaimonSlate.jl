@@ -439,6 +439,7 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # was last published (owner/name + slug), so the dialog pre-fills and a CI action can read the
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
 const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "macroexpand", "agentmodel", "runon",
+                      "regionon",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
                       "publishrepo", "publishslug", "series", "docid")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
@@ -451,6 +452,10 @@ const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload
                            # a machine-specific ssh alias the author chose to bake in (the *session* and
                            # *global* run-location layers live in runtime meta / slate.json, never here).
                            "runon" => :string,
+                           # `regionon` = where `remote`-tagged cells run ("host[,transport[,port,stream]]").
+                           # The region-runner counterpart of `runon`: the main kernel stays put; only the
+                           # tagged subgraph executes there, boundary values crossing as CAS blobs.
+                           "regionon" => :string,
                            "slidelevel" => :int, "slidetransition" => :string,
                            "slidetheme" => :string, "slideratio" => :string, "bibstyle" => :string,
                            "publishrepo" => :string, "publishslug" => :string, "series" => :string,

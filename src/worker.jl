@@ -674,6 +674,53 @@ end
 "Discard the namespace (full rebuild)."
 __slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _NS[] = _new_ns(); true)
 
+"Encode the namespace global `name` into this worker's content-addressed store and return its
+address — `(; hash, codec, bytes)` (or `(; error)`). One half of cross-kernel value transport
+(region runner): the hub moves the blob to the other worker's CAS over the data channel (or the
+filesystem, when that worker is local) and calls `__slate_bind_blob` there. Codec-picked like
+the memo store (arrow/raw/jls), so a DataFrame crosses as mmap-ready Arrow IPC."
+function __slate_blob_of(name::String)
+    _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
+    m = _NS[]
+    s = Symbol(name)
+    Base.invokelatest(isdefined, m, s) || return (; error = "no global named '$name'")
+    v = Base.invokelatest(getglobal, m, s)
+    codec = try; _codec_pick(v); catch; "jls"; end
+    h, n = try
+        try
+            MemoStore.put_blob(io -> _codec_encode(io, codec, v), _memo_dir())
+        catch
+            codec == "jls" && rethrow()
+            codec = "jls"
+            MemoStore.put_blob(io -> _codec_encode(io, "jls", v), _memo_dir())
+        end
+    catch e
+        return (; error = "'$name' won't serialize: " * first(sprint(showerror, e), 160))
+    end
+    return (; hash = h, codec = codec, bytes = n)
+end
+
+"Decode the CAS blob `hash` (already present in THIS worker's store) with `codec` and assign it
+to the namespace global `name` — the other half of cross-kernel value transport. `zc=true`
+allows a zero-copy (mmap/arrow-view) materialization when the graph proved nothing mutates it."
+function __slate_bind_blob(name::String, hash::String, codec::String; zc::Bool = false)
+    _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
+    p = MemoStore.blob_path(_memo_dir(), hash)
+    isfile(p) || return (; error = "blob $hash not in this worker's store")
+    v = try
+        _codec_decode(codec, p, zc)
+    catch e
+        return (; error = "decode failed ($codec): " * first(sprint(showerror, e), 160))
+    end
+    s = Symbol(name)
+    try
+        Core.eval(_NS[], :($s = $v))
+    catch e
+        return (; error = "assign failed: " * first(sprint(showerror, e), 160))
+    end
+    return (; ok = true)
+end
+
 "Adopt this worker for a notebook (warm-pool handoff): point `PARENT_PROJECT` at the remote
 project dir and swap in a fresh namespace. Loaded packages + the memo store survive — that is
 the warmth a pool worker exists to hold; only the (empty) namespace is discarded."
@@ -1197,6 +1244,8 @@ function tools()
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
+        KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
+        KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_complete", __slate_complete),
@@ -1230,6 +1279,11 @@ end
 #                                      The hub sends the payload as a zero-copy message over its
 #                                      mmap of the blob (zmq_msg_init_data — no read()/vcat copies);
 #                                      here it's written straight from the message's memory.
+#   'G' <64-hex>:<offset>:<len>      → PULL one chunk of a blob (the reverse direction — remote
+#                                      results flowing back). TWO reply frames: "ok <total>" (or
+#                                      "err: …" alone) + the payload, sent zero-copy over an mmap
+#                                      of the blob. The hub loops offsets and sha-verifies the
+#                                      assembled file before landing it (same CAS discipline).
 #   'M' <fullkey>\n<toml…>           → reply "ok" — manifest written; senders order it LAST so a
 #                                      manifest can never reference blobs that aren't there yet.
 # ZMQ rides KaimonGate's own dependency (the worker adds none). With `curve` (the :direct
@@ -1289,6 +1343,24 @@ function _blob_server!(host::String, port::Int; curve::Bool = false)
                 put_chunk!(h, last, io -> GC.@preserve payload begin
                     unsafe_write(io, pointer(payload), length(payload))
                 end)
+            elseif cmd == 'G'
+                parts = split(String(copy(data))[2:end], ':')
+                h = String(parts[1])
+                off = length(parts) >= 2 ? something(tryparse(Int, parts[2]), 0) : 0
+                len = length(parts) >= 3 ? something(tryparse(Int, parts[3]), 0) : 0
+                p = MemoStore.blob_path(root, h)
+                if !isfile(p)
+                    "err: no blob $h"
+                else
+                    sz = filesize(p)
+                    n = clamp(len <= 0 ? sz - off : min(len, sz - off), 0, sz - off)
+                    if n <= 0 || sz == 0
+                        ("ok $sz", Z.Message())              # empty tail (or zero-size blob)
+                    else
+                        mm = Mmap.mmap(p, Vector{UInt8}, sz) # Message(origin=mm,…) keeps it alive till sent
+                        ("ok $sz", Z.Message(mm, pointer(mm) + off, n))
+                    end
+                end
             elseif cmd == 'P'
                 d = copy(data)
                 h = String(d[2:65]); last = d[66] == 0x01
@@ -1307,7 +1379,16 @@ function _blob_server!(host::String, port::Int; curve::Bool = false)
         catch e
             "err: " * first(split(sprint(showerror, e), '\n'))
         end
-        try; Z.send(sock, reply); catch; end   # REP must always answer or the channel wedges
+        # REP must always answer or the channel wedges. A Tuple reply = multipart ('G': meta + payload).
+        try
+            if reply isa Tuple
+                Z.send(sock, reply[1]; more = true)
+                Z.send(sock, reply[2])
+            else
+                Z.send(sock, reply)
+            end
+        catch
+        end
     end
 end
 
@@ -1388,7 +1469,8 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
     # The blob data channel (port+2): bulk memo transfer that never queues ahead of cell results.
     # Same CURVE posture as the gate: encrypted + allow-listed on :direct, plaintext behind SSH.
-    data_port > 0 && Threads.@spawn try
+    # Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
+    data_port > 0 && _MEMO_OK && Threads.@spawn try
         _blob_server!(host, data_port; curve = curve)
     catch e
         @warn "slate worker: blob channel died" port = data_port exception = e

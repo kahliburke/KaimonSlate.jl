@@ -604,6 +604,31 @@ function create_tools(GateTool::Type)
     end
 
     """
+        region_on(notebook, host) -> String
+
+    Run this notebook's `remote`-tagged cells on `host` (a `Host` from ~/.ssh/config;
+    "host[,transport[,port,stream]]", same grammar as run_on) while everything else keeps
+    running on the main kernel — the region runner. Boundary values cross automatically as
+    content-addressed blobs over the data channel (a DataFrame crosses as Arrow IPC; unchanged
+    values dedup to nothing), so a huge frame produced AND consumed inside the region never
+    moves — only what local cells actually read does. Tag cells with `remote` (edit_cell tags).
+    Durable (written to the notebook footer). `host=""` clears the region — tagged cells run on
+    the main kernel again. Pure `using` cells run on BOTH kernels; keep `@bind` cells local.
+    """
+    function region_on(notebook::String, host::String)::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        h = strip(host)
+        NotebookServer._teardown_region!(nb)          # a live region (old host) detaches warm
+        lock(nb.lock) do
+            isempty(h) ? delete!(nb.report.meta, "regionon") : (nb.report.meta["regionon"] = String(h))
+            NotebookServer._persist!(nb)
+        end
+        isempty(h) && return "✅ region cleared — `remote`-tagged cells run on the main kernel again."
+        n = count(c -> :remote in c.flags, nb.report.cells)
+        return "✅ $(basename(nb.path)): `remote`-tagged cells ($n now) run on '$h'. The region worker spawns/adopts on the next run; tag cells with edit_cell(tags=\"remote\")."
+    end
+
+    """
         memo_trace(notebook; cell="") -> String
 
     What the durable memo cache DID on each cell's latest eval — the direct probe for "why did
@@ -1350,6 +1375,7 @@ function create_tools(GateTool::Type)
         GateTool("list", nb_list),
         GateTool("close", nb_close),
         GateTool("run_on", run_on),
+        GateTool("region_on", region_on),
         GateTool("sync_memo", sync_memo),
         GateTool("check_remote", check_remote),
         GateTool("remote_workers", remote_workers),

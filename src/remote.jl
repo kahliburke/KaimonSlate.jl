@@ -30,6 +30,7 @@ import Sockets
 import FileWatching
 import Dates
 import Mmap
+import SHA as _SHA
 
 # ── Durable orchestration log ─────────────────────────────────────────────────────
 # The extension logger drops @info/@warn structured kwargs (only the message string survives),
@@ -1171,35 +1172,7 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         for h in want
             p = joinpath(root, "blobs", "sha256", h[1:2], String(h))
             isfile(p) || (_rlog("memo push: missing local blob $h — skipped"); continue)
-            sz = filesize(p)
-            if v2 && sz > 0
-                mm = Mmap.mmap(p, Vector{UInt8}, sz)
-                off = 0
-                chunk = _blob_chunk()
-                while off < sz
-                    n = min(chunk, sz - off)
-                    last = off + n >= sz
-                    hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(String(h))), UInt8[last ? 0x01 : 0x00])
-                    Z.send(sock, hdr; more = true)
-                    # zero-copy payload frame: libzmq sends straight out of the mmap; `mm` is the
-                    # origin object ZMQ protects until the frame is out (REQ/REP: by the reply).
-                    Z.send(sock, Z.Message(mm, pointer(mm) + off, n))
-                    r = String(copy(Z.recv(sock)))
-                    startswith(r, "err") && error("memo push $h: $r")
-                    nbytes += n; off += n
-                end
-            else
-                open(p, "r") do io
-                    while true
-                        chunk = read(io, 1 << 20)
-                        last = eof(io)
-                        r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(String(h))), UInt8[last ? 0x01 : 0x00], chunk))
-                        startswith(r, "err") && error("memo push $h: $r")
-                        nbytes += length(chunk)
-                        last && break
-                    end
-                end
-            end
+            nbytes += _send_blob!(Z, sock, req, p, String(h), v2)
             sent += 1
         end
         for (k, s) in picked
@@ -1225,6 +1198,126 @@ end
 # it lacks. (Empty reply string → nothing to send.)
 want_hashes(req, hashes) =
     split(req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty = false)
+
+# Ship ONE blob file over an already-connected data-channel REQ socket — v2 = multipart 'p'
+# with a zero-copy payload frame over an mmap (libzmq sends straight out of the page cache;
+# the Message's origin keeps the mmap alive until the frame is out — REQ/REP: by the reply);
+# v1 = single-frame copy-chunk 'P'. Returns the bytes sent. Shared by the memo push and the
+# region runner's single-binding transfers.
+function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool)
+    sz = filesize(path)
+    nbytes = 0
+    if v2 && sz > 0
+        mm = Mmap.mmap(path, Vector{UInt8}, sz)
+        off = 0
+        chunk = _blob_chunk()
+        while off < sz
+            n = min(chunk, sz - off)
+            last = off + n >= sz
+            hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00])
+            Z.send(sock, hdr; more = true)
+            Z.send(sock, Z.Message(mm, pointer(mm) + off, n))
+            r = String(copy(Z.recv(sock)))
+            startswith(r, "err") && error("blob push $h: $r")
+            nbytes += n; off += n
+        end
+    else
+        open(path, "r") do io
+            while true
+                chunk = read(io, 1 << 20)
+                last = eof(io)
+                r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00], chunk))
+                startswith(r, "err") && error("blob push $h: $r")
+                nbytes += length(chunk)
+                last && break
+            end
+        end
+    end
+    return nbytes
+end
+
+"""
+    push_blob!(host_ip, data_port, hash; server_key="", timeout_ms=20_000) -> Int
+
+Ship ONE blob from the LOCAL CAS to a worker's store over its data channel (dedup-aware: the
+'H' query makes an already-present blob cost one round-trip). The region runner's local→remote
+half; `pull_blob!` is the reverse. Returns bytes actually sent (0 = deduped).
+"""
+function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
+                    server_key::AbstractString = "", timeout_ms::Int = 20_000)
+    root = joinpath(_slate_cache_dir(), "memo")
+    p = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
+    isfile(p) || error("push_blob!: no local blob $hash")
+    kg = getfield(_kaimon(), :KaimonGate)
+    Z = kg.ZMQ
+    sock = Z.Socket(Z.REQ)
+    try
+        sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
+        if !isempty(server_key)
+            cpub, csec = kg._load_or_create_client_keypair()
+            kg.make_curve_client!(sock, String(server_key), cpub, csec)
+        end
+        Z.connect(sock, "tcp://$host_ip:$data_port")
+        req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
+        v2 = req(UInt8['V']) == "2"
+        want = want_hashes(req, [String(hash)])
+        isempty(want) && return 0                          # already there
+        return _send_blob!(Z, sock, req, p, String(hash), v2)
+    finally
+        try; Z.close(sock); catch; end
+    end
+end
+
+"""
+    pull_blob!(host_ip, data_port, hash; server_key="", timeout_ms=20_000) -> Int
+
+PULL one content-addressed blob from a worker's store over the data channel ('G' chunks) into
+the LOCAL memo CAS — the reverse of `push_memo_blobs!`; how remote results flow back (region
+runner: a remote cell's writes that local cells read). Streams into a tmp file, sha-verifies
+against the address, atomic-renames — a truncated/corrupt transfer never lands. Dedup first:
+an already-present blob costs nothing. Returns bytes moved over the network (0 = deduped).
+"""
+function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
+                    server_key::AbstractString = "", timeout_ms::Int = 20_000)
+    root = joinpath(_slate_cache_dir(), "memo")
+    dest = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
+    isfile(dest) && return 0                              # dedup: already here — nothing moved
+    kg = getfield(_kaimon(), :KaimonGate)
+    Z = kg.ZMQ
+    sock = Z.Socket(Z.REQ)
+    try
+        sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
+        if !isempty(server_key)
+            cpub, csec = kg._load_or_create_client_keypair()
+            kg.make_curve_client!(sock, String(server_key), cpub, csec)
+        end
+        Z.connect(sock, "tcp://$host_ip:$data_port")
+        chunk = _blob_chunk()
+        mkpath(dirname(dest))
+        tmp = tempname(dirname(dest))
+        total = -1; off = 0
+        open(tmp, "w") do io
+            while total < 0 || off < total
+                Z.send(sock, "G$(hash):$(off):$(chunk)")
+                frames = Z.recv_multipart(sock)
+                meta = String(copy(frames[1]))
+                startswith(meta, "err") && error("pull $hash: $meta")
+                total = parse(Int, split(meta)[2])
+                total == 0 && break
+                payload = frames[2]
+                GC.@preserve payload unsafe_write(io, pointer(payload), length(payload))
+                off += length(payload)
+                length(payload) == 0 && off < total && error("pull $hash: empty chunk at $off/$total")
+            end
+        end
+        got = bytes2hex(open(_SHA.sha256, tmp))
+        got == String(hash) || (rm(tmp; force = true); error("pull $hash: hash mismatch (got $got)"))
+        mv(tmp, dest; force = true)
+        return total
+    finally
+        try; Z.close(sock); catch; end
+    end
+end
 
 # The carry's transfer-vs-recompute decision: ship an entry only when moving its bytes beats
 # recomputing it. Estimated transfer = bytes/bw; ship when that stays under BOTH 2× the entry's
@@ -1292,6 +1385,35 @@ function push_notebook_memo!(k, report; boot::Bool = false)
     return push_memo_blobs!(ep.ip, ep.port, keys; server_key = ep.server_key,
                             max_transfer_s = boot ? _carry_ceiling_s() : 0.0,
                             bw_key = t.ssh_host)   # bandwidth is per HOST — a tunnel dials 127.0.0.1
+end
+
+# ── Cross-kernel value transport (the region runner's boundary) ─────────────────────────────
+# Move the namespace global `name` from kernel `src_k` to kernel `dst_k`: the source worker
+# encodes it into its CAS (`__slate_blob_of` — codec-picked, so a DataFrame crosses as Arrow
+# IPC), the blob moves through the LOCAL CAS as the interchange point (pull from a remote
+# source / push to a remote destination, both over the data channel; a local worker shares the
+# hub's store, so its leg is free), and the destination binds it (`__slate_bind_blob`). Content
+# addressing gives dedup at every hop — re-shipping an unchanged value costs one round-trip.
+# Returns (; bytes, codec) — bytes MOVED over a network (0 = deduped / local↔local).
+function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false)
+    meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = 600.0)
+    err = try; getproperty(meta, :error); catch; nothing; end
+    err === nothing || error("transfer '$name': $err")
+    h = String(meta.hash); codec = String(meta.codec)
+    moved = 0
+    if src_k.target isa RemoteTarget                       # remote source → land the blob locally
+        ep = _data_endpoint!(src_k.target, src_k)
+        moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key)
+    end
+    if dst_k.target isa RemoteTarget                       # remote destination → ship it there
+        ep = _data_endpoint!(dst_k.target, dst_k)
+        moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key)
+    end
+    r = _tool(dst_k, "__slate_bind_blob", Dict{String,Any}(
+        "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = 600.0)
+    rerr = try; getproperty(r, :error); catch; nothing; end
+    rerr === nothing || error("transfer '$name' (bind): $rerr")
+    return (; bytes = moved, codec = codec)
 end
 
 # Boot-window memo carry — "your session follows you", automatically. Called from `prepare!`

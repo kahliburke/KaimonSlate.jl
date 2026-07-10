@@ -150,6 +150,7 @@ function restart_kernel!(nb::LiveNotebook)
         # An explicit restart must yield a FRESH worker — with a detached (still-warm) remote,
         # prepare!'s reattach-first would re-adopt the same process and the restart would no-op.
         try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
+        _teardown_region!(nb; kill = true)   # the region kernel restarts fresh too (+ sync state reset)
         ReportEngine.reset!(nb.kernel, nb.report)
         build_dependencies!(nb.report)
         nb.report.meta["hydrating"] = true
@@ -1301,6 +1302,7 @@ function close_notebook!(h::Hub, id::AbstractString)
         _close_agent!(nb)
         _unwire_callbacks!(nb)
         try; shutdown!(nb.kernel); catch; end
+        _teardown_region!(nb)                 # detach — a remote region idles warm like the main kernel
         lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
         delete!(h.notebooks, id)
         return true
@@ -1315,6 +1317,7 @@ function stop_hub(h::Hub)
         for nb in values(h.notebooks)
             _close_listeners(nb); _unwire_callbacks!(nb)
             try; shutdown!(nb.kernel); catch; end
+            _teardown_region!(nb)
         end
         empty!(h.notebooks)
     end

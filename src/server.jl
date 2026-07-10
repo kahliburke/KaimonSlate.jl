@@ -488,12 +488,133 @@ function _cell_stats_json(nbid::AbstractString, cid::AbstractString)
     end
 end
 
+# ── Region runner: `remote`-tagged cells run on a SECOND kernel ──────────────────────────────
+# The notebook keeps its main kernel; cells tagged `remote` execute on a region kernel resolved
+# from the durable `regionon` footer ("host[,transport[,port,stream]]" — same grammar as runon).
+# Boundary values cross as content-addressed blobs (see ReportEngine.transfer_binding!): before a
+# cell runs, any name it reads that was written on the OTHER kernel is shipped over — codec-picked
+# (a DataFrame crosses as Arrow IPC) and deduped, so an unchanged value re-ships for one
+# round-trip. Only the boundary crosses: a 500 MB frame produced AND queried remotely never moves;
+# the few-KB aggregate a local cell reads does. Pure `using` cells run on BOTH kernels (namespace
+# parity); v1 rules: the main kernel should be local when a region is active, `@bind`-declaring
+# cells stay local, cross-boundary MUTATION is undefined (same as the release-plan validity rule).
+const _REGION_KERNELS = Dict{String,Any}()             # notebook id → region GateKernel
+const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "dst:name" → freshness token
+const _REGION_LOCK = ReentrantLock()
+
+_region_spec(nb::LiveNotebook) = strip(String(get(nb.report.meta, "regionon", "")))
+_cell_remote(cell::Cell) = :remote in cell.flags
+_region_active(nb::LiveNotebook) =
+    !isempty(_region_spec(nb)) && any(_cell_remote, nb.report.cells)
+
+# The notebook's region kernel, created lazily from the `regionon` spec (spawn/adopt happens at
+# its first prepare!, so a warm-pool worker makes this ~1s). Label carries "#region" so the
+# worker roster + attach records distinguish it from a whole-notebook remote.
+function _region_kernel!(nb::LiveNotebook)
+    lock(_REGION_LOCK) do
+        k = get(_REGION_KERNELS, nb.id, nothing)
+        k === nothing || return k
+        parts = split(_region_spec(nb), ',')
+        rhost = String(strip(parts[1]))
+        transport = length(parts) >= 2 && !isempty(strip(parts[2])) ? Symbol(strip(parts[2])) : :tunnel
+        pport  = length(parts) >= 3 ? something(tryparse(Int, strip(parts[3])), 0) : 0
+        psport = length(parts) >= 4 ? something(tryparse(Int, strip(parts[4])), 0) : 0
+        proj = Base.current_project(dirname(abspath(nb.path)))
+        parent = proj === nothing ? "" : dirname(proj)
+        rproj = "~/.cache/kaimonslate/remote/" * (isempty(parent) ? "detached" : basename(parent))
+        envdir = ReportEngine.notebook_env_dir(nb.path)
+        origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
+                     (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
+        target = ReportEngine.RemoteTarget(rhost; transport = transport, project = rproj,
+                                           port = pport, stream_port = psport, origin_env = origin_env)
+        ReportEngine._rlog("region: kernel for $(nb.id) → $rhost ($transport)")
+        k = ReportEngine.GateKernel(rproj; parent = parent, target = target,
+                                    label = basename(abspath(nb.path)) * "#region")
+        _REGION_KERNELS[nb.id] = k
+        return k
+    end
+end
+
+# Detach (default) or kill the region kernel + forget the boundary sync state.
+function _teardown_region!(nb::LiveNotebook; kill::Bool = false)
+    k = lock(_REGION_LOCK) do; pop!(_REGION_KERNELS, nb.id, nothing); end
+    lock(_REGION_LOCK) do; delete!(_REGION_SYNCED, nb.id); end
+    k === nothing && return nothing
+    try; ReportEngine.shutdown!(k; kill_remote = kill); catch e
+        @warn "slate region: teardown failed" notebook = nb.id exception = e
+    end
+    return nothing
+end
+
+# Ship every cross-boundary input of `cell` to the kernel it is about to run on: each read name
+# whose latest WRITER lives on the other kernel, skipped when the writer's freshness token says
+# the destination already holds that exact run's value (dedup makes a re-ship of an unchanged
+# value one round-trip even when the token is lost). Runs BEFORE the cell — DAG order guarantees
+# writers already ran. Throws (→ the cell errors) if a needed value can't cross.
+function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k)
+    _region_active(nb) || return nothing
+    dst_remote = _cell_remote(cell)
+    prepared = false
+    for r in cell.reads
+        writer = nothing
+        for o in nb.report.cells
+            (o !== cell && r in o.writes && _cell_remote(o) != dst_remote) && (writer = o; break)
+        end
+        writer === nothing && continue                   # same-side (or bind/global) input — nothing to do
+        writer.output === nothing && continue            # writer never ran (errored upstream) — its cell will show why
+        # A `using` cell's exports ride its refinement into `writes` for dataflow, but they are
+        # NAMESPACE, not data — the mirror run provides them on both kernels; never ship them.
+        ReportEngine._is_pure_using(writer.source) && continue
+        src_k = _cell_remote(writer) ? _region_kernel!(nb) : nb.kernel
+        token = string(writer.src_hash, ':', objectid(writer.output))
+        key = string(dst_remote ? "region" : "main", ':', r)
+        seen = lock(_REGION_LOCK) do; get(get(_REGION_SYNCED, nb.id, Dict{String,String}()), key, ""); end
+        seen == token && continue
+        if !prepared                                      # both wires must be up before the first move
+            ReportEngine.prepare!(src_k, nb.report)       # (idempotent + cheap when already connected;
+            ReportEngine.prepare!(dst_k, nb.report)       #  a cold region kernel spawns/adopts here)
+            prepared = true
+        end
+        # zero-copy materialization is safe when nothing anywhere mutates the name
+        zc = !any(o -> r in o.mutates, nb.report.cells)
+        t = ReportEngine.transfer_binding!(src_k, dst_k, string(r); zc = zc)
+        ReportEngine._rlog("region: '$(r)' → $(dst_remote ? "region" : "main") kernel " *
+                           "($(t.bytes) bytes over the wire, $(t.codec)) for cell $(cell.id)")
+        lock(_REGION_LOCK) do
+            get!(_REGION_SYNCED, nb.id, Dict{String,String}())[key] = token
+        end
+    end
+    return nothing
+end
+
 # Evaluate ONE cell with the lock-release discipline. Markdown (fast interp) runs under the lock;
 # code marks RUNNING + announces under the lock, evals WITHOUT it, then merges under the lock iff the
 # cell still exists unchanged (src_hash match) — else the result is from a superseded run, discarded.
 function _eval_one!(nb::LiveNotebook, cell::Cell)
     if cell.kind == MARKDOWN
+        # md `{{ }}` interpolations evaluate on the MAIN kernel — pull any remote-written names first
+        try; _region_presync!(nb, cell, nb.kernel); catch e; @warn "slate region: md presync failed" cell = cell.id exception = e; end
         lock(nb.lock) do; ReportEngine.eval_cell!(nb.report, cell, nb.kernel); end
+        return nothing
+    end
+    # Region dispatch: a `remote`-tagged cell runs on the region kernel (when one is configured);
+    # its cross-boundary inputs ship over first. A presync failure is the CELL's error — surfaced
+    # in place instead of a mystery UndefVarError on the other side.
+    kernel = (_region_active(nb) && _cell_remote(cell)) ? _region_kernel!(nb) : nb.kernel
+    presync_err = try
+        _region_presync!(nb, cell, kernel)
+        nothing
+    catch e
+        sprint(showerror, e)
+    end
+    if presync_err !== nothing
+        lock(nb.lock) do
+            cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
+                                                  ReportEngine.BindSpec[], "",
+                                                  "region boundary transfer failed: " * presync_err, nothing, 0.0)
+            cell.state = ERRORED
+            _broadcast_progress(nb, cell)
+        end
         return nothing
     end
     src, srchash, memo = lock(nb.lock) do
@@ -524,10 +645,23 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         (s, cell.src_hash, m)
     end
     out = try
-        ReportEngine.eval_capture(nb.kernel, nb.report, src, "cell:" * cell.id, memo)
+        ReportEngine.eval_capture(kernel, nb.report, src, "cell:" * cell.id, memo)
     catch e
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
                                 "", sprint(showerror, e), nothing, 0.0)
+    end
+    # Namespace parity: a pure `using`/`import` cell runs on BOTH kernels when a region is active —
+    # remote cells need the same modules loaded. Result discarded (the main run's output stands);
+    # a failure logs rather than erroring the cell (the region side surfaces it on first real use).
+    if _region_active(nb) && ReportEngine._is_pure_using(cell.source) && out.exception === nothing
+        other = _cell_remote(cell) ? nb.kernel : _region_kernel!(nb)
+        try
+            r2 = ReportEngine.eval_capture(other, nb.report, src, "cell:" * cell.id * "#mirror", nothing)
+            r2.exception === nothing ||
+                ReportEngine._rlog("region: `using` mirror of $(cell.id) failed on the other kernel: $(first(String(r2.exception), 200))")
+        catch e
+            ReportEngine._rlog("region: `using` mirror of $(cell.id) errored: $(first(sprint(showerror, e), 200))")
+        end
     end
     lock(nb.lock) do
         i = _index_of(nb.report.cells, cell.id)
@@ -693,6 +827,10 @@ end
 # streaming). Returns true if a batch (≥2 cells) ran; false for the 0/1-cell case or a non-gate kernel.
 function _run_code_batch!(nb::LiveNotebook)
     nb.kernel isa ReportEngine.GateKernel || return false
+    # A notebook with an active region runs SERIALLY (v1): the batch hands all cells to ONE
+    # worker, but region cells belong to another kernel and boundary values must cross between
+    # dependency-ordered runs — the per-cell path handles both.
+    _region_active(nb) && return false
     specs, npending = lock(nb.lock) do
         code = [c for c in nb.report.cells if c.kind == CODE && c.state == STALE]
         length(code) < 2 && return (nothing, 0)
