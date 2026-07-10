@@ -542,6 +542,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         port, stream_port = reattach.port, reattach.stream_port
         k.port = port; k.stream_port = stream_port
         _rlog("reconnect: reattaching to live worker-$port on $host (notebook=$(k.label)) — skipping spawn")
+        _write_worker_state!(host, port, "attached")
     else
         # Remote ports for this worker (loopback-bound for :tunnel, 0.0.0.0 for :direct). Pinned when the
         # target names them (needed for :direct behind a firewall — you must know which ports to open);
@@ -578,6 +579,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             "transport" => string(t.transport), "port" => string(port), "stream_port" => string(stream_port),
             "client_pubkey" => _hub_client_pubkey(), "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"),
         ])
+        _write_worker_state!(host, port, "attached")
     end
 
     # Resolve connect coordinates + CURVE server key.
@@ -653,10 +655,15 @@ function _fetch_and_pin_curve!(t::RemoteTarget, connect_host::AbstractString, po
     return String(pub)
 end
 
-# Tear down a remote kernel's off-machine resources: close the supervised tunnel, stop the /src
-# sync, and best-effort kill the remote worker for this port — so nothing is orphaned (a leaked
-# tunnel or worker is a classic remote-session failure mode). Called from `_kill_worker!`.
-function teardown_remote!(k)
+# Tear down a remote kernel's off-machine resources: close the supervised tunnel and stop the
+# /src sync — then either DETACH (default) or KILL the worker itself. Detach keeps the process
+# running warm (namespace + loaded packages + memo store survive) and flips its state sidecar to
+# `idle`, so a later open of the same notebook REATTACHES instantly (`_find_live_worker`) instead
+# of re-paying the ~90s boot; this is what makes "close the notebook / stop the hub" cheap to
+# undo. Kill (an explicit restart, the preflight probe, `reap_remote_worker`) is the full
+# cleanup: pkill + drop the script/manifest/state so nothing lingers in the registry (the .log
+# is kept for post-mortem). Called from `_kill_worker!`.
+function teardown_remote!(k; kill::Bool = false)
     if k.tunnel !== nothing
         try; close_tunnel(k.tunnel); catch; end
         k.tunnel = nothing
@@ -664,16 +671,17 @@ function teardown_remote!(k)
     t = k.target
     if t isa RemoteTarget
         try; stop_sync!(t); catch; end
-        # Only kill a worker we actually spawned (port assigned). pkill exits nonzero when nothing
-        # matches — a normal outcome, not a failure — so route it through the quiet predicate, not _ssh_ok.
-        if k.port != 0
+        if k.port == 0                # nothing was spawned — only local resources to release
+            _rlog("teardown: closing tunnel + sync on $(t.ssh_host) (no worker was spawned)")
+        elseif kill
+            # Only kill a worker we actually spawned (port assigned). pkill exits nonzero when nothing
+            # matches — a normal outcome, not a failure — so route it through the quiet predicate, not _ssh_ok.
             _rlog("teardown: closing tunnel + sync, killing remote worker-$(k.port).jl on $(t.ssh_host)")
             try; _ssh_test(t.ssh_host, `pkill -f $("worker-" * string(k.port) * ".jl")`); catch; end
-            # Drop the manifest + script so a deliberately-closed worker doesn't linger in the registry
-            # list (keep the .log for post-mortem). Full removal is the explicit `reap_remote_worker`.
-            try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json")`); catch; end
+            try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state")`); catch; end
         else
-            _rlog("teardown: closing tunnel + sync on $(t.ssh_host) (no worker was spawned)")
+            _rlog("teardown: detaching from worker-$(k.port) on $(t.ssh_host) — worker stays warm (state=idle)")
+            _write_worker_state!(t.ssh_host, k.port, "idle")
         end
     end
     return nothing
@@ -787,7 +795,7 @@ function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_
             out.exception !== nothing ? ("fail", "remote eval errored: " * out.exception) :
                 ("ok", "round-trip OK → " * strip(replace(out.value_repr, "\"" => "")))
         finally
-            try; shutdown!(k); catch; end   # closes tunnel, kills probe worker, stops sync
+            try; shutdown!(k; kill_remote = true); catch; end   # probe worker is disposable — kill, don't idle
         end
     end
 
@@ -815,6 +823,21 @@ function _write_worker_manifest!(host, port::Int, fields)
     return nothing
 end
 
+# Lifecycle-state sidecar (`worker-<port>.state`): `attached`/`idle` + a unix timestamp. Kept
+# SEPARATE from the manifest so flipping state on attach/detach is one tiny write, and the
+# manifest stays immutable identity (who spawned it, for what) after spawn. Advisory: a hub crash
+# leaves a stale `attached`, so consumers must treat it as a hint, never a lock. Best-effort.
+function _write_worker_state!(host, port::Int, state::AbstractString)
+    body = string(state, " ", round(Int, time()))
+    path = "$_REMOTE_WORKER/worker-$port.state"
+    try
+        run(pipeline(_ssh(host, `$("cat > " * path)`); stdin = IOBuffer(body), stdout = devnull, stderr = devnull))
+    catch e
+        _rlog("state: could not write $host:$path ($(sprint(showerror, e)))")
+    end
+    return nothing
+end
+
 # The probe (shipped as a file, run on the host) that enumerates workers: for each `worker-<port>.json`
 # it emits port, liveness (pgrep), the log's mtime (last activity) and size, and the raw manifest —
 # delimited with control chars and wrapped in sentinels so incidental stdout noise can't corrupt it.
@@ -830,7 +853,9 @@ const _WORKERS_PROBE = raw"""
             lastact = isfile(logf) ? round(Int, mtime(logf)) : 0
             logsz = isfile(logf) ? filesize(logf) : 0
             alive = try; success(pipeline(`pgrep -f $("worker-" * port * ".jl")`; stdout = devnull, stderr = devnull)); catch; false; end
-            print(port, "\x1f", alive ? "1" : "0", "\x1f", lastact, "\x1f", logsz, "\x1f", body, "\x1e")
+            statef = joinpath(dir, "worker-" * port * ".state")
+            state = isfile(statef) ? strip(read(statef, String)) : ""
+            print(port, "\x1f", alive ? "1" : "0", "\x1f", lastact, "\x1f", logsz, "\x1f", state, "\x1f", body, "\x1e")
         end
     end
     print("\x03")
@@ -840,8 +865,10 @@ const _WORKERS_PROBE = raw"""
     list_remote_workers(host) -> Vector{Dict}
 
 Enumerate the workers Slate has spawned on `host`, each: `port`, `alive` (process running), `lastActivity`
-(unix mtime of its log = last computation), `logBytes`, and `manifest` (raw JSON string — the browser
-parses it for who/what/when). Reads the on-host manifests over one ssh call. `[]` if unreachable/none.
+(unix mtime of its log = last computation), `logBytes`, `state`/`stateSince` (lifecycle sidecar:
+"attached"/"idle" + unix ts; "" for a pre-sidecar worker — advisory, a hub crash leaves a stale
+"attached"), and `manifest` (raw JSON string — the browser parses it for who/what/when). Reads the
+on-host manifests over one ssh call. `[]` if unreachable/none.
 """
 function list_remote_workers(host)
     code = replace(_WORKERS_PROBE, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
@@ -853,14 +880,18 @@ function list_remote_workers(host)
     workers = Any[]
     for rec in split(payload, '\x1e'; keepempty = false)
         parts = split(rec, '\x1f')
-        length(parts) >= 5 || continue
+        length(parts) >= 6 || continue
         port = tryparse(Int, strip(parts[1])); port === nothing && continue
+        # state sidecar: "attached 1783659480" / "idle 1783659480" / "" (pre-sidecar worker)
+        sw = split(strip(parts[5]))
         push!(workers, Dict{String,Any}(
             "port" => port,
             "alive" => strip(parts[2]) == "1",
             "lastActivity" => something(tryparse(Int, strip(parts[3])), 0),
             "logBytes" => something(tryparse(Int, strip(parts[4])), 0),
-            "manifest" => String(strip(parts[5])),
+            "state" => isempty(sw) ? "" : String(sw[1]),
+            "stateSince" => length(sw) > 1 ? something(tryparse(Int, sw[2]), 0) : 0,
+            "manifest" => String(strip(parts[6])),
         ))
     end
     return workers
@@ -900,6 +931,6 @@ never auto-reaps (a worker may hold results worth keeping). Returns true if the 
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
     try; _ssh_test(host, `pkill -f $("worker-" * string(port) * ".jl")`); catch; end
-    try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json")`); catch; end
+    try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state")`); catch; end
     return true
 end

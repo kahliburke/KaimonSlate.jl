@@ -147,7 +147,9 @@ function restart_kernel!(nb::LiveNotebook)
     # user gets control back immediately instead of blocking until everything re-renders. Same
     # "open instantly" pattern as load_notebook.
     lock(nb.lock) do
-        try; ReportEngine.shutdown!(nb.kernel); catch; end
+        # An explicit restart must yield a FRESH worker — with a detached (still-warm) remote,
+        # prepare!'s reattach-first would re-adopt the same process and the restart would no-op.
+        try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
         ReportEngine.reset!(nb.kernel, nb.report)
         build_dependencies!(nb.report)
         nb.report.meta["hydrating"] = true
@@ -183,7 +185,7 @@ function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
     lock(nb.lock) do
         s = strip(String(spec))
         isempty(s) ? delete!(nb.report.meta, "remoteworker") : (nb.report.meta["remoteworker"] = String(s))
-        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → just disconnected
+        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → detached (idles warm)
         nb.kernel = _select_kernel(nb.path, nb.report)         # remote attach vs local, per the meta
         build_dependencies!(nb.report)
         # New worker → empty namespace → re-run every cell (this is what drives prepare!→attach). Cells
@@ -247,7 +249,7 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
     # Actually switching → stop the current evaluation NOW (don't drain it), then tear down + re-pick.
     _interrupt_inflight!(nb)
     lock(nb.lock) do
-        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → tunnel/sync torn down
+        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → detached (idles warm, switch-back reattaches)
         nb.kernel = _select_kernel(nb.path, nb.report)
         remotehost = (nb.kernel isa ReportEngine.GateKernel && nb.kernel.target isa ReportEngine.RemoteTarget) ?
                      nb.kernel.target.ssh_host : ""

@@ -167,8 +167,9 @@ end
 
 abstract type Kernel end
 
-"Release a kernel's resources (e.g. kill a gate worker). No-op for in-process."
-shutdown!(::Kernel) = nothing
+"Release a kernel's resources (kill a local gate worker; detach a spawned-remote one unless
+`kill_remote=true` — see the GateKernel method). No-op for in-process."
+shutdown!(::Kernel; kill_remote::Bool = false) = nothing
 
 """
     InProcessKernel <: Kernel

@@ -387,10 +387,10 @@ end
 # Kill a worker process (SIGTERM, then SIGKILL if it ignores it — e.g. wedged in precompile),
 # drop its routing entry, and clear conn/proc. Killing the process EOFs its stdout pipe, which
 # ends the log-pump task (no leak). Shared by respawn (prepare!) and shutdown!.
-function _kill_worker!(k::GateKernel)
-    # Remote target: close the supervised tunnel, stop the /src sync, and best-effort kill the
-    # remote worker so nothing is orphaned (no local proc to reap in that case).
-    (k.target isa RemoteTarget || k.tunnel !== nothing) && teardown_remote!(k)
+function _kill_worker!(k::GateKernel; kill_remote::Bool = false)
+    # Remote target: close the supervised tunnel and stop the /src sync; the worker itself is
+    # detached (kept warm for reattach) unless `kill_remote` — see `teardown_remote!`.
+    (k.target isa RemoteTarget || k.tunnel !== nothing) && teardown_remote!(k; kill = kill_remote)
     if k.conn !== nothing
         try; delete!(_GATE_SESSION, k.conn.name); catch; end
         # Tear the client connection DOWN, not just drop the reference: `disconnect!` closes the
@@ -805,15 +805,22 @@ function reset!(k::GateKernel, report::Report)
     return nothing
 end
 
-"Kill the worker (local) or just drop the connection (remote), and clear gate state."
-function shutdown!(k::GateKernel)
+"""
+Shut the kernel down and clear gate state. A LOCAL worker is killed (clean exit request +
+SIGTERM/SIGKILL backstop). A spawned-remote worker is DETACHED by default — tunnel/sync closed,
+process left running warm (namespace + packages + memo store) with its state sidecar flipped to
+`idle`, so reopening the notebook reattaches instantly. `kill_remote=true` is for the paths where
+a surviving worker would be wrong: an explicit restart (reattach would make it a no-op), the
+preflight probe, and reap. An ATTACHED worker (`k.remote`) is never ours to kill either way.
+"""
+function shutdown!(k::GateKernel; kill_remote::Bool = false)
     K = _kaimon()
     lock(k.lock) do
-        # A remote/attached worker isn't ours to kill — skip `send_shutdown!` (which tells the worker
-        # to EXIT) and just drop our connection so it stays alive for the next attach; the tunnel owner
-        # manages its lifecycle. A LOCAL worker gets the clean exit request + SIGTERM/SIGKILL backstop.
-        (k.remote || k.conn === nothing) || (try; K.send_shutdown!(k.conn); catch; end)
-        _kill_worker!(k)     # proc === nothing for remote → no process kill; just clears conn + routing
+        # `send_shutdown!` tells the worker process to EXIT — only a local worker (or an explicit
+        # remote kill) gets it. An attached worker isn't ours; a detaching remote must keep running.
+        wants_exit = !(k.remote || (k.target isa RemoteTarget && !kill_remote))
+        (wants_exit && k.conn !== nothing) && (try; K.send_shutdown!(k.conn); catch; end)
+        _kill_worker!(k; kill_remote)   # proc === nothing for remote → no process kill; clears conn + routing
     end
     return nothing
 end
