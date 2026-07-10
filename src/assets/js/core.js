@@ -123,7 +123,20 @@ function renderCharts(c) {
   const host = document.querySelector('#cell-' + c.id + ' .echarts');
   if (host) {                                   // code-cell echarts host
     if (!charts[c.id]) charts[c.id] = [];
-    const insts = charts[c.id];
+    // A Preact re-render OCCASIONALLY recreates the cell subtree (it usually preserves it):
+    // the host div comes back empty while the persisted instances still point at DETACHED
+    // divs — setOption then paints an off-document canvas (blank output, no error). Drop
+    // any instance whose DOM is no longer inside THIS host, and any host child that lost
+    // its instance, before reconciling counts.
+    const insts = charts[c.id] = charts[c.id].filter(inst => {
+      const dom = inst.getDom && inst.getDom();
+      if (dom && host.contains(dom)) return true;
+      try { inst.dispose(); } catch (_) {}
+      return false;
+    });
+    Array.from(host.children).forEach(ch => {
+      if (!insts.some(inst => inst.getDom() === ch)) host.removeChild(ch);
+    });
     while (host.children.length < specs.length) {
       const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
       insts.push(echarts.init(d, 'dark'));
@@ -132,6 +145,7 @@ function renderCharts(c) {
     specs.forEach((s, i) => _applySize(host.children[i], insts[i], s));
     Promise.all(specs.map((s, i) => _ensureMaps(s).then(() => _geoSafeSetOption(insts[i], s))))
       .then(() => { if (insts.length) _snapCell(c.id, insts, _sansMaps(specs[0])); });
+    _healSizesSoon(insts);
   }
   // Inline `{{ echart(…) }}` placeholders in a markdown cell.
   document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
@@ -161,6 +175,20 @@ function _geoSafeSetOption(inst, s) {
   } catch (e) {}
 }
 window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
+// Late size heal: a chart initialized before its div finished layout has a 0×0 canvas, and
+// the synchronous heal inside _geoSafeSetOption can't see the final size yet (clientWidth
+// is still 0 in the same frame). Check again next frame and once more after layout settles.
+function _healSizesSoon(insts) {
+  const heal = () => insts.forEach(inst => {
+    try {
+      const dom = inst.getDom && inst.getDom();
+      if (dom && dom.isConnected && (dom.clientWidth !== inst.getWidth() || dom.clientHeight !== inst.getHeight()))
+        inst.resize();
+    } catch (_) {}
+  });
+  requestAnimationFrame(heal);
+  setTimeout(heal, 250);
+}
 
 // ── Interactive data tables (hand-rolled; no CDN dep) ────────────────────────
 // A cell's `c.tables` is a list of {columns, rows, opts}; rows hold JSON-safe

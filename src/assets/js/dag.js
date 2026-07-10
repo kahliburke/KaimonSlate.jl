@@ -924,6 +924,7 @@ function dagDock() {
   _dagDock = _dagDock === 'right' ? 'bottom' : 'right';
   try { localStorage.setItem('slateDagDock', _dagDock); } catch (_) {}
   _dagApplyDock();
+  _dagReflowCharts();                                // dock flip reflows the whole notebook column
   dagFit();
 }
 function _dagApplyDock() {
@@ -954,8 +955,18 @@ function toggleDag() {
     const r = anchor.getBoundingClientRect();
     Math.abs(r.top - off) > 1 && window.scrollBy(0, r.top - off);
   });
+  _dagReflowCharts();                                        // the notebook column changed width
   if (open) requestAnimationFrame(_dagRender);               // after the pane lays out (sizes valid)
   else { _dagCardClose(); _dagPulseSync(); }
+}
+// The pane reflows the notebook column, but only window.resize normally re-measures the
+// NOTEBOOK's chart instances — nudge them (and again post-layout) or they keep stale canvases.
+function _dagReflowCharts() {
+  const heal = () => Object.values(window.charts || {}).flat().forEach(inst => {
+    try { const d = inst.getDom && inst.getDom(); if (d && d.isConnected) inst.resize(); } catch (_) {}
+  });
+  requestAnimationFrame(heal);
+  setTimeout(heal, 260);
 }
 function dagFit() {
   _dagLayoutKey = '';                                        // force re-layout
@@ -1049,6 +1060,7 @@ function dagFit() {
       if (_dagDock === 'right') localStorage.setItem('slateDagW', document.body.style.getPropertyValue('--dagw'));
       else localStorage.setItem('slateDagH', document.body.style.getPropertyValue('--dagh'));
     } catch (_) {}
+    _dagReflowCharts();                              // the notebook column changed width too
     dagFit();                                        // re-layout for the new aspect
   };
   grip.addEventListener('pointerdown', e => {
