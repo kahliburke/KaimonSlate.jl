@@ -156,11 +156,20 @@ function _dagEcThumb(id, big) {
   if (e) return big ? e.big : e.small;
   const inst = window.charts && window.charts[id] && window.charts[id][0];
   if (!inst || !inst.getDataURL) return null;
+  const grab = () => ({ small: inst.getDataURL({ pixelRatio: 0.5, backgroundColor: 'transparent' }),
+                        big: inst.getDataURL({ pixelRatio: 1.25, backgroundColor: 'transparent' }) });
   try {
-    const cap = { small: inst.getDataURL({ pixelRatio: 0.5, backgroundColor: 'transparent' }),
-                  big: inst.getDataURL({ pixelRatio: 1.25, backgroundColor: 'transparent' }) };
-    _dagEcThumbs[id] = cap;
-    return big ? cap.big : cap.small;
+    _dagEcThumbs[id] = grab();          // immediate — correct for an already-idle chart
+    // Mid-animation case: 'finished' fires when rendering (incl. animations/progressive)
+    // truly completes — re-grab there. One-shot: it fires on every future render too.
+    const once = () => {
+      inst.off('finished', once);
+      try {
+        if (!(inst.isDisposed && inst.isDisposed())) { _dagEcThumbs[id] = grab(); _dagQueue(); }
+      } catch (_) {}
+    };
+    inst.on('finished', once);
+    return big ? _dagEcThumbs[id].big : _dagEcThumbs[id].small;
   } catch (_) { return null; }
 }
 
