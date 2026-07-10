@@ -424,8 +424,10 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     # filename = `cell:<id>` → backtrace frames read `cell:<id>:N`, so an error in code defined in
     # ANOTHER cell still names its source cell (cross-cell error jump). Trace wrap shifts no lines
     # (`begin ` is on the cell's line 1), so the recorded line numbers stay 1:1 with the source.
+    # names = writes + MUTATES: a mutator's effect lives in the mutated value — an entry without
+    # it restores the pre-mutation namespace while downstream entries carry post-mutation results.
     memo = (key = _memo_key(report, cell),
-            names = String[string(w) for w in cell.writes],
+            names = unique!(String[string(w) for w in Iterators.flatten((cell.writes, cell.mutates))]),
             threshold = _MEMO_THRESHOLD_MS,
             force = false,
             # `cache` tag: a pipeline stage whose result must persist REGARDLESS of runtime — the

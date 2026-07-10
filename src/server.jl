@@ -507,6 +507,31 @@ _cell_remote(cell::Cell) = :remote in cell.flags
 _region_active(nb::LiveNotebook) =
     !isempty(_region_spec(nb)) && any(_cell_remote, nb.report.cells)
 
+# The EFFECTIVE side a cell executes on: its tag — except that an untagged MUTATOR follows the
+# tagged writer of its mutation target (a mutation must run where the value lives; mutating a
+# transferred copy forks the data, seen live). Depth-1 on purpose: explicit tags are the fixed
+# points, so this can't chase chains. NOTE the static analysis marks `df[!, :c] = …` as a WRITE
+# of df too — which is exactly why every ownership question below must ask THIS function and
+# never the raw tag: judged by tag, that mutator becomes a phantom local "writer" of df, and a
+# remote reader's presync would ship the main kernel's stale copy back over the fresh one
+# (seen live: the mutation vanished).
+function _cell_side_remote(nb::LiveNotebook, cell::Cell)
+    _cell_remote(cell) && return true
+    for m in cell.mutates, o in nb.report.cells
+        (o !== cell && m in o.writes && _cell_remote(o) && !ReportEngine._is_pure_using(o.source)) && return true
+    end
+    return false
+end
+
+# Which kernel does `cell` run on? Its effective side. Returns (kernel, runs_in_region::Bool).
+function _region_route(nb::LiveNotebook, cell::Cell)
+    _region_active(nb) || return (nb.kernel, false)
+    rem = _cell_side_remote(nb, cell)
+    rem && !_cell_remote(cell) &&
+        ReportEngine._rlog("region: cell $(cell.id) auto-follows its mutation target to the region kernel — a mutation runs where the value lives")
+    return (rem ? _region_kernel!(nb) : nb.kernel, rem)
+end
+
 # The notebook's region kernel, created lazily from the `regionon` spec (spawn/adopt happens at
 # its first prepare!, so a warm-pool worker makes this ~1s). Label carries "#region" so the
 # worker roster + attach records distinguish it from a whole-notebook remote.
@@ -551,22 +576,48 @@ end
 # the destination already holds that exact run's value (dedup makes a re-ship of an unchanged
 # value one round-trip even when the token is lost). Runs BEFORE the cell — DAG order guarantees
 # writers already ran. Throws (→ the cell errors) if a needed value can't cross.
-function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k)
+function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_remote::Bool = _cell_remote(cell))
     _region_active(nb) || return nothing
-    dst_remote = _cell_remote(cell)
+    # ── Validity gate: cross-boundary MUTATION is invalid, and must fail FAST and clearly.
+    # Without this, `df[!, :col] = …` in a local cell against a region-held df would pull the
+    # whole value over the wire (minutes for a big frame), mutate the LOCAL COPY, and leave the
+    # region's original untouched — remote re-runs then silently disagree with what the user
+    # believes the value is. The fix is a choice only the author can make, so say so.
+    for m in cell.mutates
+        owner = nothing
+        for o in nb.report.cells
+            (o !== cell && m in o.writes && _cell_side_remote(nb, o) != dst_remote &&
+             !ReportEngine._is_pure_using(o.source)) && (owner = o; break)
+        end
+        owner === nothing && continue
+        error("cell mutates '$m', which lives on the " * (dst_remote ? "main" : "region") *
+              " kernel (written by cell $(owner.id)) — but this cell runs on the " *
+              (dst_remote ? "region" : "main") * " kernel (it mutates values on BOTH sides, or " *
+              "its `remote` tag pins it opposite its data). Mutating across the boundary would " *
+              "fork the value. Split the cell so each mutation runs where its value lives, or " *
+              "derive a NEW binding instead (e.g. $(m)2 = transform($m, …)).")
+    end
     prepared = false
     for r in cell.reads
         writer = nothing
         for o in nb.report.cells
-            (o !== cell && r in o.writes && _cell_remote(o) != dst_remote) && (writer = o; break)
+            (o !== cell && r in o.writes && _cell_side_remote(nb, o) != dst_remote) && (writer = o; break)
         end
         writer === nothing && continue                   # same-side (or bind/global) input — nothing to do
         writer.output === nothing && continue            # writer never ran (errored upstream) — its cell will show why
         # A `using` cell's exports ride its refinement into `writes` for dataflow, but they are
         # NAMESPACE, not data — the mirror run provides them on both kernels; never ship them.
         ReportEngine._is_pure_using(writer.source) && continue
-        src_k = _cell_remote(writer) ? _region_kernel!(nb) : nb.kernel
+        src_side = _cell_side_remote(nb, writer)
+        src_k = src_side ? _region_kernel!(nb) : nb.kernel
+        # Freshness token: the writer's latest run PLUS every same-side mutator's — a mutation
+        # changes the value without touching the writer, and a stale transfer would resurrect
+        # the pre-mutation bytes on the other side.
         token = string(writer.src_hash, ':', objectid(writer.output))
+        for o in nb.report.cells
+            (o !== cell && r in o.mutates && _cell_side_remote(nb, o) == src_side && o.output !== nothing) &&
+                (token *= string('+', o.src_hash, ':', objectid(o.output)))
+        end
         key = string(dst_remote ? "region" : "main", ':', r)
         seen = lock(_REGION_LOCK) do; get(get(_REGION_SYNCED, nb.id, Dict{String,String}()), key, ""); end
         seen == token && continue
@@ -597,12 +648,12 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         lock(nb.lock) do; ReportEngine.eval_cell!(nb.report, cell, nb.kernel); end
         return nothing
     end
-    # Region dispatch: a `remote`-tagged cell runs on the region kernel (when one is configured);
-    # its cross-boundary inputs ship over first. A presync failure is the CELL's error — surfaced
-    # in place instead of a mystery UndefVarError on the other side.
-    kernel = (_region_active(nb) && _cell_remote(cell)) ? _region_kernel!(nb) : nb.kernel
+    # Region dispatch: tag decides, mutation auto-follows its data (see _region_route); the
+    # cell's cross-boundary inputs ship over first. A presync failure is the CELL's error —
+    # surfaced in place instead of a mystery UndefVarError on the other side.
+    kernel, in_region = _region_route(nb, cell)
     presync_err = try
-        _region_presync!(nb, cell, kernel)
+        _region_presync!(nb, cell, kernel; dst_remote = in_region)
         nothing
     catch e
         sprint(showerror, e)
@@ -636,8 +687,12 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         # the immutable CAS blob — the graph's `mutates` analysis is the safety proof).
         safe = String[string(w) for w in cell.writes
                       if !any(o -> o !== cell && w in o.mutates, nb.report.cells)]
+        # The entry snapshots the cell's writes AND its mutation targets: a mutator's effect
+        # lives in the mutated value, and an entry without it would restore the PRE-mutation
+        # namespace while downstream entries (keyed over this cell's source) carry post-mutation
+        # results — a silently stale `df` for any new reader.
         m = (key = ReportEngine._memo_key(nb.report, cell),
-             names = String[string(w) for w in cell.writes],
+             names = unique!(String[string(w) for w in Iterators.flatten((cell.writes, cell.mutates))]),
              threshold = ReportEngine._MEMO_THRESHOLD_MS,
              force = frc,
              always = (:cache in cell.flags),   # `cache` tag → persist regardless of runtime
@@ -654,7 +709,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # remote cells need the same modules loaded. Result discarded (the main run's output stands);
     # a failure logs rather than erroring the cell (the region side surfaces it on first real use).
     if _region_active(nb) && ReportEngine._is_pure_using(cell.source) && out.exception === nothing
-        other = _cell_remote(cell) ? nb.kernel : _region_kernel!(nb)
+        other = in_region ? nb.kernel : _region_kernel!(nb)
         try
             r2 = ReportEngine.eval_capture(other, nb.report, src, "cell:" * cell.id * "#mirror", nothing)
             r2.exception === nothing ||
