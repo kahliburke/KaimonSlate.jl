@@ -215,7 +215,19 @@ function sync_from_file!(nb::LiveNotebook)
     return true
 end
 
-_echarts_specs(c::Cell) = c.output === nothing ? Any[] : c.output.echarts
+# JSON has no NaN/±Inf — one non-finite float anywhere in a chart option made JSON.json throw,
+# turning the WHOLE state pull into a 500 (a blank notebook in the browser). Sanitize at the
+# egress choke point: non-finite → nothing (null), which ECharts renders as a gap — the correct
+# chart semantic for NaN anyway. Recurses the shapes an option is built from (Dict / NamedTuple /
+# Vector / Tuple / Pair); everything else passes through untouched.
+_json_finite(x) = x
+_json_finite(x::AbstractFloat) = isfinite(x) ? x : nothing
+_json_finite(x::AbstractDict) = Dict{Any,Any}(k => _json_finite(v) for (k, v) in x)
+_json_finite(x::NamedTuple) = NamedTuple{keys(x)}(map(_json_finite, values(x)))
+_json_finite(x::Union{AbstractVector,Tuple}) = Any[_json_finite(v) for v in x]
+_json_finite(x::Pair) = _json_finite(x.first) => _json_finite(x.second)
+
+_echarts_specs(c::Cell) = c.output === nothing ? Any[] : Any[_json_finite(e) for e in c.output.echarts]
 _table_specs(c::Cell) = c.output === nothing ? Any[] : c.output.tables
 
 # Read a field from an animation payload whether it crossed as a NamedTuple (in-process) or a Dict
@@ -246,7 +258,7 @@ function _animation_specs(c::Cell, nbid::AbstractString = "")
 end
 # Specs from a markdown cell's `{{ }}` interpolations, in document order (matches
 # the `.ichart`/`.itable` placeholder indices the renderer emits).
-_md_interp_echarts(c::Cell) = (e = Any[]; for o in c.interp; append!(e, o.echarts); end; e)
+_md_interp_echarts(c::Cell) = (e = Any[]; for o in c.interp, s in o.echarts; push!(e, _json_finite(s)); end; e)
 _md_interp_tables(c::Cell) = (t = Any[]; for o in c.interp; append!(t, o.tables); end; t)
 
 # A bound control resolved for the frontend: enough to render the widget *and*

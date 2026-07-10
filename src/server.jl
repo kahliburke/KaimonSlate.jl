@@ -291,7 +291,9 @@ function server_refresh(nb::LiveNotebook, vars)
     lock(nb.lock) do
         seed = String[]
         for c in nb.report.cells
-            c.kind == CODE || continue
+            # MARKDOWN readers seed too: a `{{ level[] }}` interpolation is a reader like any code
+            # cell (md never writes, so the don't-retrigger guard passes trivially). Skipping them
+            # left prose silently frozen at the last non-reactive render while charts moved.
             (!isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms)) || continue
             c.state = STALE
             push!(seed, c.id)
