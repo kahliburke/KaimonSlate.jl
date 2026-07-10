@@ -170,7 +170,31 @@ end
 # ── shell helpers (argv Cmds — no shell string, so host/path can't inject) ────────
 # Every remote op captures its output and LOGS on failure — provisioning must NEVER fail silently
 # (that opacity is exactly what makes a remote spawn undebuggable).
-_ssh(host, argv::Cmd) = `ssh -o BatchMode=yes -o ConnectTimeout=15 $host $argv`
+
+# SSH connection multiplexing: every remote op here is a separate ssh/scp/rsync exec, each paying
+# a full connection setup (key exchange + auth — hundreds of ms on a LAN, seconds on a WAN)
+# before doing any work. ControlMaster makes the first connection per host the master and every
+# later exec a ~10ms slave through its socket — compounding across the many round-trips of
+# provision/spawn/probe/detach. `auto` self-heals (a dead socket falls back to a fresh
+# connection); ControlPersist keeps the master warm 2min past the last op. The supervised TUNNEL
+# deliberately does NOT use it — it needs a dedicated connection for its ServerAlive liveness.
+# Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
+function _ssh_mux_opts()
+    get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
+    d = joinpath(homedir(), ".cache", "kaimonslate", "mux")
+    try; mkpath(d); catch; return String[]; end
+    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=120"]
+end
+
+# rsync's `-e` value is whitespace-tokenized by rsync itself, so a mux path containing a space
+# (an exotic $HOME) would mangle it — in that case rsync just runs unmuxed.
+function _rsync_ssh_opt()
+    opts = _ssh_mux_opts()
+    (isempty(opts) || any(o -> occursin(' ', o), opts)) && return String[]
+    return ["-e", "ssh -o BatchMode=yes " * join(opts, " ")]
+end
+
+_ssh(host, argv::Cmd) = `ssh -o BatchMode=yes -o ConnectTimeout=15 $(_ssh_mux_opts()) $host $argv`
 
 # Run `cmd`, merging stdout+stderr; on failure, @warn the command + captured output. Returns (ok, output).
 function _run_logged(cmd::Cmd, what::AbstractString)
@@ -200,7 +224,7 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString)
     write(tmp, code)
     remote = "$_REMOTE_ROOT/$(basename(tmp)).jl"
     scp_ok = try
-        run(pipeline(`scp -q $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
+        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
     catch; false; end
     rm(tmp; force = true)
     scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return (false, ""))
@@ -242,6 +266,7 @@ function _rsync!(host, localdir::AbstractString, remotedir::AbstractString; dele
                  excludes::Vector{String} = String[])
     _ssh_ok(host, `mkdir -p $remotedir`)   # openrsync (macOS) has no --mkpath; ensure the dest exists
     args = String["-az"]
+    append!(args, _rsync_ssh_opt())
     delete && push!(args, "--delete")
     for e in excludes; push!(args, "--exclude", e); end
     push!(args, string(rstrip(localdir, '/'), "/"), string(host, ":", remotedir))
@@ -530,20 +555,77 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     K = _kaimon()
     host = t.ssh_host
     _rlog("═══ REMOTE SPAWN requested: notebook worker → $host (transport=$(t.transport)) ═══")
-    provision_remote!(t, parent_project)
-    start_sync!(t, parent_project)
 
-    # Reconnect-first: if a LIVE worker for this same notebook already exists on the host (e.g. after an
-    # extension restart or a network blip), REATTACH to it — preserving its warm namespace + results and
-    # skipping a costly re-spawn/re-precompile — rather than spawning a new one (which would orphan the old).
+    # Resolve connect coordinates + CURVE key, open the tunnel if needed, and dial. `deadline`
+    # bounds the wait: a fresh spawn legitimately needs ~90s (remote Julia boot + KaimonGate
+    # load), but an ALREADY-RUNNING worker answers in about a second — so the reattach dial
+    # fails fast instead of hanging on a wedged process. The retry quantum is 0.25s (was 1s —
+    # it sat directly on the reattach path, where try #1 usually races the tunnel coming up).
+    # On failure the just-opened tunnel is CLOSED — its supervisor would otherwise respawn the
+    # forward forever (a leak the old single-path flow had on its error exit).
+    function dial(port, stream_port; deadline::Float64)
+        server_key = ""
+        if t.transport === :direct
+            # fetch the worker's CURVE server pubkey over the authenticated SSH channel, then pin.
+            server_key = _fetch_and_pin_curve!(t, _remote_ip(host), port)
+            connect_host, connect_port, connect_stream = _remote_ip(host), port, stream_port
+            tunnel = nothing
+        else
+            lport, lstream = _free_local_port(), _free_local_port()
+            tunnel = open_tunnel(host, [(lport, port), (lstream, stream_port)])
+            connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
+        end
+        _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
+        t0 = time(); last = ""; conn = nothing; tries = 0
+        while time() - t0 < deadline
+            tries += 1
+            try
+                conn = K.connect_tcp!(_manager(), connect_host, connect_port;
+                                      name = "slate-$(host)-$(port)", stream_port = connect_stream,
+                                      server_key = server_key, label = k.label)
+                break
+            catch e
+                last = sprint(showerror, e); sleep(0.25)
+            end
+        end
+        if conn === nothing
+            _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
+            tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
+        end
+        return (conn, tunnel, last)
+    end
+
+    # Reattach-first, provision-second: a LIVE worker for this notebook (detached-warm, or left
+    # by an extension restart / network blip) is by definition already provisioned — so probe
+    # for it BEFORE paying the provision pass (~12s of rsync + env replication even on a warm
+    # host, measured), which keeps reattach at connect-time cost. The worker keeps its warm
+    # namespace + results; a dead-but-listed worker fails the short dial and falls through to a
+    # fresh spawn on new ports (the stale one stays visible in the roster for manual reap).
     reattach = nothing
     try; reattach = _find_live_worker(host, k.label, k.parent); catch; end
     if reattach !== nothing
-        port, stream_port = reattach.port, reattach.stream_port
-        k.port = port; k.stream_port = stream_port
-        _rlog("reconnect: reattaching to live worker-$port on $host (notebook=$(k.label)) — skipping spawn")
-        _write_worker_state!(host, port, "attached")
-    else
+        k.port = reattach.port; k.stream_port = reattach.stream_port
+        _rlog("reconnect: reattaching to live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
+        conn, tunnel, _ = dial(k.port, k.stream_port; deadline = 15.0)
+        if conn !== nothing
+            _write_worker_state!(host, k.port, "attached")
+            start_sync!(t, parent_project)     # non-blocking watcher; heals /src drift from the detached period
+            # Catch-up provisioning in the BACKGROUND: idempotent, keeps the on-disk payload/env
+            # fresh for the NEXT spawn. A running worker never re-includes its payload, so paying
+            # this synchronously would charge ~12s to reattach while changing nothing live.
+            Threads.@spawn begin
+                try; provision_remote!(t, parent_project)
+                catch e; _rlog("background provision (post-reattach) failed: $(sprint(showerror, e))"); end
+            end
+            _rlog("connect OK: reattached to worker on $host:$(k.port) → notebook now runs on $host")
+            return (conn, tunnel)
+        end
+        _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — falling back to a fresh spawn")
+    end
+
+    provision_remote!(t, parent_project)
+    start_sync!(t, parent_project)
+    begin
         # Remote ports for this worker (loopback-bound for :tunnel, 0.0.0.0 for :direct). Pinned when the
         # target names them (needed for :direct behind a firewall — you must know which ports to open);
         # otherwise auto-assigned from _next_ports (9100+).
@@ -560,7 +642,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         tmp = tempname()
         write(tmp, script)
         try
-            run(pipeline(`scp -q $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
+            run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
         finally
             rm(tmp; force = true)
         end
@@ -580,41 +662,13 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             "client_pubkey" => _hub_client_pubkey(), "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"),
         ])
         _write_worker_state!(host, port, "attached")
-    end
 
-    # Resolve connect coordinates + CURVE server key.
-    server_key = ""
-    if t.transport === :direct
-        # fetch the worker's CURVE server pubkey over the authenticated SSH channel, then pin.
-        server_key = _fetch_and_pin_curve!(t, _remote_ip(host), port)
-        connect_host, connect_port, connect_stream = _remote_ip(host), port, stream_port
-        tunnel = nothing
-    else
-        lport, lstream = _free_local_port(), _free_local_port()
-        tunnel = open_tunnel(host, [(lport, port), (lstream, stream_port)])
-        connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
+        # Cold spawn: the dial deadline covers remote Julia boot + KaimonGate load (~90s).
+        conn, tunnel, last = dial(port, stream_port; deadline = 120.0)
+        conn === nothing && error("slate remote: could not reach worker on $host:$port ($last)")
+        _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
+        return (conn, tunnel)
     end
-
-    # Connect (retry: remote Julia boot + KaimonGate load is slow, ~90s).
-    _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport)) — waiting for remote boot (≤120s)")
-    deadline = time() + 120; last = ""; conn = nothing; tries = 0
-    while time() < deadline
-        tries += 1
-        try
-            conn = K.connect_tcp!(_manager(), connect_host, connect_port;
-                                  name = "slate-$(host)-$(port)", stream_port = connect_stream,
-                                  server_key = server_key, label = k.label)
-            break
-        catch e
-            last = sprint(showerror, e); sleep(1.0)
-        end
-    end
-    if conn === nothing
-        _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
-        error("slate remote: could not reach worker on $host:$port ($last)")
-    end
-    _rlog("connect OK: attached to worker on $host:$port after $tries tries → notebook now runs on $host")
-    return (conn, tunnel)
 end
 
 # The routable address of `host` for a :direct dial. An ssh alias (~/.ssh/config Host) may not
@@ -838,28 +892,33 @@ function _write_worker_state!(host, port::Int, state::AbstractString)
     return nothing
 end
 
-# The probe (shipped as a file, run on the host) that enumerates workers: for each `worker-<port>.json`
-# it emits port, liveness (pgrep), the log's mtime (last activity) and size, and the raw manifest —
-# delimited with control chars and wrapped in sentinels so incidental stdout noise can't corrupt it.
-const _WORKERS_PROBE = raw"""
-    dir = joinpath(homedir(), "REMOTE_WORKER_DIR")
-    print("\x02")
-    if isdir(dir)
-        for f in sort(readdir(dir))
-            (startswith(f, "worker-") && endswith(f, ".json")) || continue
-            port = replace(replace(f, "worker-" => ""), ".json" => "")
-            body = try; replace(read(joinpath(dir, f), String), r"[\r\n]" => " "); catch; "{}"; end
-            logf = joinpath(dir, "worker-" * port * ".log")
-            lastact = isfile(logf) ? round(Int, mtime(logf)) : 0
-            logsz = isfile(logf) ? filesize(logf) : 0
-            alive = try; success(pipeline(`pgrep -f $("worker-" * port * ".jl")`; stdout = devnull, stderr = devnull)); catch; false; end
-            statef = joinpath(dir, "worker-" * port * ".state")
-            state = isfile(statef) ? strip(read(statef, String)) : ""
-            print(port, "\x1f", alive ? "1" : "0", "\x1f", lastact, "\x1f", logsz, "\x1f", state, "\x1f", body, "\x1e")
-        end
-    end
-    print("\x03")
-    """
+# The probe (one POSIX-sh command string, sent as a SINGLE ssh argv token like the launch line)
+# that enumerates workers: for each `worker-<port>.json` it emits port, liveness (pgrep), the
+# log's mtime (last activity) and size, the state sidecar, and the raw manifest — delimited with
+# control chars (printf octal escapes) and wrapped in sentinels so incidental login-shell stdout
+# can't corrupt it. This USED to ship a Julia script and boot `julia` on the host per call — ~3s,
+# measured, sitting directly on the reattach path; sh answers in one round-trip. Portability:
+# `stat -c` (GNU/Linux) with a `-f` (BSD/macOS) fallback; `setopt nonomatch` disarms zsh's
+# error-on-unmatched-glob for the empty-dir case (harmless no-op elsewhere).
+const _WORKERS_PROBE_SH = raw"""
+setopt nonomatch 2>/dev/null || true
+cd "$HOME/REMOTE_WORKER_DIR" 2>/dev/null || { printf '\002\003'; exit 0; }
+printf '\002'
+for f in worker-*.json; do
+  [ -f "$f" ] || continue
+  port="${f#worker-}"; port="${port%.json}"
+  alive=0; pgrep -f "worker-$port.jl" >/dev/null 2>&1 && alive=1
+  sz=0; mt=0
+  if [ -f "worker-$port.log" ]; then
+    sz=$(wc -c < "worker-$port.log" | awk '{print $1+0}')
+    mt=$(stat -c %Y "worker-$port.log" 2>/dev/null || stat -f %m "worker-$port.log" 2>/dev/null || echo 0)
+  fi
+  st=""; [ -f "worker-$port.state" ] && st=$(cat "worker-$port.state" 2>/dev/null)
+  body=$(tr -d '\n\r' < "$f" 2>/dev/null); [ -n "$body" ] || body='{}'
+  printf '%s\037%s\037%s\037%s\037%s\037%s\036' "$port" "$alive" "$mt" "$sz" "$st" "$body"
+done
+printf '\003'
+"""
 
 """
     list_remote_workers(host) -> Vector{Dict}
@@ -871,8 +930,8 @@ Enumerate the workers Slate has spawned on `host`, each: `port`, `alive` (proces
 on-host manifests over one ssh call. `[]` if unreachable/none.
 """
 function list_remote_workers(host)
-    code = replace(_WORKERS_PROBE, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
-    ok, out = _ssh_julia!(host, code, "list workers on $host")
+    sh = replace(_WORKERS_PROBE_SH, "REMOTE_WORKER_DIR" => _REMOTE_WORKER)
+    ok, out = _ssh_capture(host, `$sh`)   # one token → the remote login shell runs the script verbatim
     ok || return Any[]
     i = findfirst('\x02', out); j = findlast('\x03', out)
     (i === nothing || j === nothing || j <= i) && return Any[]
