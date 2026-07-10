@@ -1,15 +1,15 @@
 #%% md id=title title
 # Delay Contagion: How Late Flights Infect the Network
 
-*A DAG-driven pipeline over BTS On-Time Performance data — aircraft rotations, delay transfer, and network spillover.*
+*A DAG-driven pipeline over BTS On-Time Performance data — months of flights resident in DuckDB, aircraft rotations, delay transfer, and network spillover.*
 
 #%% code id=deps
-using DuckDB, DataFrames, Chain, Dates, Statistics, Printf
+using DuckDB, DataFrames, Dates, Printf
 using CairoMakie
 using ZipArchives: ZipReader, zip_names, zip_openentry
 import Downloads
 
-#%% code id=theme hidecode
+#%% code id=theme collapsed
 ## Dark Makie theme to match the notebook.
 set_theme!(merge(theme_dark(), Theme(
     backgroundcolor = :transparent,
@@ -18,129 +18,147 @@ set_theme!(merge(theme_dark(), Theme(
 )))
 
 #%% code id=config
-## Pipeline configuration — the root of the DAG. Change the month and
-## watch only the affected stages recompute. Data lives in a stable cache
-## dir (not tempdir, which the OS reaps) so cached stages survive reboots.
-YEAR = 2024
-MONTH = 1
+## Pipeline configuration — the root of the DAG. `MONTHS` is the scale knob: `1:1` is an
+## instant demo (~500k flights); `1:12` is the medium-data version (~7M flights, ~350 MB of
+## one-time downloads). Row-level data lives in a persistent DuckDB file — the notebook only
+## ever materializes AGGREGATES, so the reactive graph stays light at any scale.
+YEAR = 2025
+MONTHS = 1:1
 DATA_DIR = joinpath(homedir(), ".cache", "kaimon", "data", "delay_contagion")
 mkpath(DATA_DIR)
-(; YEAR, MONTH, DATA_DIR)
+(; YEAR, MONTHS = collect(MONTHS), DATA_DIR)
 
-#%% code id=fetch_raw cache
-## **Stage 1 — fetch.** One month of BTS On-Time Performance data (~27 MB zip,
-## ~600k flights). Idempotent: skips the download/extract if the files are already
-## on disk, and the `cache` tag persists the result across sessions.
-raw_csv = let
-    stem = "On_Time_Reporting_Carrier_On_Time_Performance_1987_present_$(YEAR)_$(MONTH)"
-    zippath = joinpath(DATA_DIR, stem * ".zip")
-    csvpath = joinpath(DATA_DIR, stem * ".csv")
-    if !isfile(csvpath)
-        if !isfile(zippath) || filesize(zippath) == 0
-            Downloads.download("https://transtats.bts.gov/PREZIP/" * stem * ".zip", zippath)
-        end
-        zr = ZipReader(read(zippath))
-        entry = only(filter(endswith(".csv"), zip_names(zr)))
-        open(csvpath, "w") do out
-            zip_openentry(zr, entry) do io
-                write(out, io)
+#%% code id=ingest cache
+## **Stage 1 — ingest.** Per month: download the BTS zip (~27 MB), extract, load typed+cleaned
+## rows into the persistent DuckDB file, then delete the raw files (the DB has the rows).
+## Idempotent via an `ingested` ledger — growing MONTHS only adds the missing months. The cached
+## artifact is the DB PATH + the WINDOW's row count (window-scoped so the cached value is a pure
+## function of the config, even when the file holds more months than this window).
+dbpath = joinpath(DATA_DIR, "flights.duckdb")
+ingested_n = let con = DBInterface.connect(DuckDB.DB, dbpath)
+    try
+        DBInterface.execute(con, "CREATE TABLE IF NOT EXISTS ingested(y INTEGER, m INTEGER)")
+        done = Set((r.y, r.m) for r in DBInterface.execute(con, "SELECT y, m FROM ingested"))
+        todo = [(YEAR, m) for m in MONTHS if (YEAR, m) ∉ done]
+        DBInterface.execute(con,
+            "CREATE OR REPLACE MACRO hhmm_min(t) AS (CAST(t AS INT) // 100) * 60 + (CAST(t AS INT) % 100)")
+        for (i, (y, m)) in enumerate(todo)
+            slate_progress((i - 1) / length(todo); msg = "ingesting $y-$(lpad(m, 2, '0'))")
+            stem = "On_Time_Reporting_Carrier_On_Time_Performance_1987_present_$(y)_$(m)"
+            zippath = joinpath(DATA_DIR, stem * ".zip")
+            csvpath = joinpath(DATA_DIR, stem * ".csv")
+            if !isfile(csvpath)
+                if !isfile(zippath) || filesize(zippath) == 0
+                    Downloads.download("https://transtats.bts.gov/PREZIP/" * stem * ".zip", zippath)
+                end
+                zr = ZipReader(read(zippath))
+                entry = only(filter(endswith(".csv"), zip_names(zr)))
+                open(csvpath, "w") do out
+                    write(out, zip_openentry(zr, entry))
+                end
             end
+            sel = """
+                SELECT
+                    FlightDate                                 AS date,
+                    Reporting_Airline                          AS carrier,
+                    Tail_Number                                AS tail,
+                    CAST(Flight_Number_Reporting_Airline AS INT) AS flight_num,
+                    Origin                                     AS origin,
+                    Dest                                       AS dest,
+                    FlightDate + INTERVAL 1 MINUTE * hhmm_min(CRSDepTime) AS sched_dep,
+                    FlightDate + INTERVAL 1 MINUTE * (hhmm_min(CRSDepTime) + CAST(DepDelay AS INT)) AS dep_ts,
+                    datetrunc('day', FlightDate + INTERVAL 1 MINUTE * (hhmm_min(CRSDepTime) + CAST(DepDelay AS INT)))
+                      + INTERVAL 1 MINUTE * (hhmm_min(ArrTime) % 1440)
+                      + CASE WHEN (hhmm_min(ArrTime) % 1440) < (hhmm_min(DepTime) % 1440)
+                             THEN INTERVAL 1 DAY ELSE INTERVAL 0 DAY END AS arr_ts,
+                    CAST(DepDelay AS INT)                      AS dep_delay,
+                    CAST(ArrDelay AS INT)                      AS arr_delay,
+                    CAST(ActualElapsedTime AS INT)             AS elapsed,
+                    CAST(Distance AS INT)                      AS distance
+                FROM read_csv_auto('$(csvpath)', header=true)
+                WHERE Cancelled = 0 AND Diverted = 0
+                  AND Tail_Number IS NOT NULL AND Tail_Number <> ''
+                  AND DepTime IS NOT NULL AND ArrTime IS NOT NULL
+                  AND ActualElapsedTime IS NOT NULL
+            """
+            hasfl = !isempty(collect(DBInterface.execute(con,
+                "SELECT 1 FROM information_schema.tables WHERE table_name = 'flights'")))
+            DBInterface.execute(con, (hasfl ? "INSERT INTO flights " : "CREATE TABLE flights AS ") * sel)
+            DBInterface.execute(con, "INSERT INTO ingested VALUES ($y, $m)")
+            rm(csvpath; force = true); rm(zippath; force = true)
+            slate_progress(i / length(todo); msg = "ingested $y-$(lpad(m, 2, '0'))")
         end
+        DataFrame(DBInterface.execute(con, """
+            SELECT count(*) AS n FROM flights
+            WHERE year(date) = $YEAR AND month(date) IN ($(join(collect(MONTHS), ',')))
+        """)).n[1]
+    finally
+        DBInterface.close!(con)
     end
-    csvpath
 end
+@sprintf "%d flights in the window → %s" ingested_n dbpath
 
-#%% code id=flights cache
-## **Stage 2 — load & type.** DuckDB does the heavy lifting: drop cancelled/diverted
-## flights, turn hhmm strings into real local timestamps (departure = schedule + signed
-## delay, so past-midnight departures land on the right day; arrivals roll a day when
-## the clock wraps), and coalesce the five delay-cause columns (NULL unless delay ≥ 15).
-flights = let
-    con = DBInterface.connect(DuckDB.DB)
-    DBInterface.execute(con, "CREATE MACRO hhmm_min(t) AS (CAST(t AS INT) // 100) * 60 + (CAST(t AS INT) % 100)")
-    df = DataFrame(DBInterface.execute(con, """
-        WITH src AS (
-            SELECT *,
-                FlightDate + INTERVAL 1 MINUTE * (hhmm_min(CRSDepTime) + DepDelay) AS dep_ts
-            FROM read_csv_auto('$(raw_csv)', header=true)
-            WHERE Cancelled = 0 AND Diverted = 0
-              AND Tail_Number IS NOT NULL AND Tail_Number <> ''
-              AND DepTime IS NOT NULL AND ArrTime IS NOT NULL
-              AND ActualElapsedTime IS NOT NULL
-        )
-        SELECT
-            FlightDate                              AS date,
-            Reporting_Airline                       AS carrier,
-            Tail_Number                             AS tail,
-            CAST(Flight_Number_Reporting_Airline AS INT) AS flight_num,
-            Origin                                  AS origin,
-            Dest                                    AS dest,
-            FlightDate + INTERVAL 1 MINUTE * hhmm_min(CRSDepTime) AS sched_dep,
-            dep_ts,
-            datetrunc('day', dep_ts)
-              + INTERVAL 1 MINUTE * (hhmm_min(ArrTime) % 1440)
-              + CASE WHEN (hhmm_min(ArrTime) % 1440) < (hhmm_min(DepTime) % 1440)
-                     THEN INTERVAL 1 DAY ELSE INTERVAL 0 DAY END AS arr_ts,
-            CAST(DepDelay AS INT)                   AS dep_delay,
-            CAST(ArrDelay AS INT)                   AS arr_delay,
-            CAST(ActualElapsedTime AS INT)          AS elapsed,
-            CAST(Distance AS INT)                   AS distance,
-            CAST(COALESCE(CarrierDelay,      0) AS INT) AS d_carrier,
-            CAST(COALESCE(WeatherDelay,      0) AS INT) AS d_weather,
-            CAST(COALESCE(NASDelay,          0) AS INT) AS d_nas,
-            CAST(COALESCE(SecurityDelay,     0) AS INT) AS d_security,
-            CAST(COALESCE(LateAircraftDelay, 0) AS INT) AS d_lateac
-        FROM src
-        ORDER BY tail, dep_ts
-    """))
-    DBInterface.close!(con)
-    df
-end
-"$(nrow(flights)) flights, $(length(unique(flights.tail))) aircraft, $(length(unique(flights.origin))) airports"
+#%% code id=db nocache
+## **The shared handle.** One DuckDB handle downstream cells query through (each opens its own
+## connection). Never cached — a handle is process state; if the cache dir was cleared, press ▶
+## on the ingest cell to rebuild the file.
+db = let
+    isfile(dbpath) || error("$dbpath is missing — press ▶ on the ingest cell to rebuild it")
+    DuckDB.DB(dbpath)
+end;
+"connected: $(basename(dbpath))"
 
 #%% code id=rotations cache
-## **Stage 3 — rotation join.** Link every flight to the previous leg flown by the
-## SAME aircraft (tail number). A link is a valid rotation when the aircraft departs
-## from where it landed within 24 h — that inbound leg is the contagion vector: its
-## arrival delay becomes the next flight's inherited handicap.
-rotations = let
-    con = DBInterface.connect(DuckDB.DB)
-    DuckDB.register_data_frame(con, flights, "flights")
-    df = DataFrame(DBInterface.execute(con, """
-        WITH lagged AS (
+## **Stage 2 — rotation join, in the database.** Link every flight to the previous leg flown by
+## the SAME aircraft (a valid rotation = departs where it landed, within 24 h) — the inbound
+## leg's arrival delay is the contagion vector. Materialized as a `rotations` table filtered to
+## the configured MONTHS; at 12 months this window-join over ~7M rows is the pipeline's hot node.
+rotations_n, linked_n = let con = DBInterface.connect(db)
+    try
+        DBInterface.execute(con, """
+            CREATE OR REPLACE TABLE rotations AS
+            WITH src AS (
+                SELECT * FROM flights
+                WHERE year(date) = $YEAR AND month(date) IN ($(join(collect(MONTHS), ',')))
+            ), lagged AS (
+                SELECT *,
+                    LAG(dest)      OVER w AS prev_dest,
+                    LAG(arr_ts)    OVER w AS prev_arr_ts,
+                    LAG(arr_delay) OVER w AS prev_arr_delay
+                FROM src
+                WINDOW w AS (PARTITION BY tail ORDER BY dep_ts)
+            )
             SELECT *,
-                LAG(dest)      OVER w AS prev_dest,
-                LAG(arr_ts)    OVER w AS prev_arr_ts,
-                LAG(arr_delay) OVER w AS prev_arr_delay
-            FROM flights
-            WINDOW w AS (PARTITION BY tail ORDER BY dep_ts)
-        )
-        SELECT *,
-            CAST(date_diff('minute', prev_arr_ts, dep_ts) AS INT) AS turn_min,
-            (prev_dest = origin
-              AND date_diff('minute', prev_arr_ts, dep_ts) BETWEEN 0 AND 1440) AS linked
-        FROM lagged
-        ORDER BY tail, dep_ts
-    """))
-    DBInterface.close!(con)
-    df.linked = coalesce.(df.linked, false)
-    df
+                CAST(date_diff('minute', prev_arr_ts, dep_ts) AS INT) AS turn_min,
+                COALESCE(prev_dest = origin
+                  AND date_diff('minute', prev_arr_ts, dep_ts) BETWEEN 0 AND 1440, FALSE) AS linked
+            FROM lagged
+        """)
+        d = DataFrame(DBInterface.execute(con,
+            "SELECT count(*) AS n, sum(CASE WHEN linked THEN 1 ELSE 0 END) AS l FROM rotations"))
+        (Int(d.n[1]), Int(d.l[1]))
+    finally
+        DBInterface.close!(con)
+    end
 end
-let n = nrow(rotations), l = sum(rotations.linked)
-    @sprintf "%d flights — %d (%.1f%%) linked to their inbound aircraft rotation" n l 100l/n
-end
+@sprintf "%d flights (of %d ingested) — %d (%.1f%%) linked to their inbound rotation" rotations_n ingested_n linked_n 100linked_n/rotations_n
 
 #%% code id=transfer_curve
-## **Consumer A — delay transfer.** How much of an inbound delay does the aircraft
-## pass on to its next departure? Bin inbound arrival delay, average the outbound
-## departure delay per bin — the slope of this curve is the contagion coefficient.
-transfer_curve = @chain rotations begin
-    subset(:linked; skipmissing=true)
-    dropmissing([:prev_arr_delay, :dep_delay])
-    transform(:prev_arr_delay => ByRow(d -> clamp(15 * fld(d, 15), -30, 240)) => :in_bin)
-    groupby(:in_bin)
-    combine(nrow => :n, :dep_delay => mean => :mean_out, :dep_delay => median => :med_out)
-    sort(:in_bin)
+## **Consumer A — delay transfer.** How much of an inbound delay does the aircraft pass to its
+## next departure? Binned in SQL; only the 19-row curve ever leaves the database.
+@assert rotations_n > 0   # dataflow edge: the `rotations` TABLE is db state, invisible to analysis
+transfer_curve = let con = DBInterface.connect(db)
+    try
+        DataFrame(DBInterface.execute(con, """
+            SELECT CAST(least(greatest(15 * floor(prev_arr_delay / 15.0), -30), 240) AS INT) AS in_bin,
+                   count(*) AS n, avg(dep_delay) AS mean_out, median(dep_delay) AS med_out
+            FROM rotations
+            WHERE linked AND prev_arr_delay IS NOT NULL AND dep_delay IS NOT NULL
+            GROUP BY in_bin ORDER BY in_bin
+        """))
+    finally
+        DBInterface.close!(con)
+    end
 end
 first(transfer_curve, 6)
 
@@ -161,74 +179,170 @@ echart(
         (type = "line", name = "median", data = round.(transfer_curve.med_out; digits = 1),
          smooth = true, symbolSize = 4, lineStyle = (type = "dashed",)),
         (type = "bar", name = "flights (k)", data = round.(transfer_curve.n ./ 1000; digits = 1),
-         yAxisIndex = 0, itemStyle = (opacity = 0.15,)),
+         yAxisIndex = 0, itemStyle = (opacity = .15,)),
     ],
 )
 
+#%% code id=late_thresh
+## **Explore:** what counts as "late"? Everything below — airport pressure, the contagion
+## network, the drill-down, the prose — re-queries the database on release.
+@bind late_thresh Slider(5:5:120, default = 15, label = "late ≥ (min)")
+
 #%% code id=airport_stats
-## **Consumer B — airport pressure.** Per-airport departure stats, split into delay
-## the airport *originates* (first legs / long turnarounds) vs delay it *transmits*
-## (inherited from late inbound aircraft). Feeds the network map later.
-airport_stats = @chain rotations begin
-    groupby(:origin)
-    combine(
-        nrow => :n_dep,
-        :dep_delay => mean => :mean_dep_delay,
-        :dep_delay => (d -> mean(d .>= 15)) => :frac_late15,
-        [:linked, :prev_arr_delay] =>
-            ((l, p) -> mean(coalesce.(p[l], 0) .>= 15)) => :frac_inbound_late,
-    )
-    subset(:n_dep => ByRow(>=(500)))
-    sort(:mean_dep_delay; rev=true)
+## **Consumer B — airport pressure.** Per-airport departure stats, split into delay the airport
+## *originates* vs delay it *transmits* (inherited from late inbound aircraft). "Late" follows
+## the slider; the traffic floor scales with the configured months.
+@assert rotations_n > 0   # dataflow edge: the `rotations` TABLE is db state, invisible to analysis
+airport_stats = let con = DBInterface.connect(db)
+    try
+        DataFrame(DBInterface.execute(con, """
+            SELECT origin, count(*) AS n_dep, avg(dep_delay) AS mean_dep_delay,
+                   avg(CASE WHEN dep_delay >= $late_thresh THEN 1.0 ELSE 0.0 END) AS frac_late,
+                   avg(CASE WHEN COALESCE(prev_arr_delay, 0) >= $late_thresh THEN 1.0 ELSE 0.0 END)
+                       FILTER (WHERE linked) AS frac_inbound_late
+            FROM rotations
+            GROUP BY origin
+            HAVING count(*) >= $(500 * length(MONTHS))
+            ORDER BY mean_dep_delay DESC
+        """))
+    finally
+        DBInterface.close!(con)
+    end
 end
 first(airport_stats, 8)
 
 #%% code id=airport_table
-## **Airport pressure table** (interactive — sort/filter/page).
+## **Airport pressure table** (interactive — sort/filter/page; "late" follows the slider).
 slate_table(
-    @chain airport_stats begin
-        transform(
-            :mean_dep_delay => ByRow(x -> round(x; digits = 1)) => :mean_dep_delay,
-            :frac_late15 => ByRow(x -> round(100x; digits = 1)) => :pct_late15,
-            :frac_inbound_late => ByRow(x -> round(100x; digits = 1)) => :pct_inbound_late,
-        )
-        select(:origin, :n_dep, :mean_dep_delay, :pct_late15, :pct_inbound_late)
+    let t = copy(airport_stats)
+        t.mean_dep_delay = round.(t.mean_dep_delay; digits = 1)
+        t.pct_late = round.(100 .* t.frac_late; digits = 1)
+        t.pct_inbound_late = round.(100 .* t.frac_inbound_late; digits = 1)
+        t[:, [:origin, :n_dep, :mean_dep_delay, :pct_late, :pct_inbound_late]]
     end;
-    page_size = 12,
+    page_size = 12, viz = (mean_dep_delay = :bar, pct_inbound_late = :heat),
 )
 
-#%% code id=daily_fig
-## **Daily pulse of the system** (CairoMakie): mean departure delay + late share
-## per day. The mid-January winter storms light up immediately.
-daily_fig = let
-    d = @chain rotations begin
-        groupby(:date)
-        combine(nrow => :n,
-                :dep_delay => mean => :mean_delay,
-                :dep_delay => (x -> 100mean(x .>= 15)) => :pct_late)
-        sort(:date)
+#%% md id=network_md
+## The contagion network
+
+Delay doesn't just happen *at* airports — it travels *between* them on the tail of a
+late aircraft. Each arrow below is a **spillover corridor**: an aircraft landed late
+(≥ the slider) and carried that delay to its next destination. Drag nodes, scroll to
+zoom; node size is traffic, color is the share of departures that inherit a late inbound.
+
+#%% code id=network
+## **Consumer C — network spillover** (ECharts force graph). Corridor counts come straight
+## from SQL; only the busiest 80 edges leave the database.
+@assert rotations_n > 0   # dataflow edge: the `rotations` TABLE is db state, invisible to analysis
+network = let
+    edges = let con = DBInterface.connect(db)
+        try
+            DataFrame(DBInterface.execute(con, """
+                SELECT origin, dest, count(*) AS contagious FROM rotations
+                WHERE linked AND prev_arr_delay >= $late_thresh AND dep_delay >= $late_thresh
+                GROUP BY origin, dest ORDER BY contagious DESC LIMIT 80
+            """))
+        finally
+            DBInterface.close!(con)
+        end
     end
+    stats = Dict(r.origin => (r.n_dep, r.frac_inbound_late) for r in eachrow(airport_stats))
+    nodes = [let (n, f) = get(stats, a, (500, 0.0))
+                 (name = a, symbolSize = round(6 + 3sqrt(n / (500 * length(MONTHS))); digits = 1),
+                  value = round(100f; digits = 1))
+             end for a in union(edges.origin, edges.dest)]
+    wmax = maximum(edges.contagious)
+    echart(
+        height = 640,
+        tooltip = (trigger = "item",),
+        visualMap = (min = 10, max = 35, calculable = true, left = 8, bottom = 8,
+                     inRange = (color = ["#7dd3fc", "#facc15", "#fb7185"],),
+                     text = ["inherits delay often", "rarely"],
+                     textStyle = (color = "#8b949e",)),
+        series = [(
+            type = "graph", layout = "force", roam = true,
+            data = nodes,
+            links = [(source = r.origin, target = r.dest,
+                      lineStyle = (width = round(0.5 + 3r.contagious / wmax; digits = 2),))
+                     for r in eachrow(edges)],
+            force = (repulsion = 260, edgeLength = [40, 150], gravity = 0.12),
+            edgeSymbol = ["none", "arrow"], edgeSymbolSize = 5,
+            label = (show = true, fontSize = 10, color = "#8b949e"),
+            lineStyle = (color = "source", opacity = 0.45, curveness = 0.15),
+        )],
+    )
+end
+
+#%% code id=daily_fig
+## **Daily pulse of the system** (CairoMakie): mean departure delay + late share per day,
+## aggregated in SQL. Storm days light up immediately.
+@assert rotations_n > 0   # dataflow edge: the `rotations` TABLE is db state, invisible to analysis
+daily_fig = let
+    d = let con = DBInterface.connect(db)
+        try
+            DataFrame(DBInterface.execute(con, """
+                SELECT date, count(*) AS n, avg(dep_delay) AS mean_delay,
+                       100 * avg(CASE WHEN dep_delay >= 15 THEN 1.0 ELSE 0.0 END) AS pct_late
+                FROM rotations GROUP BY date ORDER BY date
+            """))
+        finally
+            DBInterface.close!(con)
+        end
+    end
+    days = Dates.value.(Date.(d.date) .- Date(YEAR, first(MONTHS), 1)) .+ 1
+    span = maximum(days)
     fig = Figure(size = (860, 340))
-    ax1 = Axis(fig[1, 1]; xlabel = "day of January 2024", ylabel = "mean departure delay (min)",
-               xticks = 1:2:31)
-    days = Dates.day.(d.date)
+    ax1 = Axis(fig[1, 1];
+               xlabel = length(MONTHS) == 1 ? "day of $(Dates.monthname(first(MONTHS))) $YEAR" :
+                        "days since $YEAR-$(lpad(first(MONTHS), 2, '0'))-01",
+               ylabel = "mean departure delay (min)",
+               xticks = 1:max(5, 5 * cld(span, 35)):span)
     barplot!(ax1, days, d.mean_delay; color = d.pct_late, colormap = :inferno,
              colorrange = (10, 50))
     Colorbar(fig[1, 2]; limits = (10, 50), colormap = :inferno, label = "% departures ≥15 min late")
     fig
 end
 
-#%% code id=late_thresh
-## **Explore:** what counts as "late"? Everything downstream recomputes on release.
-@bind late_thresh Slider(5:5:120, default = 15)
+#%% code id=shares
+## The headline shares the prose below interpolates (two scalars — computed in SQL).
+@assert rotations_n > 0   # dataflow edge: the `rotations` TABLE is db state, invisible to analysis
+shares = let con = DBInterface.connect(db)
+    try
+        d = DataFrame(DBInterface.execute(con, """
+            SELECT 100 * avg(CASE WHEN dep_delay >= $late_thresh THEN 1.0 ELSE 0.0 END) AS late_all,
+                   100 * avg(CASE WHEN dep_delay >= $late_thresh THEN 1.0 ELSE 0.0 END)
+                         FILTER (WHERE linked AND COALESCE(prev_arr_delay, 0) >= $late_thresh) AS relayed
+            FROM rotations
+        """))
+        (late_all = round(d.late_all[1]; digits = 1), relayed = round(d.relayed[1]; digits = 1))
+    finally
+        DBInterface.close!(con)
+    end
+end
 
 #%% md id=late_share
-With "late" defined as **≥ {{ late_thresh }} min**, **{{ round(100 * mean(rotations.dep_delay .>= late_thresh); digits = 1) }}%** of January departures were late — and among aircraft that arrived ≥ {{ late_thresh }} min behind schedule, the next departure left late **{{ round(100 * mean(skipmissing(rotations.dep_delay[rotations.linked .& (coalesce.(rotations.prev_arr_delay, 0) .>= late_thresh)] .>= late_thresh)); digits = 1) }}%** of the time.
+With "late" defined as **≥ {{ late_thresh }} min**, **{{ shares.late_all }}%** of departures in the configured window were late — and among aircraft that arrived ≥ {{ late_thresh }} min behind schedule, the next departure left late **{{ shares.relayed }}%** of the time.
+
+#%% md id=drill_md
+## Every worst offender, on demand
+
+The table below is **server-paged**: sorting, searching, and paging run as SQL against the
+DuckDB file — the browser only ever holds one page, whether the window is one month or twelve.
+
+#%% code id=drill
+## Server-paged drill-down over the raw rotations (worst inherited delays first).
+@assert rotations_n > 0
+slate_query(db, """
+    SELECT date, carrier, tail, origin, dest, dep_delay, prev_arr_delay, turn_min
+    FROM rotations WHERE linked AND dep_delay >= $late_thresh
+    ORDER BY dep_delay DESC
+"""; page_size = 15)
 
 #%% code id=export_csv
 ## **Export** — the airport pressure table as CSV (a file-producing pipeline sink).
 airport_csv = let
-    path = joinpath(DATA_DIR, "airport_stats_$(YEAR)_$(lpad(MONTH, 2, '0')).csv")
+    path = joinpath(DATA_DIR, "airport_stats_$(YEAR)_$(lpad(first(MONTHS), 2, '0'))-$(lpad(last(MONTHS), 2, '0')).csv")
     cols = names(airport_stats)
     open(path, "w") do io
         println(io, join(cols, ","))
@@ -239,38 +353,15 @@ airport_csv = let
     path
 end
 
-#%% md id=dag_scaffold_md
-## DAG test scaffolding
+#%% md id=closing
+## What the window says
 
-*Temporary timed nodes (`heavy_*`) — multi-second compute branches + a diamond join into the real pipeline, for exercising the pipeline graph (breathing, heat map, stats).*
-
-#%% code id=heavy_alpha nocache
-## Timed test node — predictable 3 s (root of the scaffold branch). `sleep` is
-## interruptible and wall-clock is all the memo threshold / stats see. Tagged
-## `nocache` so it ALWAYS recomputes — scaffolding should breathe on every run.
-heavy_alpha = begin
-    sleep(3.0)
-    length(raw_csv)
-end
-
-#%% code id=heavy_beta nocache
-## Timed test node — 1.5 s, downstream of alpha. `nocache`: always recomputes.
-heavy_beta = begin
-    sleep(1.5)
-    heavy_alpha / 2
-end
-
-#%% code id=heavy_gamma nocache
-## Timed test node — 0.8 s, a second branch off alpha (fan-out). `nocache`: always recomputes.
-heavy_gamma = begin
-    sleep(0.8)
-    heavy_alpha * 3
-end
-
-#%% code id=heavy_join
-## Diamond join — cheap combiner reading BOTH scaffold branches AND the real
-## pipeline (transfer_curve), so the scaffold is wired into the actual DAG.
-heavy_join = (beta = heavy_beta, gamma = heavy_gamma, curve_rows = nrow(transfer_curve))
+Delay is infectious, and the vector is the airframe itself: an aircraft that lands
+{{ late_thresh }}+ minutes behind hands most of that deficit to its next departure (the
+contagion curve), mountain and island airports run the highest baseline pressure (the
+table), and the spillover corridors concentrate on a handful of hub pairs (the network).
+Widen `MONTHS` in `config` — or drag the slider — and the whole argument recomputes,
+with every row staying in the database.
 
 # ╔═╡ Slate.env · notebook packages (auto-maintained — manage via the package panel)
 #   Chain 1.0.0 8be319e6-bccf-4806-a6f7-6fae938471bc
