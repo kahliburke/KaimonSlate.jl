@@ -212,10 +212,17 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
       text(size: 0.7em)[#text(fill: $(p.parlabel), weight: "bold")[parameters] #h(6pt) #items.map(it => [#raw(it.at(0)) = #text(weight: "bold", it.at(1))]).join([#h(10pt)])])
     // One slide = one page. Measure the body at full content width; if it's taller than the page,
     // scale it down (floor 0.5×) so it still fits, then vertically center.
+    // Typst cannot measure a cite() in isolation ("cannot format citation in isolation" — it needs
+    // document context to resolve), so the MEASURED copy renders citation sentinels as a fixed
+    // stand-in of comparable width; the real body still renders true citations.
     #let slide(body) = page[
       #align(horizon)[
         #layout(sz => {
-          let m = measure(box(width: sz.width, body))
+          let plain = {
+            show regex("§c§[^§]*§[^§]+§[^§]*§"): it => [[0]]
+            body
+          }
+          let m = measure(box(width: sz.width, plain))
           let s = if m.height > sz.height and m.height > 0pt { calc.max(0.5, sz.height / m.height) } else { 1.0 }
           scale(origin: top + center, x: s * 100%, y: s * 100%, box(width: sz.width, body))
         })

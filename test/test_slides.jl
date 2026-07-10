@@ -111,4 +111,27 @@ _mknb(src) = NS.LiveNotebook("deck", "/tmp/slidetest.jl", RE.parse_report(src),
         end
         @test pdf === nothing || length(pdf) > 1000
     end
+
+    @testset "slide-deck with CITATIONS compiles (measure-in-isolation regression)" begin
+        # A cite() inside the slide fit-scaler's measure() used to abort the whole deck with
+        # "cannot format citation in isolation" — the measured copy must render citation
+        # sentinels as a stand-in, while the real slide keeps the true citation. Gate on a PLAIN
+        # deck compiling first (typst/packages/network available), so offline skips both but a
+        # citation-specific failure can never hide behind the skip.
+        plain = try
+            NS.export_pdf(_mknb("#%% md id=s\n## One\n\nplain\n"); layout = "slides")
+        catch
+            nothing
+        end
+        if plain === nothing
+            @info "cited slide PDF compile skipped (typst unavailable)"
+            @test true
+        else
+            nb = _mknb("#%% md id=s\n## Cited slide\n\nSee [@knuth1984, p. 3].\n\n" *
+                       "#%% md id=refs bibliography\n@book{knuth1984,\n  author = {Knuth, D.},\n" *
+                       "  title = {The TeXbook},\n  publisher = {Addison-Wesley},\n  year = {1984}\n}\n")
+            pdf = NS.export_pdf(nb; layout = "slides")   # a throw here IS the regression
+            @test length(pdf) > 1000
+        end
+    end
 end
