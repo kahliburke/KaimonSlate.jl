@@ -1049,7 +1049,8 @@ end
 # host-portable digests (see worker.jl `_src_digest`) are what make them match over there.
 # v1: plaintext socket (tunnel = SSH-encrypted; CURVE on :direct is a flagged TODO), copy-chunk
 # sends (the mmap zero-copy send is the optimization pass).
-function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String})
+function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String};
+                          timeout_ms::Int = 20_000)
     Z = getfield(_kaimon(), :KaimonGate).ZMQ
     root = joinpath(_slate_cache_dir(), "memo")   # mirrors worker.jl _memo_dir
     mdir = joinpath(root, "manifests")
@@ -1071,6 +1072,11 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
     unique!(hashes)
     sock = Z.Socket(Z.REQ)
     try
+        # Bounded I/O: this also runs on the notebook-boot path (memo carry), where an unbound
+        # REQ recv against a dead blob channel would hang the open forever. On expiry recv
+        # throws (EAGAIN) → the caller's catch downgrades to "cells recompute instead".
+        sock.rcvtimeo = timeout_ms
+        sock.sndtimeo = timeout_ms
         Z.connect(sock, "tcp://$host_ip:$data_port")
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
         want = split(req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty = false)
@@ -1101,6 +1107,35 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
     finally
         try; Z.close(sock); catch; end
     end
+end
+
+# Boot-window memo carry — "your session follows you", automatically. Called from `prepare!`
+# right after the remote connection is up and BEFORE the first cell dispatch: a push at any
+# later point RACES hydration — the recompute stores under the same key and clobbers the
+# pushed entry (seen live; rand-token producer proved the ordering). Here the worker's blob
+# channel is already bound (at spawn) and nothing has evaluated yet, so pushed entries are
+# exactly what hydration then restores. Failure is never fatal: the cells just recompute.
+# v1 reach: :direct transport only (the tunnel path doesn't forward the data port yet — that
+# forward is designed to ride its OWN ssh process; TODO with the transfer heuristics pass).
+function _sync_memo_boot!(k, report)
+    t = k.target
+    t isa RemoteTarget || return nothing
+    if t.transport !== :direct
+        _rlog("memo carry: skipped — data channel is :direct-only (tunnel data-port forward TODO); cached cells recompute remotely")
+        return nothing
+    end
+    keys = String[_memo_key(report, c) for c in report.cells]
+    filter!(!isempty, keys)
+    isempty(keys) && return nothing
+    try
+        rec = _attach_lookup(t.ssh_host, k.label)   # remote_ip was learned at spawn — no ssh here
+        ip = rec !== nothing && !isempty(rec.remote_ip) ? String(rec.remote_ip) : _remote_ip(t.ssh_host)
+        r = push_memo_blobs!(ip, k.port + 2, keys)
+        _rlog("memo carry (boot window) → $(t.ssh_host):$(k.port + 2) — $r")
+    catch e
+        _rlog("memo carry failed — cells recompute remotely instead ($(first(sprint(showerror, e), 200)))")
+    end
+    return nothing
 end
 
 # ── Attachment record (the hub's local memory of where it left each worker) ─────────────────
@@ -1220,21 +1255,28 @@ _pool_claimed(host, port::Int) =
 _release_pool_claim!(host, port::Int) =
     (lock(_POOL_CLAIM_LOCK) do; delete!(_POOL_CLAIMS, (String(host), port)); end; nothing)
 
-# Find + claim an adoptable pool worker: alive, idle, spawned by THIS hub, same transport
-# (bind/CURVE mode is fixed at boot) and same env dir (--project is fixed at boot). First
-# unclaimed match wins — pool members are interchangeable. Returns (port, stream_port) | nothing.
+# Is this roster entry a pool worker THIS hub could adopt at all (alive, idle, ours)? The
+# env/transport fit is `_adoptable` — split so the claim loop can log near-misses.
+_pool_candidate(w) =
+    w["alive"] === true && get(w, "state", "") == "idle" &&
+    _manifest_get(w["manifest"], "pool") == "1" &&
+    _manifest_get(w["manifest"], "hub") == gethostname()
+
+# Does a candidate FIT this notebook: same env dir (--project is fixed at boot) and same
+# transport (bind address/CURVE mode is fixed at boot)?
+_adoptable(w, rproj, transport::Symbol) =
+    _manifest_get(w["manifest"], "transport") == string(transport) &&
+    _manifest_get(w["manifest"], "project") == String(rproj)
+
+# Find + claim an adoptable pool worker. First unclaimed match wins — pool members are
+# interchangeable. Returns (port, stream_port) | nothing.
 function _claim_pool_worker!(host, rproj, transport::Symbol)
     seen = 0   # pool members that were alive+idle but didn't fit — logged so a mismatch isn't silent
     for w in list_remote_workers(host)
-        w["alive"] === true || continue
-        get(w, "state", "") == "idle" || continue
-        mf = w["manifest"]
-        _manifest_get(mf, "pool") == "1" || continue
-        _manifest_get(mf, "hub") == gethostname() || continue
+        _pool_candidate(w) || continue
         seen += 1
-        _manifest_get(mf, "transport") == string(transport) || continue
-        _manifest_get(mf, "project") == String(rproj) || continue
-        sp = tryparse(Int, _manifest_get(mf, "stream_port")); sp === nothing && continue
+        _adoptable(w, rproj, transport) || continue
+        sp = tryparse(Int, _manifest_get(w["manifest"], "stream_port")); sp === nothing && continue
         port = w["port"]
         claimed = lock(_POOL_CLAIM_LOCK) do
             (String(host), port) in _POOL_CLAIMS && return false
@@ -1284,14 +1326,12 @@ function _pool_reconcile!(host)
             if _manifest_get(w["manifest"], "pool") == "1" &&
                _manifest_get(w["manifest"], "hub") == gethostname()]
     dead  = [w for w in mine if w["alive"] !== true]
-    stale = [w for w in mine if w["alive"] === true && get(w, "state", "") == "idle" &&
-                                _manifest_get(w["manifest"], "project") != t.project &&
+    stale = [w for w in mine if _pool_candidate(w) && !_adoptable(w, t.project, cfg.transport) &&
                                 !_pool_claimed(host, w["port"])]
-    for w in vcat(dead, stale)                       # litter: dead members + idlers of an old preload env
+    for w in vcat(dead, stale)                       # litter: dead members + idlers of an old preload env/transport
         reap_remote_worker(host, w["port"])
     end
-    warm = [w for w in mine if w["alive"] === true && get(w, "state", "") == "idle" &&
-                               _manifest_get(w["manifest"], "project") == t.project &&
+    warm = [w for w in mine if _pool_candidate(w) && _adoptable(w, t.project, cfg.transport) &&
                                !_pool_claimed(host, w["port"])]
     deficit = cfg.n - length(warm)
     cleaned = isempty(dead) && isempty(stale) ? "" : " (cleaned $(length(dead)) dead, $(length(stale)) stale-env)"

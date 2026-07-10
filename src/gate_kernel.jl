@@ -448,6 +448,9 @@ function prepare!(k::GateKernel, report::Report)
                 k.conn, k.tunnel = spawn_and_connect_remote!(k, k.target, k.parent)
                 _GATE_SESSION[k.conn.name] = report.id
                 _ensure_poller!()
+                # Carry the local memo store over NOW — the eval that triggered this prepare
+                # dispatches next, and a push after it races the recompute (same-key clobber).
+                _sync_memo_boot!(k, report)
             end
         elseif k.remote
             # Attached to a pre-running (e.g. tunneled remote) worker: connect ONCE, never spawn or
