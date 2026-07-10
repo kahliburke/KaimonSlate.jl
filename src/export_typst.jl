@@ -322,7 +322,10 @@ function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{S
     s = tmpl
     for i in 1:length(exprs)
         o = i <= length(c.interp) ? c.interp[i] : nothing
-        val = (o === nothing || o.exception !== nothing || isempty(o.value_repr)) ? "" : o.value_repr
+        # `_interp_scalar` matches the live renderer: a String's repr is quoted (`"January"`), but
+        # `{{ }}` is a presentation context — splice the bare content, like Julia's `$(…)`.
+        val = (o === nothing || o.exception !== nothing || isempty(o.value_repr)) ? "" :
+              ReportRender._interp_scalar(o.value_repr)
         s = replace(s, ReportEngine._interp_token(i) => val)
     end
     return _rewrite_citations(s, citekeys; figrefs = figrefs)
@@ -609,15 +612,27 @@ end
 # cell, the document title falls back to the first markdown H1 (then the notebook filename). One
 # resolver for PDF, slides, and HTML.
 function _parse_title_cell(src)
+    # The byline/subtitle are usually authored with markdown emphasis (`*A pipeline over…*`), but
+    # the title block renders them as PLAIN Typst text — literal asterisks in the PDF. The block
+    # already styles them, so strip one surrounding emphasis layer rather than render markdown.
+    unemph(s) = begin
+        t = strip(String(s))
+        for d in ("***", "**", "*", "__", "_")
+            if startswith(t, d) && endswith(t, d) && ncodeunits(t) > 2ncodeunits(d)
+                return strip(t[nextind(t, firstindex(t), length(d)):prevind(t, lastindex(t), length(d))])
+            end
+        end
+        return t
+    end
     title = ""; subtitle = ""; byline = ""
     for ln in split(String(src), '\n')
         s = strip(ln); isempty(s) && continue
         if isempty(title) && (m = match(r"^#\s+(.+?)\s*#*$", ln)) !== nothing
-            title = strip(m.captures[1])
+            title = unemph(m.captures[1])
         elseif isempty(subtitle) && (m = match(r"^#{2,3}\s+(.+?)\s*#*$", ln)) !== nothing
-            subtitle = strip(m.captures[1])
+            subtitle = unemph(m.captures[1])
         elseif isempty(byline) && !startswith(s, "#")
-            byline = String(s)
+            byline = unemph(s)
         end
     end
     return (title, subtitle, byline)
