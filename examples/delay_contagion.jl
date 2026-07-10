@@ -1,6 +1,3 @@
-#%% md id=intro
-# New Notebook
-
 #%% md id=title title
 # Delay Contagion: How Late Flights Infect the Network
 
