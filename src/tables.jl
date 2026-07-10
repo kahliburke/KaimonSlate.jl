@@ -248,6 +248,15 @@ end
 # build-time authoring typo → hard error listing the available names.
 function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align = NamedTuple(),
                          coltype = NamedTuple(), viz = NamedTuple())
+    # The inevitable Julia trap: `viz = (x = :heat)` is an ASSIGNMENT in parens, not a NamedTuple —
+    # the option arrives as a bare Symbol and `pairs` would throw an opaque MethodError. Say it
+    # in human instead.
+    for (opt, v) in (("format", format), ("align", align), ("coltype", coltype), ("viz", viz))
+        v isa Union{NamedTuple,AbstractDict} ||
+            throw(ArgumentError("slate_table: `$opt` must be a column-keyed NamedTuple/Dict — got " *
+                                "`$(repr(v))`. A ONE-entry NamedTuple needs its trailing comma: " *
+                                "`$opt = (colname = $(repr(v)),)` (or `(; colname = $(repr(v)))`)"))
+    end
     idx = Dict(c.name => i for (i, c) in enumerate(cols))
     _at(nm) = (i = get(idx, String(nm), nothing); i === nothing &&
         throw(ArgumentError("slate_table: no column \"$nm\" (have: $(join((c.name for c in cols), ", ")))")); i)

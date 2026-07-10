@@ -68,6 +68,11 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         # coltype override + unknown-column typo → hard error
         @test slate_table(["x"], [[1]]; coltype = (x = :string,)).columns[1].type == :string
         @test_throws ArgumentError slate_table(["x"], [[1]]; format = (nope = :currency,))
+        # the trailing-comma trap: `viz = (x = :heat)` is an assignment, not a NamedTuple — the
+        # bare Symbol must produce a FRIENDLY ArgumentError naming the fix, not a keys(::Symbol)
+        # MethodError
+        err = try; slate_table(["x"], [[1]]; viz = :heat); nothing; catch e; e; end
+        @test err isa ArgumentError && occursin("trailing comma", err.msg)
     end
 
     @testset "viz (bar/heat) + domain + export_rows" begin
