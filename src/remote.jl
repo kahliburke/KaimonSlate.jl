@@ -42,7 +42,9 @@ function _rlog(msg::AbstractString)
     try
         mkpath(dirname(_REMOTE_LOG))
         open(_REMOTE_LOG, "a") do io
-            println(io, "[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), "] ", msg)
+            # ms resolution: the reattach path is timed in tens of ms now — whole-second
+            # timestamps couldn't distinguish "instant" from "1.9s" (both printed as :01→:02).
+            println(io, "[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
         end
     catch
     end
@@ -563,14 +565,21 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     # it sat directly on the reattach path, where try #1 usually races the tunnel coming up).
     # On failure the just-opened tunnel is CLOSED — its supervisor would otherwise respawn the
     # forward forever (a leak the old single-path flow had on its error exit).
-    function dial(port, stream_port; deadline::Float64)
-        server_key = ""
+    function dial(port, stream_port; deadline::Float64, server_key::String = "", remote_ip::String = "")
         if t.transport === :direct
-            # fetch the worker's CURVE server pubkey over the authenticated SSH channel, then pin.
-            server_key = _fetch_and_pin_curve!(t, _remote_ip(host), port)
-            connect_host, connect_port, connect_stream = _remote_ip(host), port, stream_port
+            # CURVE key + routable IP: use the caller's cached values (the attachment record) when
+            # given — each is otherwise an ssh exec, and both were learned at the original spawn.
+            # The key is PINNED either way (pinning is a local trust-store write, not a fetch).
+            ip = isempty(remote_ip) ? _remote_ip(host) : remote_ip
+            if isempty(server_key)
+                server_key = _fetch_and_pin_curve!(t, ip, port)
+            else
+                try; getfield(_kaimon(), :KaimonGate).pin_server!(ip, port, server_key); catch; end
+            end
+            connect_host, connect_port, connect_stream = ip, port, stream_port
             tunnel = nothing
         else
+            ip = ""
             lport, lstream = _free_local_port(), _free_local_port()
             tunnel = open_tunnel(host, [(lport, port), (lstream, stream_port)])
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
@@ -592,34 +601,58 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             _rlog("connect FAILED: could not reach worker on $host:$port after $tries tries ($last)")
             tunnel === nothing || (try; close_tunnel(tunnel); catch; end)
         end
-        return (conn, tunnel, last)
+        # resolved key/ip ride back so a successful caller can stamp them into the attachment record
+        return (conn = conn, tunnel = tunnel, err = last, server_key = server_key, remote_ip = ip)
     end
 
-    # Reattach-first, provision-second: a LIVE worker for this notebook (detached-warm, or left
-    # by an extension restart / network blip) is by definition already provisioned — so probe
-    # for it BEFORE paying the provision pass (~12s of rsync + env replication even on a warm
-    # host, measured), which keeps reattach at connect-time cost. The worker keeps its warm
-    # namespace + results; a dead-but-listed worker fails the short dial and falls through to a
-    # fresh spawn on new ports (the stale one stays visible in the roster for manual reap).
+    t0 = time()
+    # After a successful (re)attach, everything that isn't the dial moves OFF the hot path: the
+    # state-sidecar write is an ssh exec and catch-up provisioning is ~10s of rsync — neither
+    # changes anything about the live session (a running worker never re-includes its payload),
+    # so they run in the background while the notebook is already usable. The attachment record
+    # gets the dial's resolved key/ip so the NEXT reattach needs zero ssh before its dial.
+    function attached!(r, via::String)
+        _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
+                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
+        start_sync!(t, parent_project)          # non-blocking watcher; heals /src drift from the detached period
+        Threads.@spawn begin
+            try
+                _write_worker_state!(host, k.port, "attached")
+                provision_remote!(t, parent_project)   # idempotent; on-disk freshness for the NEXT spawn
+            catch e
+                _rlog("background catch-up (post-reattach) failed: $(sprint(showerror, e))")
+            end
+        end
+        _rlog("connect OK: reattached via $via to worker-$(k.port) on $host in $(round(Int, (time() - t0) * 1000))ms → notebook now runs on $host")
+        return (r.conn, r.tunnel)
+    end
+
+    # 1. Record-first: the hub's own memory of where it left this notebook's worker — no probe,
+    #    no ssh at all before the dial itself, whose success IS the validation. Short deadline:
+    #    a live worker answers in well under a second; anything else is stale → demote.
+    rec = _attach_lookup(host, k.label)
+    if rec !== nothing
+        k.port = rec.port; k.stream_port = rec.stream_port
+        r = dial(rec.port, rec.stream_port; deadline = 5.0,
+                 server_key = String(rec.server_key), remote_ip = String(rec.remote_ip))
+        r.conn !== nothing && return attached!(r, "record")
+        _attach_clear!(host, k.label)
+        _rlog("reconnect: attachment record for worker-$(rec.port) was stale — demoting to probe")
+    end
+
+    # 2. Probe (reattach-first, provision-second): a LIVE worker for this notebook — detached-
+    #    warm, or left by an extension restart / network blip before the record existed — is by
+    #    definition already provisioned, so ask the host BEFORE paying the provision pass (~12s
+    #    of rsync + env replication even warm, measured). A dead-but-listed worker fails the
+    #    dial and falls through to a fresh spawn on new ports (the stale one stays visible in
+    #    the roster for manual reap).
     reattach = nothing
     try; reattach = _find_live_worker(host, k.label, k.parent); catch; end
     if reattach !== nothing
         k.port = reattach.port; k.stream_port = reattach.stream_port
-        _rlog("reconnect: reattaching to live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
-        conn, tunnel, _ = dial(k.port, k.stream_port; deadline = 15.0)
-        if conn !== nothing
-            _write_worker_state!(host, k.port, "attached")
-            start_sync!(t, parent_project)     # non-blocking watcher; heals /src drift from the detached period
-            # Catch-up provisioning in the BACKGROUND: idempotent, keeps the on-disk payload/env
-            # fresh for the NEXT spawn. A running worker never re-includes its payload, so paying
-            # this synchronously would charge ~12s to reattach while changing nothing live.
-            Threads.@spawn begin
-                try; provision_remote!(t, parent_project)
-                catch e; _rlog("background provision (post-reattach) failed: $(sprint(showerror, e))"); end
-            end
-            _rlog("connect OK: reattached to worker on $host:$(k.port) → notebook now runs on $host")
-            return (conn, tunnel)
-        end
+        _rlog("reconnect: probe found live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
+        r = dial(k.port, k.stream_port; deadline = 15.0)
+        r.conn !== nothing && return attached!(r, "probe")
         _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — falling back to a fresh spawn")
     end
 
@@ -664,10 +697,12 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         _write_worker_state!(host, port, "attached")
 
         # Cold spawn: the dial deadline covers remote Julia boot + KaimonGate load (~90s).
-        conn, tunnel, last = dial(port, stream_port; deadline = 120.0)
-        conn === nothing && error("slate remote: could not reach worker on $host:$port ($last)")
+        r = dial(port, stream_port; deadline = 120.0)
+        r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
+        _attach_record!(host, k.label; port = port, stream_port = stream_port,
+                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
         _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
-        return (conn, tunnel)
+        return (r.conn, r.tunnel)
     end
 end
 
@@ -733,6 +768,7 @@ function teardown_remote!(k; kill::Bool = false)
             _rlog("teardown: closing tunnel + sync, killing remote worker-$(k.port).jl on $(t.ssh_host)")
             try; _ssh_test(t.ssh_host, `pkill -f $("worker-" * string(k.port) * ".jl")`); catch; end
             try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state")`); catch; end
+            try; _attach_clear!(t.ssh_host, k.label); catch; end   # a killed worker must not be re-dialed from the record
         else
             _rlog("teardown: detaching from worker-$(k.port) on $(t.ssh_host) — worker stays warm (state=idle)")
             _write_worker_state!(t.ssh_host, k.port, "idle")
@@ -891,6 +927,52 @@ function _write_worker_state!(host, port::Int, state::AbstractString)
     end
     return nothing
 end
+
+# ── Attachment record (the hub's local memory of where it left each worker) ─────────────────
+# Written at spawn/reattach, consulted FIRST on the next connect: (host, label) → ports,
+# transport, CURVE server key, routable IP. Every field was learned during the original spawn,
+# so re-deriving any of them over ssh on the reattach path (the probe asking the host what we
+# already knew; re-fetching a key that is by definition PINNED; asking the remote its own IP)
+# was pure waste — with the record, reattach touches the network exactly once: the dial itself,
+# whose success IS the validation. A dead record fails the short dial and demotes to probe →
+# spawn. One flat hand-written JSON file per attachment (regex-read like the worker manifests —
+# ReportEngine deliberately has no JSON dep), keyed by hash(host, label).
+const _ATTACH_DIR = joinpath(homedir(), ".cache", "kaimonslate", "attach")
+
+_attach_path(host, label) =
+    joinpath(_ATTACH_DIR, string(hash((String(host), String(label))); base = 16) * ".json")
+
+function _attach_record!(host, label; port::Int, stream_port::Int, transport::Symbol,
+                         server_key::AbstractString = "", remote_ip::AbstractString = "")
+    esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => " ", "\r" => " ")
+    fields = ["host" => String(host), "label" => String(label), "port" => string(port),
+              "stream_port" => string(stream_port), "transport" => string(transport),
+              "server_key" => String(server_key), "remote_ip" => String(remote_ip),
+              "ts" => string(round(Int, time()))]
+    body = "{" * join(["\"$(esc(k))\":\"$(esc(v))\"" for (k, v) in fields], ",") * "}"
+    try
+        mkpath(_ATTACH_DIR)
+        p = _attach_path(host, label); tmp = p * ".tmp"
+        write(tmp, body); mv(tmp, p; force = true)
+    catch e
+        _rlog("attach-record: could not write for $host/$label ($(sprint(showerror, e)))")
+    end
+    return nothing
+end
+
+function _attach_lookup(host, label)
+    p = _attach_path(host, label)
+    isfile(p) || return nothing
+    s = try; read(p, String); catch; return nothing; end
+    g(k) = _manifest_get(s, k)
+    port = tryparse(Int, g("port")); sp = tryparse(Int, g("stream_port"))
+    (port === nothing || sp === nothing || port == 0) && return nothing
+    tr = g("transport")
+    return (port = port, stream_port = sp, transport = Symbol(isempty(tr) ? "tunnel" : tr),
+            server_key = g("server_key"), remote_ip = g("remote_ip"))
+end
+
+_attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true); catch; end; nothing)
 
 # The probe (one POSIX-sh command string, sent as a SINGLE ssh argv token like the launch line)
 # that enumerates workers: for each `worker-<port>.json` it emits port, liveness (pgrep), the

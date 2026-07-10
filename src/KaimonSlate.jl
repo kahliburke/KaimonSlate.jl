@@ -419,7 +419,9 @@ function create_tools(GateTool::Type)
         run_on(notebook::String, host::String, scope::String) -> String
 
     Choose WHERE this notebook's worker runs — per notebook. `host=""` runs it LOCALLY.
-    `host="ssh_host"` (or `"ssh_host,transport"`, transport = tunnel|direct, default tunnel) PROVISIONS
+    `host="ssh_host"` — or the full spec `"ssh_host[,transport[,port,stream_port]]"` (transport =
+    tunnel|direct, default tunnel; the optional ports PIN the worker's remote ports, needed for
+    `direct` through a firewall where specific ports are opened) — PROVISIONS
     + spawns the worker on that SSH host and connects over an SSH tunnel or CURVE; the notebook then
     behaves exactly as if local (reactivity, hot-reload, streaming all transparent). The host must be an
     SSH target you've already set up (a `Host` in ~/.ssh/config with key auth). Different notebooks can
