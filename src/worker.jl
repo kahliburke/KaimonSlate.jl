@@ -1217,55 +1217,84 @@ end
 
 # ── Blob data channel (the third socket — gate port + 2) ─────────────────────────────────────
 # Bulk memo blobs move HERE so they can never head-of-line-block the control gate (a 5 GB Arrow
-# shipment must not queue ahead of a cell result). v1 protocol: strict REQ/REP alternation
-# (backpressure for free), one self-framed message per request:
+# shipment must not queue ahead of a cell result). Protocol v2: strict REQ/REP alternation
+# (backpressure for free); commands are self-framed:
+#   'V'                              → reply "2" — protocol version probe. A v1 server answers
+#                                      "err: unknown cmd", telling the hub to stay on 'P'
+#                                      single-frame puts (a multipart 'p' would EFSM-wedge it).
 #   'H' <hex,hex,…>                  → reply: comma-joined hashes we DON'T have (the dedup query)
 #   'P' <64-hex><u8 last><chunk…>    → reply "ok"/"done"/"err:…" — chunks stream into a tmp,
 #                                      sha256-verified on the last one, atomic-renamed into the
 #                                      CAS: a corrupt/truncated transfer never lands.
+#   'p' <64-hex><u8 last> ‖ <chunk>  → same put, TWO frames: 66-byte header + raw payload frame.
+#                                      The hub sends the payload as a zero-copy message over its
+#                                      mmap of the blob (zmq_msg_init_data — no read()/vcat copies);
+#                                      here it's written straight from the message's memory.
 #   'M' <fullkey>\n<toml…>           → reply "ok" — manifest written; senders order it LAST so a
 #                                      manifest can never reference blobs that aren't there yet.
-# ZMQ rides KaimonGate's own dependency (the worker adds none). v1 is PLAINTEXT on :direct
-# (tunnel transport is SSH-encrypted end to end) — CURVE on this socket is a flagged TODO.
-# v1 sends copy chunks; the mmap zero-copy send is the optimization pass on the hub side.
-function _blob_server!(host::String, port::Int)
+# ZMQ rides KaimonGate's own dependency (the worker adds none). With `curve` (the :direct
+# transport) the socket is a CURVE server on the SAME persisted key the gate serves with (the hub
+# already pins it), created on the gate's context so the gate's ZAP handler enforces the same
+# client allow-list. :tunnel stays plaintext on loopback — SSH encrypts the wire.
+function _blob_server!(host::String, port::Int; curve::Bool = false)
     Z = KaimonGate.ZMQ
-    sock = Z.Socket(Z.REP)
+    ctx = try; KaimonGate._GATE_CONTEXT[]; catch; nothing; end
+    sock = ctx === nothing ? Z.Socket(Z.REP) : Z.Socket(ctx, Z.REP)
+    if curve
+        sec = try; KaimonGate._CURVE_SERVER_SECRET[]; catch; ""; end
+        isempty(sec) && ((_, sec) = KaimonGate._load_or_create_server_keypair())
+        KaimonGate.make_curve_server!(sock, sec)
+        # Same ZAP domain as the gate sockets → the running ZAP handler (same context) applies
+        # the client allow-list here too. If the gate runs allow_any, so do we (no handler).
+        try
+            KaimonGate._CURVE_ALLOW_ANY[] ||
+                KaimonGate._setsockopt_str(sock, KaimonGate._ZMQ_ZAP_DOMAIN, KaimonGate._ZAP_DOMAIN)
+        catch
+        end
+    end
     Z.bind(sock, "tcp://$host:$port")
     root = _memo_dir()
     open_tmps = Dict{String,Tuple{IOStream,String}}()   # hash → (io, tmppath)
-    @info "slate worker: blob data channel listening" port = port
+    @info "slate worker: blob data channel listening" port = port curve = curve
+    # One put chunk (either framing): append to the blob's tmp; on the last chunk verify the
+    # sha and atomically land it in the CAS.
+    put_chunk! = function (h::String, last::Bool, writechunk!)
+        io, tmp = get!(open_tmps, h) do
+            bdir = joinpath(root, "blobs"); mkpath(bdir)
+            t = tempname(bdir)
+            (open(t, "w"), t)
+        end
+        writechunk!(io)
+        last || return "ok"
+        close(io); delete!(open_tmps, h)
+        got = bytes2hex(open(MemoStore.SHA.sha256, tmp))
+        got == h || (rm(tmp; force = true); return "err: hash mismatch (got $got)")
+        dest = MemoStore.blob_path(root, h)
+        mkpath(dirname(dest)); mv(tmp, dest; force = true)
+        return "done"
+    end
     while true
         reply = try
-            data = copy(Z.recv(sock))
+            frames = Z.recv_multipart(sock)             # Message frames — payload never copied here
+            data = frames[1]
             cmd = Char(data[1])
-            if cmd == 'H'
-                hs = split(String(data[2:end]), ","; keepempty = false)
+            if cmd == 'V'
+                "2"
+            elseif cmd == 'H'
+                hs = split(String(copy(data))[2:end], ","; keepempty = false)
                 join([h for h in hs if !MemoStore.has_blob(root, String(h))], ",")
+            elseif cmd == 'p'
+                h = String(copy(data[2:65])); last = data[66] == 0x01
+                payload = length(frames) >= 2 ? frames[2] : Z.Message()
+                put_chunk!(h, last, io -> GC.@preserve payload begin
+                    unsafe_write(io, pointer(payload), length(payload))
+                end)
             elseif cmd == 'P'
-                h = String(data[2:65]); last = data[66] == 0x01
-                io, tmp = get!(open_tmps, h) do
-                    bdir = joinpath(root, "blobs"); mkpath(bdir)
-                    t = tempname(bdir)
-                    (open(t, "w"), t)
-                end
-                write(io, @view data[67:end])
-                if last
-                    close(io); delete!(open_tmps, h)
-                    got = bytes2hex(open(MemoStore.SHA.sha256, tmp))
-                    if got == h
-                        dest = MemoStore.blob_path(root, h)
-                        mkpath(dirname(dest)); mv(tmp, dest; force = true)
-                        "done"
-                    else
-                        rm(tmp; force = true)
-                        "err: hash mismatch (got $got)"
-                    end
-                else
-                    "ok"
-                end
+                d = copy(data)
+                h = String(d[2:65]); last = d[66] == 0x01
+                put_chunk!(h, last, io -> write(io, @view d[67:end]))
             elseif cmd == 'M'
-                s = String(data[2:end])
+                s = String(copy(data))[2:end]
                 nl = findfirst('\n', s)
                 key = s[1:nl-1]
                 p = MemoStore.manifest_path(root, key)
@@ -1358,8 +1387,9 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                      curve = curve, allowed_clients = allowed_clients)
     _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
     # The blob data channel (port+2): bulk memo transfer that never queues ahead of cell results.
+    # Same CURVE posture as the gate: encrypted + allow-listed on :direct, plaintext behind SSH.
     data_port > 0 && Threads.@spawn try
-        _blob_server!(host, data_port)
+        _blob_server!(host, data_port; curve = curve)
     catch e
         @warn "slate worker: blob channel died" port = data_port exception = e
     end

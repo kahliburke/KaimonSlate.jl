@@ -242,6 +242,29 @@ end
         @test !isempty(ReportEngine._memo_key(ca, ca.cells[1]))
         @test !isempty(ReportEngine._memo_key(ca, ca.cells[2]))
         @test :cache in parse_report(serialize_report(ca)).cells[1].flags
+        # a PURE `using` upstream does NOT poison the key, even while :opaque (pre-refinement):
+        # its effect is (source, resolved env) — both already digested — unlike include()/eval.
+        # This is what lets the boot-window memo carry compute keys BEFORE anything has run.
+        us = parse_report("#%% code id=pkgs\nusing LinearAlgebra\n\n#%% code id=work cache\nv = [1.0, 2.0]; t = sum(v)")
+        build_dependencies!(us)
+        @test :opaque in us.cells[1].flags                            # unrefined — the carry-time state
+        @test ReportEngine._memo_key(us, us.cells[1]) == ""           # the using cell itself: never memoized
+        kw = ReportEngine._memo_key(us, us.cells[2])
+        @test !isempty(kw)                                            # downstream stays keyable
+        # …and the key is refinement-invariant: dropping :opaque (what the post-run macro
+        # refinement does) must not change it, or carried entries would never match.
+        delete!(us.cells[1].flags, :opaque)
+        @test ReportEngine._memo_key(us, us.cells[2]) == kw
+        # a MIXED opaque cell (using + arbitrary code) still poisons downstream
+        mx = parse_report("#%% code id=inc\nusing LinearAlgebra; include(\"setup.jl\")\n\n#%% code id=work2\nw = 1 + 1")
+        build_dependencies!(mx)
+        if :opaque in mx.cells[1].flags
+            @test ReportEngine._memo_key(mx, mx.cells[2]) == ""
+        end
+        @test !ReportEngine._is_pure_using("using A; f()")
+        @test !ReportEngine._is_pure_using("f()")
+        @test !ReportEngine._is_pure_using("")
+        @test ReportEngine._is_pure_using("using A, B\nimport C.d\n# comment")
     end
 
     @testset "@asset file deps: static extraction + memo invalidation" begin

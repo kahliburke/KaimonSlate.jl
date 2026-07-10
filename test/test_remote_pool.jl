@@ -107,6 +107,29 @@ mkworker(port; alive = true, state = "idle", pool = "1", hub = gethostname(),
         @test isempty([w for w in RE.parked_wires() if w.host == "__parktest__"])
     end
 
+    @testset "carry cost gate: ship iff transfer beats recompute (with floors + ceiling)" begin
+        MB = 2^20
+        # cheap+small always ships (0.5s floor): 100KB @ 1MB/s ≈ 0.1s vs 5ms recompute
+        @test RE._carry_should_ship(100_000, 5.0, 1.0e6, 30.0)
+        # big+cheap skips: 80MB @ 1MB/s = 80s vs 0.3s recompute (the live case)
+        @test !RE._carry_should_ship(80MB, 290.0, 1.0e6, 30.0)
+        # big+expensive ships when the link affords it: 80MB @ 10MB/s = 8s vs 30min recompute
+        @test RE._carry_should_ship(80MB, 1_800_000.0, 10.0e6, 30.0)
+        # …but the hard ceiling still wins (never stall a notebook open): same entry, 1MB/s = 80s > cap
+        @test !RE._carry_should_ship(80MB, 1_800_000.0, 1.0e6, 30.0)
+        # bandwidth EMA memory round-trips per host
+        h = "__bwtest-$(getpid())__"
+        try
+            @test RE._bw_get(h) == 0.0
+            RE._bw_note!(h, 2.0e6)
+            @test RE._bw_get(h) ≈ 2.0e6
+            RE._bw_note!(h, 4.0e6)                      # EMA: 0.7·2e6 + 0.3·4e6 = 2.6e6
+            @test RE._bw_get(h) ≈ 2.6e6
+        finally
+            rm(RE._bw_path(h); force = true)
+        end
+    end
+
     @testset "_manifest_get: flat JSON field extraction incl. escapes" begin
         s = "{\"a\":\"x\",\"esc\":\"say \\\"hi\\\"\",\"back\":\"a\\\\b\",\"port\":\"9100\"}"
         @test RE._manifest_get(s, "a") == "x"

@@ -334,6 +334,22 @@ function _memoizable(cell::Cell)
     return isempty(cell.binds)
 end
 
+# Is this source purely `using`/`import` statements (comments/whitespace aside)? Such a cell is
+# deterministic given the resolved environment — the one :opaque shape that is safe to digest
+# into a downstream memo key (see the closure loop in `_memo_key`). Conservative: any other
+# top-level expression (or a parse error) → false.
+function _is_pure_using(src::AbstractString)
+    ex = try; Meta.parseall(String(src)); catch; return false; end
+    ex isa Expr || return false
+    seen = false
+    for a in (ex.head === :toplevel ? ex.args : Any[ex])
+        a isa LineNumberNode && continue
+        (a isa Expr && a.head in (:using, :import)) || return false
+        seen = true
+    end
+    return seen
+end
+
 # A total-ish cache key: this cell's source + the sources of its transitive upstream cells + the
 # values of any @bind variables in the read-closure. The worker folds in the Revise'd `src/` digest
 # and the resolved Manifest, completing the key so a src/dep/package change invalidates the entry.
@@ -350,9 +366,17 @@ function _memo_key(report::Report, cell::Cell)
     # re-runs produce fresh values from the same source) or an :opaque barrier (include(): effects
     # from outside the source) breaks that — restoring downstream against a re-run impure producer
     # would silently resurrect results computed from the PREVIOUS run's values. Unkeyable → no memo.
+    # EXCEPTION: an :opaque upstream that is PURELY `using`/`import` statements. Its effect is a
+    # function of (its source, the resolved environment) — the source is digested right here and
+    # the env by the worker's manifest digest — so it can't smuggle in outside state the way
+    # `include()` can. This matters at a very specific moment: a `using` cell is :opaque until its
+    # post-run macro refinement, and a kernel switch resets that — so at boot-memo-carry time EVERY
+    # downstream cell was transiently unkeyable and the carry shipped nothing (seen live). Judging
+    # by SOURCE keeps the key identical before and after refinement.
     for id in closure
         f = byid[id].flags
-        (:nocache in f || :volatile in f || :opaque in f) && return ""
+        (:nocache in f || :volatile in f) && return ""
+        (:opaque in f && !_is_pure_using(byid[id].source)) && return ""
     end
     depsrc = sort!([(id, byid[id].src_hash) for id in closure])
     readnames = copy(cell.reads); for id in closure; union!(readnames, byid[id].reads); end

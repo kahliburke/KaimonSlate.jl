@@ -449,21 +449,19 @@ function create_tools(GateTool::Type)
     Push this notebook's LOCAL durable-cache entries (manifests + content-addressed blobs) to its
     remote worker over the blob data channel (gate port + 2) — so the remote RESTORES cached
     results instead of recomputing them ("your session follows you"). Dedup-aware: blobs the
-    remote already has don't move. Requires the notebook to be running on a `direct`-transport
-    remote worker (v1). Arrow/raw-codec blobs land mmap-ready and duckdb/pyarrow-readable.
+    remote already has don't move. Runs automatically in the boot window on every remote
+    (re)attach; this tool is the MID-SESSION push. Both transports: `direct` dials the CURVE-
+    encrypted data socket; `tunnel` rides a dedicated ssh forward (its own ssh process, so a
+    big shipment never queues ahead of cell results). Arrow/raw-codec blobs land mmap-ready
+    and duckdb/pyarrow-readable.
     """
     function sync_memo(notebook::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         k = nb.kernel
         (k isa ReportEngine.GateKernel && k.target isa ReportEngine.RemoteTarget) ||
             return "Notebook isn't on a remote worker — nothing to sync."
-        k.target.transport === :direct || return "v1 syncs over :direct transport only (tunnel forward for the data port is TODO)."
         k.port == 0 && return "Remote worker not up yet — run a cell first."
-        keys = String[ReportEngine._memo_key(nb.report, c) for c in nb.report.cells]
-        filter!(!isempty, keys)
-        isempty(keys) && return "No memoizable cells in this notebook."
-        ip = ReportEngine._remote_ip(k.target.ssh_host)
-        r = ReportEngine.push_memo_blobs!(ip, k.port + 2, keys)
+        r = ReportEngine.push_notebook_memo!(k, nb.report)
         return "✅ memo sync → $(k.target.ssh_host):$(k.port + 2) — $r"
     end
 

@@ -29,6 +29,7 @@
 import Sockets
 import FileWatching
 import Dates
+import Mmap
 
 # ── Durable orchestration log ─────────────────────────────────────────────────────
 # The extension logger drops @info/@warn structured kwargs (only the message string survives),
@@ -881,6 +882,7 @@ function teardown_remote!(k; kill::Bool = false)
             try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state") $("$_REMOTE_WORKER/worker-$(k.port).stats")`); catch; end
             try; _attach_clear!(t.ssh_host, k.label); catch; end   # a killed worker must not be re-dialed from the record
             try; _evict_parked!(t.ssh_host; label = k.label, port = k.port); catch; end   # …nor via a parked wire
+            try; _evict_data_tunnels!(t.ssh_host; port = k.port + 2); catch; end
         else
             _rlog("teardown: detaching from worker-$(k.port) on $(t.ssh_host) — worker stays warm (state=idle)")
             _write_worker_state!(t.ssh_host, k.port, "idle")
@@ -1047,11 +1049,42 @@ end
 # LAST (never referencing blobs that aren't there). Local store scanned with the same regex
 # discipline as the worker manifests (no TOML dep hub-side); fullkeys transfer verbatim —
 # host-portable digests (see worker.jl `_src_digest`) are what make them match over there.
-# v1: plaintext socket (tunnel = SSH-encrypted; CURVE on :direct is a flagged TODO), copy-chunk
-# sends (the mmap zero-copy send is the optimization pass).
+# v2 wire: a 'V' probe picks the framing — a v2 server gets multipart 'p' puts whose payload
+# frame is a ZERO-COPY message over an mmap of the blob (zmq_msg_init_data: libzmq reads pages
+# straight from the page cache — no read()/vcat copies hub-side); a v1 server keeps getting the
+# single-frame copy-chunk 'P'. `server_key` (Z85, the gate's pinned CURVE key — the data socket
+# serves with the SAME key) encrypts the channel on :direct; tunnel passes "" (SSH encrypts).
+const _BLOB_CHUNK = 8 << 20   # 8 MiB per REQ/REP round-trip — throughput vs per-chunk RTT
+
+# ── Per-host upstream-bandwidth memory (the transfer-vs-recompute input) ─────────────────────
+# Every push measures its own rate over 8 MiB chunks and stamps it here (EMA so one anomalous
+# push doesn't own the estimate). Host-level, not per-worker — the link is the physics. The
+# carry's cost gate reads it; unknown hosts assume a conservative 1 MB/s (biases the FIRST
+# carry toward recompute — a boot window must never stall on an unmeasured link).
+_bw_path(host_ip) = joinpath(_slate_cache_dir(), "bw", replace(String(host_ip), r"[^A-Za-z0-9._-]" => "_") * ".json")
+function _bw_get(host_ip)
+    p = _bw_path(host_ip)
+    isfile(p) || return 0.0
+    v = tryparse(Float64, _manifest_get(try; read(p, String); catch; return 0.0; end, "up_bps"))
+    something(v, 0.0)
+end
+function _bw_note!(host_ip, bps::Float64)
+    bps > 0 || return nothing
+    old = _bw_get(host_ip)
+    ema = old > 0 ? 0.7 * old + 0.3 * bps : bps
+    try
+        mkpath(dirname(_bw_path(host_ip)))
+        write(_bw_path(host_ip), "{\"up_bps\":\"$(round(ema; digits = 1))\",\"ts\":\"$(round(Int, time()))\"}")
+    catch
+    end
+    return nothing
+end
+
 function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String};
-                          timeout_ms::Int = 20_000)
-    Z = getfield(_kaimon(), :KaimonGate).ZMQ
+                          timeout_ms::Int = 20_000, server_key::AbstractString = "",
+                          max_transfer_s::Float64 = 0.0, bw_key::AbstractString = host_ip)
+    kg = getfield(_kaimon(), :KaimonGate)
+    Z = kg.ZMQ
     root = joinpath(_slate_cache_dir(), "memo")   # mirrors worker.jl _memo_dir
     mdir = joinpath(root, "manifests")
     isdir(mdir) || return "no local memo store"
@@ -1065,6 +1098,31 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         push!(picked, (replace(basename(f), ".toml" => ""), s))
     end
     isempty(picked) && return "no matching local entries"
+    # ── Cost gate (the boot carry sets max_transfer_s > 0; the explicit sync_memo tool doesn't):
+    # an entry ships only when moving its bytes is cheaper than recomputing it — est. transfer
+    # (entry bytes / measured host bandwidth, 1 MB/s floor when unmeasured) vs the manifest's
+    # recorded compute cost `ms` (×2 slack, 0.5s floor so trivial entries always ship), capped
+    # by max_transfer_s so no single entry can stall a notebook open. Skipping is SAFE: the cell
+    # recomputes remotely and re-stores under the same key — correctness never depends on the
+    # carry, only warm-start time does. `sync_memo` remains the unconditional escape hatch.
+    skipped = String[]
+    if max_transfer_s > 0
+        bw = max(_bw_get(bw_key), 1.0e6)
+        keep = Tuple{String,String}[]
+        for (k, s) in picked
+            bytes = sum(parse(Int, m.captures[1]) for m in eachmatch(r"bytes\s*=\s*(\d+)", s); init = 0)
+            msm = match(r"(?m)^ms\s*=\s*([0-9.]+)", s)
+            ms = msm === nothing ? 0.0 : something(tryparse(Float64, msm.captures[1]), 0.0)
+            if !_carry_should_ship(bytes, ms, bw, max_transfer_s)
+                push!(skipped, "$(first(k, 8))… ($(round(Int, bytes / 2^20))MB ≈ $(round(bytes / bw; digits = 1))s transfer vs $(round(ms; digits = 0))ms recompute)")
+                continue
+            end
+            push!(keep, (k, s))
+        end
+        picked = keep
+        isempty(skipped) || _rlog("memo push: cost gate skipped $(length(skipped)) entr$(length(skipped) == 1 ? "y" : "ies") — recompute is cheaper (bw $(round(bw / 1e6; digits = 1)) MB/s): " * join(skipped, "; "))
+        isempty(picked) && return "all $(length(skipped)) entries cheaper to recompute (skipped)"
+    end
     hashes = String[]
     for (_, s) in picked, m in eachmatch(r"blob\s*=\s*\"([0-9a-f]{64})\"", s)
         push!(hashes, String(m.captures[1]))
@@ -1077,21 +1135,49 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         # throws (EAGAIN) → the caller's catch downgrades to "cells recompute instead".
         sock.rcvtimeo = timeout_ms
         sock.sndtimeo = timeout_ms
+        if !isempty(server_key)
+            cpub, csec = kg._load_or_create_client_keypair()   # the key the worker allow-lists
+            kg.make_curve_client!(sock, String(server_key), cpub, csec)
+        end
         Z.connect(sock, "tcp://$host_ip:$data_port")
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
-        want = split(req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty = false)
+        # Framing probe: v2 servers answer "2" and take multipart zero-copy 'p'; a v1 server
+        # answers "err: unknown cmd" (single-frame command — safe) and keeps the copy path.
+        # This matters for WARM workers: a reattached worker may still RUN v1 code even though
+        # its on-disk payload was re-provisioned.
+        v2 = req(UInt8['V']) == "2"
+        t0 = time()
+        want = want_hashes(req, hashes)
         sent = 0; nbytes = 0
         for h in want
             p = joinpath(root, "blobs", "sha256", h[1:2], String(h))
             isfile(p) || (_rlog("memo push: missing local blob $h — skipped"); continue)
-            open(p, "r") do io
-                while true
-                    chunk = read(io, 1 << 20)
-                    last = eof(io)
-                    r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(String(h))), UInt8[last ? 0x01 : 0x00], chunk))
+            sz = filesize(p)
+            if v2 && sz > 0
+                mm = Mmap.mmap(p, Vector{UInt8}, sz)
+                off = 0
+                while off < sz
+                    n = min(_BLOB_CHUNK, sz - off)
+                    last = off + n >= sz
+                    hdr = vcat(UInt8['p'], Vector{UInt8}(codeunits(String(h))), UInt8[last ? 0x01 : 0x00])
+                    Z.send(sock, hdr; more = true)
+                    # zero-copy payload frame: libzmq sends straight out of the mmap; `mm` is the
+                    # origin object ZMQ protects until the frame is out (REQ/REP: by the reply).
+                    Z.send(sock, Z.Message(mm, pointer(mm) + off, n))
+                    r = String(copy(Z.recv(sock)))
                     startswith(r, "err") && error("memo push $h: $r")
-                    nbytes += length(chunk)
-                    last && break
+                    nbytes += n; off += n
+                end
+            else
+                open(p, "r") do io
+                    while true
+                        chunk = read(io, 1 << 20)
+                        last = eof(io)
+                        r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(String(h))), UInt8[last ? 0x01 : 0x00], chunk))
+                        startswith(r, "err") && error("memo push $h: $r")
+                        nbytes += length(chunk)
+                        last && break
+                    end
                 end
             end
             sent += 1
@@ -1101,12 +1187,92 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
             startswith(r, "err") && error("memo push manifest $k: $r")
         end
         deduped = length(hashes) - length(want)
-        msg = "pushed $(sent) blobs ($(nbytes) bytes) + $(length(picked)) manifests, $(deduped) blobs deduped"
-        _rlog("memo push → $host_ip:$data_port — $msg")
+        elapsed = time() - t0
+        rate = (nbytes > 0 && elapsed > 0) ? " @ $(round(nbytes / elapsed / 2^20; digits = 1)) MB/s" : ""
+        # Feed the cost gate: remember this host's measured upstream rate (only from pushes big
+        # enough that chunk round-trips, not RTT, dominated the clock).
+        nbytes > 4 << 20 && elapsed > 0 && _bw_note!(bw_key, nbytes / elapsed)
+        msg = "pushed $(sent) blobs ($(nbytes) bytes$rate, $(v2 ? "v2 zero-copy" : "v1 copy")) + $(length(picked)) manifests, $(deduped) blobs deduped" *
+              (isempty(skipped) ? "" : "; $(length(skipped)) skipped (recompute cheaper)")
+        _rlog("memo push → $host_ip:$data_port ($(isempty(server_key) ? "plaintext" : "CURVE")) — $msg")
         return msg
     finally
         try; Z.close(sock); catch; end
     end
+end
+
+# The dedup query, extracted so the put loop reads clean: ask the server which of `hashes`
+# it lacks. (Empty reply string → nothing to send.)
+want_hashes(req, hashes) =
+    split(req(vcat(UInt8['H'], Vector{UInt8}(codeunits(join(hashes, ","))))), ","; keepempty = false)
+
+# The carry's transfer-vs-recompute decision: ship an entry only when moving its bytes beats
+# recomputing it. Estimated transfer = bytes/bw; ship when that stays under BOTH 2× the entry's
+# recorded compute cost (0.5s floor — trivial entries always ship, so a warm reattach isn't
+# nickel-and-dimed) and the hard per-entry ceiling (a notebook open must never stall on one
+# giant entry, however expensive its recompute claims to be — `sync_memo` covers that case).
+_carry_should_ship(bytes::Integer, ms::Real, bw_bps::Real, cap_s::Real) =
+    (est = bytes / max(bw_bps, 1.0); est <= max(2 * ms / 1000, 0.5) && est <= cap_s)
+
+# ── Data-channel endpoint (transport-aware) ─────────────────────────────────────────────────
+# Where the hub dials a worker's blob channel (gate port + 2). :direct → the routable IP + the
+# gate's pinned CURVE key (the data socket serves with the SAME key), both cached in the
+# attachment record so no ssh rides this path. :tunnel → a lazily-opened `ssh -L` forward on
+# its OWN ssh process — a multi-GB shipment on the gate forward's ssh channel would head-of-
+# line-block cell results (the whole reason the data socket exists). Forwards are cached per
+# (host, remote data port), supervised like the gate tunnel, and evicted on reap/kill.
+const _DATA_TUNNELS = Dict{Tuple{String,Int},Tuple{Tunnel,Int}}()   # (host, data_port) → (tunnel, local_port)
+const _DATA_TUNNEL_LOCK = ReentrantLock()
+
+function _data_endpoint!(t::RemoteTarget, k)
+    dport = k.port + 2
+    if t.transport === :direct
+        rec = _attach_lookup(t.ssh_host, k.label)   # ip + CURVE key were learned at spawn — no ssh here
+        ip = rec !== nothing && !isempty(rec.remote_ip) ? String(rec.remote_ip) : _remote_ip(t.ssh_host)
+        key = rec !== nothing ? String(rec.server_key) : ""
+        return (ip = ip, port = dport, server_key = key)
+    end
+    lock(_DATA_TUNNEL_LOCK) do
+        cached = get(_DATA_TUNNELS, (t.ssh_host, dport), nothing)
+        cached !== nothing && cached[1].running &&
+            return (ip = "127.0.0.1", port = cached[2], server_key = "")
+        lport = _free_local_port()
+        tun = open_tunnel(t.ssh_host, [(lport, dport)])
+        _DATA_TUNNELS[(t.ssh_host, dport)] = (tun, lport)
+        _rlog("data channel: opened dedicated tunnel $(t.ssh_host):$dport ← 127.0.0.1:$lport (own ssh proc)")
+        return (ip = "127.0.0.1", port = lport, server_key = "")
+    end
+end
+
+# Close the cached data forward for `host` (a specific worker's data port, or all when port=0).
+function _evict_data_tunnels!(host; port::Int = 0)
+    lock(_DATA_TUNNEL_LOCK) do
+        for key in collect(keys(_DATA_TUNNELS))
+            key[1] == String(host) || continue
+            (port == 0 || key[2] == port) || continue
+            tun, _ = pop!(_DATA_TUNNELS, key)
+            try; close_tunnel(tun); catch; end
+        end
+    end
+    return nothing
+end
+
+# Push THIS notebook's memo entries to the kernel's remote worker over the data channel —
+# the shared engine of the boot-window carry and the mid-session `sync_memo` tool. `boot=true`
+# arms the cost gate (per-entry transfer-vs-recompute + a hard per-entry ceiling, so a big
+# store on a slow link can't stall the notebook open); the explicit tool pushes everything.
+_carry_ceiling_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_CARRY_MAX_S", "")), 30.0)
+function push_notebook_memo!(k, report; boot::Bool = false)
+    t = k.target
+    t isa RemoteTarget || return "not on a remote worker"
+    k.port == 0 && return "remote worker not up yet"
+    keys = String[_memo_key(report, c) for c in report.cells]
+    filter!(!isempty, keys)
+    isempty(keys) && return "no memoizable cells"
+    ep = _data_endpoint!(t, k)
+    return push_memo_blobs!(ep.ip, ep.port, keys; server_key = ep.server_key,
+                            max_transfer_s = boot ? _carry_ceiling_s() : 0.0,
+                            bw_key = t.ssh_host)   # bandwidth is per HOST — a tunnel dials 127.0.0.1
 end
 
 # Boot-window memo carry — "your session follows you", automatically. Called from `prepare!`
@@ -1115,23 +1281,11 @@ end
 # pushed entry (seen live; rand-token producer proved the ordering). Here the worker's blob
 # channel is already bound (at spawn) and nothing has evaluated yet, so pushed entries are
 # exactly what hydration then restores. Failure is never fatal: the cells just recompute.
-# v1 reach: :direct transport only (the tunnel path doesn't forward the data port yet — that
-# forward is designed to ride its OWN ssh process; TODO with the transfer heuristics pass).
 function _sync_memo_boot!(k, report)
-    t = k.target
-    t isa RemoteTarget || return nothing
-    if t.transport !== :direct
-        _rlog("memo carry: skipped — data channel is :direct-only (tunnel data-port forward TODO); cached cells recompute remotely")
-        return nothing
-    end
-    keys = String[_memo_key(report, c) for c in report.cells]
-    filter!(!isempty, keys)
-    isempty(keys) && return nothing
+    k.target isa RemoteTarget || return nothing
     try
-        rec = _attach_lookup(t.ssh_host, k.label)   # remote_ip was learned at spawn — no ssh here
-        ip = rec !== nothing && !isempty(rec.remote_ip) ? String(rec.remote_ip) : _remote_ip(t.ssh_host)
-        r = push_memo_blobs!(ip, k.port + 2, keys)
-        _rlog("memo carry (boot window) → $(t.ssh_host):$(k.port + 2) — $r")
+        r = push_notebook_memo!(k, report; boot = true)
+        _rlog("memo carry (boot window) → $(k.target.ssh_host):$(k.port + 2) — $r")
     catch e
         _rlog("memo carry failed — cells recompute remotely instead ($(first(sprint(showerror, e), 200)))")
     end
@@ -1551,6 +1705,7 @@ never auto-reaps (a worker may hold results worth keeping). Returns true if the 
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
+    try; _evict_data_tunnels!(host; port = port + 2); catch; end
     try; _release_pool_claim!(host, port); catch; end
     try; _ssh_test(host, `pkill -f $("worker-" * string(port) * ".jl")`); catch; end
     try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`); catch; end
