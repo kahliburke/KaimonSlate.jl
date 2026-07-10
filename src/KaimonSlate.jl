@@ -429,7 +429,10 @@ function create_tools(GateTool::Type)
     `"notebook"` = durable, saved in the .jl so it reopens there; `"clear"` = drop both overrides and
     fall back to the global default / local. Use `check_remote` first to validate + prime a new host.
     """
-    function run_on(notebook::String, host::String, scope::String = "session")::String
+    # `scope` MUST be a keyword arg: the gate silently strips optional POSITIONALS
+    # (see _reflect_tool/_dispatch_tool_call notes) — as a positional this defaulted to
+    # "session" no matter what the caller passed. Same fix on check_remote/publish_history.
+    function run_on(notebook::String, host::String; scope::String = "session")::String
         nb, err = _nb(notebook); nb === nothing && return err
         sc = Symbol(strip(scope)); sc in (:session, :notebook, :clear) || (sc = :session)
         set_run_on!(nb, host; scope = sc)
@@ -447,7 +450,7 @@ function create_tools(GateTool::Type)
     Returns a step-by-step checklist. Slow on a cold host (first-time provisioning). Run this before
     `run_on` to catch setup problems early; it also primes the host so the first real run is fast.
     """
-    function check_remote(host::String, transport::String = "tunnel")::String
+    function check_remote(host::String; transport::String = "tunnel")::String
         h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
         r = ReportEngine.preflight_remote(h; transport = tr)
@@ -477,7 +480,11 @@ function create_tools(GateTool::Type)
             nbk = ReportEngine._manifest_get(mf, "notebook"); nbk = isempty(nbk) ? "?" : nbk
             spawned = ReportEngine._manifest_get(mf, "spawned")
             la = w["lastActivity"]; age = la == 0 ? "never" : string(round(Int, (time() - la) / 60), "m ago")
-            println(io, "  • port $(w["port"])  $(w["alive"] ? "🟢 running" : "⚪ stopped")  notebook=$(nbk)  last activity: $age", isempty(spawned) ? "" : "  (spawned $spawned)")
+            # lifecycle sidecar: attached (a hub is using it) / idle (detached, warm, adoptable)
+            st = get(w, "state", "")
+            badge = !w["alive"] ? "⚪ stopped" :
+                    st == "idle" ? "🟡 idle (warm)" : st == "attached" ? "🟢 attached" : "🟢 running"
+            println(io, "  • port $(w["port"])  $badge  notebook=$(nbk)  last activity: $age", isempty(spawned) ? "" : "  (spawned $spawned)")
         end
         println(io, "\nReap one with reap_worker(host, port).")
         return String(take!(io))
@@ -984,7 +991,7 @@ function create_tools(GateTool::Type)
     just that document's history (timestamped events with live URLs / DOIs / commit SHAs); leave it
     empty for a summary across all documents and the configured targets.
     """
-    function publish_history_tool(notebook::String = "")::String
+    function publish_history_tool(; notebook::String = "")::String
         if !isempty(strip(notebook))
             nb, err = _nb(notebook); nb === nothing && return err
             info = NotebookServer.publish_doc_info(nb)
