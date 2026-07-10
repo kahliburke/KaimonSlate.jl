@@ -181,22 +181,9 @@ function openSettings() {
   const perm = document.getElementById('setperm');
   perm.value = agentPerm();
   perm.onchange = () => switchSetting(perm, 'slateAgentPerm', 'change permissions', 'permissions');
-  // Data-transfer knobs (chunk size, carry budget) are GLOBAL and live on the front page's
-  // Remotes dialog (index.html) next to the default run location — not per-notebook settings.
-  // Default run location (global) — where NEW notebooks run. Server-side (slate.json) via the global
-  // /api/run-on-default; the host list comes from ~/.ssh/config. gapi() (runloc.js) hits the raw route.
-  const rl = document.getElementById('setrunloc');
-  if (rl && window.gapi) {
-    gapi('GET', '/api/ssh-hosts').then(d => {
-      const hosts = (d && d.hosts) || [], cur = (d && d.global) || '';
-      rl.innerHTML = '<option value="">Local (this machine)</option>' +
-        hosts.map(h => `<option value="${h}">🖧 ${h}</option>`).join('');
-      if (cur && !hosts.includes(cur)) rl.innerHTML += `<option value="${cur}">🖧 ${cur}</option>`;
-      rl.value = cur;
-      rl.onchange = () => gapi('POST', '/api/run-on-default', { host: rl.value })
-        .then(() => { try { toast('Default run location → ' + (rl.value || 'local'), 2200); } catch (_) {} });
-    }).catch(() => {});
-  }
+  // Global execution settings (default run location, transfer chunk size, carry budget) live on
+  // the front page's Remotes dialog (index.html) — not in per-notebook settings. The notebook's
+  // OWN run location is the toolbar "Running on" picker (runloc.js).
   document.getElementById('setbg').classList.add('show');
 }
 // Your GLOBAL agent-model default ('' = server default = sonnet).

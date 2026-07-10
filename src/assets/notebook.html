@@ -278,9 +278,7 @@
   <div class="setrow"><label title="What Tab does when the autocomplete popup is open. Accept: Tab (and Enter) accept the highlighted item — the standard IDE convention. Navigate: Tab moves down the list, Shift-Tab up; only Enter accepts.">Tab in autocomplete</label>
     <span class="rt"><select id="setcomptab"><option value="accept">Accept (standard)</option><option value="navigate">Navigate list</option></select></span></div>
   <div class="setsec">Execution</div>
-  <div class="setrow"><label title="Where NEW notebooks run by default (a Host in ~/.ssh/config). Each notebook and session can still override this from the toolbar 'Running on' picker.">Default run location</label>
-    <span class="rt"><select id="setrunloc"><!-- populated from /api/ssh-hosts (settings.js) --></select></span></div>
-  <div class="setrow sethint"><span></span>Data-transfer settings (chunk size, carry budget) live on the <strong>front page → Remotes</strong> — they're global to all notebooks.</div>
+  <div class="setrow sethint"><span></span>Global execution settings (default run location, transfer chunk size, carry budget) live on the <strong>front page → Remotes</strong> — this notebook's own run location is the toolbar "Running on" picker.</div>
   <div class="setsec">Agent</div>
   <div class="setrow"><label title="Your default model for every notebook. A single notebook can override it in 🎚 Notebook config.">Agent model (global default)</label>
     <select id="setmodel">
