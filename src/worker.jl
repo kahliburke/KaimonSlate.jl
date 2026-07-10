@@ -147,6 +147,10 @@ end
 # NOT Revise's async `pkgdatas`, whose membership varied with load timing, so store-time and
 # restore-time digests diverged and nearly every restart MISSED the cache (recompute, not restore).
 # Cached by the newest src mtime so it costs one `stat` sweep per eval, not a full re-parse.
+# HOST-PORTABLE: files are keyed by their path RELATIVE to their src root (never the absolute
+# path — /Users/… locally vs ~/.cache/kaimonslate/remote/… on a host would fork the digest and
+# make every transferred memo entry unfindable). rsync mirrors the tree, so relpaths + def-body
+# hashes agree across hosts; entries sort by (relpath, defhash) so root ORDER can't matter either.
 const _SRC_DIGEST_CACHE = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
 function _src_digest()
     try; _seed_new_src_defs!(); catch; end          # keep seeding the hot-reload watcher's baseline
@@ -156,17 +160,27 @@ function _src_digest()
     _SRC_DIGEST_CACHE[][1] == mt && return _SRC_DIGEST_CACHE[][2]
     h = UInt(0x53726300)
     try
-        for path in files
-            h = hash(path, h); defs = _file_defs(path)
-            for k in sort!(collect(keys(defs))); h = hash((k, defs[k]), h); end
+        entries = Tuple{String,UInt}[]
+        for dir in _memo_src_dirs(), (root, _, fs) in walkdir(dir), f in fs
+            endswith(f, ".jl") || continue
+            p = joinpath(root, f)
+            defs = _file_defs(p)
+            dh = UInt(0)
+            for k in sort!(collect(keys(defs))); dh = hash((k, defs[k]), dh); end
+            push!(entries, (relpath(p, dir), dh))
         end
+        sort!(entries)
+        for e in entries; h = hash(e, h); end
     catch
     end
     _SRC_DIGEST_CACHE[] = (mt, h)
     return h
 end
 
-# Digest of the resolved Manifest (package versions); cached by mtime.
+# Digest of the resolved Manifest (package versions/tree-hashes); cached by mtime. HOST-PORTABLE:
+# dev-dep `path = "…"` lines are EXCLUDED — `_replicate_env!` rewrites them to the host's rsync'd
+# copies, so hashing raw bytes would fork the digest across hosts (and kill every transferred
+# entry) while the version/git-tree-sha1 lines still pin all behavior that matters.
 const _MANIFEST_DIGEST = Ref{Tuple{Float64,UInt}}((-1.0, UInt(0)))
 function _manifest_digest()
     try
@@ -174,7 +188,8 @@ function _manifest_digest()
         man = joinpath(dirname(proj), "Manifest.toml"); isfile(man) || return UInt(0)
         mt = Float64(mtime(man))
         _MANIFEST_DIGEST[][1] == mt && return _MANIFEST_DIGEST[][2]
-        d = hash(read(man)); _MANIFEST_DIGEST[] = (mt, d); return d
+        s = replace(read(man, String), r"(?m)^\s*path\s*=\s*\".*\"\s*$" => "")
+        d = hash(s); _MANIFEST_DIGEST[] = (mt, d); return d
     catch; return UInt(0); end
 end
 
