@@ -94,6 +94,18 @@ const _USING_EXPORTS = Dict{String,Vector{Symbol}}()   # dotted module path → 
 const _USING_TRIED   = Set{String}()                   # paths already attempted (success or fail)
 const _USING_LOCK    = ReentrantLock()
 
+# Resolution state (`_USING_EXPORTS`, `_MACRO_BINDS`, and everything derived from them — the
+# barrier→precise verdict, provenance graphics/theme classification) feeds cached inference, so a
+# `_BIND_CACHE` entry is only valid for the state it was computed under. Rather than trusting
+# every mutator to remember `rebuild_precise!` (a non-local invariant a future code path — a pool
+# preload, a remote state sync — WILL eventually violate), every mutation bumps this GENERATION
+# and every cache entry stamps the generation it was computed at; a mismatch is a cache miss.
+# Self-healing regardless of who mutated what. Bumps are rare (once per module path / macro cell
+# per session), and invalidation is LAZY — entries recompute one-by-one on next touch, never as a
+# burst.
+const _RESOLUTION_GEN = Threads.Atomic{Int}(0)
+_bump_resolution!() = (Threads.atomic_add!(_RESOLUTION_GEN, 1); nothing)
+
 # ── Durable `using`-export cache (across sessions) ───────────────────────────
 # `_USING_EXPORTS` is session-scoped, so every cold open re-paid a kernel round-trip (import + a
 # possible package load) per bare-`using` module before the graph/memo keys were precise. Persist
@@ -363,7 +375,7 @@ the cell is flagged `:opaque` (treated as a barrier in the graph).
 # call — ≈1.5s on a 140-cell notebook, paid by EVERY structural edit. Keyed by cell id but validated
 # on the source hash, so a stale or cross-notebook id can never return wrong bindings (hash mismatch
 # → recompute).
-const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol}}}()
+const _BIND_CACHE = Dict{String,Tuple{UInt64,Set{Symbol},Set{Symbol},Bool,Vector{String},Set{Symbol},Set{Symbol},Bool,Set{Symbol},Int}}()
 const _BIND_CACHE_LOCK = ReentrantLock()
 # Bounded LRU: entries carry a recency tick (`_BIND_TICKS`, bumped on every hit/store) and overflow
 # evicts the least-recently-used ~10% — the old clear-on-full wholesale `empty!` made a long-lived
@@ -385,12 +397,13 @@ function _bind_cache_evict!()
 end
 function infer_bindings!(cell::Cell)
     h = hash(cell.source) ⊻ hash(cell.kind)
+    gen = _RESOLUTION_GEN[]   # read BEFORE compute: a mid-inference bump stamps stale → next hit misses
     hit = lock(_BIND_CACHE_LOCK) do
         v = get(_BIND_CACHE, cell.id, nothing)
         v === nothing || (_BIND_TICKS[cell.id] = (_BIND_TICK[] += 1))   # LRU: a hit refreshes recency
         v
     end
-    if hit !== nothing && hit[1] == h
+    if hit !== nothing && hit[1] == h && hit[10] == gen   # gen mismatch ⇒ resolution state moved ⇒ recompute
         empty!(cell.reads);  union!(cell.reads,  hit[2])
         empty!(cell.writes); union!(cell.writes, hit[3])
         hit[4] ? push!(cell.flags, :opaque) : delete!(cell.flags, :opaque)
@@ -404,7 +417,7 @@ function infer_bindings!(cell::Cell)
     _infer_bindings_uncached!(cell)
     lock(_BIND_CACHE_LOCK) do
         length(_BIND_CACHE) >= _BIND_CACHE_MAX && _bind_cache_evict!()
-        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now))
+        _BIND_CACHE[cell.id] = (h, copy(cell.reads), copy(cell.writes), :opaque in cell.flags, copy(cell.inputs), copy(cell.provides), copy(cell.mutates), :macrocall in cell.flags, copy(cell.reads_now), gen)
         _BIND_TICKS[cell.id] = (_BIND_TICK[] += 1)
     end
     return cell
@@ -844,6 +857,7 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
             push!(_USING_TRIED, p)
             isempty(syms) || (_USING_EXPORTS[p] = syms; newly = true)   # cache only a real export set
         end
+        isempty(syms) || _bump_resolution!()
         if !isempty(syms)   # persist for the next session's cold open (registry versions only)
             isempty(vers) && (vers = _dep_versions(kernel, report))
             v, src = get(vers, String(first(split(p, '.'))), ("", ""))
@@ -912,6 +926,7 @@ function resolve_usings!(report::Report, kernel::Kernel, paths::Vector{String})
             lock(_USING_LOCK) do
                 push!(_USING_TRIED, p); _USING_EXPORTS[p] = syms
             end
+            _bump_resolution!()
             newly = true
         else
             push!(remaining, p)
@@ -925,6 +940,7 @@ function resolve_usings!(report::Report, kernel::Kernel, paths::Vector{String})
         lock(_USING_LOCK) do
             push!(_USING_TRIED, p); _USING_EXPORTS[p] = syms
         end
+        _bump_resolution!()
         v, src = get(vers, String(first(split(p, '.'))), ("", ""))
         !isempty(v) && src == "registry" && _using_disk_store!("$p@$v", syms)
         newly = true
@@ -1031,6 +1047,7 @@ function resolve_macros!(report::Report, kernel::Kernel, cells::Vector{Cell}; ma
                 newly = true
             end
         end
+        binds === nothing || _bump_resolution!()
     end
     return newly
 end

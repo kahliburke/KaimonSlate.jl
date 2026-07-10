@@ -393,6 +393,35 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         end
     end
 
+    @testset "resolution generation: stale verdicts self-heal WITHOUT rebuild_precise!" begin
+        # The invariant this guards: a cached inference verdict is only valid for the resolution
+        # state it was computed under. A future code path that mutates _USING_EXPORTS without
+        # remembering rebuild_precise! (a pool preload, a remote state sync) must NOT be able to
+        # serve the stale verdict — the generation stamp turns the mistake into a lazy recompute.
+        tmp = joinpath(mktempdir(), "usings.json")
+        oldpath = ReportEngine._USING_DISK_PATH[]
+        ReportEngine._USING_DISK_PATH[] = tmp
+        wipe2!() = (empty!(ReportEngine._USING_EXPORTS); empty!(ReportEngine._USING_TRIED);
+                    empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS);
+                    ReportEngine._USING_DISK[] = nothing)
+        try
+            wipe2!()
+            c = Cell("genc", CODE, "using FakeExpPkg")
+            infer_bindings!(c)
+            @test :opaque in c.flags                    # unresolved → barrier, and now CACHED
+            r = parse_report("#%% code id=genc\nusing FakeExpPkg")
+            # Resolve through the kernel and DELIBERATELY skip rebuild_precise! / cache clearing.
+            @test ReportEngine.resolve_usings!(r, CountingKernel(0), ["FakeExpPkg"])
+            c2 = Cell("genc", CODE, "using FakeExpPkg")
+            infer_bindings!(c2)                         # same id, same source, same hash…
+            @test !(:opaque in c2.flags)                # …but the generation moved → recomputed
+            @test :fk_fun in c2.writes
+        finally
+            ReportEngine._USING_DISK_PATH[] = oldpath
+            wipe2!()
+        end
+    end
+
     @testset "backref: a top-level read above its definer is flagged (ordering footgun)" begin
         # Cell A reads x, cell B (below) defines it — edges point backward, so document order
         # silently swallows the dependency; the diagnostic surfaces it (reader, definer).
