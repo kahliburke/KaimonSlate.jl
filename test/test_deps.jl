@@ -326,6 +326,33 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         empty!(ReportEngine._MACRO_BINDS); empty!(ReportEngine._MACRO_TRIED); empty!(ReportEngine._BIND_CACHE)
     end
 
+    @testset "global-theme cells wire theme→plot edges (Makie theme reactivity)" begin
+        # set_theme! mutates process state no binding carries — the synthetic _THEME_SENTINEL
+        # write/read pair turns that into real dataflow, so theme edits restale figures.
+        r = parse_report("#%% code id=th\nset_theme!(theme_dark())\n" *
+                         "#%% code id=plot\nfig = Figure(); lines!(Axis(fig[1, 1]), xs, ys); fig\n" *
+                         "#%% code id=pure\nz = 1 + 1")
+        build_dependencies!(r)
+        @test "th" in findcell(r, "plot").deps              # figure depends on the theme setter
+        @test isempty(findcell(r, "pure").deps)             # pure compute untouched
+        @test "plot" in dependents_of(r, Set(["th"]))       # editing the theme restales the figure
+        @test !("pure" in dependents_of(r, Set(["th"])))
+        @test isempty(r.meta["multidef"])                   # the sentinel never reads as a collision
+        @test ReportEngine._memo_key(r, findcell(r, "th")) == ""   # side-effect cell → never memoized
+        # consecutive theme cells chain (update_theme! composes onto set_theme!'s state)
+        r2 = parse_report("#%% code id=a\nset_theme!(theme_dark())\n" *
+                          "#%% code id=b\nupdate_theme!(fontsize = 20)\n" *
+                          "#%% code id=p\nfig = Figure()")
+        build_dependencies!(r2)
+        @test "a" in findcell(r2, "b").deps
+        @test "b" in findcell(r2, "p").deps                 # the figure follows the LAST mutation
+        @test "p" in dependents_of(r2, Set(["a"]))          # editing the first still reaches it
+        # no theme cell above a plot ⇒ a read with no writer ⇒ no edge
+        r3 = parse_report("#%% code id=p\nfig = Figure()\n#%% code id=q\nq = 2")
+        build_dependencies!(r3)
+        @test isempty(findcell(r3, "p").deps)
+    end
+
     @testset "dependents index: BFS ≡ the old fixpoint (equivalence oracle)" begin
         # `dependents_of` walks `report.dependents` (the transpose of `deps`, rebuilt by
         # `build_dependencies!`). Keep the pre-index fixpoint as the reference: any divergence on a

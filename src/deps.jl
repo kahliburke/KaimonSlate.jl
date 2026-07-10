@@ -405,6 +405,22 @@ function _infer_bindings_uncached!(cell::Cell)
         end
     end
     _is_barrier_expr(top) && push!(cell.flags, :opaque)
+    # Makie's global theme is process state no notebook binding carries, so a theme-setting cell
+    # writes nothing a plot cell reads — without help, editing the theme re-runs it ALONE and every
+    # figure keeps the old theme (dead reactivity). Wire it through the ordinary dataflow: theme
+    # setters write a synthetic `_THEME_SENTINEL` (as a MUTATION — consecutive theme cells chain
+    # like `push!`ers, and it never reads as a definition/multidef), graphics cells read it. The
+    # most-recent-prior-writer rule then gives real theme→plot edges: theme edits restale figures,
+    # batch scheduling follows deps, and figure memo keys digest the theme cell's source (a cached
+    # figure can't restore under a stale theme). No theme cell above a plot ⇒ read with no writer ⇒
+    # no edge — harmless. See graphics_detect.jl.
+    if _sets_global_theme(cell.source)
+        push!(cell.reads, _THEME_SENTINEL)     # a later setter composes onto the earlier one's state
+        push!(cell.writes, _THEME_SENTINEL)
+        push!(cell.mutates, _THEME_SENTINEL)
+    elseif _uses_shared_graphics(cell.source)
+        push!(cell.reads, _THEME_SENTINEL)
+    end
     return cell
 end
 

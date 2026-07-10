@@ -326,6 +326,9 @@ function _memoizable(cell::Cell)
     # A refined `using`/`import` cell is no longer :opaque, but restoring cached export BINDINGS is
     # not the same as executing the `using` (method-table effects, load order) — never memoize it.
     isempty(cell.provides) || return false
+    # Same for a global-theme setter (`set_theme!`): its effect is process state, not a binding —
+    # a restore would skip applying the theme. (Marked by the synthetic `_THEME_SENTINEL` write.)
+    _THEME_SENTINEL in cell.writes && return false
     return isempty(cell.binds)
 end
 

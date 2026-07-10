@@ -545,6 +545,7 @@ include(joinpath(@__DIR__, "capture.jl"))   # shared run_capture (engine + worke
 include(joinpath(@__DIR__, "format.jl"))    # _format_cell — server-side table cell renderer (JS mirror: fmtCell)
 include(joinpath(@__DIR__, "completion.jl")) # shared REPLCompletions (engine + worker)
 include(joinpath(@__DIR__, "macroexpand.jl")) # shared cell macro-expansion (engine + worker)
+include(joinpath(@__DIR__, "graphics_detect.jl")) # Makie graphics/theme cell detection (deps + scheduler)
 include(joinpath(@__DIR__, "eval.jl"))
 include(joinpath(@__DIR__, "deps.jl"))
 include(joinpath(@__DIR__, "bind.jl"))
