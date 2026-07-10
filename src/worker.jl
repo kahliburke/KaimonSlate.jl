@@ -1069,6 +1069,21 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                      curve = curve, allowed_clients = allowed_clients)
     _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
+    # Prewarm the eval path: the FIRST run through `_eval_one`/`run_capture` pays ~4s of JIT
+    # (measured — eval/capture/demux/repr machinery all compiling), which otherwise lands under
+    # the user's first cell. Compile it NOW, in the background: the port is already serving, so
+    # a real eval arriving mid-prewarm just serializes with it harmlessly (same total, never
+    # worse) — while an idle-spawned worker (warm pool, detach target) has it fully paid before
+    # anyone attaches. "1 + 1" exercises exactly the measured slow path; it writes no globals.
+    Threads.@spawn try
+        t0 = time()
+        # Through the TOOL entry point (not _eval_one) so the wrapper + cancel-registry +
+        # kwarg path compile too — the layers a real first request would otherwise JIT.
+        __slate_eval("1 + 1"; filename = "cell:__prewarm__")
+        @info "slate worker: eval pipeline prewarmed" ms = round(Int, (time() - t0) * 1000)
+    catch e
+        @warn "slate worker: prewarm failed (harmless — first cell just pays the JIT)" exception = e
+    end
     # `serve` runs the message loop on a spawned thread and returns — but this is
     # a non-interactive `-e` process, so we must block to keep it alive until a
     # remote `:shutdown` (which calls `exit(0)` from the gate task). Flush each
