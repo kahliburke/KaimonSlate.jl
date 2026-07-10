@@ -15,6 +15,7 @@
 // animation loop re-paints without re-laying-out.
 let _dagChart = null, _dagRaf = 0, _dagAnim = 0;
 let _dagAnyRunning = false, _dagSel = null, _dagCtx = null;   // _dagCtx: {m, L, P} of the last render (click/tooltip)
+let _dagHoverId = null, _dagHoverIdx = null, _dagEdgeV = 0;   // hover lineage: node id → highlighted edge indices
 const _dagRunning = new Set();          // ids running RIGHT NOW (cellrun → celldone)
 
 const _dagOpen = () => document.getElementById('dagpane').classList.contains('open');
@@ -234,6 +235,37 @@ function dagHeat() {
 function _dagHeatBtn() { const b = document.getElementById('dagheat'); if (b) b.classList.toggle('on', _dagHeatOn); }
 
 function _dagState(c) { return _dagRunning.has(c.id) ? 'running' : (c.state || 'stale'); }
+
+// Hover lineage with DIRECTION + DISTANCE: edges on paths into the node (upstream)
+// vs out of it (downstream), each with hop count — direct neighbors render bold,
+// further hops fall off. Returns Map(edge index → {up, d}).
+const _DAG_UP_HUE = '#e2a63d', _DAG_DOWN_HUE = '#3fc6c0';   // amber = feeds it · teal = fed by it
+function _dagLineageIdx(L, id) {
+  if (!id) return null;
+  const upD = new Map([[id, 0]]), dnD = new Map([[id, 0]]);
+  let ch = true;
+  while (ch) {
+    ch = false;
+    L.links.forEach(l => {
+      if (upD.has(l.t)) { const d = upD.get(l.t) + 1; if (!upD.has(l.s) || upD.get(l.s) > d) { upD.set(l.s, d); ch = true; } }
+      if (dnD.has(l.s)) { const d = dnD.get(l.s) + 1; if (!dnD.has(l.t) || dnD.get(l.t) > d) { dnD.set(l.t, d); ch = true; } }
+    });
+  }
+  const idx = new Map();
+  L.links.forEach((l, i) => {
+    if (upD.has(l.t)) idx.set(i, { up: true, d: upD.get(l.t) + 1 });
+    else if (dnD.has(l.s)) idx.set(i, { up: false, d: dnD.get(l.s) + 1 });
+  });
+  return idx;
+}
+function _dagSetHover(id) {
+  if (_dagHoverId === id) return;
+  _dagHoverId = id;
+  _dagHoverIdx = _dagCtx ? _dagLineageIdx(_dagCtx.L, id) : null;
+  if (!_dagChart || !_dagCtx) return;
+  _dagEdgeV++;                                       // bump forces the edge renderItems to re-evaluate
+  try { _dagChart.setOption({ series: [{ id: 'dag-edges', data: _dagCtx.L.links.map((_, i) => [i, _dagEdgeV]) }] }); } catch (_) {}
+}
 const _dagCost = c => (c.stats && c.stats.total_ms) || c.duration || 0;
 
 // Layout → {nodes:[{c,b,x,y}], links:[{s,t,pts}], gw, gh}. With dagre: real Sugiyama
@@ -397,6 +429,7 @@ function _dagOption() {
   const stOf = id => _dagState(m.byId[id]);
   _dagAnyRunning = m.nodes.some(c => _dagState(c) === 'running');
   _dagCtx = { m, L, P };
+  _dagHoverIdx = _dagLineageIdx(L, _dagHoverId);   // keep hover lineage valid across live re-renders
   const cnt = document.getElementById('dagcount');
   if (cnt) cnt.textContent = `${L.nodes.length} cells · ${L.links.length} edges`;
 
@@ -457,27 +490,34 @@ function _dagOption() {
         zoomOnMouseWheel: false, moveOnMouseMove: true, moveOnMouseWheel: false },
     ],
     series: [
-      { // edges under nodes — dagre's routed waypoints, smoothed, with an arrowhead at the target border
+      { // edges under nodes — routed/S-curve waypoints, smoothed, arrowhead at the target border
         type: 'custom', id: 'dag-edges', name: 'edges', coordinateSystem: 'cartesian2d', z: 1,
-        data: L.links.map((_, i) => [i]),
+        data: L.links.map((_, i) => [i, _dagEdgeV]),
         renderItem: (params, api) => {
           const l = L.links[params.dataIndex];
           // hot ONLY when the SOURCE is computing (its result will flow out along this edge) —
           // a running leaf must not light up its inbound edges. Edges live in their own violet
           // family; only an errored source overrides (red). Setup edges (using/import — every
           // cell has one) are background whispers: faint, thin, no layout influence.
+          // Hovering a node brightens its transitive lineage and fades everything else.
           const s = stOf(l.s), hot = !l.dim && s === 'running';
-          const col = s === 'errored' ? P.errored : hot ? P.edgeHot : P.edge;
+          const hv = _dagHoverIdx ? _dagHoverIdx.get(params.dataIndex) : null;
+          const faded = _dagHoverIdx && !hv;
+          const col = s === 'errored' ? P.errored
+                    : hv ? (hv.up ? _DAG_UP_HUE : _DAG_DOWN_HUE)   // amber upstream · teal downstream
+                    : hot ? P.edgeHot : P.edge;
+          const lw = hv ? (hv.d === 1 ? 2.8 : 1.8) : l.dim ? 0.8 : hot ? 2.4 : 1.4;
+          const op = hv ? (hv.d === 1 ? 0.98 : Math.max(0.3, 0.62 - 0.12 * (hv.d - 2)))
+                   : faded ? (l.dim ? 0.04 : 0.15) : l.dim ? 0.12 : hot ? 0.95 : 0.6;
           const pts = l.pts.map(p => api.coord(p));
           const n = pts.length, x1 = pts[n - 2][0], y1 = pts[n - 2][1], x2 = pts[n - 1][0], y2 = pts[n - 1][1];
           const len = Math.hypot(x2 - x1, y2 - y1) || 1, ux = (x2 - x1) / len, uy = (y2 - y1) / len;
           const ah = 7, aw = 3.4, bx = x2 - ux * ah, by = y2 - uy * ah;
           return { type: 'group', children: [
             { type: 'polyline', shape: { points: pts.slice(0, -1).concat([[bx, by]]), smooth: 0.22 },
-              style: { fill: 'none', stroke: col, lineWidth: l.dim ? 0.8 : hot ? 2.4 : 1.4,
-                       opacity: l.dim ? 0.12 : hot ? 0.95 : 0.6 } },
+              style: { fill: 'none', stroke: col, lineWidth: lw, opacity: op } },
             { type: 'polygon', shape: { points: [[x2, y2], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
-              style: { fill: col, opacity: l.dim ? 0.15 : hot ? 0.95 : 0.7 } },
+              style: { fill: col, opacity: Math.min(1, op + 0.1) } },
           ] };
         },
       },
@@ -594,6 +634,8 @@ function _dagRender() {
       _dagCard(id, p.event ? p.event.offsetX : 0, p.event ? p.event.offsetY : 0);   // click → details card
     });
     _dagChart.getZr().on('click', e => { if (!e.target) _dagCardClose(); });        // empty canvas → dismiss
+    _dagChart.on('mouseover', p => { if (p.seriesName === 'nodes' && _dagCtx) _dagSetHover(_dagCtx.L.nodes[p.dataIndex].c.id); });
+    _dagChart.on('mouseout', p => { if (p.seriesName === 'nodes') _dagSetHover(null); });
     // Gentle wheel zoom, anchored on the cursor. ECharts' built-in wheel rate is fixed
     // (~1.4× per tick) and way too hot; exp(-ΔY·k) is mild per tick AND continuous for
     // trackpad pixel deltas. Both axes get the same factor → aspect stays locked.
