@@ -201,16 +201,27 @@ end
 
 function _unpack_tree(packed::Vector{UInt8}, dest::AbstractString)
     mkpath(dest)
+    # Path-escape guard prefix — MUST use the OS separator: `normpath` emits backslashes on
+    # Windows, so the old hardcoded "/" prefix rejected EVERY entry there (a ghost expansion:
+    # empty folder, then the printed instantiate manufactured an empty Project.toml).
+    sep = Base.Filesystem.path_separator
     base = normpath(dest)
+    endswith(base, sep) || (base *= sep)
     io = IOBuffer(transcode(GzipDecompressor, packed))
+    written = 0; rejected = 0
     while !eof(io)
         rel = String(read(io, ntoh(read(io, UInt32))))
         data = read(io, ntoh(read(io, UInt64)))
         out = normpath(joinpath(dest, rel))
-        startswith(out, base * (endswith(base, "/") ? "" : "/")) || continue   # no path-escape
+        startswith(out, base) || (rejected += 1; continue)   # no path-escape
         mkpath(dirname(out))
         write(out, data)
+        written += 1
     end
+    # A malicious archive may lose a few entries to the guard; losing ALL of them means the
+    # guard itself is broken — fail loudly instead of leaving a convincing empty expansion.
+    written == 0 && rejected > 0 &&
+        error("bundle unpack: the path guard rejected all $(rejected) entries — this is a Slate bug, please report it")
     return dest
 end
 
@@ -604,9 +615,12 @@ function expand(jl_path::AbstractString; target::AbstractString = "", force::Boo
     co = _extract_bundle!(b64, tdir)
     isrepo = isdir(joinpath(tdir, ".git"))
     @info "Expanded standalone notebook" target = tdir
+    # Double quotes throughout: cmd.exe treats single quotes as literal characters, so the
+    # -e '…' form hands Windows users a broken command. Double quotes parse on cmd,
+    # PowerShell, AND POSIX shells (nothing in the literal needs escaping in any of them).
     println("Expanded to: $tdir\n" *
             "  • notebook:   $(co.notebook)\n" *
-            "  • instantiate: julia --project=$(co.envdir) -e 'using Pkg; Pkg.instantiate()'" *
+            "  • instantiate: julia --project=\"$(co.envdir)\" -e \"using Pkg; Pkg.instantiate()\"" *
             (isdir(joinpath(tdir, "local")) ? "\n  • local package source: $(joinpath(tdir, "local"))" : "") *
             (isrepo ? "\n  • git checkout wired to origin (matching SHAs) — ready to branch & PR" : "") * "\n")
     return tdir

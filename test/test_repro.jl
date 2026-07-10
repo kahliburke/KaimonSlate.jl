@@ -185,6 +185,31 @@ end
 struct LiveNotebook end
 include(joinpath(@__DIR__, "..", "src", "export_bundle.jl"))
 
+@testset "_unpack_tree path guard (Windows ghost-expansion regression)" begin
+    # The guard compares normpath'd output paths against the destination prefix. On Windows
+    # normpath emits BACKSLASHES, and a hardcoded "/" in the prefix silently rejected every
+    # entry — expand() produced a convincing empty folder and a printed instantiate that
+    # manufactured an empty Project.toml (beta-tester report, 2026-07). The prefix is now
+    # built with the OS separator, and rejecting ALL entries is a loud error, never silence.
+    pack(entries) = begin
+        io = IOBuffer()
+        for (p, d) in entries
+            pb = Vector{UInt8}(p); db = Vector{UInt8}(d)
+            write(io, hton(UInt32(length(pb))), pb, hton(UInt64(length(db))), db)
+        end
+        transcode(GzipCompressor, take!(io))
+    end
+    d = mktempdir()
+    _unpack_tree(pack([("ok.txt", "fine"), ("../evil.txt", "nope"), ("sub/deep.txt", "ok")]), d)
+    @test read(joinpath(d, "ok.txt"), String) == "fine"        # legitimate entries land
+    @test isfile(joinpath(d, "sub", "deep.txt"))
+    @test !ispath(joinpath(dirname(d), "evil.txt"))            # escape entry dropped
+    d2 = mktempdir()
+    err = try; _unpack_tree(pack([("../a.txt", "x"), ("../b.txt", "y")]), d2); ""
+          catch e; sprint(showerror, e); end
+    @test occursin("path guard rejected all", err)             # all-rejected → loud, not empty
+end
+
 @testset "self-contained bundle round-trip" begin
     cells = "#%% code id=a\nusing Foo\nFoo.greet()\n"
 
