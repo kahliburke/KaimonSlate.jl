@@ -85,9 +85,10 @@ function _radar!(opt, layout, indicators, vals)
 end
 
 """
-    series(kind, args...; name=nothing, kwargs...)
+    series(kind, args...; name=nothing, kwargs...) -> EChartSeries
 
-Build one series for [`echart`](@ref). `kind` is an ECharts series type:
+Build one series for the composable `echart(series(…), series(…); …)` form — combine different
+kinds and axes in a single chart. `kind` is an ECharts series type:
 
 - `:line` / `:bar` / `:area` `(x, y)` — string x → category axis, numeric x → value axis
 - `:scatter` `(x, y)`
@@ -98,8 +99,13 @@ Build one series for [`echart`](@ref). `kind` is an ECharts series type:
   `["Allocated" => […], "Actual" => […]]` for several rings
 - `:boxplot` `(categories, data)` — each `data[i]` is `[min,Q1,med,Q3,max]` or raw samples
 
-Any other `kind` falls back to `data = args[1]`. Extra kwargs (`smooth`, `stack`,
-`symbolSize`, `areaStyle`, `markLine`, …) splice into the series option verbatim.
+Any other `kind` falls back to `data = args[1]`. `name=` labels the series for the legend; every
+extra kwarg (`smooth`, `stack`, `symbolSize`, `yAxisIndex`, `areaStyle`, `markLine`, `lineStyle`, …)
+splices into the series option verbatim.
+
+    echart(series(:bar,  x, a; name="obs", stack="t"),
+           series(:line, x, b; name="fit", smooth=true, yAxisIndex=1); legend=true,
+           yAxis=[(name="obs",), (name="fit", type=:log)])
 """
 function series(kind::Symbol, args...; name = nothing, kwargs...)
     k = String(kind)

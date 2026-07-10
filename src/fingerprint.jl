@@ -88,7 +88,8 @@ end
 
 A canonical, session-stable content hash (SHA-256 hex) of the given value(s) — `isequal`-style
 semantics: Dicts/Sets are order-independent, `NaN ≡ NaN`, integer widths widen, `missing` and
-`nothing` are distinct. Use it to assert a restored/recomputed value is REALLY the same:
+`nothing` are distinct. The robust way to assert a restored/recomputed/transferred value is REALLY
+the same — unlike `hash`, which leaks Dict order and session state.
 `slate_fingerprint(df, params)` in a cell gives one comparable line across runs, sessions, and
 worker restarts.
 """

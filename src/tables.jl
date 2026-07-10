@@ -282,37 +282,45 @@ end
 # ── Public helper (injected into the cell namespace as `slate_table`) ─────────
 
 """
-    slate_table(data; format=…, align=…, coltype=…, viz=…) -> SlateTable
-    slate_table(columns, rows; …) -> SlateTable
+    slate_table(data; format, align, coltype, viz, paged, page_size, export_rows) -> SlateTable
+    slate_table(columns, rows; format, align, coltype, viz, export_rows)          -> SlateTable
 
-Build an interactive table. `data` may be a DataFrame / any Tables.jl source, a
-`Vector` of `NamedTuple` rows, or a `Dict`/`NamedTuple` of equal-length column
-vectors. The two-argument form takes explicit column names plus `rows` (a vector
-of row vectors/tuples, or an `AbstractMatrix`). Cells are reduced to JSON-safe
-scalars; numbers stay numeric so the browser sorts them numerically.
+Build an interactive, sortable, filterable, paged table. RETURN it from a cell to render it — a bare
+DataFrame / Tables.jl source already auto-renders, so you only call `slate_table` explicitly to pass
+options. `data` may be a DataFrame / any Tables.jl source, a `Vector` of `NamedTuple` rows, or a
+`Dict`/`NamedTuple` of equal-length column vectors. The two-argument form takes explicit `columns`
+(names) plus `rows` (a vector of row vectors/tuples, or an `AbstractMatrix`). Cells are reduced to
+JSON-safe scalars; numbers stay numeric so the browser sorts them numerically.
 
 Each column's physical type (`:int`/`:float`/`:bool`/`:date`/`:string`) and default alignment are
-inferred. Opt into display formatting per column via `format` (a NamedTuple/Dict keyed by column
-name); a value is a preset `Symbol` or a `NamedTuple` naming a `kind` plus overrides. `align` and
-`coltype` likewise override the inferred defaults:
+inferred. The overlay options each take a NamedTuple/Dict keyed by column NAME — a ONE-entry
+NamedTuple needs its trailing comma: `(Revenue = :currency,)`:
 
-    slate_table(df; format = (Revenue = :currency, Margin = (kind=:percent, digits=1)),
-                    align  = (Product = :left,))
+  • `format` — per-column display formatting. A value is a preset `Symbol`, or a `NamedTuple`/`Dict`
+    naming a `kind` plus overrides `(digits, sep, prefix, suffix)`. Presets:
+    `:currency` (\$, 2 dp, thousands-grouped) · `:percent` (1 dp) · `:integer` (grouped) ·
+    `:fixed` (2 dp) · `:scientific` (3 sig figs) · `:bytes` (KB/MB/GB…).
+  • `align` — `:left` / `:right` / `:center`, overriding the type-inferred default.
+  • `coltype` — override the inferred physical type (e.g. force an id column to `:string`).
+  • `viz` — an in-cell visualization for a NUMERIC column, scaled over its min→max: `:bar`
+    (a proportional bar behind the value) or `:heat` (a background shaded by magnitude).
 
-`viz` adds an in-cell visualization to a numeric column, scaled over its min→max: `:bar` (a
-proportional bar behind the value) or `:heat` (a background shaded by magnitude):
+Example combining several:
 
-    slate_table(df; format = (Revenue = :currency,), viz = (Revenue = :bar, Margin = :heat))
+    slate_table(df; format = (Revenue = :currency, Margin = (kind = :percent, digits = 1)),
+                    align  = (Product = :left,),
+                    viz    = (Revenue = :bar, Margin = :heat))
 
-`export_rows = n` caps the rows shown in FIXED exports (PDF / markdown / static HTML) to the first
-`n` (with a "showing n of N" note); the live table stays fully paginated.
+`paged = true` builds a SERVER-paged table: the provider stays where cells evaluate and the browser
+fetches one `page_size`-row page at a time, so the full result set never crosses the wire (use it for
+large data — `slate_query(conn, sql)` does the same for a SQL source). `export_rows = n` caps the
+rows shown in FIXED exports (PDF / markdown / static HTML) to the first `n` (with a "showing n of N"
+note); the live table stays fully paginated.
 """
-
-# `paged=true` builds a server-paged table (provider lives where cells eval; the
-# browser fetches one page at a time) — see paged.jl. Otherwise the eager form
-# below materializes all rows (capped). `page_size` sets the paged page length.
 function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = nothing,
                      format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple())
+    # `paged=true` → a server-paged provider (paged.jl), one page fetched at a time; otherwise the
+    # eager form below materializes all rows (capped). `page_size` sets the paged page length.
     if paged
         prov = _inmemory_provider(x)
         prov === nothing && throw(ArgumentError(

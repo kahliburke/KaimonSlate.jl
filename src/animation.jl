@@ -200,21 +200,30 @@ _overlay_point(p) = length(p) >= 3 ? [Float64(p[1]), Float64(p[2]), Int(p[3])] :
 
 # ── Public API ──────────────────────────────────────────────────────────────────────────────────
 """
-    animate(frames; kind=:heatmap, fps=30, colormap=:viridis, clim=:global, transform=nothing,
+    animate(frames; kind=:heatmap, fps=30, colormap=:auto, clim=:global, transform=nothing,
             dither=true, bits=8, x=nothing, y=nothing, title="", colorbar=true,
             loop=true, autoplay=false, overlay=nothing, maxbytes=128_000_000) -> Animation
 
-Build a client-side-playable animation from an already-computed stack of frames. The heavy compute
-is yours and runs once; `animate` only quantizes + packages. Playback happens entirely in the
-browser. See ANIMATION_PIPELINE_DESIGN.md.
+Precompute a stack of frames ONCE, then play it back entirely in the browser on a WebGL canvas —
+nothing touches Julia during playback, so a slow simulation still plays at 60 fps. The heavy compute
+is yours and runs once; `animate` only quantizes + packages.
 
-`kind=:heatmap` (default) takes a vector of 2-D scalar matrices, colormapped via `colormap`/`clim`.
-`kind=:image` takes a vector of H×W color matrices (e.g. `Matrix{RGB}` from VideoIO.jl/Images.jl)
-or H×W×3 arrays — real video/image frames, played back as true color (no colormap).
+`kind=:heatmap` (default) takes a vector of 2-D scalar matrices, colormapped via `colormap`/`clim`,
+where `clim` is `:global` (comparable frames) | `:symmetric` (signed fields → diverging map; skips
+`transform`) | `:perframe` | `(lo, hi)`. `kind=:image` takes real color frames — a vector of H×W
+color matrices (e.g. `Matrix{RGB}` from VideoIO.jl/Images.jl) or H×W×3 arrays — played back true
+color, no colormap.
 
-`overlay` (either kind) draws frame-synced markers on top — a vector with one entry per frame, each
-a list of `(x, y[, id])` points in frame pixel space; `id` keeps a point's color/trail stable across
-frames, e.g. a tracked object's identity.
+`overlay` (either kind) draws frame-synced markers on top: a vector with one entry per frame, each a
+list of `(x, y[, id])` points in frame pixel space; `id` keeps a point's color/trail stable across
+frames, e.g. a tracked object's identity. Pair with `playhead` to react to the current frame.
+
+    frames = [density(t) for t in times]          # heavy compute, once (cache it)
+    animate(frames; clim=:symmetric, x=r, y=r, title="ψ(t)", autoplay=true)
+
+    vidframes = [read(reader) for _ in 1:n]        # Matrix{RGB{N0f8}} from VideoIO.jl
+    tracks = [[(x1,y1,1), (x2,y2,2)] for _ in 1:n] # per-frame (x,y,id) detections
+    animate(vidframes; kind=:image, overlay=tracks, fps=25, title="tracked beetles")
 """
 function animate(frames::AbstractVector;
                  kind::Symbol = :heatmap, fps::Real = 30, times = nothing,

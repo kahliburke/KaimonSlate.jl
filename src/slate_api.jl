@@ -13,7 +13,38 @@ struct SlateApiEntry
     name::String
     category::String
     signature::String
-    doc::String          # markdown: a sentence or two + at least one example
+    doc::String          # markdown fallback: a sentence or two + at least one example
+    docbinding::Union{Nothing,Base.Docs.Binding}   # a REAL function whose own docstring is the SSOT
+end
+# Most helpers are injected DSL constructs with no reachable docstring → the registry `doc` IS the
+# source. A few (`slate_table`, `slate_query`, …) are real exported functions: point `docbinding` at
+# them and their OWN docstring drives the api tool / search / prompt, so the two can never drift.
+SlateApiEntry(name, category, signature, doc) = SlateApiEntry(name, category, signature, doc, nothing)
+# Backed ENTIRELY by a real function's own docstring — no signature or prose duplicated here. The
+# docstring (which leads with its own signature lines) is the single source rendered everywhere.
+SlateApiEntry(name, category, binding::Base.Docs.Binding) =
+    SlateApiEntry(name, category, "", "", binding)
+
+# The markdown shown for an entry: a real function's own docstring when `docbinding` is set and it
+# carries one, else the registry `doc`. Empty only if a binding entry's function somehow lost its doc.
+function _entry_doc(e::SlateApiEntry)
+    b = e.docbinding
+    b === nothing && return e.doc
+    return Base.Docs.hasdoc(b.mod, b.var) ? strip(string(Base.Docs.doc(b))) : e.doc
+end
+
+# The one-line signature for the reference/index. Registry entries carry their own; binding-backed
+# entries have none of their own (the docstring already leads with the signature), so return "" and
+# renderers skip the separate signature line.
+_entry_signature(e::SlateApiEntry) = e.signature
+
+# One entry rendered to markdown: its `signature` (if any) then its doc — the live docstring for
+# binding-backed entries, the registry `doc` otherwise. Shared by the api tool, the filtered form,
+# and the docs drill-down so every surface shows exactly the same text.
+function _entry_markdown(e::SlateApiEntry)
+    sig = _entry_signature(e)
+    doc = _entry_doc(e)
+    isempty(sig) ? doc : string("`", sig, "`\n\n", doc)
 end
 
 const SLATE_API = SlateApiEntry[
@@ -84,39 +115,11 @@ const SLATE_API = SlateApiEntry[
         coordinate system — the dots stop following the map); pass an explicit `progressive=N` to
         re-enable for huge data.
         Worked examples: `examples/echarts_dsl.jl`, `examples/seismic_month.jl`. See also `series`."""),
-    SlateApiEntry("series", "Charts", "series(kind, x, y; name, smooth, stack, symbolSize, …) -> EChartSeries",
-        """One series for the composable `echart(series(…), series(…); …)` form — combine different
-        kinds/axes in one chart. Same positional data shapes as `echart`'s Express kinds (`:line`/`:bar`/
-        `:area` `(x,y)`, `:scatter` `(x,y)`, `:pie` `(labels,vals)`, `:heatmap` `(z)`/`(xs,ys,z)`,
-        `:candlestick` `(dates,ohlc)`, `:radar` `(inds,vals)`, `:boxplot` `(cats,data)`; any other kind
-        via `series(:kind; data=…)`). `name=` labels it for the legend; every extra kwarg (`smooth`,
-        `stack`, `symbolSize`, `yAxisIndex`, `markLine`, `lineStyle`, …) splices into the series option.
-        ```julia
-        echart(series(:bar, x, a; name="obs", stack="t"),
-               series(:line, x, b; name="fit", smooth=true, yAxisIndex=1); legend=true,
-               yAxis=[(name="obs",), (name="fit", type=:log)])
-        ```"""),
+    # Real functions — documented in their own docstrings (echarts_dsl.jl / animation.jl).
+    SlateApiEntry("series", "Charts", Base.Docs.Binding(ReportEngine, :series)),
 
-    # ── Animation ────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("animate", "Animation", "animate(frames; kind=:heatmap, fps=30, colormap=:auto, clim=:global, transform, dither, x, y, title, loop, autoplay, overlay) -> Animation",
-        """Precompute a stack of frames ONCE, then play it back entirely in the browser on a WebGL
-        canvas — nothing touches Julia during playback, so a slow simulation still plays at 60 fps.
-        `kind=:heatmap` (default) takes 2-D scalar matrices, colormapped via `colormap`/`clim`:
-        `:global` (comparable frames) | `:symmetric` (signed fields → diverging map; skips `transform`)
-        | `:perframe` | `(lo,hi)`. `kind=:image` takes real color frames — a `Vector` of H×W color
-        matrices (e.g. `Matrix{RGB}` from VideoIO.jl/Images.jl) or H×W×3 arrays — played back true
-        color, no colormap. `overlay` draws frame-synced markers (e.g. tracked positions) on top of
-        either kind: a `Vector` with one entry per frame, each a list of `(x, y[, id])` points in
-        frame pixel space; `id` keeps a point's color/trail stable across frames. Pair with `playhead`
-        to react to the current frame.
-        ```julia
-        frames = [density(t) for t in times]          # heavy compute, once (cache it)
-        animate(frames; clim=:symmetric, x=r, y=r, title="ψ(t)", autoplay=true)
-
-        vidframes = [read(reader) for _ in 1:n]        # Matrix{RGB{N0f8}} from VideoIO.jl
-        tracks = [[(x1,y1,1), (x2,y2,2)] for _ in 1:n] # per-frame (x,y,id) detections
-        animate(vidframes; kind=:image, overlay=tracks, fps=25, title="tracked beetles")
-        ```"""),
+    # ── Animation ── real function, documented in its own docstring (animation.jl) ─────────────────
+    SlateApiEntry("animate", "Animation", Base.Docs.Binding(ReportEngine, :animate)),
 
     # ── Widgets (@bind) ────────────────────────────────────────────────────────────────────────────
     SlateApiEntry("@bind", "Widgets", "@bind name Widget(…)",
@@ -193,11 +196,9 @@ const SLATE_API = SlateApiEntry[
         """Cooperatively stop a running `@onclick` handler (it stops at its next `pause`). `cancel(:level)`."""),
 
     # ── Tables ─────────────────────────────────────────────────────────────────────────────────────
-    SlateApiEntry("slate_table", "Tables", "slate_table(df; …) -> interactive table",
-        """Render a DataFrame / table as an interactive sortable, filterable, paged table (server-paged
-        for big data). Just return it from a cell. `slate_table(df)`."""),
-    SlateApiEntry("slate_query", "Tables", "slate_query(…) -> paged provider",
-        """A server-paged table provider for large/lazy data — only the visible page crosses the wire."""),
+    # Real exported functions — documented ONCE in their own docstrings (tables.jl / paged.jl).
+    SlateApiEntry("slate_table", "Tables", Base.Docs.Binding(ReportEngine, :slate_table)),
+    SlateApiEntry("slate_query", "Tables", Base.Docs.Binding(ReportEngine, :slate_query)),
 
     # ── Assets & front-end ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("@asset", "Assets & front-end", "@asset \"path\" -> String   ·   @asset bytes \"path\" -> Vector{UInt8}",
@@ -259,26 +260,33 @@ const SLATE_API = SlateApiEntry[
         run chip. `@progress`/`@withprogress` loops also drive it automatically.
         `for i in 1:n; slate_progress(i/n; msg=\"step \$i\"); end`."""),
 
-    # ── Fingerprints & the memo store ──────────────────────────────────────────────────────────────
-    SlateApiEntry("slate_fingerprint", "Caching", "slate_fingerprint(xs...) -> String",
-        """A canonical, session-stable content hash (SHA-256 hex) of the given value(s), with
-        `isequal`-style semantics: Dicts/Sets are order-independent, `NaN ≡ NaN`, integer widths
-        widen, `missing` and `nothing` stay distinct. The robust way to assert a restored /
-        recomputed / transferred value is REALLY the same — one comparable line across runs,
-        sessions, and worker restarts (unlike `hash`, which leaks Dict order and session state).
-        `slate_fingerprint(df, params)`."""),
+    # ── Fingerprints & the memo store ── real functions, documented in their own docstrings ─────────
+    SlateApiEntry("slate_fingerprint", "Caching", Base.Docs.Binding(ReportEngine, :slate_fingerprint)),
+    SlateApiEntry("slate_memo_stats", "Caching", Base.Docs.Binding(ReportEngine, :slate_memo_stats)),
+    SlateApiEntry("slate_memo_entries", "Caching", Base.Docs.Binding(ReportEngine, :slate_memo_entries)),
 
-    SlateApiEntry("slate_memo_stats", "Caching", "slate_memo_stats() -> (; manifests, blobs, bytes, root)",
-        """Shape of the durable memo store backing this notebook's `cache` tags: entry count,
-        unique content blobs (identical values dedup to ONE blob), total on-disk bytes, and the
-        store root. In-process kernels have no durable store — all zeros."""),
-
-    SlateApiEntry("slate_memo_entries", "Caching", "slate_memo_entries(; name=\"\") -> Vector{NamedTuple}",
-        """The durable memo store's entries, newest first — one row per cached cell result:
-        `(; key, names, bytes, blobs, created)` where `names` are the globals the entry restores
-        and `blobs` their content hashes (a shared hash across rows = deduped storage).
-        `name="x"` filters to entries carrying a binding named `x`. Return it from a cell — or
-        `slate_table(slate_memo_entries())` — to see exactly what a cold open will restore."""),
+    # ── Remote execution & worker pools ──────────────────────────────────────────────────────────────
+    # A discoverability SIGNPOST for the `slate.*` AGENT tools (not cell helpers). It names each tool
+    # and its purpose so `slate_api("remote")` / `slate_search_docs("warm pool")` surface them; the full
+    # per-parameter reference is each tool's own schema (its docstring in `create_tools`).
+    SlateApiEntry("remote", "Remote & pools",
+        "slate.run_on · slate.warm_pool · slate.pools · slate.whereis · slate.remote_workers · slate.reap_worker · slate.sync_memo · slate.check_remote",
+        """Run a notebook's worker on another machine, and keep warm workers ready for instant adoption.
+        These are `slate.*` AGENT TOOLS — call the tool (they act on a notebook/host from OUTSIDE a cell;
+        cell code never calls them). Each tool's schema has the full parameters:
+          • `slate.run_on(notebook, host, scope)` — place THIS notebook's worker locally or on an SSH
+            host (transport `tunnel`|`direct`; `scope` `session`|`notebook`|`clear`). Reactivity,
+            hot-reload and streaming stay transparent. `slate.check_remote(host)` dry-runs + primes a
+            host first.
+          • `slate.warm_pool(host; n, preload)` — keep `n` prewarmed workers on `host` (optionally with
+            a replicated `preload` project) so opening a matching notebook ADOPTS one (~1s) instead of a
+            cold boot. `slate.pools()` shows configured pools + parked wires.
+          • `slate.remote_workers(host)` — a host's live roster (state + telemetry);
+            `slate.reap_worker(host, port)` kills one; `slate.whereis(notebook)` shows where a notebook
+            runs right now.
+          • `slate.sync_memo(notebook)` — push local durable-cache blobs to a `direct`-transport remote
+            so it RESTORES cached results instead of recomputing (companion to `slate_memo_stats` /
+            `slate_memo_entries`)."""),
 
     # ── Cell tags (header) ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("cell tags", "Cell tags", "#%% code id=… <tag> …    (or the 🏷 tag editor)",
@@ -290,7 +298,11 @@ const SLATE_API = SlateApiEntry[
         input actually changes). Presentation tags: `slide` (force a
         new slide), `notes` (speaker notes, presenter-only). Document-metadata ROLE tags: `title`,
         `abstract`, `bibliography` (see "front matter"). Site tags (see "site"): `home` (this notebook is
-        the published site's FRONT PAGE), `docindex` (marks where the document listing is injected). Any
+        the published site's FRONT PAGE), `docindex` (marks where the document listing is injected).
+        `needs=<id>,<id>` asserts MANUAL dependency edges on EARLIER code cells — for effects no
+        variable carries (a cell reading a DB table another cell CREATEs): the engine treats them as
+        real edges (staleness, run ordering, memo keys). Draw/remove them in the DAG pane with
+        ⌥-click (two cells to link; a dashed edge to unlink). Any
         other token is a free-form tag that round-trips. Expensive cells (≥400 ms) are otherwise
         auto-cached to disk and RESTORED after a restart instead of recomputing."""),
 
@@ -332,7 +344,7 @@ const SLATE_API = SlateApiEntry[
 # ── Renderers ──────────────────────────────────────────────────────────────────────────────────
 # Records for the semantic index: one per entry, module "Slate" so module-scoped search includes them.
 slate_api_records() = [Dict{String,Any}("module" => "Slate", "name" => e.name,
-                                        "doc" => string(e.signature, "\n\n", e.doc)) for e in SLATE_API]
+                                        "doc" => _entry_markdown(e)) for e in SLATE_API]
 
 # A content hash so the auto-indexer re-indexes only when the API docs actually change.
 slate_api_version() = string(hash(slate_api_records()); base = 16)
@@ -340,10 +352,11 @@ slate_api_version() = string(hash(slate_api_records()); base = 16)
 _api_categories() = unique(String[e.category for e in SLATE_API])
 
 # Resolve ONE Slate helper by exact name (case-insensitive; tolerant of a leading `@`). The docs UI's
-# drill-down / "Related" cross-references resolve a Slate helper's docs from THIS registry (the SSOT),
-# NOT from a live binding — a DSL helper like `Checkbox`/`@bind` is an injected constructor/macro with
-# no docstring, so a live `module_help` lookup returns "No documentation found". Returns the entry or
-# `nothing` (caller then falls back to live package help).
+# drill-down / "Related" cross-references resolve a Slate helper's docs from THIS registry FIRST — a
+# DSL helper like `Checkbox`/`@bind` is an injected constructor/macro with no reachable docstring, so a
+# live `module_help` lookup returns "No documentation found". An entry backed by `docbinding` (a real
+# function like `slate_table`) still renders that function's OWN docstring via `_entry_markdown`.
+# Returns the entry or `nothing` (caller then falls back to live package help).
 function slate_api_entry(name::AbstractString)
     n = lowercase(strip(String(name)))
     isempty(n) && return nothing
@@ -371,18 +384,21 @@ function slate_api_reference(topic::AbstractString = "")
             println(io, "## ", cat)
             for e in SLATE_API
                 e.category == cat || continue
-                println(io, "\n### ", e.name, "\n`", e.signature, "`\n\n", e.doc)
+                println(io, "\n### ", e.name, "\n", _entry_markdown(e))
             end
             println(io)
         end
         return String(take!(io))
     end
-    hits = [e for e in SLATE_API if occursin(t, lowercase(e.name)) || occursin(t, lowercase(e.category)) ||
-                                     occursin(t, lowercase(e.doc))]
+    # Match when EVERY whitespace-separated word of the topic appears somewhere in the entry's
+    # name/category/doc — so a multi-word query ("warm pool") finds `warm_pool`/`warm workers`/`pools`.
+    words = split(t)
+    hits = [e for e in SLATE_API if (c = lowercase(string(e.name, " ", e.category, " ", _entry_doc(e)));
+                                     all(w -> occursin(w, c), words))]
     isempty(hits) && return "No Slate API entry matches \"$topic\". Try `slate.api()` for the full reference, " *
                             "or `slate.search_docs(\"$topic\")`."
     for e in hits
-        println(io, "### ", e.name, "  (", e.category, ")\n`", e.signature, "`\n\n", e.doc, "\n")
+        println(io, "### ", e.name, "  (", e.category, ")\n", _entry_markdown(e), "\n")
     end
     return String(take!(io))
 end
@@ -428,7 +444,11 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
     @onclick go (for v in 0:100; level[]=v; pause(0.1) end)   # pause = cancellable; cancel(:level) stops
     @onchange n (level[] = n)          # runs on change; cell does NOT recompute
 
-## Tables — `slate_table(df)`   ·   Progress — `slate_progress(frac; msg)`
+## Tables — `slate_table(df)`  (a bare DataFrame auto-renders; sortable/filterable/paged)
+    slate_table(df; format=(Rev=:currency, Pct=(kind=:percent,digits=1)), align=(Name=:left,),
+                    viz=(Rev=:bar, Pct=:heat), paged=true)   # per-column format/align/coltype/viz +
+    #   server-paging. Presets & the full option list: `slate_api("slate_table")`. SQL source → slate_query(conn, sql)
+    #   Progress — `slate_progress(frac; msg)`
 
 ## Assets & front-end — include TRACKED files + browser modules
     @asset "app.js"        # read a file (String). Path is a LITERAL → TRACKED: edit the file and the
@@ -439,7 +459,8 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
 
 ## Cell tags (🏷 in the cell header, or `#%%` header tokens, e.g. `#%% md id=abs abstract`)
     collapsed · hidecode · trace · nocache (skip durable caching) · cache (ALWAYS persist — a pipeline
-stage restores instead of recomputing) · plus free-form tags.
+stage restores instead of recomputing) · needs=<id>,… (manual dependency edges on earlier code cells,
+for effects no variable carries, e.g. DB tables; ⌥-click two cells in the DAG pane) · plus free-form tags.
     Presentation: slide (force a new slide) · notes (speaker notes — presenter view only).
     Document metadata (ROLES): title · abstract · bibliography. Expensive cells (≥400ms) auto-cache.
 

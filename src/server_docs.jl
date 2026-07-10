@@ -111,7 +111,7 @@ function help_lookup(nb::LiveNotebook, name::AbstractString)
     # instead of "No documentation found" (the injected constructor/macro carries no docstring).
     e = slate_api_entry(name)
     if e !== nothing
-        doc = string("`", e.signature, "`\n\n", e.doc)
+        doc = _entry_markdown(e)
         return Dict{String,Any}("name" => e.name, "module" => "Slate", "kind" => "slate",
                                 "doc" => doc, "exports" => Dict{String,Any}[], "docHtml" => _doc_html(doc))
     end
