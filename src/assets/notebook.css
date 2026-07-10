@@ -139,7 +139,8 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
    cell box (cells normally clip to their rounded corners via overflow:hidden). */
 .cell.dep-up, .cell.dep-focus { overflow:visible; }
 .cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
-        margin:14px 0; background:var(--bg2); overflow:hidden; }
+        margin:14px 0; background:var(--bg2); overflow:hidden;
+        scroll-margin-top:68px; }   /* jumps (DAG/TOC/nav) land the cell HEADER below the sticky topbar, with breathing room */
 .cell.state-fresh   { border-left-color:var(--accent); }
 .cell.state-stale   { border-left-color:var(--gold); }
 .cell.state-edited  { border-left-color:var(--orange); }
@@ -763,6 +764,89 @@ body.modkey .cm-content { cursor: pointer; }
   border-left:1px solid var(--bg3); transform:translateX(100%);
   transition:transform .18s ease; z-index:60; display:flex; flex-direction:column; }
 .logpanel.open { transform:none; box-shadow:-8px 0 24px #0007; }   /* shadow only when open (see .palette) */
+/* Pipeline DAG split pane — the live dataflow graph (dag.js) docked on the right, the
+   notebook reflowing to the left half: click a node to navigate the code, watch the graph
+   recompute while you edit. The divider is mouse-resizable (--dagw, persisted). */
+.dagpane { position:fixed; z-index:60; background:var(--bg2); display:none; flex-direction:column; }
+.dagpane.open { display:flex; }
+.dagpane.dock-right { top:0; right:0; bottom:0; width:var(--dagw, 44vw);
+  border-left:1px solid var(--bg3); box-shadow:-8px 0 24px #0007; }
+.dagpane.dock-bottom { left:0; right:0; bottom:0; height:var(--dagh, 42vh);
+  border-top:1px solid var(--bg3); box-shadow:0 -8px 24px #0007; }
+.dagpane .aphead { flex:0 0 auto; }
+.daggrip { position:absolute; z-index:2; }
+.dagpane.dock-right .daggrip { left:-5px; top:0; bottom:0; width:10px; cursor:ew-resize; }
+.dagpane.dock-bottom .daggrip { top:-5px; left:0; right:0; height:10px; cursor:ns-resize; }
+.dagpane.dock-right .daggrip:hover, .dagpane.dock-right .daggrip.on {
+  background:linear-gradient(to right, transparent 30%, var(--accent) 50%, transparent 70%); opacity:.6; }
+.dagpane.dock-bottom .daggrip:hover, .dagpane.dock-bottom .daggrip.on {
+  background:linear-gradient(to bottom, transparent 30%, var(--accent) 50%, transparent 70%); opacity:.6; }
+.dagcanvas { flex:1; min-height:0; }
+.dagcanvas canvas { cursor:grab; }   /* pan affordance; ECharts swaps to pointer over nodes */
+/* Node details card — click a node for full run statistics + actions (⇧-click navigates). */
+.dagcard { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:80;
+  background:var(--bg); border:1px solid var(--border); border-radius:12px;
+  padding:14px 18px; box-shadow:0 18px 52px #000c; font-size:.92rem;
+  width:760px; max-width:94vw; max-height:88vh; overflow:auto; }
+.dagcard-thumb { display:block; max-width:100%; max-height:440px; margin:6px auto; border-radius:8px;
+  background:#fff0; }
+.dagcard-grid { grid-template-columns:1fr 1fr 1fr 1fr; }   /* four condensed chips in one row */
+.dagcard-mini { border-collapse:collapse; font-size:.72rem; font-family:'Cascadia Code',monospace; margin:4px 0;
+  width:100%; }
+.dagcard-mini th { color:var(--dim); text-align:left; padding:2px 8px 2px 0; border-bottom:1px solid var(--border);
+  font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:110px; }
+.dagcard-mini td { padding:2px 8px 2px 0; color:var(--text); white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; max-width:110px; }
+.dagcard-h { display:flex; gap:8px; align-items:baseline; margin:-10px -12px 7px; padding:8px 12px 7px;
+  border-bottom:1px solid var(--border); border-left:3px solid var(--accent); border-radius:10px 10px 0 0;
+  background:var(--bg2); }
+.dagcard-kico { flex:0 0 auto; }
+.dagcard-jump { cursor:pointer; }
+.dagcard-jump:hover { color:var(--accent); text-decoration:underline; }
+.dagcard-st { font-size:.72rem; font-weight:700; }
+.dagcard-kind { margin-left:auto; font-size:.7rem; font-weight:600; opacity:.9; }
+.dagcard-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px 6px; margin:6px 0; }
+.dagchip { background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:3px 7px;
+  display:flex; flex-direction:column; gap:0; min-width:0; }
+.dagchip span { color:var(--dim); font-size:.62rem; text-transform:uppercase; letter-spacing:.04em; }
+.dagchip b { color:var(--text); font-size:.76rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dagcard-sec { color:var(--dim); font-size:.62rem; text-transform:uppercase; letter-spacing:.05em; margin:7px 0 2px; }
+.dagcard-dim { color:var(--dim); font-size:.74rem; margin:6px 0; }
+.dagspark { display:block; margin:2px 0; }
+.dagcard-defs { color:var(--dim); font-size:.72rem; font-family:'Cascadia Code',monospace; margin:1px 0;
+  max-height:60px; overflow:auto; word-break:break-word; }
+.dagcard-err { color:var(--red); background:#2a1215; border-radius:5px; padding:5px 7px; font-size:.7rem;
+  white-space:pre-wrap; word-break:break-word; max-height:110px; overflow:auto; margin:4px 0; }
+.dagcard-acts { display:flex; gap:6px; margin-top:9px; }
+.dagcard-acts button { background:var(--bg3); border:1px solid var(--border); color:var(--text); border-radius:6px;
+  padding:4px 11px; cursor:pointer; font-size:.75rem; }
+.dagcard-acts button:hover { border-color:var(--accent); color:var(--accent); }
+#dagheat.on { background:var(--accent); color:#fff; }
+/* ⚙ graph display settings — click popover with checkboxes */
+.daggear { position:relative; cursor:pointer; }
+.daggearpop { display:none; position:absolute; right:-6px; top:calc(100% + 8px); width:280px; z-index:7;
+  background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:10px 12px;
+  box-shadow:0 12px 32px #000c; text-align:left; font-weight:400; font-size:.78rem; line-height:1.7;
+  color:var(--text); cursor:default; }
+.daggearpop.open { display:block; }
+.daggearpop label { display:flex; align-items:center; gap:7px; cursor:pointer; }
+.daggearpop .dhdim { color:var(--dim); font-size:.7rem; }
+/* ? cheatsheet — instant styled popover (no native-tooltip delay). */
+.daghelp { cursor:help; text-align:center; font-weight:700; position:relative; }
+.daghelppop { display:none; position:absolute; right:-6px; top:calc(100% + 8px); width:300px; z-index:7;
+  background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:10px 12px;
+  box-shadow:0 12px 32px #000c; text-align:left; font-weight:400; font-size:.74rem; line-height:1.65;
+  color:var(--text); cursor:default; }
+.daghelp:hover .daghelppop { display:block; }
+.daghelppop kbd { background:var(--bg3); border:1px solid var(--border); border-bottom-width:2px; border-radius:4px;
+  padding:0 6px; font-size:.68rem; font-family:'Cascadia Code',monospace; }
+.daghelppop .dhsec { color:var(--dim); font-size:.62rem; text-transform:uppercase; letter-spacing:.05em; margin:7px 0 1px; }
+.daghelppop .dhsw i { display:inline-block; width:10px; height:10px; border-radius:3px; margin:0 4px 0 10px; vertical-align:-1px; }
+.daghelppop .dhsw i:first-child { margin-left:0; }
+/* true split: the notebook reflows around the docked pane, nothing hides */
+body.dag-open.dag-right .page { margin-right:var(--dagw, 44vw); }
+body.dag-open.dag-right .topbar { padding-right:calc(var(--dagw, 44vw) + 20px); }   /* toolbar stays reachable */
+body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); }
 /* Blocking package-install overlay — the notebook is frozen while the worker resolves/precompiles. */
 .pkginstall-bg { position:fixed; inset:0; z-index:95; display:none; align-items:center; justify-content:center;
   background:rgba(5,8,16,.55); backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px); }

@@ -10,5 +10,6 @@
   "signals-core": { "version": "1.8.0",   "base": "https://cdn.jsdelivr.net/npm/@preact/signals-core@{version}/" },
   "htm":          { "version": "3.1.1",   "base": "https://cdn.jsdelivr.net/npm/htm@{version}/" },
 
-  "html2canvas":  { "version": "1.4.1",   "base": "https://cdn.jsdelivr.net/npm/html2canvas@{version}/dist/" }
+  "html2canvas":  { "version": "1.4.1",   "base": "https://cdn.jsdelivr.net/npm/html2canvas@{version}/dist/" },
+  "dagre":        { "version": "3.0.0",   "base": "https://cdn.jsdelivr.net/npm/@dagrejs/dagre@{version}/dist/" }
 }

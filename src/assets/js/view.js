@@ -386,6 +386,7 @@ function patchCells(cells) {
     }
     if (!_conflicted) { renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] }); }
   });
+  window.onCellsPatched && window.onCellsPatched(cells);       // states/durations moved (DAG panel)
 }
 // `cellpre:` — an agent add/edit, shown BEFORE its eval finishes. Upsert by id: replace an
 // existing cell in place (edit → the new source renders now), or splice a new one at `index`
@@ -447,6 +448,7 @@ function _publishState(state) {
                                                 // this first ran (the boot reload() is async).
   if (selectedId && !(state.cells || []).some(c => c.id === selectedId)) selectedId = null;   // dropped/renamed
   window.slateStore && window.slateStore.applyState(state);   // → Preact re-renders #nb reactively
+  window.onNbState && window.onNbState(state);                // graph-shaped consumers (DAG panel)
   updateChrome(state);
 }
 // Topbar/banner bits that live outside #nb (title, worker dot, vscode link, hydrating banner).

@@ -32,6 +32,7 @@
 <!-- CodeMirror 6 (editor + Lezer Julia highlighting), pre-bundled into one local artifact. -->
 <script src="/assets/js/cm6.bundle.js"></script>
 <script src="/assets/vendor/echarts/echarts.min.js"></script>
+<script src="/assets/vendor/dagre/dagre.min.js"></script>
 <link rel="stylesheet" href="/assets/vendor/katex/katex.min.css"/>
 <script defer src="/assets/vendor/katex/katex.min.js"></script>
 <script defer src="/assets/vendor/katex/contrib/auto-render.min.js"></script>
@@ -51,6 +52,7 @@
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
   <button onclick="enterPresent()" title="present this notebook as a slide deck (⌘⇧P)">▶ Present</button>
   <button onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
+  <button onclick="toggleDag()" title="pipeline graph — the notebook's dataflow DAG, live (⌘⇧G)">🕸 DAG</button>
   <button onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
   <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
   <div class="menuwrap">
@@ -197,6 +199,31 @@
   <span class="runchipbar"><span id="runchipfill"></span></span>
   <button id="runchipstop" class="runchipstop" onclick="event.stopPropagation(); window.cancelRun && window.cancelRun()" title="stop the run (interrupts running cells; keeps the namespace)">✕</button>
 </div>
+<aside id="dagpane" class="dagpane">
+  <div class="daggrip" id="daggrip" title="drag to resize"></div>
+  <div class="aphead"><strong>🕸 Pipeline</strong><span id="dagcount" class="hint"></span>
+    <span class="hbtn daggear" onclick="dagGearToggle(event)" title="graph display settings">⚙<div class="daggearpop" id="daggearpop" onclick="event.stopPropagation()">
+      <label><input type="checkbox" id="dagoptsetup" onchange="dagSetupSet(this.checked)"> show setup cells <span class="dhdim">(using/import + their edges)</span></label>
+      <label><input type="checkbox" id="dagoptiso" onchange="dagIsoSet(this.checked)"> show isolated cells <span class="dhdim">(no dataflow edges)</span></label>
+    </div></span>
+    <button class="hbtn" id="dagdock" onclick="dagDock()" title="dock side">◨</button>
+    <button class="hbtn" id="dagheat" onclick="dagHeat()" title="cost heat map — color cells by accumulated compute time (hotter = more expensive)">🔥</button>
+    <button class="hbtn" id="dagdir" onclick="dagDir()" title="layout direction — auto follows the pane shape (tall → top-down)">⇅ auto</button>
+    <button class="hbtn" onclick="dagFit()" title="re-fit the graph">⤢ fit</button>
+    <span class="hbtn daghelp">?<div class="daghelppop">
+      <div class="dhrow"><kbd>click</kbd> cell details, stats &amp; actions</div>
+      <div class="dhrow"><kbd>⇧ click</kbd> navigate to the cell</div>
+      <div class="dhrow"><kbd>scroll</kbd> zoom &nbsp;·&nbsp; <kbd>drag</kbd> pan</div>
+      <div class="dhrow"><kbd>🔥</kbd> cost heat — fill = Σ compute · ×evals · ↓pulls</div>
+      <div class="dhrow"><kbd>💾</kbd> dashed border = cached pipeline stage</div>
+      <div class="dhsec">corner wedge — output type</div>
+      <div class="dhrow dhsw"><i style="background:#00c9a7"></i>table <i style="background:#d066e2"></i>chart <i style="background:#ff8f3d"></i>file <i style="background:#00b4ff"></i>control <i style="background:#9ba3ad"></i>setup</div>
+      <div class="dhsec">card border — state</div>
+      <div class="dhrow dhsw"><i style="background:#569cd6"></i>fresh <i style="background:#56d364"></i>executing <i style="background:#ffd700"></i>stale <i style="background:#e57575"></i>error</div>
+    </div></span>
+    <button class="pclose" onclick="toggleDag()" title="close (Esc)">✕</button></div>
+  <div id="dagcanvas" class="dagcanvas"></div>
+</aside>
 <aside id="pkgpanel" class="logpanel">
   <div class="aphead"><strong>📦 Packages</strong><span id="pkgstatus" class="hint"></span>
     <button class="pclose" onclick="togglePackages()" title="close">✕</button></div>
@@ -441,6 +468,7 @@
 <script src="/assets/js/panels.js"></script>
 <script src="/assets/js/config.js"></script>
 <script src="/assets/js/runstatus.js"></script>
+<script src="/assets/js/dag.js"></script>
 <script src="/assets/js/runloc.js"></script>
 <script src="/assets/js/inspect.js"></script>
 <script src="/assets/js/dragdrop.js"></script>

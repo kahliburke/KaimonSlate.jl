@@ -129,6 +129,7 @@ function paletteCommands() {
     { label: 'Toggle agent panel', key: '⌘⇧A', run: toggleAgent },
     { label: 'Toggle controls palette', key: '⌘⇧F', run: togglePalette },
     { label: 'Table of contents', key: '⌘⇧L', run: toggleTOC },
+    { label: 'Pipeline DAG (dataflow graph)', key: '⌘⇧G', run: toggleDag },
     { label: 'Undo', key: '⌘Z', run: undoNb },
     { label: 'Redo', key: '⌘⇧Z', run: redoNb },
     { label: 'Add code cell below', key: 'b', run: () => addCell(sel || '', 'code') },
@@ -533,6 +534,7 @@ document.addEventListener('keydown', e => {
   else if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); toggleAgent(); }   // ⌘⇧A agent
   else if (mod && e.shiftKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); togglePalette(); } // ⌘⇧F controls
   else if (mod && e.shiftKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); toggleTOC(); }      // ⌘⇧L table of contents
+  else if (mod && e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); toggleDag(); }      // ⌘⇧G pipeline DAG
   // ⌘⇧← / ⌘⇧→ : back/forward through selected-cell history — but ONLY outside an editor, where those
   // chords are text selection (select-to-line-start/end).
   else if (mod && e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
