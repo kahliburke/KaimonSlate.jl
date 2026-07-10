@@ -1212,9 +1212,10 @@ want_hashes(req, hashes) =
 # the Message's origin keeps the mmap alive until the frame is out — REQ/REP: by the reply);
 # v1 = single-frame copy-chunk 'P'. Returns the bytes sent. Shared by the memo push and the
 # region runner's single-binding transfers.
-function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool)
+function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool; on_progress = nothing)
     sz = filesize(path)
     nbytes = 0
+    tick() = on_progress === nothing || on_progress(nbytes, sz)
     if v2 && sz > 0
         mm = Mmap.mmap(path, Vector{UInt8}, sz)
         off = 0
@@ -1228,6 +1229,7 @@ function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool)
             r = String(copy(Z.recv(sock)))
             startswith(r, "err") && error("blob push $h: $r")
             nbytes += n; off += n
+            tick()
         end
     else
         open(path, "r") do io
@@ -1237,6 +1239,7 @@ function _send_blob!(Z, sock, req, path::AbstractString, h::String, v2::Bool)
                 r = req(vcat(UInt8['P'], Vector{UInt8}(codeunits(h)), UInt8[last ? 0x01 : 0x00], chunk))
                 startswith(r, "err") && error("blob push $h: $r")
                 nbytes += length(chunk)
+                tick()
                 last && break
             end
         end
@@ -1253,7 +1256,7 @@ half; `pull_blob!` is the reverse. Returns bytes actually sent (0 = deduped).
 """
 function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
                     server_key::AbstractString = "", timeout_ms::Int = 20_000,
-                    on_plan = nothing, meta = nothing)
+                    on_plan = nothing, meta = nothing, on_progress = nothing)
     root = joinpath(_slate_cache_dir(), "memo")
     p = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
     isfile(p) || error("push_blob!: no local blob $hash")
@@ -1275,7 +1278,7 @@ function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
             return 0
         end
         on_plan === nothing || on_plan(Int(filesize(p)), meta)   # exact bytes; may throw (preview gate)
-        return _send_blob!(Z, sock, req, p, String(hash), v2)
+        return _send_blob!(Z, sock, req, p, String(hash), v2; on_progress = on_progress)
     finally
         try; Z.close(sock); catch; end
     end
@@ -1291,7 +1294,7 @@ against the address, atomic-renames — a truncated/corrupt transfer never lands
 an already-present blob costs nothing. Returns bytes moved over the network (0 = deduped).
 """
 function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
-                    server_key::AbstractString = "", timeout_ms::Int = 20_000)
+                    server_key::AbstractString = "", timeout_ms::Int = 20_000, on_progress = nothing)
     root = joinpath(_slate_cache_dir(), "memo")
     dest = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
     isfile(dest) && return 0                              # dedup: already here — nothing moved
@@ -1320,6 +1323,7 @@ function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
                 payload = frames[2]
                 GC.@preserve payload unsafe_write(io, pointer(payload), length(payload))
                 off += length(payload)
+                on_progress === nothing || on_progress(off, total)
                 length(payload) == 0 && off < total && error("pull $hash: empty chunk at $off/$total")
             end
         end
@@ -1413,7 +1417,8 @@ end
 # throw to abort before anything moves: the transfer-preview gate lives there, so its numbers
 # are the encoded blob's, not a summarysize guess — mmap-backed arrow frames price correctly
 # and dedup'd content never triggers a preview.
-function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, on_plan = nothing)
+function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, on_plan = nothing,
+                           on_progress = nothing)
     meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = 600.0)
     err = try; getproperty(meta, :error); catch; nothing; end
     err === nothing || error("transfer '$name': $err")
@@ -1424,12 +1429,13 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
         have = isfile(joinpath(root, "blobs", "sha256", h[1:2], h))
         on_plan === nothing || on_plan(have ? 0 : Int(meta.bytes), meta)
         ep = _data_endpoint!(src_k.target, src_k)
-        moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key)
+        moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key, on_progress = on_progress)
     end
     if dst_k.target isa RemoteTarget                       # remote destination → ship it there
         ep = _data_endpoint!(dst_k.target, dst_k)
         moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key,
-                            on_plan = src_k.target isa RemoteTarget ? nothing : on_plan, meta = meta)
+                            on_plan = src_k.target isa RemoteTarget ? nothing : on_plan, meta = meta,
+                            on_progress = on_progress)
     end
     r = _tool(dst_k, "__slate_bind_blob", Dict{String,Any}(
         "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = 600.0)

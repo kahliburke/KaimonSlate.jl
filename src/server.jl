@@ -420,8 +420,11 @@ mutable struct CellStats
     last_ms::Float64
     last_ts::Float64        # epoch seconds of the last completion
     last_memo::String       # "" | "restored" | "stored"
+    ran_on::String          # "" (never ran) | "local" | the region host — WHERE the last run executed
+    xfer_bytes::Int         # session total: boundary bytes moved FOR this cell's inputs
+    last_xfer::String       # latest boundary move, human-readable ("df 153MB in 71s ← slate-remote")
 end
-CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "")
+CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "", "", 0, "")
 const _CELL_STATS = Dict{String,Dict{String,CellStats}}()   # nb.id → cell.id → stats
 const _CELL_STATS_LOCK = ReentrantLock()
 
@@ -478,14 +481,38 @@ function _cell_stats_json(nbid::AbstractString, cid::AbstractString)
         q = sort(s.recent)
         pct = p -> isempty(q) ? 0.0 : q[clamp(ceil(Int, p * length(q)), 1, length(q))]
         r1(x) = round(x; digits = 1)
-        return Dict{String,Any}(
+        d = Dict{String,Any}(
             "evals" => n, "restores" => s.restores, "pulls" => s.pulls,
             "total_ms" => r1(s.total_ms), "mean_ms" => r1(mean), "std_ms" => r1(sd),
             "min_ms" => n > 0 ? r1(s.min_ms) : 0.0, "max_ms" => r1(s.max_ms),
             "p50_ms" => r1(pct(0.5)), "p90_ms" => r1(pct(0.9)),
             "last_ms" => r1(s.last_ms), "last_ts" => r1(s.last_ts), "memo" => s.last_memo,
             "recent" => [r1(x) for x in s.recent])   # the raw ring — the stats card's sparkline
+        # Region provenance (absent for a plain local notebook): where the last run executed and
+        # what its inputs cost to move — the badges/stats the mental model needs (a user watched
+        # their mutation "run locally" when it had auto-followed to the region; nothing said so).
+        isempty(s.ran_on) || (d["ranOn"] = s.ran_on)
+        s.xfer_bytes > 0 && (d["xferBytes"] = s.xfer_bytes)
+        isempty(s.last_xfer) || (d["lastXfer"] = s.last_xfer)
+        return d
     end
+end
+
+# Record where a cell just ran ("local" | region host) and any boundary move made for it —
+# streamed to the browser inside cell_json["stats"] like every other stat.
+function _stats_ran_on!(nb::LiveNotebook, cid::AbstractString, where::AbstractString)
+    lock(_CELL_STATS_LOCK) do
+        get!(CellStats, get!(Dict{String,CellStats}, _CELL_STATS, nb.id), String(cid)).ran_on = String(where)
+    end
+    return nothing
+end
+function _stats_xfer!(nb::LiveNotebook, cid::AbstractString, desc::AbstractString, bytes::Integer)
+    lock(_CELL_STATS_LOCK) do
+        s = get!(CellStats, get!(Dict{String,CellStats}, _CELL_STATS, nb.id), String(cid))
+        s.xfer_bytes += Int(bytes)
+        s.last_xfer = String(desc)
+    end
+    return nothing
 end
 
 # ── Region runner: `remote`-tagged cells run on a SECOND kernel ──────────────────────────────
@@ -671,10 +698,30 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_remote::Bool 
         # the wire host prices the preview: whichever side of this transfer is remote
         whost = src_k.target isa ReportEngine.RemoteTarget ? src_k.target.ssh_host :
                 dst_k.target isa ReportEngine.RemoteTarget ? dst_k.target.ssh_host : ""
+        # Live progress: chunk callbacks drive the cell's ordinary progress bar over the
+        # notebook SSE stream — a 70s pull is a labeled bar, not a silent spinner. Throttled to
+        # meaningful movement (≥2% or done) so a fast transfer doesn't flood the stream.
+        lastfrac = Ref(0.0)
+        onprog = (done, total) -> begin
+            total <= 0 && return nothing
+            f = done / total
+            (f - lastfrac[] >= 0.02 || done >= total) || return nothing
+            lastfrac[] = f
+            ReportEngine._do_userprog(nb.report.id, f,
+                "⇄ $(r): $(round(Int, done / 2^20))/$(round(Int, total / 2^20)) MB " *
+                (dst_remote ? "→" : "←") * " $whost", "xfer-" * cell.id, done >= total)
+            return nothing
+        end
+        t0 = time()
         t = ReportEngine.transfer_binding!(src_k, dst_k, string(r); zc = zc,
-                                           on_plan = _xfer_plan_gate(nb, cell, whost, r, token))
+                                           on_plan = _xfer_plan_gate(nb, cell, whost, r, token),
+                                           on_progress = onprog)
+        secs = round(time() - t0; digits = 1)
         ReportEngine._rlog("region: '$(r)' → $(dst_remote ? "region" : "main") kernel " *
-                           "($(t.bytes) bytes over the wire, $(t.codec)) for cell $(cell.id)")
+                           "($(t.bytes) bytes over the wire in $(secs)s, $(t.codec)) for cell $(cell.id)")
+        t.bytes > 0 && _stats_xfer!(nb, cell.id,
+            "'$(r)' $(round(t.bytes / 2^20; digits = 1)) MB $(t.codec) in $(secs)s " *
+            (dst_remote ? "→" : "←") * " $whost", t.bytes)
         lock(_REGION_LOCK) do
             get!(_REGION_SYNCED, nb.id, Dict{String,String}())[key] = token
         end
@@ -696,6 +743,10 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # cell's cross-boundary inputs ship over first. A presync failure is the CELL's error —
     # surfaced in place instead of a mystery UndefVarError on the other side.
     kernel, in_region = _region_route(nb, cell)
+    # Provenance for the DAG/stats: which kernel this run executes on (only meaningful — and
+    # only recorded — while a region is active; users otherwise know where cells run).
+    _region_active(nb) &&
+        _stats_ran_on!(nb, cell.id, in_region ? String(first(split(_region_spec(nb), ','))) : "local")
     presync_err = try
         _region_presync!(nb, cell, kernel; dst_remote = in_region)
         nothing

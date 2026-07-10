@@ -207,7 +207,11 @@ function _dagBlock(c) {
   }
   const dur = c.duration == null ? '' : _dagFmtMs(c.duration);
   const icon = _DAG_KINDS[kind].icon;
-  const row1 = (icon ? icon + ' ' : '') + c.id;
+  // Region provenance: a cell whose LAST run executed on the region kernel wears 🖧 in the node
+  // — "where did this actually run" at a glance (stats.ranOn only ships while a region is
+  // active; "local" is the unmarked default).
+  const remote = c.stats && c.stats.ranOn && c.stats.ranOn !== 'local';
+  const row1 = (remote ? '🖧 ' : '') + (icon ? icon + ' ' : '') + c.id;
   let w = Math.max((row1.length + (dur ? dur.length + 3 : 0)) * 7.8, d2.length * 6.2) + 22;
   let h = d2 ? 46 : 30;
   if (thumb) { h += _DAG_THUMB_H; w = Math.max(w, 130); }
@@ -534,6 +538,8 @@ function _dagOption() {
     if (defs.length) rows.push(`<code>${defs.slice(0, 5).join(', ')}</code>${defs.length > 5 ? ` <span style="color:${P.dim}">+${defs.length - 5}</span>` : ''}`);
     if (c.opaque) rows.push(`<span style="color:${P.errored}">⚠ unparseable — dependencies unknown (treated as a barrier)</span>`);
     if (c.stats) rows.push(`<span style="color:${P.dim}">Σ ${_dagFmtMs(c.stats.total_ms)} · ×${c.stats.evals}${c.stats.pulls ? ` · ↓${c.stats.pulls}` : ''}</span>`);
+    if (c.stats && c.stats.ranOn) rows.push(`<span style="color:${P.dim}">${c.stats.ranOn === 'local' ? '⌂ ran locally' : '🖧 ran on ' + c.stats.ranOn}</span>`);
+    if (c.stats && c.stats.lastXfer) rows.push(`<span style="color:${P.dim}">⇄ ${c.stats.lastXfer}</span>`);
     return rows.join('<br>');
   };
   const edgeTip = i => _dagCardEl() ? '' : `${L.links[i].s} → ${L.links[i].t}`;
@@ -865,6 +871,10 @@ function _dagCard(id, cx, cy) {
     ['total', `${_dagFmtMs(st.total_ms)} · ×${st.evals}${st.restores ? ` ♻${st.restores}` : ''}`],
     ['used downstream', `↓ ${st.pulls}`],
   ] : [];
+  // Region provenance chips: where the last run executed + what its inputs cost to move —
+  // present only when a region is active for this notebook.
+  if (st && st.ranOn) chips.push(['ran on', st.ranOn === 'local' ? '⌂ local' : `🖧 ${st.ranOn}`]);
+  if (st && st.xferBytes) chips.push(['moved', `⇄ ${(st.xferBytes / 1048576).toFixed(1)} MB total`]);
   const defs = c.defs || [];
   const card = document.createElement('div');
   card.id = 'dagcard'; card.className = 'dagcard';
@@ -881,6 +891,7 @@ function _dagCard(id, cx, cy) {
           `<div class="dagchip"><span>${k}</span><b>${_esc(String(v))}</b></div>`).join('') + '</div>'
       : `<div class="dagcard-dim">no runs recorded this session yet</div>`) +
     (st ? _dagSpark(st.recent, P) : '') +
+    (st && st.lastXfer ? `<div class="dagcard-sec">boundary transfer</div><div class="dagcard-defs">⇄ ${_esc(st.lastXfer)}</div>` : '') +
     (defs.length ? `<div class="dagcard-sec">defines (${defs.length})</div><div class="dagcard-defs">` +
       `${_esc(defs.slice(0, 12).join(', '))}${defs.length > 12 ? ` … +${defs.length - 12} more` : ''}</div>` : '') +
     ((c.tags || []).length ? `<div class="dagcard-sec">tags</div><div class="dagcard-defs">🏷 ${_esc(c.tags.join(', '))}</div>` : '') +
