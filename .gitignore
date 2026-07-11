@@ -19,3 +19,12 @@
 # CM6 bundle build (node deps; the built artifact is committed under src/assets/js/)
 build/cm6/node_modules/
 build/cm6/package-lock.json
+
+# Machine-local: Julia local prefs + per-project agent config (not package source)
+/LocalPreferences.toml
+/.claude/
+
+# Standalone-expand artifacts (a single-source .jl expanded into a reproducible project tree)
+*.standalone.jl
+*.standalone.expanded/
+/test_thought/
