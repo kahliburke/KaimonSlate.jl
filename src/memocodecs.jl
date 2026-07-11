@@ -1,6 +1,6 @@
 # Memo codecs — how a binding VALUE becomes blob BYTES (and back). The manifest's per-name
 # `codec` field names one of these; "jls" (Serialization) is the universal fallback. The fast
-# codecs exist for the multi-GB case, where JLS's object-graph walk (~87MB/s measured) turns
+# codecs exist for the multi-GB case, where JLS's slow object-graph walk turns
 # "instant reopen" into minutes:
 #   raw    isbits Arrays — 64-byte self-describing header + the raw bytes. When the graph
 #          proves the binding is never mutated downstream (`zc`), restore MMAPs the immutable

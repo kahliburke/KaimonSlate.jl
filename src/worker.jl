@@ -444,7 +444,7 @@ end
 # that won't serialize aborts the whole entry (a restore missing it would NOT be faithful); its
 # already-written sibling blobs are simply unreferenced and swept by a later gc.
 # Display objects (Makie figures/scenes, Plots plots) are the pathological Serialization case:
-# a 14 MB scene graph and seconds to serialize for a chart whose RENDERED image already rides the
+# a large scene graph and seconds to serialize for a chart whose RENDERED image already rides the
 # wire blob. When nothing downstream reads the binding, the object is pure dead weight — store the
 # pixels, elide the object. Type check by ROOT MODULE NAME so the dep-light worker never needs a
 # plotting package loaded to decide.
@@ -838,8 +838,8 @@ end
 
 "Cheap size estimate for the namespace global `name` — `(; bytes, type)` via Base.summarysize
 (walks the object, no serialization), or `(; error)`. The transfer-preview input: for numeric
-columns summarysize tracks the arrow/raw blob size closely, so 'this read will move ~160MB'
-can be answered BEFORE paying the encode."
+columns summarysize tracks the arrow/raw blob size closely, so how much a read will move can be
+answered BEFORE paying the encode."
 function __slate_sizeof(name::String)
     m = _NS[]
     s = Symbol(name)
@@ -1447,7 +1447,7 @@ function tools()
 end
 
 # ── Blob data channel (the third socket — gate port + 2) ─────────────────────────────────────
-# Bulk memo blobs move HERE so they can never head-of-line-block the control gate (a 5 GB Arrow
+# Bulk memo blobs move HERE so they can never head-of-line-block the control gate (a multi-GB Arrow
 # shipment must not queue ahead of a cell result). Protocol v2: strict REQ/REP alternation
 # (backpressure for free); commands are self-framed:
 #   'V'                              → reply "2" — protocol version probe. A v1 server answers

@@ -126,7 +126,7 @@ end
 
 # Tracked files (relative, forward-slashed) of the git worktree at `dir`, or `nothing` when `dir`
 # isn't under git. `git ls-files` gives exactly the source we want to ship: it drops `.git`, every
-# `.gitignore`d path (build/output dirs), AND untracked stray files (a 60 MB `test.out` sitting in
+# `.gitignore`d path (build/output dirs), AND untracked stray files (a large `test.out` sitting in
 # the tree) — the working-tree copy of each tracked file, so uncommitted source edits still ride.
 function _git_tracked_files(dir::AbstractString)
     Sys.which("git") === nothing && return nothing
@@ -136,8 +136,8 @@ function _git_tracked_files(dir::AbstractString)
 end
 
 # Vendor a path-dep's SOURCE into `dest` WITHOUT its data/computed bloat. A dev'd package can carry
-# huge untracked/ignored artifacts (`bowtie_search/`, `output/`, a stray `test.out`); copying it
-# whole (`_copy_tree!`) ballooned standalone bundles to 100 MB+. If the dep is a git worktree, ship
+# huge untracked/ignored artifacts (data/`output/` dirs, a stray `test.out`); copying it
+# whole (`_copy_tree!`) ballooned standalone bundles. If the dep is a git worktree, ship
 # only its tracked files; otherwise ship just what `using <Pkg>` needs — the `*.toml` metadata plus
 # `src`/`ext`/`test` — so a data dir alongside the source can't bloat the bundle.
 function _copy_dep_source!(dest::AbstractString, src::AbstractString)

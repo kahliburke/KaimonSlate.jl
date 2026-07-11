@@ -308,8 +308,8 @@ function _collect_use_imports!(dict::AbstractDict, ex)
     return dict
 end
 
-# ExpressionExplorer swallows an UNKNOWN macro's arguments whole: `@chain rotations begin … end`
-# yields only `@chain` as a reference — the `rotations` dataflow edge (and every function the block
+# ExpressionExplorer swallows an UNKNOWN macro's arguments whole: `@chain df begin … end`
+# yields only `@chain` as a reference — the `df` dataflow edge (and every function the block
 # calls) silently vanishes from the reactive graph, breaking recompute order, the deps viewer, and
 # memo-key closures alike. Until the macro can be expanded for real (worker-side macroexpand, which
 # also recovers WRITES — e.g. `@kwdef struct Foo`), over-approximate: scan every macrocall's
@@ -724,7 +724,7 @@ function build_dependencies!(report::Report)
     # already loaded) to re-establish scope. That makes every NON-OPAQUE provider memoizable:
     #   • `:import_scaffold` — memoizable; the worker replays the usings on restore so a NOVEL
     #     `using X` (the sole importer of X) keeps X's names in scope for any downstream cell that
-    #     later RE-RUNS. Unlocks e.g. `using KrylovKit, LegendrePolynomials; bvals = eigsolve(...)`.
+    #     later RE-RUNS. Unlocks e.g. `using SolverPkg, HelperPkg; result = solve(...)`.
     #   • `:using_redundant` — the stricter subset where EVERY provided name is already in scope from
     #     an upstream cell, so the replay is a proven no-op (kept as a hint; not required for safety).
     # A cell reaching here with non-empty `provides` is non-opaque by construction (an UNRESOLVED

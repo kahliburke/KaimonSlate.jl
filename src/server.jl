@@ -434,7 +434,7 @@ mutable struct CellStats
     last_memo::String       # "" | "restored" | "stored"
     ran_on::String          # "" (never ran) | "local" | the region host — WHERE the last run executed
     xfer_bytes::Int         # session total: boundary bytes moved FOR this cell's inputs
-    last_xfer::String       # latest boundary move, human-readable ("df 153MB in 71s ← slate-remote")
+    last_xfer::String       # latest boundary move, human-readable ("<name> <size> in <time> ← <host>")
 end
 CellStats() = CellStats(0, 0, 0, 0.0, 0.0, Inf, 0.0, Float64[], 0.0, 0.0, "", "", 0, "")
 const _CELL_STATS = Dict{String,Dict{String,CellStats}}()   # nb.id → cell.id → stats
@@ -533,8 +533,8 @@ end
 # Boundary values cross as content-addressed blobs (see ReportEngine.transfer_binding!): before a
 # cell runs, any name it reads that was written on the OTHER kernel is shipped over — codec-picked
 # (a DataFrame crosses as Arrow IPC) and deduped, so an unchanged value re-ships for one
-# round-trip. Only the boundary crosses: a 500 MB frame produced AND queried remotely never moves;
-# the few-KB aggregate a local cell reads does. Pure `using` cells run on BOTH kernels (namespace
+# round-trip. Only the boundary crosses: a large frame produced AND queried remotely never moves;
+# the small aggregate a local cell reads does. Pure `using` cells run on BOTH kernels (namespace
 # parity); v1 rules: the main kernel should be local when a region is active, `@bind`-declaring
 # cells stay local, cross-boundary MUTATION is undefined (same as the release-plan validity rule).
 const _REGION_KERNELS = Dict{Tuple{String,String},Any}()   # (nb id, region name) → GateKernel
@@ -544,7 +544,7 @@ const _REGION_LOCK = ReentrantLock()
 
 # Named region specs from the durable footer. Two grammars: a bare "host[,transport[,ports]]"
 # is the `default` region (what the plain `remote` tag targets); the multi-region form is
-# "name:spec;name2:spec2" (e.g. "gpu:hetzner-a100,direct;bigmem:slate-remote"). Names are
+# "name:spec;name2:spec2" (e.g. "gpu:host-a,direct;bigmem:host-b"). Names are
 # identifiers so a bare host spec (commas, no leading `name:`) can't be misread as one.
 function _region_specs(nb::LiveNotebook)
     raw = strip(String(get(nb.report.meta, "regionon", "")))
@@ -718,8 +718,8 @@ end
 # if the notebook's imports change (a fresh/replaced kernel has a new objectid ⇒ re-primes).
 function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
     # Cells that ESTABLISH the environment on a side: pure `using`/`import`, AND the import scaffold —
-    # a cell like `using ChaosLab, CairoMakie; set_theme!(…)` isn't pure-using, but the region needs
-    # exactly what it does (load the packages so `orbit`/`ylims!` resolve, apply the theme so remote
+    # a cell like `using SomePkg, CairoMakie; set_theme!(…)` isn't pure-using, but the region needs
+    # exactly what it does (load the packages so downstream calls resolve, apply the theme so remote
     # figures match). In document order so imports precede a scaffold/effect that builds on them.
     env = [c for c in nb.report.cells
            if c.kind == CODE && (ReportEngine._is_pure_using(c.source) || :import_scaffold in c.flags)]
@@ -1023,7 +1023,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # A cell running on a REGION needs the notebook's environment established there first — its own
     # `using`/scaffold cells may live on the main kernel (they aren't cross-boundary READS, so the
     # presync below won't ship them). Bring the kernel up and prime it (idempotent, once per kernel)
-    # so `orbit`, `ylims!`, the theme, … all resolve instead of an UndefVarError on the far side.
+    # so the package's functions, the theme, … all resolve instead of an UndefVarError on the far side.
     if !isempty(side)
         try
             ReportEngine.prepare!(kernel, nb.report)
@@ -1469,11 +1469,11 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
     isempty(names) && return
     syms = Set{Symbol}(Symbol(n) for n in names)
     # A cell rarely reads the EXACT edited def — it calls a higher-level function that uses it (a cell
-    # calls `bifurcation`, which internally calls the edited `map1d`). But editing any def in a package
+    # calls `f`, which internally calls the edited `g`). But editing any def in a package
     # changes the whole project's src digest, so every cell USING that package is affected — and would
     # recompute on rerun anyway (the memo key folds the src digest). So expand the changed set with all
     # names PROVIDED by a cell that provides one of the changed names — i.e. the `using <Pkg>` cell's
-    # in-scope exports — turning "map1d changed" into "everything using ChaosLab is stale".
+    # in-scope exports — turning "one exported name changed" into "everything using that package is stale".
     lock(nb.lock) do
         for c in nb.report.cells
             (isempty(c.provides) || !any(p -> p in syms, c.provides)) && continue
