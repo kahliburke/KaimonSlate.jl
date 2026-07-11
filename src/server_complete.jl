@@ -869,6 +869,13 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/hidecode/{cid}", req -> _withnb(h, req, nb -> begin
         set_code_hidden!(nb, HTTP.getparam(req, "cid"), get(_body(req), "hidden", true) === true); _json(state_json(nb))
     end))
+    # Bulk hide/show code — one history entry (vs one per cell). Body {hidden, cells?}: `cells` (a list
+    # of ids) targets just those; omitted ⇒ every code cell. Palette "hide/show all (plot) code".
+    HTTP.register!(router, "POST", "/api/{id}/hidecode-all", req -> _withnb(h, req, nb -> begin
+        b = _body(req); cs = get(b, "cells", nothing)
+        set_code_hidden_all!(nb, get(b, "hidden", true) === true; ids = cs isa AbstractVector ? cs : nothing)
+        _json(state_json(nb))
+    end))
     HTTP.register!(router, "POST", "/api/{id}/trace/{cid}", req -> _withnb(h, req, nb -> begin
         # Toggle the flag (marks the cell STALE) then re-run stale cells, so the trace table
         # appears / disappears in one round-trip — no client-side source resend.

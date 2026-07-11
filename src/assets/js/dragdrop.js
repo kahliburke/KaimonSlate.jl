@@ -201,13 +201,16 @@ function _cellHasPlot(c) {
   const el = document.getElementById('cell-' + c.id), out = el && el.querySelector('.output');
   return !!(out && out.querySelector('img, svg, canvas'));
 }
-// Bulk hide/show the code of every plot cell at once (command palette). One file write per
-// changed cell; only renders once, at the end.
+// Bulk hide/show the code of every PLOT cell at once (command palette) — one server call (the plot
+// cell ids), so it's one history entry (the server skips no-op cells and only writes if changed).
 async function hideAllPlotCode(hidden) {
-  const targets = ((nbState && nbState.cells) || []).filter(_cellHasPlot).filter(c => !!c.codeHidden !== hidden);
-  let last;
-  for (const c of targets) last = await api('POST', '/api/hidecode/' + c.id, { hidden });
-  if (last) renderAll(last);
+  const cells = ((nbState && nbState.cells) || []).filter(_cellHasPlot).map(c => c.id);
+  renderAll(await api('POST', '/api/hidecode-all', { hidden, cells }));
+}
+// Bulk hide/show the code of EVERY code cell at once (command palette). ONE server call → one file
+// write / one history entry (the per-cell endpoint would snapshot once per cell).
+async function hideAllCode(hidden) {
+  renderAll(await api('POST', '/api/hidecode-all', { hidden }));
 }
 // Insertion row within a column element, by cursor y (before the first control
 // whose midpoint is below the cursor; else at the end).

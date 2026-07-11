@@ -923,6 +923,26 @@ function set_code_hidden!(nb::LiveNotebook, id::AbstractString, hidden::Bool)
     return nb
 end
 
+# Bulk hide/show code across many code cells in ONE persist — so a palette "hide/show all" is a single
+# history entry, not one snapshot per cell. `ids === nothing` targets EVERY code cell; a given list
+# targets just those (e.g. "all plot cells"). No-op cells (already in the wanted state) are skipped, and
+# the write only fires if something actually changed.
+function set_code_hidden_all!(nb::LiveNotebook, hidden::Bool; ids::Union{Nothing,AbstractVector} = nothing)
+    idset = ids === nothing ? nothing : Set(String(x) for x in ids)
+    lock(nb.lock) do
+        changed = false
+        for c in nb.report.cells
+            c.kind == CODE || continue
+            (idset === nothing || c.id in idset) || continue
+            (:hidecode in c.flags) == hidden && continue
+            hidden ? push!(c.flags, :hidecode) : delete!(c.flags, :hidecode)
+            changed = true
+        end
+        changed && _persist!(nb)
+    end
+    return nb
+end
+
 # Toggle a cell's `trace` flag (persisted in the `.jl` header as the `trace` token). Unlike
 # collapsed/hidecode this CHANGES the eval result (the cell runs wrapped in `@trace`), so we
 # mark it STALE — the frontend re-runs it to show/hide the trace table.

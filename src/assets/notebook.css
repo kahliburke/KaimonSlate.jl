@@ -182,6 +182,32 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 /* `!important` needed: CM6's base theme forces `.cm-editor { display:flex !important }`. */
 .cell.codehidden > textarea, .cell.codehidden .cm-editor { display:none !important; }
 .cellhead .hidecode.on { color:var(--accent); }
+
+/* ── Zen / reading mode ──────────────────────────────────────────────────────────────────────
+   Hide code + every distraction (per-cell chrome, toolbars, panels), leaving only markdown and
+   rendered output (figures, tables, charts, live @bind controls). Esc or the floating ✕ exits. */
+/* Cross-fade on enter/exit (toggleZen dips opacity, swaps the mode, fades back). */
+#nb { transition:opacity .2s ease; }
+#nb.zen-fading { opacity:0; }
+body.zen .topbar, body.zen .hydbanner, body.zen #runchip, body.zen #runstale, body.zen #scratchrun,
+body.zen .focusbar, body.zen .dagpane, body.zen .agentpanel, body.zen .filespanel, body.zen #healthbadge,
+body.zen .cellhead, body.zen .coldrop, body.zen .cellprog, body.zen .cell .controls.empty { display:none !important; }
+body.zen .cell > textarea, body.zen .cell .cm-editor, body.zen .cell .srcedit { display:none !important; }
+body.zen .cell { border:none !important; background:none !important; box-shadow:none !important;
+  padding:2px 0 !important; margin:0 !important; }
+body.zen .cell .md { margin:0; }
+/* Width follows the page's own mode (the column-width slider / Full-page-width toggle on `.page`) —
+   zen only frees vertical space by adding a little top room now that the topbar is hidden. */
+body.zen #nb { margin-top:22px; }
+/* Collapse a code cell that renders nothing (no markdown / output / table / chart / control) so a
+   reading pass has no blank gaps where a pure definition cell used to be. `:has()` — modern browsers. */
+body.zen #nb .cell:not(:has(.md)):not(:has(.output *)):not(:has(.tables *)):not(:has(.echarts *)):not(:has(.controls:not(.empty))):not(:has(.binds *)) { display:none !important; }
+/* Floating exit affordance (the topbar with the toggle is hidden in zen). */
+.zenexit { display:none; }
+body.zen .zenexit { display:inline-flex; align-items:center; gap:6px; position:fixed; top:14px; right:18px;
+  z-index:120; background:var(--bg2); color:var(--dim); border:1px solid var(--border); border-radius:8px;
+  padding:6px 11px; font-size:.8rem; cursor:pointer; opacity:.45; transition:opacity .15s ease; }
+body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accent); }
 .cellhead .trace.on { color:var(--accent); }
 
 /* Trace inspector modal: source lines with captured values shown beneath each line. */

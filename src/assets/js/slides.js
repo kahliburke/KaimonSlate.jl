@@ -309,6 +309,30 @@
     }));
   }
 
+  // Zen / reading mode — toggle `body.zen` (CSS hides code + chrome, leaving markdown + rendered
+  // output). Unlike Present (a slide deck), zen is the same scrollable page, just distraction-free.
+  // Esc or the floating ✕ exits.
+  // Subtle cross-fade: `display:none` chrome can't animate, so fade the notebook down, swap the mode
+  // under cover of the dip, then fade back up — the chrome appears/vanishes without a jarring pop.
+  let _zenAnim = null;
+  function toggleZen(on) {
+    const want = (on === undefined) ? !document.body.classList.contains('zen') : !!on;
+    if (want === document.body.classList.contains('zen')) return;
+    const nb = document.getElementById('nb');
+    if (!nb) { document.body.classList.toggle('zen', want); return; }
+    clearTimeout(_zenAnim);
+    nb.classList.add('zen-fading');                    // → opacity 0 (CSS transition)
+    _zenAnim = setTimeout(() => {
+      document.body.classList.toggle('zen', want);     // swap while invisible (reflow hidden)
+      requestAnimationFrame(() => nb.classList.remove('zen-fading'));   // → fade back up
+    }, 180);
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('zen')) toggleZen(false);
+  });
+  window.toggleZen = toggleZen;
+  window.exitZen = () => toggleZen(false);
+
   // Exports onto the shared global scope (classic scripts) for inline handlers + palette/keys.
   window.enterPresent = enterPresent;
   window.exitPresent = exitPresent;

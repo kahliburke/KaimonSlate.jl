@@ -66,6 +66,7 @@
       <button onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
       <button onclick="toggleHistory();closeTopMenu()">🕘 History</button>
       <button id="scratchbtn" onclick="toggleScratch();closeTopMenu()">🧪 Scratchpad</button>
+      <button onclick="toggleZen();closeTopMenu()" title="reading mode — hide code &amp; chrome, show only markdown + output (Esc to exit)">🧘 Zen mode</button>
       <hr>
       <button id="undobtn" onclick="undoNb();closeTopMenu()">↶ Undo</button>
       <button id="redobtn" onclick="redoNb();closeTopMenu()">↷ Redo</button>
@@ -230,6 +231,8 @@
 </div>
 <!-- Watchdog health drop-down (populated by js/health.js; toggled from #healthbadge). -->
 <div id="healthpanel" class="healthpanel"></div>
+<!-- Zen reading-mode exit (shown only while body.zen is on; the topbar toggle is hidden then). -->
+<div class="zenexit" onclick="window.exitZen && window.exitZen()" title="exit zen mode (Esc)">✕ Exit zen</div>
 <aside id="dagpane" class="dagpane">
   <div class="daggrip" id="daggrip" title="drag to resize"></div>
   <div class="aphead"><strong>🕸 Pipeline</strong><span id="dagcount" class="hint"></span>
