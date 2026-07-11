@@ -1627,7 +1627,7 @@ function pool_configs()
         h = _manifest_get(s, "host"); isempty(h) && continue
         cfg = _pool_config(h); cfg === nothing && continue
         push!(out, (host = h, n = cfg.n, preload = cfg.preload, transport = cfg.transport,
-                    base_port = cfg.base_port, root = cfg.root))
+                    base_port = cfg.base_port, root = cfg.root, status = pool_status(h)))
     end
     return out
 end
@@ -1737,12 +1737,35 @@ function warm_pool!(host::AbstractString; n::Int = 1, preload::AbstractString = 
            "pool[$h]: configured → n=$n$(base_port > 0 ? " base_port=$base_port" : "") (reconcile queued)"
 end
 
-# Drive the host toward the configured pool size: reap dead pool litter and stale-env idlers,
-# launch the deficit (one provision pass covers them all), trim any excess idlers. Never touches
-# an attached worker, a claimed worker, or anything not pool-tagged by this hub.
+# host → last reconcile outcome (ok?, message, when). A BACKGROUND reconcile that throws (host down /
+# ssh banner timeout / provision error) used to die silently in its @async task — logged, but invisible
+# to the user ("the workers don't come up, no errors I can see"). Now the outcome lands here and the
+# pool UI surfaces it.
+const _POOL_STATUS = Dict{String,Any}()
+_set_pool_status!(host, ok::Bool, msg::AbstractString) =
+    (_POOL_STATUS[String(host)] = (ok = ok, msg = String(msg), ts = time()); nothing)
+pool_status(host) = get(_POOL_STATUS, String(host), nothing)
+
+# Drive the host toward the configured pool size — recording the outcome so a failure is visible.
 function _pool_reconcile!(host)
     cfg = _pool_config(host)
     cfg === nothing && return "no pool configured for '$host' — call warm_pool!(host; n, preload)"
+    try
+        msg = _pool_reconcile_impl!(host, cfg)
+        _set_pool_status!(host, true, msg)
+        return msg
+    catch e
+        emsg = "reconcile failed — " * first(sprint(showerror, e), 140)
+        _set_pool_status!(host, false, emsg)
+        _rlog("pool[$host]: $emsg")
+        rethrow()
+    end
+end
+
+# Reap dead pool litter and stale-env idlers, launch the deficit (one provision pass covers them all),
+# trim any excess idlers. Never touches an attached worker, a claimed worker, or anything not
+# pool-tagged by this hub. Wrapped by `_pool_reconcile!`, which records the outcome for the UI.
+function _pool_reconcile_impl!(host, cfg)
     t = _pool_target(host, cfg)
     roster = list_remote_workers(host)
     mine = [w for w in roster

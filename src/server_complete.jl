@@ -697,7 +697,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/pools", _ -> _json(Dict(
         "pools" => [Dict("host" => c.host, "n" => c.n, "preload" => c.preload,
                          "transport" => String(c.transport), "base_port" => c.base_port,
-                         "root" => c.root)
+                         "root" => c.root,
+                         # Last warm/reconcile outcome — so a silent background spawn failure is visible.
+                         "status" => c.status === nothing ? nothing :
+                                     Dict("ok" => c.status.ok, "msg" => c.status.msg,
+                                          "age" => round(Int, time() - c.status.ts)))
                     for c in ReportEngine.pool_configs()],
         "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
                           "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))

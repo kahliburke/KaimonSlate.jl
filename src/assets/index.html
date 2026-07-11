@@ -181,6 +181,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   display:inline-block;animation:actspin .8s linear infinite;}
 @keyframes actspin{to{transform:rotate(360deg)}}
 .actempty{color:#6a7090;font-size:.78rem;padding:3px 2px;}
+.acterr{color:#e5636e;font-size:.76rem;line-height:1.35;padding:5px 8px;margin-bottom:8px;border-radius:7px;
+  background:rgba(229,99,110,.1);border:1px solid rgba(229,99,110,.28);}
+.acterr b{color:#f0a3aa;font-weight:600;} .acterr .acterrage{color:#8a6a70;font-family:Menlo,monospace;}
 /* Fixed grid: the label block (host + badge) has a FIXED width, so every meter starts at the exact
    same x and the meters read as one clean aligned stack down the panel. The status column soaks up
    the rest. Columns: label | cpu-meter | cpu% | rss | status(fills rest). */
@@ -1531,16 +1534,17 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     if(_actInflight) return; _actInflight=true;
     var done=function(){ _actInflight=false; };
     fetch('/api/pools').then(function(r){return r.json();}).then(function(d){
-      var hs={}; (d.pools||[]).forEach(function(p){hs[p.host]=1;}); (d.parked||[]).forEach(function(p){hs[p.host]=1;});
+      var pools=d.pools||[];
+      var hs={}; pools.forEach(function(p){hs[p.host]=1;}); (d.parked||[]).forEach(function(p){hs[p.host]=1;});
       var hosts=Object.keys(hs);
-      if(!hosts.length){ _actRender([]); done(); return; }
+      if(!hosts.length){ _actRender([], pools); done(); return; }
       Promise.all(hosts.map(function(h){ return fetch('/api/remote-workers?host='+encodeURIComponent(h))
         .then(function(r){return r.json();}).then(function(d){return {host:h,workers:(d.workers||[])};})
         .catch(function(){return {host:h,workers:[]};}); }))
-        .then(function(hd){ _actRender(hd); done(); }).catch(done);
+        .then(function(hd){ _actRender(hd, pools); done(); }).catch(done);
     }).catch(done);
   }
-  function _actRender(hostData){
+  function _actRender(hostData, pools){
     var el=document.getElementById('actmon'); if(!el) return;
     var rows=[], nW=0, totRss=0, busy=0;
     hostData.forEach(function(hd){ (hd.workers||[]).forEach(function(w){
@@ -1576,11 +1580,17 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         '<span class="actrun'+(runTxt==='idle'?' idle':'')+'" title="'+esc(runTxt)+'">'+esc(runTxt)+'</span></div>');
     }); });
     el.dataset.loaded='1';
-    if(!hostData.length){ el.innerHTML=''; return; }   // no pools/hosts at all → collapse (:empty hides it)
-    if(!nW){ el.innerHTML=_actShell('<div class="actempty">No workers running</div>'); return; }   // hosts, but idle
-    var agg='<div class="actagg">'+nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+
-      ' busy <span class="actlive">●</span></div>';
-    el.innerHTML=_actShell(agg+rows.join(''));
+    // A pool whose last warm/reconcile FAILED shows a red row here (it has no workers, so it'd be
+    // invisible otherwise) — turning a silent background spawn failure into something you can see.
+    var poolErr=(pools||[]).filter(function(p){return p.status&&p.status.ok===false;}).map(function(p){
+      var age=(p.status.age!=null)?(' <span class="acterrage">('+(p.status.age<60?p.status.age+'s':Math.round(p.status.age/60)+'m')+' ago)</span>'):'';
+      return '<div class="acterr" title="'+esc(p.status.msg)+'">⚠ <b>'+esc(p.host)+'</b> — '+esc(p.status.msg)+age+'</div>';
+    }).join('');
+    if(!hostData.length && !poolErr){ el.innerHTML=''; return; }   // nothing at all → collapse (:empty hides it)
+    if(!nW && !poolErr){ el.innerHTML=_actShell('<div class="actempty">No workers running</div>'); return; }
+    var agg=nW?('<div class="actagg">'+nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+
+      ' busy <span class="actlive">●</span></div>'):'';
+    el.innerHTML=_actShell(poolErr+agg+rows.join(''));
   }
   loadSessions(); loadPublished(); _actStart();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
