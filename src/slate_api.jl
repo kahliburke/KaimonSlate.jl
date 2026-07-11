@@ -295,7 +295,11 @@ const SLATE_API = SlateApiEntry[
         editor, show output), `trace` (wrap in @trace — inspect every value), `nocache` (opt OUT of
         durable memoization — for impure / side-effecting cells), `cache` (opt IN regardless of
         runtime — persist a pipeline stage's result so it RESTORES instead of recomputing until an
-        input actually changes). Presentation tags: `slide` (force a
+        input actually changes), `resource` (an EXTERNAL-resource initializer — a DB connection or
+        file/socket handle: the live handle can't be cached so the cell re-inits every open, but
+        unlike `nocache` it does NOT poison downstream — cells reading it stay cacheable, keyed by
+        this cell's source; pair with an `@asset` on the backing file if the resource can drift
+        externally). Presentation tags: `slide` (force a
         new slide), `notes` (speaker notes, presenter-only). Document-metadata ROLE tags: `title`,
         `abstract`, `bibliography` (see "front matter"). Site tags (see "site"): `home` (this notebook is
         the published site's FRONT PAGE), `docindex` (marks where the document listing is injected).
@@ -303,7 +307,7 @@ const SLATE_API = SlateApiEntry[
         variable carries (a cell reading a DB table another cell CREATEs): the engine treats them as
         real edges (staleness, run ordering, memo keys). Draw/remove them in the DAG pane: 🔗 arms
         link mode, then click two cells to link (click a dashed edge to unlink). Any
-        other token is a free-form tag that round-trips. Expensive cells (≥400 ms) are otherwise
+        other token is a free-form tag that round-trips. Expensive cells (≥150 ms) are otherwise
         auto-cached to disk and RESTORED after a restart instead of recomputing."""),
 
     # ── Publishing to a site (GitHub Pages) ──────────────────────────────────────────────────────────

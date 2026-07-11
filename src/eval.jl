@@ -324,7 +324,11 @@ const _MEMO_THRESHOLD_MS = 150.0    # only cells slower than this are worth pers
 # `writes`), control-DECLARING cells (their value comes from the UI), and explicit opt-outs.
 function _memoizable(cell::Cell)
     cell.kind == CODE || return false
-    (:opaque in cell.flags || :nocache in cell.flags || :volatile in cell.flags) && return false
+    # `:resource` — an external-resource initializer (a DB connection, a file/socket handle). The
+    # value is a live handle that can't/shouldn't be serialized, so the cell itself is never cached
+    # (it re-inits cheaply every open, like `:nocache`); its downstream is unlocked separately in
+    # `_memo_key`, where a `:resource` upstream is key-transparent instead of a purity barrier.
+    (:opaque in cell.flags || :nocache in cell.flags || :volatile in cell.flags || :resource in cell.flags) && return false
     # A cell that PROVIDES names (`using`/`import`) is memoizable via IMPORT SCAFFOLD: cache its
     # genuinely-defined values (writes ∖ provides) and, on restore, replay just its `using`/`import`
     # statements (the worker does this from the source) to re-establish the import's name-in-scope /
@@ -384,6 +388,13 @@ function _memo_key(report::Report, cell::Cell)
     # by SOURCE keeps the key identical before and after refinement.
     for id in closure
         f = byid[id].flags
+        # `:resource` — a user-asserted DETERMINISTIC external resource (a DB connection re-opened
+        # from a fixed file, etc.). Its handle is uncacheable so it re-runs every open, but its
+        # OUTPUT is a pure function of its reads + the resource, so it does NOT poison downstream:
+        # key-transparent, like the `_is_pure_using` exception (its source is still digested into
+        # `depsrc` below, so editing it invalidates dependents). The user owns the determinism
+        # claim — any TRULY external drift is pinned by pairing the tag with an `@asset` on the file.
+        :resource in f && continue
         (:nocache in f || :volatile in f) && return ""
         (:opaque in f && !_is_pure_using(byid[id].source)) && return ""
     end

@@ -85,34 +85,53 @@ function hideControlPicker() { document.getElementById('ctlpop').classList.remov
 // The `#%%` header isn't editable in the browser, so tags are set here: known behaviour tags as
 // checkboxes + free-form custom tags as chips. Each change POSTs the full tag set to /api/tags/<id>.
 // #tagpop lives outside #nb so it survives renderAll and stays open across edits.
-const TAG_INFO = [
-  ['collapsed', 'fold the whole cell'],
-  ['hidecode', 'hide the editor — show only the output'],
-  ['trace', 'trace — inspect each value (re-runs the cell)'],
-  ['nocache', "don't cache this cell (impure / side-effecting)"],
-  ['cache', "always persist this cell's result (pipeline stage — no time threshold)"],
+// Behaviour tags, grouped and scoped to the cell kinds they actually do something on (a code cell
+// never offers `title`; an md cell never offers `resource`). [group, tag, description, kinds].
+const TAG_DEFS = [
+  ['Caching & execution', 'cache',    'always persist — restore until an input changes', ['code']],
+  ['Caching & execution', 'nocache',  'never cache (impure / side-effecting)', ['code']],
+  ['Caching & execution', 'resource', 'external handle (DB / file) — re-inits each run, but keeps everything downstream cacheable', ['code']],
+  ['Caching & execution', 'trace',    'inspect every value (re-runs the cell)', ['code']],
+  ['Display',  'collapsed', 'fold the whole cell', ['code', 'md']],
+  ['Display',  'hidecode',  'hide the editor — show output only', ['code']],
+  ['Document', 'title',       'the document title (front matter)', ['md']],
+  ['Document', 'abstract',    'the document abstract / summary', ['md']],
+  ['Document', 'caption',     'figure caption for the output above', ['md']],
+  ['Document', 'bibliography','render the reference list here', ['md']],
+  ['Site',     'home',     "this notebook is the published site's front page", ['md']],
+  ['Site',     'docindex', 'where the document listing is injected', ['md']],
+  ['Slides',   'slide', 'start a new slide here', ['code', 'md']],
+  ['Slides',   'notes', 'speaker notes (presenter-only)', ['code', 'md']],
 ];
 function _curTags(id) { const c = _cellById(id); return (c && c.tags) ? c.tags.slice() : []; }
-function _knownTagSet() { return new Set(TAG_INFO.map(t => t[0])); }
+function _tagKind(id) { const c = _cellById(id); return (c && c.kind === 'md') ? 'md' : 'code'; }
+function _knownTagSet() { return new Set(TAG_DEFS.map(d => d[1])); }
 
 function renderTagPop(pop, id) {
-  const tags = new Set(_curTags(id)), known = _knownTagSet();
-  // Region tags (`remote` / `region=…`) are owned by the "Run on" radio above — don't also show
-  // them as free-form chips (applyTagChecks still recomputes from _curTags, so they're preserved).
-  const custom = _curTags(id).filter(t => !known.has(t) && t !== 'remote' && !t.startsWith('region='));
+  const tags = new Set(_curTags(id)), known = _knownTagSet(), kind = _tagKind(id);
+  // Region tags (`remote` / `region=…`) are owned by the "Run on" radio above, and `needs=` edges by
+  // the DAG — don't also show them as free-form chips (applyTagChecks preserves them either way).
+  const custom = _curTags(id).filter(t => !known.has(t) && t !== 'remote'
+                 && !t.startsWith('region=') && !t.startsWith('needs='));
   const row = (n, desc) =>
-    `<label class="ctlrow"><input type="checkbox" data-tag="${n}"${tags.has(n) ? ' checked' : ''}>` +
-    `<span>${n}<span class="tagdesc">${_escc(desc)}</span></span></label>`;
+    `<label class="ctlrow tagrow"><input type="checkbox" data-tag="${n}"${tags.has(n) ? ' checked' : ''}>` +
+    `<span><span class="tagname">${n}</span><span class="tagdesc">${_escc(desc)}</span></span></label>`;
+  // Group the kind-relevant tags under their section subheads, in definition order.
+  let groups = '', lastGroup = null;
+  for (const [group, tag, desc, kinds] of TAG_DEFS) {
+    if (!kinds.includes(kind)) continue;
+    if (group !== lastGroup) { groups += `<div class="ctlsub">${group}</div>`; lastGroup = group; }
+    groups += row(tag, desc);
+  }
   pop.innerHTML =
     runOnSectionHtml(id) +
-    '<div class="ctlhead">Cell tags</div>' +
-    TAG_INFO.map(t => row(t[0], t[1])).join('') +
-    '<div class="ctlsub">custom</div>' +
+    groups +
+    '<div class="ctlsub">Custom</div>' +
     '<div class="tagchips">' +
       (custom.length ? custom.map(t => `<span class="tagchip">${_escc(t)}<button data-del="${_escc(t)}" title="remove">×</button></span>`).join('')
                      : '<span class="tagnone">none</span>') +
     '</div>' +
-    '<div class="tagadd"><input type="text" class="taginput" placeholder="add tag…" maxlength="40"><button class="tagaddbtn">add</button></div>';
+    '<div class="tagadd"><input type="text" class="taginput" placeholder="add custom tag…" maxlength="40"><button class="tagaddbtn">add</button></div>';
   wireRunOnSection(pop, id);
   pop.querySelectorAll('input[data-tag]').forEach(cb => cb.onchange = () => applyTagChecks(id));
   pop.querySelectorAll('.tagchip button').forEach(b => b.onclick = () => setTags(id, _curTags(id).filter(x => x !== b.dataset.del)));
@@ -123,9 +142,13 @@ function renderTagPop(pop, id) {
 }
 function applyTagChecks(id) {
   const pop = document.getElementById('tagpop');
-  const checked = [...pop.querySelectorAll('input[data-tag]:checked')].map(cb => cb.dataset.tag);
-  const custom = _curTags(id).filter(t => !_knownTagSet().has(t));
-  setTags(id, [...new Set([...checked, ...custom])]);
+  const boxes = [...pop.querySelectorAll('input[data-tag]')];
+  const shown = new Set(boxes.map(cb => cb.dataset.tag));       // tags with a checkbox right now (kind-scoped)
+  const checked = boxes.filter(cb => cb.checked).map(cb => cb.dataset.tag);
+  // Preserve everything NOT currently shown — custom chips, region/needs, and any known tag hidden
+  // by the cell-kind filter — so toggling a visible box never silently drops an off-screen tag.
+  const preserved = _curTags(id).filter(t => !shown.has(t));
+  setTags(id, [...new Set([...checked, ...preserved])]);
 }
 async function setTags(id, tags) {
   renderAll(await api('POST', '/api/tags/' + id, { tags }));

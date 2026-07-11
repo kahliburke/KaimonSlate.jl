@@ -446,10 +446,15 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .ctlpop .ctlrow input { accent-color:var(--accent); cursor:pointer; }
 .ctlpop .ctlsub { font-size:.64rem; text-transform:uppercase; letter-spacing:.04em; color:var(--dim);
                   padding:7px 8px 3px; margin-top:3px; border-top:1px solid var(--bg3); }
-/* Cell tag editor (🏷) — reuses .ctlpop chrome */
-.tagpop { min-width:230px; }
-.tagpop .ctlrow span { display:flex; flex-direction:column; }
-.tagpop .tagdesc { font-size:.62rem; color:var(--dim); font-family:system-ui,sans-serif; letter-spacing:0; }
+/* Cell tag editor (🏷) — reuses .ctlpop chrome; grouped, kind-scoped, with per-tag guidance. */
+.tagpop { min-width:256px; max-width:304px; }
+.tagpop .tagrow { align-items:flex-start; padding:5px 10px; }
+.tagpop .tagrow input { margin-top:2px; }
+.tagpop .ctlrow span { display:flex; flex-direction:column; gap:1px; }
+.tagpop .tagname { font-family:'Cascadia Code',ui-monospace,monospace; font-size:.8rem; color:var(--text); }
+.tagpop .tagrow input:checked + span .tagname { color:var(--accent); }
+.tagpop .tagrow:has(input:checked) { background:color-mix(in srgb, var(--accent) 9%, transparent); }
+.tagpop .tagdesc { font-size:.64rem; color:var(--dim); font-family:system-ui,sans-serif; letter-spacing:0; line-height:1.32; }
 .tagpop .tagchips { display:flex; flex-wrap:wrap; gap:5px; padding:4px 8px 6px; }
 .tagpop .tagnone { color:var(--dim); font-size:.72rem; }
 .tagpop .tagchip { display:inline-flex; align-items:center; gap:3px; background:var(--bg3); color:var(--text);
