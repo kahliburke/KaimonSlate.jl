@@ -117,11 +117,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .remotesmodal.focusmode>*:not(.rtfocus){display:none;}
 .rtfocus{display:none;}
 .remotesmodal.focusmode .rtfocus{display:block;}
-.rtfhead{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
-.rtfhead strong{color:#e6ebf7;font-size:1.05rem;}
-.rtfhead .pddim{margin-right:auto;}   /* tight left group (back · title · subtitle); ↻ pushed right */
-.modal .rtfback{padding:3px 10px;font-size:.82rem;border-radius:6px;}
-.modal .rtfref{padding:3px 9px;font-size:.82rem;border-radius:6px;}
+/* Breadcrumb header, mirroring the Publishing dashboard: "Remotes › host — subtitle" with the host
+   name as the bold left-anchored title and "Remotes" a plain clickable crumb (no boxed button). */
+.rtfhead{display:flex;align-items:center;gap:9px;margin-bottom:14px;}
+.rtfhead strong{color:#fff;font-size:1.05rem;}
+.rtfhead .rtfcrumb{color:#9aa3c0;cursor:pointer;}
+.rtfhead .rtfcrumb:hover{color:#569cd6;text-decoration:underline;}
+.rtfhead .rtfsub{color:#6a7090;font-size:.78rem;}
+.modal .rtfref{margin-left:auto;padding:3px 9px;font-size:.82rem;border-radius:6px;}
 .rppcfg{margin-bottom:6px;padding-bottom:12px;border-bottom:1px solid #21253a;}
 .rpprow{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
 .rpprow>label{flex:0 0 88px;color:#8a90a8;font-size:.8rem;}
@@ -524,8 +527,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function rtRenderFocus(){
     var h=_rtFocus; if(!h) return; var box=document.getElementById('rtfocus');
     var cfg=_rtPoolCfg(h), tr=_rtHostTr(h), m=_rtMsg[h];
-    var head='<div class="rtfhead"><button class="rtfback">← Remotes</button><strong>🖧 '+esc(h)+
-      '</strong><span class="pddim">warm pool &amp; live workers</span><button class="rtfref" title="refresh roster">↻</button></div>';
+    var head='<div class="rtfhead"><strong><span class="rtfcrumb" title="back to Remotes">Remotes</span> › 🖧 '+esc(h)+
+      '</strong><span class="rtfsub">— warm pool &amp; live workers</span><button class="rtfref" title="refresh roster">↻</button></div>';
     var cfgHtml='<div class="rppcfg">'+
       '<div class="rpprow"><label>Workers</label>'+
       '<input class="rppn" type="text" inputmode="numeric" autocomplete="off" value="'+(cfg?cfg.n:1)+'" title="how many warm workers to keep ready for instant adoption">'+
@@ -543,7 +546,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '</div>'+
       '<div class="rppmsg'+(m&&m.err?' err':'')+'">'+(m?esc(m.text):'')+'</div>';
     box.innerHTML=head+cfgHtml+'<div class="rtfworkers"></div><div class="rtfpark"></div>';
-    box.querySelector('.rtfback').onclick=rtUnfocus;
+    box.querySelector('.rtfcrumb').onclick=rtUnfocus;
     box.querySelector('.rtfref').onclick=function(){ rtFetchRoster(h); };
     var trSel=box.querySelector('.rpptr'), portIn=box.querySelector('.rppport');
     trSel.onchange=function(){ portIn.style.display=(trSel.value==='direct')?'':'none'; };
