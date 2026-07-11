@@ -23,11 +23,22 @@ function renderRunLoc(state) {
   const src = (state && state.runLocationSource) || 'default';
   const host = loc ? loc.split(',')[0] : '';
   document.getElementById('runlocicon').textContent = host ? '🖧' : '💻';
-  document.getElementById('runloclabel').textContent = host || 'local';
+  // Worker-health overlay: while the worker is (re)provisioning/connecting — a restart, a fresh remote
+  // spawn, or a genuine disconnect of a runnable notebook — the pill must NOT sit there looking
+  // connected. It goes amber and pulses with "· starting…"/"· reconnecting…" so a slow remote respawn
+  // is visible here (this is the pill people watch), not just on the small worker dot.
+  const w = (state && state.worker) || {};
+  const runnable = ((state && state.cells) || []).some(c => c.kind === 'code');
+  const busy = !!(state && state.hydrating) || (w.kind === 'gate' && !w.connected && runnable);
+  const suffix = busy ? (state.hydrating ? ' · starting…' : ' · reconnecting…') : '';
+  document.getElementById('runloclabel').textContent = (host || 'local') + suffix;
   el.classList.toggle('remote', !!host);
+  el.classList.toggle('reconnecting', busy);
   const srcTxt = src === 'session' ? 'session' : src === 'notebook' ? 'saved' : src === 'global' ? 'global' : '';
-  const se = document.getElementById('runlocsrc'); se.textContent = srcTxt; se.style.display = srcTxt ? '' : 'none';
-  el.title = host ? ('worker runs on ' + host + ' (' + (srcTxt || 'set') + ') — click to change')
+  const se = document.getElementById('runlocsrc'); se.textContent = busy ? '' : srcTxt; se.style.display = (!busy && srcTxt) ? '' : 'none';
+  el.title = busy ? ((host ? ('worker on ' + host) : 'local worker') + ' — ' +
+                     (state.hydrating ? 'starting up (provisioning / connecting)…' : 'reconnecting…'))
+           : host ? ('worker runs on ' + host + ' (' + (srcTxt || 'set') + ') — click to change')
                   : 'worker runs locally — click to run it on another machine';
 }
 

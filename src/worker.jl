@@ -18,6 +18,11 @@ import Pkg                                   # project dep listing for eager doc
 # — which deps are notebook-specific adds vs. inherited from the parent project.
 const PARENT_PROJECT = Ref("")
 
+# SHA of the worker payload this process BOOTED with (set from the boot script; "" for a local worker
+# that inherits the hub's version). The hub compares it against the current payload on reattach and
+# reprovisions a worker running stale code — see remote.jl `_payload_sha` / `attached!`.
+const PAYLOAD_SHA = Ref("")
+
 # Minimal ECharts marker so notebooks can `echart(opt)`. Only the struct + helper
 # live here (no JSON); the server JSON-encodes the option Dict. `capture.jl`
 # detects `value isa EChart` and ships back the raw Dict.
@@ -1073,7 +1078,7 @@ function __slate_env_info()
         isfile(ppf) && (name = string(get(Pkg.TOML.parsefile(ppf), "name", "")))
         parent = Dict{String,Any}("path" => p, "name" => name, "deps" => _project_deps_at(p))
     end
-    return Dict{String,Any}("notebook" => nb, "parent" => parent)
+    return Dict{String,Any}("notebook" => nb, "parent" => parent, "payload_sha" => PAYLOAD_SHA[])
 end
 
 # Seed a forked notebook env from `parent`: copy the parent's deps + compat (NOT its package

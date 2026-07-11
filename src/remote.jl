@@ -290,6 +290,30 @@ end
 # top-level src `.jl` files rather than a curated list — a curated list silently breaks the moment
 # worker.jl gains an include. Hub-only files ride along unused (the worker never include()s them).
 
+# A content SHA over that payload (every top-level `src/*.jl`) — the version of the code a worker is
+# RUNNING. It's baked into the boot script so a worker reports the exact payload it loaded (a running
+# worker never re-includes its payload — see `attached!`; and `tools()` is fixed at boot, so a newly
+# added gate tool can't appear on a live worker). The hub recomputes this on every reattach and reaps
+# + cold-spawns any worker whose stamp is behind — so editing `worker.jl` reprovisions the remote
+# instead of silently running stale code. Cached by the newest payload mtime (one stat sweep per
+# check, not a re-hash). Opt out with `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1`.
+const _PAYLOAD_SHA_CACHE = Ref{Tuple{Float64,String}}((-1.0, ""))
+function _payload_sha()
+    srcdir = @__DIR__
+    files = sort!(String[joinpath(srcdir, f) for f in readdir(srcdir)
+                         if endswith(f, ".jl") && isfile(joinpath(srcdir, f))])
+    mt = try; maximum(mtime, files; init = 0.0); catch; 0.0; end
+    (_PAYLOAD_SHA_CACHE[][1] == mt && !isempty(_PAYLOAD_SHA_CACHE[][2])) && return _PAYLOAD_SHA_CACHE[][2]
+    ctx = _SHA.SHA1_CTX()
+    for f in files
+        _SHA.update!(ctx, codeunits(basename(f)))
+        _SHA.update!(ctx, read(f))
+    end
+    sha = bytes2hex(_SHA.digest!(ctx))[1:16]
+    _PAYLOAD_SHA_CACHE[] = (mt, sha)
+    return sha
+end
+
 """
     provision_remote!(t::RemoteTarget, parent_project) -> nothing
 
@@ -549,6 +573,7 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     try; @eval using Revise; catch; end
     include(_wk)
     SlateWorker.PARENT_PROJECT[] = raw"$parent"
+    SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
                       warm_deps=$warm_deps,
@@ -613,6 +638,33 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     _write_worker_manifest!(host, port, fields)
     _write_worker_state!(host, port, pool ? "idle" : "attached")
     return nothing
+end
+
+# Read a field off an `__slate_env_info` result — a Dict{String,Any} locally, a JSON3.Object (Symbol
+# props) once it has ridden back over the gate. Returns `dv` on any miss.
+_infofield(o, k::String, dv) = try
+    o isa AbstractDict ? (haskey(o, k) ? o[k] : get(o, Symbol(k), dv)) :
+    (hasproperty(o, Symbol(k)) ? getproperty(o, Symbol(k)) : dv)
+catch
+    dv
+end
+
+# Is the live worker `k` running the CURRENT worker payload? Compares its boot-baked stamp
+# (`__slate_env_info().payload_sha`) to `_payload_sha()`. Stale — or an old worker that reports none —
+# ⇒ false, and `attached!` reaps + cold-spawns it. A flaky env_info call ⇒ true (don't reap on a
+# transient error; liveness is validated separately). Opt out with `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1`.
+function _payload_current(k)::Bool
+    get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") == "1" && return true
+    want = _payload_sha()
+    got = try
+        String(_infofield(_tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0), "payload_sha", ""))
+    catch
+        return true
+    end
+    got == want && return true
+    _rlog("payload: worker-$(k.port) for '$(k.label)' is stale " *
+          "(sha $(isempty(got) ? "none" : first(got, 12)) ≠ current $(first(want, 12))) — reprovisioning")
+    return false
 end
 
 """
@@ -681,7 +733,37 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     # changes anything about the live session (a running worker never re-includes its payload),
     # so they run in the background while the notebook is already usable. The attachment record
     # gets the dial's resolved key/ip so the NEXT reattach needs zero ssh before its dial.
+    # Cold spawn: provision (idempotent) + launch a fresh worker + dial it. Both the last resort (no
+    # reusable worker) AND the redirect target when a reused worker is running a stale payload.
+    function fresh_spawn()
+        provision_remote!(t, parent_project)
+        start_sync!(t, parent_project)
+        # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them
+        # (needed for :direct behind a firewall); else auto from _next_ports (9100+), floored above the roster.
+        port, stream_port = t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
+                            _next_ports(floor = try; _port_floor(host); catch; 0; end)
+        k.port = port; k.stream_port = stream_port
+        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads)
+        r = dial(port, stream_port; deadline = 120.0)   # deadline covers remote Julia boot + KaimonGate load (~90s)
+        r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
+        _attach_record!(host, k.label; port = port, stream_port = stream_port,
+                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
+        _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
+        return (r.conn, r.tunnel)
+    end
+
     function attached!(r, via::String)
+        k.conn = r.conn; k.tunnel = r.tunnel        # so the payload probe can gate-call this worker
+        # A reused worker (park/record/probe/adopt) may be running an OLDER payload than the hub — a
+        # live worker never re-includes its code, and `tools()` is fixed at boot, so a newly added
+        # gate tool can't appear on it. If its boot stamp is behind, reap it and cold-spawn fresh.
+        if !_payload_current(k)
+            try; reap_remote_worker(host, k.port); catch; end
+            try; K.disconnect!(r.conn); catch; end
+            r.tunnel === nothing || (try; close_tunnel(r.tunnel); catch; end)
+            k.conn = nothing; k.tunnel = nothing
+            return fresh_spawn()
+        end
         _attach_record!(host, k.label; port = k.port, stream_port = k.stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
         start_sync!(t, parent_project)          # non-blocking watcher; heals /src drift from the detached period
@@ -808,25 +890,8 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         k.conn = nothing
     end
 
-    provision_remote!(t, parent_project)
-    start_sync!(t, parent_project)
-    begin
-        # Remote ports for this worker (loopback-bound for :tunnel, 0.0.0.0 for :direct). Pinned when the
-        # target names them (needed for :direct behind a firewall — you must know which ports to open);
-        # otherwise auto-assigned from _next_ports (9100+), floored above the host's live roster.
-        port, stream_port = t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
-                            _next_ports(floor = try; _port_floor(host); catch; 0; end)
-        k.port = port; k.stream_port = stream_port
-        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads)
-
-        # Cold spawn: the dial deadline covers remote Julia boot + KaimonGate load (~90s).
-        r = dial(port, stream_port; deadline = 120.0)
-        r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
-        _attach_record!(host, k.label; port = port, stream_port = stream_port,
-                        transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
-        _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
-        return (r.conn, r.tunnel)
-    end
+    # No reusable worker (or every reattach fell through) — spawn a fresh one on new ports.
+    return fresh_spawn()
 end
 
 # The routable address of `host` for a :direct dial. An ssh alias (~/.ssh/config Host) may not

@@ -487,6 +487,22 @@ function _publishState(state) {
   window.onNbState && window.onNbState(state);                // graph-shaped consumers (DAG panel)
   updateChrome(state);
 }
+// A running "0:MM" elapsed timer for the hydrating banner — reassurance that a multi-minute remote
+// respawn is progressing, not wedged. Started when hydration begins, cleared when it ends; the start
+// time persists across the per-state banner rebuilds so the count is continuous.
+let _hydTimer = null, _hydStart = 0;
+function _startHydClock() {
+  if (!_hydStart) _hydStart = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const tick = () => {
+    const el = document.getElementById('hydelapsed'); if (!el) return;
+    const s = Math.max(0, Math.floor(((typeof performance !== 'undefined' ? performance.now() : Date.now()) - _hydStart) / 1000));
+    el.textContent = '· ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  };
+  tick();                                   // paint immediately after each banner rebuild
+  if (!_hydTimer) _hydTimer = setInterval(tick, 1000);
+}
+function _stopHydClock() { if (_hydTimer) { clearInterval(_hydTimer); _hydTimer = null; } _hydStart = 0; }
+
 // Topbar/banner bits that live outside #nb (title, worker dot, vscode link, hydrating banner).
 function updateChrome(state) {
   document.getElementById('title').textContent = state.title || 'Notebook';
@@ -522,13 +538,17 @@ function updateChrome(state) {
            ' (a first run installs Julia deps and can take a few minutes)…')
       : state.hydratingKind === 'run'
         ? 'Running the notebook — cells go live as they finish…'
-        : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…');
+        : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…') +
+      ' <span id="hydelapsed" class="hydelapsed"></span>';
     document.body.classList.add('hydrating');
+    _startHydClock();     // a running elapsed timer so a slow respawn visibly ticks (not frozen)
   } else if (state.hydrateError) {
+    _stopHydClock();
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
     hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)
     document.body.classList.remove('hydrating');
   } else {
+    _stopHydClock();
     hb.style.display = 'none'; document.body.classList.remove('hydrating');
   }
   updateStaleBadge(state);

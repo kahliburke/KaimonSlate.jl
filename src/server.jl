@@ -749,12 +749,17 @@ end
 # tracked per LIVE kernel against the imports' signature, so it fires once per kernel and again only
 # if the notebook's imports change (a fresh/replaced kernel has a new objectid ⇒ re-primes).
 function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
-    # Cells that ESTABLISH the environment on a side: pure `using`/`import`, AND the import scaffold —
-    # a cell like `using SomePkg, CairoMakie; set_theme!(…)` isn't pure-using, but the region needs
-    # exactly what it does (load the packages so downstream calls resolve, apply the theme so remote
-    # figures match). In document order so imports precede a scaffold/effect that builds on them.
+    # Cells that ESTABLISH per-side state on a side — re-run (never transferred), in document order so
+    # imports precede a scaffold/effect that builds on them:
+    #   • pure `using`/`import` and the import scaffold — load packages so downstream calls resolve;
+    #   • a global-THEME setter (`set_theme!`/`update_theme!`, marked by the synthetic `_THEME_SENTINEL`
+    #     write) — its effect is process state, not a binding, so like the memo-restore replay each side
+    #     must RE-RUN it for remote figures to match. A theme cell that also `using`s is already caught
+    #     by import_scaffold; a STANDALONE `set_theme!(…)` (no `using`) is caught here — else its theme
+    #     silently never reaches the region (the sentinel is deliberately NOT shipped — see presync).
     env = [c for c in nb.report.cells
-           if c.kind == CODE && (ReportEngine._is_pure_using(c.source) || :import_scaffold in c.flags)]
+           if c.kind == CODE && (ReportEngine._is_pure_using(c.source) || :import_scaffold in c.flags ||
+                                 ReportEngine._THEME_SENTINEL in c.writes)]
     isempty(env) && return nothing
     sig = hash([c.src_hash for c in env])
     key = (nb.id, objectid(k))
@@ -785,6 +790,35 @@ function _teardown_region!(nb::LiveNotebook; kill::Bool = false)
         end
     end
     return nothing
+end
+
+# Restart JUST one region worker (the main kernel + other regions stay up): kill its worker, forget its
+# prime + boundary-sync state, restale the cells that run on it, and re-run — async, same "instant"
+# pattern as restart_kernel!. The region kernel is respawned lazily by `_region_kernel!` on the next
+# eval. `side == ""` means the main kernel → fall back to a full restart.
+function restart_region!(nb::LiveNotebook, side::AbstractString)
+    isempty(side) && return restart_kernel!(nb)
+    k = lock(_REGION_LOCK) do
+        kk = pop!(_REGION_KERNELS, (nb.id, String(side)), nothing)
+        kk === nothing || delete!(_REGION_PRIMED, (nb.id, objectid(kk)))   # fresh kernel re-primes itself
+        delete!(_REGION_SYNCED, nb.id)   # coarse (keyed per-nb): re-ships boundary values to the fresh kernel
+        kk
+    end
+    k === nothing || try; ReportEngine.shutdown!(k; kill_remote = true); catch e
+        @warn "slate region: restart teardown failed" notebook = nb.id side = side exception = e
+    end
+    ids = String[]
+    lock(nb.lock) do
+        for cell in nb.report.cells
+            (cell.kind == CODE && _cell_side(nb, cell) == side) || continue
+            cell.state = STALE; push!(ids, cell.id)
+        end
+    end
+    ReportEngine._rlog("region: restart '$side' for $(nb.id) — killed worker, restaled $(length(ids)) cell(s)")
+    @async begin
+        try; _eval!(nb); catch e; @warn "slate region: restart re-run failed" side = side exception = e; end
+    end
+    return nb
 end
 
 # ── Run supervisor: eval-level self-healing ──────────────────────────────────────────────────

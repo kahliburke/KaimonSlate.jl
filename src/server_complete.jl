@@ -1205,7 +1205,13 @@ function _make_router(h::Hub)
         end
         _json(state_json(nb))
     end))
-    HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> (restart_kernel!(nb); _json(state_json(nb)))))
+    # Restart the worker. Body {side:"<region>"} restarts JUST that region's worker (leaving the main
+    # kernel + other regions up); no side / "" restarts the main kernel (and tears regions down).
+    HTTP.register!(router, "POST", "/api/{id}/restart", req -> _withnb(h, req, nb -> begin
+        side = String(get(_body(req), "side", ""))
+        isempty(side) ? restart_kernel!(nb) : restart_region!(nb, side)
+        _json(state_json(nb))
+    end))
     # Run this notebook on a remote worker. Body {ports:"port,stream_port"} (127.0.0.1, e.g. an SSH
     # tunnel) attaches; {ports:""} switches back to a local worker. Runtime-only (not saved to the .jl).
     HTTP.register!(router, "POST", "/api/{id}/remote-worker", req -> _withnb(h, req, nb -> begin
