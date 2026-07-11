@@ -630,6 +630,39 @@ end
 _side_kernel!(nb::LiveNotebook, side::AbstractString) =
     isempty(side) ? nb.kernel : _region_kernel!(nb, String(side))
 
+# Read a table spec's declared id, tolerating both JSON3.Object (Symbol keys, as
+# deserialized off the gate) and a plain Dict{String,Any} (server-built specs).
+function _spec_tableid(t)
+    try
+        if t isa AbstractDict
+            haskey(t, :tableId) && return t[:tableId]
+            haskey(t, "tableId") && return t["tableId"]
+            return nothing
+        end
+        return getproperty(t, :tableId)
+    catch
+        return nothing
+    end
+end
+
+# Which side (region kernel; "" = main) owns a paged table? A paged table's provider
+# is registered in the WORKER that ran the producing cell, so page requests must hit
+# THAT kernel — a `region`-tagged cell's DataFrame can't paginate against the main
+# kernel because the provider was never registered there. Resolve by finding the cell
+# whose last output declared this tableId, then ask where that cell runs.
+function _table_side(nb::LiveNotebook, table_id::AbstractString)
+    (isempty(table_id) || !_region_active(nb)) && return ""
+    for cell in nb.report.cells
+        o = cell.output
+        o === nothing && continue
+        for t in o.tables
+            tid = _spec_tableid(t)
+            tid !== nothing && String(tid) == String(table_id) && return _cell_side(nb, cell)
+        end
+    end
+    return ""
+end
+
 # Which kernel does `cell` run on? Its effective side. Returns (kernel, side::String).
 function _region_route(nb::LiveNotebook, cell::Cell)
     _region_active(nb) || return (nb.kernel, "")

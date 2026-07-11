@@ -1100,8 +1100,11 @@ function _make_router(h::Hub)
     end))
     HTTP.register!(router, "POST", "/api/{id}/table-page", req -> _withnb(h, req, nb -> begin
         b = _body(req)
+        tid = String(get(b, "table_id", ""))
         res = lock(nb.lock) do                       # serialize vs eval (shared gate connection)
-            ReportEngine.table_page(nb.kernel, nb.report, String(get(b, "table_id", "")), b)
+            # A region-produced table's provider lives on that region's kernel — route there.
+            k = _side_kernel!(nb, _table_side(nb, tid))
+            ReportEngine.table_page(k, nb.report, tid, b)
         end
         _json(Dict("rows" => res.rows, "total" => res.total))
     end))
