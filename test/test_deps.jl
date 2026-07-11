@@ -86,9 +86,11 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
     end
 
     @testset "redundant `using` unlocks memoization (`:using_redundant`)" begin
-        # A `using X; v = solve()` cell is normally unmemoizable (it provides X's names). But when
-        # X is already in scope from an UPSTREAM `using X`, this cell's import is a no-op the anchor
-        # covers, so it becomes memoizable. Mock the resolved exports so the usings aren't opaque.
+        # A `using X; v = solve()` cell provides X's names, yet is still memoizable: the worker caches
+        # its genuinely-defined values (writes ∖ provides) and REPLAYS the `using` on restore
+        # (`:import_scaffold`) to re-establish scope. `:using_redundant` marks the stricter subset whose
+        # replay is a proven no-op (X already in scope upstream) — a HINT, not a safety gate. This block
+        # checks both the flags and that providers memoize. Mock the resolved exports so usings aren't opaque.
         empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
         ReportEngine._USING_EXPORTS["FakeMemoPkg"] = [:fakesolve]
         ReportEngine._USING_EXPORTS["OtherMemoPkg"] = [:othername]
@@ -99,14 +101,16 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
             build_dependencies!(r)
             anchor = findcell(r, "anchor"); heavy = findcell(r, "heavy"); novel = findcell(r, "novel")
             @test :fakesolve in anchor.provides
-            @test !(:using_redundant in anchor.flags)      # FIRST provider — the anchor, must run
-            @test !ReportEngine._memoizable(anchor)
+            @test :import_scaffold in anchor.flags         # a provider → memoizable via import-scaffold replay
+            @test !(:using_redundant in anchor.flags)      # …but the FIRST provider, so not a redundant no-op
+            @test ReportEngine._memoizable(anchor)         # restore replays its `using` to re-establish scope
             @test :fakesolve in heavy.provides             # heavy re-provides fakesolve (redundantly)
             @test :using_redundant in heavy.flags          # every provided name anchored upstream
             @test ReportEngine._memoizable(heavy)          # …so it memoizes despite providing
             @test :v in heavy.writes && !(:v in heavy.provides)   # the genuinely-defined value
-            @test !(:using_redundant in novel.flags)       # OtherMemoPkg is NOVEL here → not redundant
-            @test !ReportEngine._memoizable(novel)
+            @test !(:using_redundant in novel.flags)       # OtherMemoPkg is NOVEL here → not redundant…
+            @test :import_scaffold in novel.flags          # …yet still an import-scaffold provider
+            @test ReportEngine._memoizable(novel)          # so memoizable anyway: restore replays both usings
         finally
             delete!(ReportEngine._USING_EXPORTS, "FakeMemoPkg")
             delete!(ReportEngine._USING_EXPORTS, "OtherMemoPkg")
@@ -554,7 +558,7 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test "plot" in dependents_of(r, Set(["th"]))       # editing the theme restales the figure
         @test !("pure" in dependents_of(r, Set(["th"])))
         @test isempty(r.meta["multidef"])                   # the sentinel never reads as a collision
-        @test ReportEngine._memo_key(r, findcell(r, "th")) == ""   # side-effect cell → never memoized
+        @test ReportEngine._memo_key(r, findcell(r, "th")) != ""   # theme setter → memoizable via theme-replay on restore
         # consecutive theme cells chain (update_theme! composes onto set_theme!'s state)
         r2 = parse_report("#%% code id=a\nset_theme!(theme_dark())\n" *
                           "#%% code id=b\nupdate_theme!(fontsize = 20)\n" *
