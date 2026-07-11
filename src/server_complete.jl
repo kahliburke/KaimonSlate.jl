@@ -383,6 +383,7 @@ _ollama_models() = _tags_models(get(ENV, "OLLAMA_HOST", "http://127.0.0.1:11434"
 _vmlx_models()   = _tags_models(get(ENV, "VMLX_HOST", "http://127.0.0.1:8000"))
 
 include("export_typst.jl")   # export_pdf(nb) — publication-quality PDF via Typst (uses types defined above)
+include("memostore.jl")      # MemoStore (server-side copy — stateless, root passed explicitly): pack/unpack
 include("export_bundle.jl")  # export_standalone(nb) / expand(jl) — self-contained single-source .jl
 
 # Splice a notebook's `@use` entries into the shell's single `<script type="importmap">` (right
@@ -899,14 +900,32 @@ function _make_router(h::Hub)
     # shallow git bundle when the project is a repo). Reinflate with `KaimonSlate.expand`.
     HTTP.register!(router, "GET", "/api/{id}/export.standalone.jl", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
+        # `memo` = byte budget for embedded precomputed results (MB in the query, → bytes):
+        # ""/absent = all memoizable results; "0" = none. Entries chosen by compute-saved-per-byte.
+        mb = get(qp, "memo", "")
+        budget = isempty(mb) ? typemax(Int) :
+                 (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
         jl = try
-            export_standalone(nb; history = get(qp, "history", "1") != "0")   # full git history by default (deliberate share)
+            export_standalone(nb; history = get(qp, "history", "1") != "0",   # full git history by default (deliberate share)
+                              memo_budget = budget)
         catch e
             return HTTP.Response(500, "Standalone export failed: " * sprint(showerror, e))
         end
         fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".standalone.jl"
         HTTP.Response(200, ["Content-Type" => "text/x-julia; charset=utf-8",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], jl)
+    end))
+    # Precomputed-results catalog for the export dialog's size/quality slider: this notebook's
+    # embeddable memo entries ranked by compute-saved-per-byte (densest first), with totals.
+    # Snapshots current values into the store as a side effect (idempotent), so the numbers are exact.
+    HTTP.register!(router, "GET", "/api/{id}/memo-catalog", req -> _withnb(h, req, nb -> begin
+        cat = try
+            memo_catalog(nb)
+        catch e
+            Dict{String,Any}("entries" => Any[], "total_bytes" => 0, "total_ms" => 0.0,
+                             "error" => sprint(showerror, e))
+        end
+        _json(cat)
     end))
     # ── Notebook packages ─────────────────────────────────────────────────────
     # Show the environment with provenance: `notebook` deps (the notebook's own forked env,

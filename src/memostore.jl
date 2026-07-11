@@ -133,6 +133,62 @@ function _manifest_blobs(d::AbstractDict)
     return filter(_validhash, hs)
 end
 
+# ── Scoped export: a SUBSET of the store, for embedding in a standalone `.jl` ─────────────────
+# A self-contained notebook can carry the precomputed results for ITS OWN cells so they restore
+# instantly on import — never the whole (potentially multi-GB) shared store. `pack` gathers the
+# manifests for `keys` (fullkeys) plus every blob they reference (deduped) into one flat container
+# — [pathlen:u32][relpath][len:u64][bytes], network byte order, the SAME wire as the bundle tree
+# so it's dependency-free; the caller's footer layer gzips it. `unpack` merges it back into a
+# store: content-addressed, so an already-present blob is skipped, and (since the archive rides an
+# untrusted shared file) only the two known subtrees are written, no path escape. Missing entries
+# or blobs are silently skipped — a since-gc'd value simply recomputes on the other side.
+function pack(root::AbstractString, keys)
+    io = IOBuffer(); seen = Set{String}()
+    emit(rel, data) = (rb = Vector{UInt8}(rel);
+                       write(io, hton(UInt32(length(rb))), rb, hton(UInt64(length(data))), data))
+    for key in keys
+        occursin(_VALID_KEY, key) || continue
+        mp = manifest_path(root, key); isfile(mp) || continue
+        emit("manifests/$key.toml", read(mp))
+        d = read_manifest(root, key); d === nothing && continue
+        for h in _manifest_blobs(d)
+            (h in seen) && continue; push!(seen, h)
+            bp = blob_path(root, h); isfile(bp) && emit("blobs/sha256/$(h[1:2])/$h", read(bp))
+        end
+    end
+    return take!(io)
+end
+
+function unpack(root::AbstractString, data::AbstractVector{UInt8})
+    io = IOBuffer(data)
+    base = normpath(root); sep = Base.Filesystem.path_separator
+    endswith(base, sep) || (base *= sep)
+    n = 0
+    while !eof(io)
+        rel = String(read(io, ntoh(read(io, UInt32))))
+        bytes = read(io, ntoh(read(io, UInt64)))
+        (startswith(rel, "manifests/") || startswith(rel, "blobs/sha256/")) || continue   # known subtrees only
+        out = normpath(joinpath(root, rel))
+        startswith(out, base) || continue                                                 # no path escape
+        (startswith(rel, "blobs/") && isfile(out)) && continue                            # content-addressed dedup
+        mkpath(dirname(out)); try; write(out, bytes); n += 1; catch; end
+    end
+    return n
+end
+
+# One entry's on-disk footprint (its manifest + the blobs IT references — NOT deduped against
+# other keys; the export UI's density ranking wants each entry's own cost). `key => bytes`.
+function entry_bytes(root::AbstractString, key::AbstractString)
+    occursin(_VALID_KEY, key) || return 0
+    mp = manifest_path(root, key); isfile(mp) || return 0
+    b = Int(filesize(mp))
+    d = read_manifest(root, key); d === nothing && return b
+    for h in _manifest_blobs(d)
+        bp = blob_path(root, h); isfile(bp) && (b += Int(filesize(bp)))
+    end
+    return b
+end
+
 "Store shape/size: `(manifests, blobs, bytes)` — cheap enough for telemetry."
 function stats(root::AbstractString)
     nm = 0; nb = 0; bytes = 0

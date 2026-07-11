@@ -839,6 +839,14 @@ function memo_trace(k::GateKernel, cell::AbstractString = "")
     return _tool(k, "__slate_memo_trace", Dict{String,Any}("cell" => String(cell)); timeout = 30.0)
 end
 
+# Force-snapshot the CURRENT namespace values for `cells` (id → {key,names,unread,safe,ms}) into
+# the worker's durable store, threshold-free, for a standalone export. Returns id → {fullkey,
+# bytes, stored}, or `nothing` if the worker isn't up. See worker.jl `__slate_memo_snapshot`.
+function memo_snapshot(k::GateKernel, cells::AbstractDict)
+    k.conn === nothing && return nothing
+    return _tool(k, "__slate_memo_snapshot", Dict{String,Any}("cells" => cells); timeout = 120.0)
+end
+
 # Reset the worker namespace and mark every cell stale (mirrors `reset_module!`).
 function reset!(k::GateKernel, report::Report)
     k.conn === nothing || (try; _tool(k, "__slate_reset", Dict{String,Any}()); catch; end)

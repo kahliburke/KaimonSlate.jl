@@ -261,6 +261,48 @@ function __slate_memo_trace(; cell::String = "")
     end
 end
 
+# Snapshot the CURRENT namespace values for the given memoizable cells into the durable store,
+# BYPASSING the auto-store time threshold — so a standalone export can offer every memoizable
+# result for embedding, not just the cells that happened to run slow. `cells` maps cell-id →
+# {key (the server-side srckey), names, unread, safe, ms}. Reuses `_memo_store` (which reads the
+# live namespace by name), so nothing recomputes — it just serialises what's already computed.
+# Returns id → {fullkey, bytes, stored}: `stored=false` when a value wouldn't serialise; `bytes`
+# is the entry's on-disk footprint (for the export UI's size/density ranking). The stored wire is
+# minimal (`duration_ms` only) — the per-binding VALUE blobs are what a restore injects; display
+# comes from the embedded preview render. NOTE: `cells` MUST be a keyword arg (raw-Dict fast-path
+# caveat — see __slate_macroexpand); nested dicts may arrive symbol-keyed, hence `_g` dual-lookup.
+function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
+    out = Dict{String,Any}()
+    _MEMO_OK || return out
+    root = _memo_dir()
+    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
+    _strs(x) = String[String(v) for v in (x isa AbstractVector ? x : Any[])]
+    for (id, spec) in cells
+        spec isa AbstractDict || continue
+        key = String(_g(spec, "key", "")); isempty(key) && continue
+        names = _strs(_g(spec, "names", Any[])); isempty(names) && continue
+        unread = _strs(_g(spec, "unread", Any[])); safe = _strs(_g(spec, "safe", Any[]))
+        ms = try; Float64(_g(spec, "ms", 0.0)); catch; 0.0; end
+        vrepr = String(_g(spec, "value_repr", ""))
+        # A VALID wire in the same shape a real run produces (empty display + the cell's value repr).
+        # The per-binding VALUE blobs are what a restore injects; the rich display (charts/figures)
+        # comes from the embedded preview. A minimal `(; duration_ms)` wire crashes the restore path,
+        # which accesses `wire.mime` — that must never happen (see _memo_restore's shape guard).
+        wire = (stdout = "", mime = Tuple{String,Vector{UInt8}}[], echarts = Any[], tables = Any[],
+                binds = NamedTuple[], value_repr = vrepr, exception = nothing, backtrace = nothing,
+                duration_ms = ms, trace = Any[], stderr = "", overflow = NamedTuple[], animations = Any[])
+        ok = try
+            _memo_store(key, names, wire; unread = unread, safe = safe)
+        catch
+            false
+        end
+        fk = _memo_fullkey(key)
+        out[String(id)] = Dict{String,Any}("fullkey" => fk, "stored" => (ok === true),
+                                           "bytes" => MemoStore.entry_bytes(root, fk))
+    end
+    return out
+end
+
 # Bound the store to the cap: manifests are the LRU roots (restore touches them), blobs are
 # refcount-swept once no surviving manifest references them — a blob shared by several entries
 # outlives any one entry's eviction. Legacy fmt≤2 flat files are swept too. See MemoStore.gc.
@@ -322,6 +364,12 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[],
         (false, nothing)
     end
     ok || return miss("wire blob missing or undeserializable")
+    # Wire shape guard: the wire must look like a run capture (has `mime`) — the server accesses
+    # `wire.mime`/`.echarts`/… on it. An entry written by an incompatible/older store (e.g. a
+    # bad-shape snapshot wire) would crash the cell on restore; treat it as a MISS so the cell
+    # recomputes and RE-STORES a valid entry, self-healing the store. Checked BEFORE any binds are
+    # assigned, so a rejected entry never half-mutates the namespace.
+    hasproperty(wire, :mime) || return miss("incompatible wire shape (stale entry) — recomputing")
     m = _NS[]
     for (s, v) in binds
         try; Core.eval(m, :($s = $v)); catch; return miss("assigning restored global '$s' failed"); end
@@ -382,6 +430,16 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
             continue
         end
         v = Base.invokelatest(getglobal, m, s)
+        # A NOTEBOOK-DEFINED function (or closure) can't be faithfully cached: jls serialises it by
+        # its defining module + name, and on RESTORE in a reconstructed notebook that module has a
+        # different name (`Main.<rebuilt>` vs the original), so the decode throws `UndefVarError`.
+        # These are cheap to recompute anyway (a def), so ABORT the whole entry rather than embed a
+        # value that can't come back — restoring the cell's other bindings without this one would be
+        # unfaithful (the function would be undefined downstream). Package functions (parentmodule ≠
+        # the notebook module) serialise fine and are kept.
+        if v isa Function && parentmodule(v) === m
+            return fail("cell defines the notebook-local function '$nm' — not cacheable (restores unfaithfully)")
+        end
         if nm in unread && _is_display_object(v)
             push!(elided, Dict{String,Any}("name" => nm, "type" => string(typeof(v))))
             @info "slate memo: display object elided (wire image only)" cell = cellkey name = nm
@@ -1257,6 +1315,7 @@ function tools()
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
+    KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
         KaimonGate.GateTool("__slate_sizeof", __slate_sizeof),

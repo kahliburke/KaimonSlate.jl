@@ -55,19 +55,59 @@ _bundle_footer(b64::AbstractString) = _footer_block(_BUNDLE_OPEN, _BUNDLE_CLOSE,
 const _PREVIEW_OPEN = "# ╔═╡ Slate.preview"
 const _PREVIEW_CLOSE = "# ╚═╡ Slate.preview"
 
-_gzip_b64(data::AbstractString) = Base64.base64encode(transcode(GzipCompressor, Vector{UInt8}(data)))
-_gunzip_b64(b64::AbstractString) = String(transcode(GzipDecompressor, Base64.base64decode(b64)))
+# Footer compression: Zstd (better ratio + faster than gzip). The footer container is entirely
+# ours — never handed to `tar`/`gzip` — so there's no external-tool compatibility constraint (the
+# actual `.tar.gz` downloads and HTTP `gzip` content-encoding elsewhere deliberately stay gzip).
+# DECODE auto-detects the codec by magic bytes (zstd `28 b5 2f fd`, gzip `1f 8b`) so every EXISTING
+# gzip-footer standalone `.jl` still expands. `_deflate`/`_inflate` are the raw-bytes primitives.
+_deflate(data::AbstractVector{UInt8}) = transcode(CodecZstd.ZstdCompressor, Vector{UInt8}(data))
+function _inflate(data::AbstractVector{UInt8})
+    if length(data) >= 4 && data[1] == 0x28 && data[2] == 0xb5 && data[3] == 0x2f && data[4] == 0xfd
+        return transcode(CodecZstd.ZstdDecompressor, Vector{UInt8}(data))
+    end
+    return transcode(GzipDecompressor, Vector{UInt8}(data))   # legacy gzip footer (or assume it)
+end
+_zb64(data::AbstractVector{UInt8}) = Base64.base64encode(_deflate(data))
+_zb64(data::AbstractString) = _zb64(Vector{UInt8}(data))
+_unzb64_bytes(b64::AbstractString) = _inflate(Base64.base64decode(b64))
+_unzb64(b64::AbstractString) = String(_unzb64_bytes(b64))
 
 # `cells` is the JSON-able rendered-cells array (`state_json(nb)["cells"]`).
 _preview_footer(cells) = _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE,
-    "v1 · frozen render shown while the live env reconstructs", _gzip_b64(JSON.json(cells)))
+    "v1 · frozen render shown while the live env reconstructs", _zb64(JSON.json(cells)))
 
 # Pull the embedded frozen-render cells out of a standalone `.jl` (or `nothing` if absent).
 function _read_preview(text::AbstractString)
     b64 = _read_footer_b64(text, _PREVIEW_OPEN, _PREVIEW_CLOSE)
     b64 === nothing && return nothing
-    return try; JSON.parse(_gunzip_b64(b64)); catch; nothing; end
+    return try; JSON.parse(_unzb64(b64)); catch; nothing; end
 end
+
+# ── Precomputed results (memo) ────────────────────────────────────────────────
+# A standalone `.jl` can also embed the durable-cache entries for ITS OWN memoizable cells — a
+# content-addressed subset of the memo store (MemoStore.pack) — so the expensive cells RESTORE
+# instantly on import instead of recomputing, while the preview shows them meanwhile. Never the
+# whole shared store: only this notebook's cells, and only up to a chosen size budget (the export
+# UI ranks entries by compute-saved-per-byte, JPEG-quality style). Stored like the bundle/preview:
+# a marked, base64'd (Zstd) block, terminal so `parse_report` strips it.
+const _MEMO_OPEN = "# ╔═╡ Slate.memo"
+const _MEMO_CLOSE = "# ╚═╡ Slate.memo"
+
+# `packed` is the raw MemoStore.pack container bytes.
+_memo_footer(packed::AbstractVector{UInt8}) = _footer_block(_MEMO_OPEN, _MEMO_CLOSE,
+    "v1 · precomputed cell results (this notebook's memo entries) — restore instantly on import",
+    _zb64(packed))
+
+# The raw memo container bytes embedded in `text` (decompressed), or `nothing` if absent.
+function _read_memo(text::AbstractString)
+    b64 = _read_footer_b64(text, _MEMO_OPEN, _MEMO_CLOSE)
+    b64 === nothing && return nothing
+    return try; _unzb64_bytes(b64); catch; nothing; end
+end
+
+# Slate's local memo store root — matches the worker's `_memo_dir()` and remote.jl's
+# `_slate_cache_dir()` literally (self-contained: those live in other module scopes).
+_memo_root() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate", "memo")
 
 # Copy a directory's contents into `dest`, skipping `.git` (history travels via the git
 # bundle, not as loose objects) — keeps the tarball lean and avoids nested-repo confusion.
@@ -182,11 +222,12 @@ function _rewrite_manifest_paths!(manifest::AbstractString, targets::AbstractDic
     return
 end
 
-# ── Archive: a trivial (path, bytes) container, gzip'd ────────────────────────
+# ── Archive: a trivial (path, bytes) container, compressed ────────────────────
 # We don't need tar — there are no symlinks (staging follows them), no exec bits or other
 # metadata that matter, and we own both ends. So pack the staged tree as a flat stream of
-# [pathlen:u32][path][len:u64][bytes] entries (network byte order) and gzip it (CodecZlib).
-# In-process, cross-platform, no `tar`/`gzip` binary and no macOS AppleDouble `._*` cruft.
+# [pathlen:u32][path][len:u64][bytes] entries (network byte order) and compress it (Zstd; the
+# decoder auto-detects legacy gzip archives). In-process, cross-platform, no `tar`/`gzip` binary
+# and no macOS AppleDouble `._*` cruft.
 function _pack_tree(dir::AbstractString)
     io = IOBuffer()
     for (root, _, files) in walkdir(dir), f in files
@@ -196,7 +237,7 @@ function _pack_tree(dir::AbstractString)
         data = read(full)
         write(io, hton(UInt32(length(relb))), relb, hton(UInt64(length(data))), data)
     end
-    return transcode(GzipCompressor, take!(io))
+    return _deflate(take!(io))
 end
 
 function _unpack_tree(packed::Vector{UInt8}, dest::AbstractString)
@@ -207,7 +248,7 @@ function _unpack_tree(packed::Vector{UInt8}, dest::AbstractString)
     sep = Base.Filesystem.path_separator
     base = normpath(dest)
     endswith(base, sep) || (base *= sep)
-    io = IOBuffer(transcode(GzipDecompressor, packed))
+    io = IOBuffer(_inflate(packed))              # Zstd, or legacy gzip (auto-detected)
     written = 0; rejected = 0
     while !eof(io)
         rel = String(read(io, ntoh(read(io, UInt32))))
@@ -380,7 +421,85 @@ function _serialize_cells_inlining_bibs(report, nbdir::AbstractString)
     return ReportEngine.serialize_cells(tmp)
 end
 
-function export_standalone(nb::LiveNotebook; include_preview::Bool = true, history::Bool = true)
+# Per-cell memo spec (mirrors server.jl `_eval_one!`): a memoizable cell's cache key + the names
+# whose VALUES to snapshot (writes ∖ provides — never imported functions), plus the elision
+# (`unread`) and zero-copy (`safe`) hints and the compute time (for density ranking). "" key ⇒
+# not memoizable ⇒ skipped. Returns id → Dict spec, and id → compute-ms.
+function _memo_specs(report)
+    specs = Dict{String,Any}(); msof = Dict{String,Float64}()
+    for cell in report.cells
+        key = ReportEngine._memo_key(report, cell)
+        isempty(key) && continue
+        defs = [w for w in cell.writes if !(w in cell.provides)]
+        isempty(defs) && continue
+        unread = String[string(w) for w in defs if !any(o -> o !== cell && w in o.reads, report.cells)]
+        safe   = String[string(w) for w in defs if !any(o -> o !== cell && w in o.mutates, report.cells)]
+        ms = cell.output === nothing ? 0.0 : Float64(cell.output.duration_ms)
+        vrepr = cell.output === nothing ? "" : String(cell.output.value_repr)
+        specs[cell.id] = Dict{String,Any}("key" => key, "names" => String[string(w) for w in defs],
+                                          "unread" => unread, "safe" => safe, "ms" => ms, "value_repr" => vrepr)
+        msof[cell.id] = ms
+    end
+    return specs, msof
+end
+
+# Snapshot this notebook's memoizable results into the store (worker) and return them ranked by
+# compute-saved-per-byte (densest first — the most seconds banked per KB). Each entry:
+# `(cell_id, fullkey, bytes, ms)`. Empty when nothing is embeddable (in-process kernel, no
+# memoizable cells, remote store, snapshot failure). Shared by the export footer AND the catalog
+# endpoint that drives the size/quality slider. `_g` dual-lookup: gate dicts arrive symbol-keyed.
+function _memo_ranked(nb::LiveNotebook)
+    nb.kernel isa ReportEngine.GateKernel || return Tuple{String,String,Int,Float64}[]
+    specs, msof = _memo_specs(nb.report)
+    isempty(specs) && return Tuple{String,String,Int,Float64}[]
+    cat = try; ReportEngine.memo_snapshot(nb.kernel, specs); catch; nothing; end
+    (cat isa AbstractDict) || return Tuple{String,String,Int,Float64}[]
+    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
+    ranked = Tuple{String,String,Int,Float64}[]           # (cell_id, fullkey, bytes, ms)
+    for (id, r) in cat
+        r isa AbstractDict || continue
+        (_g(r, "stored", false) === true) || continue
+        fk = String(_g(r, "fullkey", "")); by = Int(_g(r, "bytes", 0))
+        (isempty(fk) || by <= 0) && continue
+        push!(ranked, (String(id), fk, by, get(msof, String(id), 0.0)))
+    end
+    sort!(ranked; by = t -> t[4] / max(t[3], 1), rev = true)   # ms per byte, densest first
+    return ranked
+end
+
+# Build the `Slate.memo` footer for `nb`: pack the ranked subset that fits `budget` bytes (densest
+# first, so a small budget still banks the most expensive solves). "" when nothing fits / to embed.
+function _build_memo_footer(nb::LiveNotebook; budget::Integer = typemax(Int))
+    budget <= 0 && return ""
+    ranked = _memo_ranked(nb)
+    isempty(ranked) && return ""
+    chosen = String[]; used = 0
+    for (_, fk, by, _ms) in ranked
+        used + by > budget && continue                    # skip this one; a later denser/smaller may still fit
+        push!(chosen, fk); used += by
+    end
+    isempty(chosen) && return ""
+    packed = try; MemoStore.pack(_memo_root(), chosen); catch; UInt8[]; end
+    isempty(packed) ? "" : _memo_footer(packed)
+end
+
+# The size/compute catalog for the export slider: this notebook's embeddable results, densest
+# first. Returns `(entries = [(cell, bytes, ms)], total_bytes, total_ms)` — the client renders a
+# JPEG-quality slider over it (cumulative bytes vs seconds-saved as the budget grows).
+function memo_catalog(nb::LiveNotebook)
+    ranked = _memo_ranked(nb)
+    entries = [Dict{String,Any}("cell" => id, "bytes" => by, "ms" => round(ms; digits = 1))
+               for (id, _fk, by, ms) in ranked]
+    return Dict{String,Any}("entries" => entries,
+                            "total_bytes" => sum(t -> t[3], ranked; init = 0),
+                            "total_ms" => round(sum(t -> t[4], ranked; init = 0.0); digits = 1))
+end
+
+# `memo_budget` bytes caps the embedded precomputed results (default: all memoizable results;
+# 0 disables). Entries are chosen by compute-saved-per-byte so a small budget still banks the
+# most expensive solves. See `_build_memo_footer`.
+function export_standalone(nb::LiveNotebook; include_preview::Bool = true, history::Bool = true,
+                           memo_budget::Integer = typemax(Int))
     lock(nb.lock) do
         info = ReportEngine.bundle_info(nb.kernel, nb.report)
         isempty(info.projectdir) &&
@@ -390,6 +509,11 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true, histo
         out = cells * "\n" * _bundle_footer(b64)
         include_preview && try
             out *= "\n" * _preview_footer(state_json(nb)["cells"])   # frozen render for instant display
+        catch
+        end
+        try
+            mf = _build_memo_footer(nb; budget = memo_budget)        # precomputed results → restore on import
+            isempty(mf) || (out *= "\n" * mf)
         catch
         end
         return out * "\n"
@@ -414,7 +538,8 @@ end
 function _carry_env_footers(text::AbstractString)
     lines = split(text, '\n')
     io = IOBuffer(); wrote = false
-    for (openm, closem) in ((_BUNDLE_OPEN, _BUNDLE_CLOSE), (_PREVIEW_OPEN, _PREVIEW_CLOSE))
+    for (openm, closem) in ((_BUNDLE_OPEN, _BUNDLE_CLOSE), (_PREVIEW_OPEN, _PREVIEW_CLOSE),
+                            (_MEMO_OPEN, _MEMO_CLOSE))
         oi = findfirst(l -> startswith(l, openm), lines)
         oi === nothing && continue
         rest = @view lines[(oi + 1):end]

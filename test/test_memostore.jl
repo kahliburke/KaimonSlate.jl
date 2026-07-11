@@ -124,6 +124,52 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
         end
     end
 
+    @testset "pack / unpack: a scoped subset round-trips, dedups, resists escape" begin
+        mktempdir() do src
+            hs, _ = MemoStore.put_blob(io -> write(io, "shared-blob"), src)   # referenced by BOTH entries
+            hA, _ = MemoStore.put_blob(io -> write(io, "AAAA"), src)
+            hB, _ = MemoStore.put_blob(io -> write(io, "BBBBBBBB"), src)
+            wh, _ = MemoStore.put_blob(io -> write(io, "wire"), src)
+            MemoStore.write_manifest(src, "keyA", mkmanifest(["a" => hA, "s" => hs], wh))
+            MemoStore.write_manifest(src, "keyB", mkmanifest(["b" => hB, "s" => hs], wh))
+            @test MemoStore.entry_bytes(src, "keyA") > 0
+            @test MemoStore.entry_bytes(src, "nope") == 0
+
+            # Pack ONLY keyA → its manifest + hA + hs + wire; keyB and hB excluded (scoping).
+            packed = MemoStore.pack(src, ["keyA"])
+            @test !isempty(packed)
+            mktempdir() do dst
+                @test MemoStore.unpack(dst, packed) >= 3
+                @test MemoStore.read_manifest(dst, "keyA") !== nothing
+                @test MemoStore.read_manifest(dst, "keyB") === nothing          # not selected → absent
+                @test MemoStore.has_blob(dst, hA) && MemoStore.has_blob(dst, hs) && MemoStore.has_blob(dst, wh)
+                @test !MemoStore.has_blob(dst, hB)
+                blobs_before = blobcount(dst)
+                MemoStore.unpack(dst, packed)                                    # idempotent: blobs already present
+                @test blobcount(dst) == blobs_before
+            end
+
+            # Pack BOTH → the shared blob travels once (dedup), both entries restore.
+            packed2 = MemoStore.pack(src, ["keyA", "keyB"])
+            mktempdir() do dst2
+                MemoStore.unpack(dst2, packed2)
+                @test MemoStore.has_blob(dst2, hA) && MemoStore.has_blob(dst2, hB) && MemoStore.has_blob(dst2, hs)
+            end
+
+            # A hand-forged entry escaping the store (path traversal / unknown subtree) is ignored.
+            io = IOBuffer()
+            for rel in ("../escape.txt", "secrets/x")
+                rb = Vector{UInt8}(rel); db = Vector{UInt8}("x")
+                write(io, hton(UInt32(length(rb))), rb, hton(UInt64(length(db))), db)
+            end
+            mktempdir() do dst3
+                MemoStore.unpack(dst3, take!(io))
+                @test !ispath(joinpath(dirname(dst3), "escape.txt"))
+                @test !ispath(joinpath(dst3, "secrets"))
+            end
+        end
+    end
+
     @testset "codecs: pick, raw round-trip, zero-copy mmap enforces immutability" begin
         mktempdir() do root
             @test _codec_pick([1.0, 2.0]) == "raw"

@@ -1,6 +1,6 @@
 # Reproducibility: the `.jl` env-delta footer (engine) and the self-contained bundle
 # (export_bundle). Run:  julia --startup-file=no test/test_repro.jl
-using ReTest, Base64, JSON, CodecZlib
+using ReTest, Base64, JSON, CodecZlib, CodecZstd
 
 include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
@@ -263,6 +263,24 @@ end
         @test isfile(joinpath(tdir, "Project.toml")) && isfile(joinpath(tdir, "Manifest.toml"))
         # No footer at all → carry is empty, nothing appended (ordinary notebooks unaffected).
         @test isempty(_carry_env_footers("#%% code id=a\nx = 1\n"))
+    end
+
+    @testset "footer codec: Zstd round-trip + legacy gzip auto-detect" begin
+        payload = Vector{UInt8}(repeat("Slate reproducibility payload — ", 500))   # compressible
+        # Zstd round-trip through the raw + base64 helpers.
+        @test _inflate(_deflate(payload)) == payload
+        @test _unzb64_bytes(_zb64(payload)) == payload
+        @test Vector{UInt8}(_unzb64(_zb64(String(payload)))) == payload
+        # Zstd actually compresses this (magic bytes 28 b5 2f fd).
+        z = _deflate(payload)
+        @test length(z) < length(payload)
+        @test z[1] == 0x28 && z[2] == 0xb5 && z[3] == 0x2f && z[4] == 0xfd
+        # BACKWARD COMPAT: a legacy gzip-compressed footer must still inflate (every existing
+        # standalone `.jl` was written with gzip). `_inflate` detects `1f 8b` and uses gzip.
+        g = transcode(GzipCompressor, payload)
+        @test g[1] == 0x1f && g[2] == 0x8b
+        @test _inflate(g) == payload
+        @test _unzb64_bytes(Base64.base64encode(g)) == payload
     end
 
     @testset "expand reinflates the project tree" begin

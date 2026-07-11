@@ -9,7 +9,7 @@ the engine (`ReportEngine`) and per-cell renderer (`ReportRender`).
 """
 module NotebookServer
 
-using HTTP, JSON, FileWatching, CodecZlib
+using HTTP, JSON, FileWatching, CodecZlib, CodecZstd
 import Base64
 import Dates                                  # publish dates for the multi-doc site manifest
 import Logging                                # standalone serve: route hub log detail to a file
@@ -256,6 +256,18 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
     try
         rc = _reconstruct_bundle!(path)
         rc.fresh && _instantiate_env!(rc.envdir)
+        # Embedded precomputed results → unpack into the local memo store BEFORE the drain, so the
+        # expensive cells RESTORE instead of recompute (content-addressed: existing blobs are kept).
+        # host-portable keys (manifest/src digests) make the exporter's fullkeys match here.
+        try
+            packed = _read_memo(read(path, String))
+            if packed !== nothing
+                n = MemoStore.unpack(_memo_root(), packed)
+                n > 0 && ReportEngine._rlog("hydrate: unpacked $n memo files from the standalone bundle")
+            end
+        catch e
+            @warn "KaimonSlate: embedded memo unpack failed (cells will recompute)" exception = (e, catch_backtrace())
+        end
         kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir, label = basename(abspath(path)))
         lock(nb.lock) do
             nb.kernel = kernel
