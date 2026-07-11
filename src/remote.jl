@@ -296,7 +296,8 @@ end
 # added gate tool can't appear on a live worker). The hub recomputes this on every reattach and reaps
 # + cold-spawns any worker whose stamp is behind — so editing `worker.jl` reprovisions the remote
 # instead of silently running stale code. Cached by the newest payload mtime (one stat sweep per
-# check, not a re-hash). Opt out with `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1`.
+# check, not a re-hash). The reprovision ACTION is opt-in (`KAIMONSLATE_REPROVISION_STALE=1`) — see
+# `_payload_current`; the stamp itself is always computed so the detection is ready when re-enabled.
 const _PAYLOAD_SHA_CACHE = Ref{Tuple{Float64,String}}((-1.0, ""))
 function _payload_sha()
     srcdir = @__DIR__
@@ -652,9 +653,15 @@ end
 # Is the live worker `k` running the CURRENT worker payload? Compares its boot-baked stamp
 # (`__slate_env_info().payload_sha`) to `_payload_sha()`. Stale — or an old worker that reports none —
 # ⇒ false, and `attached!` reaps + cold-spawns it. A flaky env_info call ⇒ true (don't reap on a
-# transient error; liveness is validated separately). Opt out with `KAIMONSLATE_SKIP_PAYLOAD_CHECK=1`.
+# transient error; liveness is validated separately). Gated OFF by default — see the body.
 function _payload_current(k)::Bool
-    get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") == "1" && return true
+    # Reprovision-on-drift is OPT-IN (KAIMONSLATE_REPROVISION_STALE=1). The worker SWAP it triggers has
+    # integration bugs: the fresh worker's empty namespace isn't re-primed / re-resourced (the per-kernel
+    # dedups — _REGION_RESOURCED / _REGION_SYNCED / _REGION_PRIMED — key by the REUSED kernel object, so
+    # they wrongly report `db`/transfers as already established), and a nil-conn race during the swap can
+    # fail an in-flight datadir sync. Until those are fixed (key the namespace dedups by a per-worker
+    # generation + guard the swap against concurrent use), default to "current" so we reattach, not swap.
+    get(ENV, "KAIMONSLATE_REPROVISION_STALE", "") == "1" || return true
     want = _payload_sha()
     got = try
         String(_infofield(_tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0), "payload_sha", ""))
