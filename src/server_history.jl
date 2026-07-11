@@ -613,7 +613,19 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
     cell = nb.report.cells[idx]
     isempty(cell.binds) && return nb
     lock(nb.lock) do
-        set_bind_value!(nb.report, cell, Symbol(name), value, nb.kernel)
+        # Push the value to the kernel the DEFINING cell runs on. A region-tagged `@bind` cell lives on
+        # its region kernel, so the control must set the value THERE — else the region never sees the
+        # slider move (and same-side readers like a remote plot re-run with the stale value). A local
+        # bind cell keeps the main kernel; a cross-side reader picks the value up via boundary transfer.
+        side = _region_active(nb) ? _cell_side(nb, cell) : ""
+        bk = nb.kernel
+        if !isempty(side)
+            bk = _side_kernel!(nb, side)
+            try; ReportEngine.prepare!(bk, nb.report); catch e
+                ReportEngine._rlog("bind: region kernel prepare failed: " * first(sprint(showerror, e), 120))
+            end
+        end
+        set_bind_value!(nb.report, cell, Symbol(name), value, bk)
         # Re-run the defining cell itself ONLY when it actually depends on the control
         # that changed — i.e. the changed var is in its `reads` (its own code or another
         # widget's args use it: `@bind a …; y = a*2`, or `@bind d Slider(1:a)`). The

@@ -684,12 +684,17 @@ end
 # tracked per LIVE kernel against the imports' signature, so it fires once per kernel and again only
 # if the notebook's imports change (a fresh/replaced kernel has a new objectid ⇒ re-primes).
 function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
-    usings = [c for c in nb.report.cells if ReportEngine._is_pure_using(c.source)]
-    isempty(usings) && return nothing
-    sig = hash([c.src_hash for c in usings])
+    # Cells that ESTABLISH the environment on a side: pure `using`/`import`, AND the import scaffold —
+    # a cell like `using ChaosLab, CairoMakie; set_theme!(…)` isn't pure-using, but the region needs
+    # exactly what it does (load the packages so `orbit`/`ylims!` resolve, apply the theme so remote
+    # figures match). In document order so imports precede a scaffold/effect that builds on them.
+    env = [c for c in nb.report.cells
+           if c.kind == CODE && (ReportEngine._is_pure_using(c.source) || :import_scaffold in c.flags)]
+    isempty(env) && return nothing
+    sig = hash([c.src_hash for c in env])
     key = (nb.id, objectid(k))
     lock(_REGION_LOCK) do; get(_REGION_PRIMED, key, UInt(0)); end == sig && return nothing
-    for c in usings
+    for c in env
         try
             ReportEngine.eval_capture(k, nb.report, c.source, "cell:" * c.id * "#prime", nothing)
         catch e
@@ -713,6 +718,106 @@ function _teardown_region!(nb::LiveNotebook; kill::Bool = false)
         try; ReportEngine.shutdown!(k; kill_remote = kill); catch e
             @warn "slate region: teardown failed" notebook = nb.id exception = e
         end
+    end
+    return nothing
+end
+
+# ── Run supervisor: eval-level self-healing ──────────────────────────────────────────────────
+# Kaimon self-heals at the SESSION/connection level ("is the worker reachable"). This layer works
+# BELOW that, per EVAL: a cell the hub marks RUNNING that no kernel is actually evaluating is an
+# ORPHAN (its worker bounced under it, or a `celldone` was lost) — it wedges the notebook forever.
+# A background sweep reconciles the hub's RUNNING cells against each kernel's authoritative
+# in-flight set (`__slate_running`) and resets confirmed orphans to STALE so the run can proceed.
+# Conservative by construction: a cell is only reset after it's been RUNNING past a grace window AND
+# a SUCCESSFUL query confirms it absent on TWO consecutive sweeps — so a genuinely long-running cell
+# (whose query would simply be slow, or return it as present) is never touched, and a transient
+# dispatch race can't trip it. An unreachable worker yields no confirmation → left to the session layer.
+const _RUN_SINCE = Dict{Tuple{String,String},Float64}()   # (nb id, cell id) → first time observed RUNNING
+const _RUN_ORPHAN_HITS = Dict{Tuple{String,String},Int}()  # consecutive confirmed-absent sweeps
+const _RECONCILE_GRACE = 8.0                               # s a cell must be RUNNING before it's judged
+const _RUN_SUPERVISOR = Ref{Any}(nothing)
+
+# A notebook's live GateKernels — main + any region kernels — for the authoritative in-flight query.
+function _nb_kernels(nb::LiveNotebook)
+    ks = Any[]
+    nb.kernel isa ReportEngine.GateKernel && push!(ks, nb.kernel)
+    lock(_REGION_LOCK) do
+        for (key, k) in _REGION_KERNELS
+            key[1] == nb.id && push!(ks, k)
+        end
+    end
+    return ks
+end
+
+# Union of the cell ids every connected kernel says it's evaluating right now, or `nothing` if NO
+# kernel could be queried (all unreachable) — in which case we must not judge anything orphaned.
+function _worker_running_ids(nb::LiveNotebook)
+    ids = Set{String}(); anyok = false
+    for k in _nb_kernels(nb)
+        (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
+        try
+            r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = 8.0)
+            run = r isa NamedTuple ? get(r, :running, nothing) :
+                  r isa AbstractDict ? get(r, "running", get(r, :running, nothing)) : nothing
+            run === nothing && continue
+            for id in run; push!(ids, String(id)); end
+            anyok = true
+        catch e
+            ReportEngine._rlog("supervisor: __slate_running failed on $(nb.id): " * first(sprint(showerror, e), 120))
+        end
+    end
+    return anyok ? ids : nothing
+end
+
+function _reconcile_nb_runs!(nb::LiveNotebook)
+    nb.kernel isa ReportEngine.GateKernel || return nothing
+    now = time()
+    running = [c for c in nb.report.cells if c.state == RUNNING]
+    ids = Set(c.id for c in running)
+    for c in running; get!(_RUN_SINCE, (nb.id, c.id), now); end   # stamp first-seen-running
+    for key in collect(keys(_RUN_SINCE))                          # drop records for cells no longer running
+        (key[1] == nb.id && !(key[2] in ids)) && (delete!(_RUN_SINCE, key); delete!(_RUN_ORPHAN_HITS, key))
+    end
+    suspects = [c for c in running if now - get(_RUN_SINCE, (nb.id, c.id), now) > _RECONCILE_GRACE]
+    isempty(suspects) && return nothing
+    actual = _worker_running_ids(nb)
+    actual === nothing && return nothing                         # no kernel could confirm → leave to the session layer
+    for c in suspects
+        key = (nb.id, c.id)
+        if c.id in actual                                        # genuinely running → clear any strike
+            delete!(_RUN_ORPHAN_HITS, key); continue
+        end
+        hits = get(_RUN_ORPHAN_HITS, key, 0) + 1                 # confirmed absent this sweep
+        _RUN_ORPHAN_HITS[key] = hits
+        hits < 2 && continue                                     # need TWO consecutive confirmations
+        idx = _index_of(nb.report.cells, c.id); idx === nothing && continue
+        did = lock(nb.lock) do
+            c.state == RUNNING ? (c.state = STALE; true) : false
+        end
+        did || continue
+        delete!(_RUN_SINCE, key); delete!(_RUN_ORPHAN_HITS, key)
+        ReportEngine._rlog("supervisor: healed orphaned run — $(nb.id)/$(c.id) was RUNNING but no kernel is evaluating it → reset to stale")
+        try; _announce_cell!(nb, idx); catch; end
+    end
+    return nothing
+end
+
+function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, included at ~1510) — untyped so this loads
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    for nb in nbs
+        try; _reconcile_nb_runs!(nb)
+        catch e; ReportEngine._rlog("supervisor: reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
+        end
+    end
+    return nothing
+end
+
+# One shared 5 s sweeper for the whole hub (started once at serve). Timer catches its own errors so a
+# transient failure can't kill the loop.
+function _ensure_run_supervisor!(h)   # NOTE: `Hub` defined later (server_hub.jl) — untyped so this loads
+    _RUN_SUPERVISOR[] === nothing || return nothing
+    _RUN_SUPERVISOR[] = Timer(5.0; interval = 5.0) do _
+        try; _supervise_runs!(h); catch; end
     end
     return nothing
 end
@@ -775,21 +880,36 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
     end
     prepared = false
     for r in cell.reads
+        # The theme sentinel (`##makie_theme##`) is a synthetic ordering/effect token the graphics
+        # analysis injects to chain `set_theme!` cells → figures — NOT a real global. Shipping it
+        # errors ("no global named …"); the theme EFFECT belongs on each side, not the wire.
+        r === ReportEngine._THEME_SENTINEL && continue
         writer = nothing
         for o in nb.report.cells
             (o !== cell && r in o.writes && _cell_side(nb, o) != dst_side) && (writer = o; break)
         end
         writer === nothing && continue                   # same-side (or bind/global) input — nothing to do
         writer.output === nothing && continue            # writer never ran (errored upstream) — its cell will show why
-        # A `using` cell's exports ride its refinement into `writes` for dataflow, but they are
-        # NAMESPACE, not data — the mirror run provides them on both kernels; never ship them.
-        ReportEngine._is_pure_using(writer.source) && continue
+        # A name the writer PROVIDES — a `using`/`import` export or a Slate-injected helper harvested
+        # into the import scaffold (`ylims!`, `Slider`, `Figure`, …) — is NAMESPACE, not data: it's
+        # defined on EVERY kernel already (the using-mirror + helper injection). Shipping it errors
+        # (assign-to-const, or JLS decode without the package). Only genuine data writes cross. This
+        # generalises the old pure-`using` skip: a cell like `using X; set_theme!()` isn't pure-using,
+        # but its exports are still namespace and must not ship.
+        (r in writer.provides || ReportEngine._is_pure_using(writer.source)) && continue
         src_side = _cell_side(nb, writer)
         src_k = _side_kernel!(nb, src_side)
         # Freshness token: the writer's latest run PLUS every same-side mutator's — a mutation
         # changes the value without touching the writer, and a stale transfer would resurrect
         # the pre-mutation bytes on the other side.
         token = string(writer.src_hash, ':', objectid(writer.output))
+        # A `@bind` value changes WITHOUT its widget cell re-running — the output objectid is stable,
+        # so fold the current bound value into the token. Else a slider move on one region never
+        # re-ships the new value to a reader on ANOTHER region (dedup sees an unchanged token → the
+        # downstream cell recomputes with the stale value).
+        for b in writer.binds
+            b.name === r && (token *= string('@', b.value))
+        end
         for o in nb.report.cells
             (o !== cell && r in o.mutates && _cell_side(nb, o) == src_side && o.output !== nothing) &&
                 (token *= string('+', o.src_hash, ':', objectid(o.output)))
@@ -867,6 +987,19 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # cell's cross-boundary inputs ship over first. A presync failure is the CELL's error —
     # surfaced in place instead of a mystery UndefVarError on the other side.
     kernel, side = _region_route(nb, cell)
+    # A cell running on a REGION needs the notebook's environment established there first — its own
+    # `using`/scaffold cells may live on the main kernel (they aren't cross-boundary READS, so the
+    # presync below won't ship them). Bring the kernel up and prime it (idempotent, once per kernel)
+    # so `orbit`, `ylims!`, the theme, … all resolve instead of an UndefVarError on the far side.
+    if !isempty(side)
+        try
+            ReportEngine.prepare!(kernel, nb.report)
+            _prime_namespace!(nb, kernel, side)
+        catch e
+            ReportEngine._rlog("region: prime before $(cell.id) on $(_side_label(nb, side)) failed: " *
+                               first(sprint(showerror, e), 160))
+        end
+    end
     # Provenance for the DAG/stats: which kernel this run executes on (only meaningful — and
     # only recorded — while a region is active; users otherwise know where cells run).
     _region_active(nb) && _stats_ran_on!(nb, cell.id, _side_label(nb, side))
@@ -1302,6 +1435,18 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
     end
     isempty(names) && return
     syms = Set{Symbol}(Symbol(n) for n in names)
+    # A cell rarely reads the EXACT edited def — it calls a higher-level function that uses it (a cell
+    # calls `bifurcation`, which internally calls the edited `map1d`). But editing any def in a package
+    # changes the whole project's src digest, so every cell USING that package is affected — and would
+    # recompute on rerun anyway (the memo key folds the src digest). So expand the changed set with all
+    # names PROVIDED by a cell that provides one of the changed names — i.e. the `using <Pkg>` cell's
+    # in-scope exports — turning "map1d changed" into "everything using ChaosLab is stale".
+    lock(nb.lock) do
+        for c in nb.report.cells
+            (isempty(c.provides) || !any(p -> p in syms, c.provides)) && continue
+            union!(syms, c.provides)
+        end
+    end
     # A cell reads a CHANGED def if a read matches a changed name directly, OR the read is a
     # QUALIFIED path (`SlateTest.Sub.greet`) whose leaf (`greet`) changed — reads record the
     # whole dotted path, while the worker reports the leaf def-name.
@@ -1325,7 +1470,10 @@ function server_src_changed(nb::LiveNotebook, names::Vector{String}, err::Abstra
             i === nothing || (nb.report.cells[i].state = STALE; push!(staled, id))
         end
     end
-    isempty(staled) && return
+    # Never silent: a real source def changed. If we mapped it to cells they're now stale (Run stale);
+    # if we mapped it to NONE (a helper no cell uses by name, or an over-narrow match), broadcast 0 so
+    # the UI still says "source changed — affected cells unknown, Run all to be safe" instead of leaving
+    # the notebook looking untouched.
     _broadcast(nb, "srcreload:$(length(staled))")
     return nothing
 end
