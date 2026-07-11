@@ -267,9 +267,11 @@ end
 # {key (the server-side srckey), names, unread, safe, ms}. Reuses `_memo_store` (which reads the
 # live namespace by name), so nothing recomputes — it just serialises what's already computed.
 # Returns id → {fullkey, bytes, stored}: `stored=false` when a value wouldn't serialise; `bytes`
-# is the entry's on-disk footprint (for the export UI's size/density ranking). The stored wire is
-# minimal (`duration_ms` only) — the per-binding VALUE blobs are what a restore injects; display
-# comes from the embedded preview render. NOTE: `cells` MUST be a keyword arg (raw-Dict fast-path
+# is the entry's on-disk footprint (for the export UI's size/density ranking). For a DATA cell the
+# stored wire is minimal (`duration_ms` + value_repr) — its VALUE blobs are what a restore injects,
+# and rich display comes from the preview; a WIRE-ONLY display cell (a self-theming plot) instead
+# reports the real-wire entry from its last interactive run, so its figure ships and restores on
+# import. NOTE: `cells` MUST be a keyword arg (raw-Dict fast-path
 # caveat — see __slate_macroexpand); nested dicts may arrive symbol-keyed, hence `_g` dual-lookup.
 function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
     out = Dict{String,Any}()
@@ -280,7 +282,19 @@ function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
     for (id, spec) in cells
         spec isa AbstractDict || continue
         key = String(_g(spec, "key", "")); isempty(key) && continue
-        names = _strs(_g(spec, "names", Any[])); isempty(names) && continue
+        names = _strs(_g(spec, "names", Any[]))
+        fk = _memo_fullkey(key)
+        if isempty(names)
+            # Wire-only (display) cell — a self-theming plot / pure figure. It has no data binding to
+            # snapshot, and its figure wire can't be reconstructed here (it came from a real render).
+            # Report the entry from the last interactive run if one exists, so export can embed the
+            # cached figure (→ restores on import instead of re-rendering); skip if never run/stored.
+            # Do NOT force-store: that would overwrite the real figure wire with a synthetic blank one.
+            exists = try; MemoStore.read_manifest(root, fk) !== nothing; catch; false; end
+            out[String(id)] = Dict{String,Any}("fullkey" => fk, "stored" => exists,
+                                               "bytes" => MemoStore.entry_bytes(root, fk))
+            continue
+        end
         unread = _strs(_g(spec, "unread", Any[])); safe = _strs(_g(spec, "safe", Any[]))
         ms = try; Float64(_g(spec, "ms", 0.0)); catch; 0.0; end
         vrepr = String(_g(spec, "value_repr", ""))
@@ -296,7 +310,6 @@ function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
         catch
             false
         end
-        fk = _memo_fullkey(key)
         out[String(id)] = Dict{String,Any}("fullkey" => fk, "stored" => (ok === true),
                                            "bytes" => MemoStore.entry_bytes(root, fk))
     end

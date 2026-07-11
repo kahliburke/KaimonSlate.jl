@@ -430,8 +430,12 @@ function _memo_specs(report)
     for cell in report.cells
         key = ReportEngine._memo_key(report, cell)
         isempty(key) && continue
-        defs = [w for w in cell.writes if !(w in cell.provides)]
-        isempty(defs) && continue
+        # `defs` = genuinely-defined values (drop import names and the synthetic theme sentinel).
+        # Empty ⇒ a WIRE-ONLY cell (a self-theming plot / pure display): no data binding to embed,
+        # but its cached wire IMAGE (from an interactive run) is worth shipping so the figure RESTORES
+        # on import instead of re-rendering. Kept — the worker snapshot reports its EXISTING entry for
+        # an empty-names cell rather than force-storing a synthetic (image-less) wire over the real one.
+        defs = [w for w in cell.writes if !(w in cell.provides) && w !== ReportEngine._THEME_SENTINEL]
         unread = String[string(w) for w in defs if !any(o -> o !== cell && w in o.reads, report.cells)]
         safe   = String[string(w) for w in defs if !any(o -> o !== cell && w in o.mutates, report.cells)]
         ms = cell.output === nothing ? 0.0 : Float64(cell.output.duration_ms)
