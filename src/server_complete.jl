@@ -406,6 +406,51 @@ function _index_html()
     return replace(html, "window.__SLATE_LEDGER__=null;" => "window.__SLATE_LEDGER__=" * js * ";"; count = 1)
 end
 
+# ── Project source browser (the Files tab) ────────────────────────────────────────────────────────
+# The notebook develops its OWN package: `project/src` + `project/notebooks`. These helpers back the
+# Files tab — browse + edit text source under the notebook's project root, path-guarded. A save just
+# writes to disk; the worker's Revise hot-reload watcher picks it up exactly like an external edit.
+const _TREE_SKIP_DIRS = Set{String}([".git", ".julia", "node_modules", "compiled", "build",
+                                     ".cache", "__pycache__", ".vscode", ".claude", ".ipynb_checkpoints"])
+const _TREE_EXTS = Set{String}([".jl", ".toml", ".md", ".txt", ".r", ".py", ".qmd", ".csv"])   # editable text
+
+# The notebook's project root (its parent project dir — the `@asset` base). "" ⇒ in-process / no project.
+_proj_root(nb::LiveNotebook) = String(get(nb.report.meta, "assetbase", ""))
+
+# Confine a client-supplied RELATIVE path to `root`: reject absolute paths and any `..` escape.
+# Returns the normalized absolute path, or "" if the root is unset or the path escapes.
+function _safe_proj_path(root::AbstractString, rel::AbstractString)
+    (isempty(root) || isempty(rel) || isabspath(rel)) && return ""
+    rp = normpath(String(root))
+    ap = normpath(joinpath(rp, String(rel)))
+    sep = Base.Filesystem.path_separator
+    (ap == rp || startswith(ap, endswith(rp, sep) ? rp : rp * sep)) || return ""
+    return ap
+end
+
+# Editable source tree under `root`: dirs (that contain something) before text files, alphabetical,
+# skipping VCS/build/hidden noise. Each node: {name, path (root-relative), dir}, dirs carry `children`.
+function _proj_tree(root::AbstractString, dir::AbstractString; depth::Int = 0)
+    nodes = Any[]
+    depth > 10 && return nodes
+    entries = try; sort!(readdir(dir)); catch; return nodes; end
+    for name in entries                                    # directories first
+        (isempty(name) || startswith(name, ".") || name in _TREE_SKIP_DIRS) && continue
+        p = joinpath(dir, name); isdir(p) || continue
+        kids = _proj_tree(root, p; depth = depth + 1)
+        isempty(kids) && continue                          # prune dirs with no editable content
+        push!(nodes, Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => true, "children" => kids))
+    end
+    for name in entries                                    # then text files
+        startswith(name, ".") && continue
+        p = joinpath(dir, name)
+        (isfile(p) && lowercase(splitext(name)[2]) in _TREE_EXTS) || continue
+        push!(nodes, Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => false,
+                                      "bytes" => (try; filesize(p); catch; 0; end)))
+    end
+    return nodes
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html()))   # front page + inlined last-known ledger (see _index_html)
@@ -981,6 +1026,37 @@ function _make_router(h::Hub)
         end
         _json(cat)
     end))
+    # ── Files tab: browse + edit the notebook's own project source ─────────────
+    # `assetbase` is the project root; the tree is `src/`, `notebooks/`, Project.toml, etc. A write
+    # goes straight to disk — the worker's Revise watcher reloads it like any external edit (no rerun
+    # here; the existing hot-reload notice + memo `_src_digest` invalidation do the rest).
+    HTTP.register!(router, "GET", "/api/{id}/tree", req -> _withnb(h, req, nb -> begin
+        root = _proj_root(nb)
+        isempty(root) && return _json(Dict("root" => "", "detached" => true, "tree" => Any[]))
+        _json(Dict("root" => root, "name" => basename(normpath(root)),
+                   "detached" => false, "tree" => _proj_tree(root, root)))
+    end))
+    HTTP.register!(router, "GET", "/api/{id}/file", req -> _withnb(h, req, nb -> begin
+        rel = String(get(HTTP.queryparams(HTTP.URI(req.target)), "path", ""))
+        ap = _safe_proj_path(_proj_root(nb), rel)
+        isempty(ap) && return HTTP.Response(400, "bad or out-of-project path")
+        isfile(ap) || return HTTP.Response(404, "no such file")
+        filesize(ap) > 4_000_000 && return HTTP.Response(413, "file too large to edit here")
+        _json(Dict("path" => rel, "content" => read(ap, String), "bytes" => filesize(ap)))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/file", req -> _withnb(h, req, nb -> begin
+        body = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
+        rel = String(get(body, "path", "")); content = String(get(body, "content", ""))
+        ap = _safe_proj_path(_proj_root(nb), rel)
+        isempty(ap) && return HTTP.Response(400, "bad or out-of-project path")
+        isfile(ap) || return HTTP.Response(404, "won't create new files here (v1 edits existing source only)")
+        try
+            write(ap, content)
+        catch e
+            return HTTP.Response(500, "write failed: " * first(sprint(showerror, e), 200))
+        end
+        _json(Dict("ok" => true, "path" => rel, "bytes" => sizeof(content)))
+    end))
     # ── Notebook packages ─────────────────────────────────────────────────────
     # Show the environment with provenance: `notebook` deps (the notebook's own forked env,
     # where adds land — removable) and `parent` deps (inherited from the enclosing project,
@@ -1340,6 +1416,7 @@ function start_hub(; host = "127.0.0.1", port = 8765)
         end
     end
     h.server = server
+    _ensure_run_supervisor!(h)   # eval-level self-healing: reconcile orphaned RUNNING cells every 5s
     @info "Kaimon Slate hub" url = _hub_url(h)
     return h
 end
