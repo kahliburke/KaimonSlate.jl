@@ -173,15 +173,19 @@ document.addEventListener('mousedown', e => {
 });
 // Fold / unfold a cell. Persisted in the .jl (header `collapsed` token) so it travels with the
 // notebook; the server returns fresh state and renderAll reflects it.
+// Flip a behavior flag (collapsed / hidecode / trace / …) on one or many cells via the unified
+// /api/cell-flag route — one persist / one history entry. `cells` omitted ⇒ every applicable cell.
+const _setCellFlag = (flag, value, cells) =>
+  api('POST', '/api/cell-flag', cells ? { flag, value, cells } : { flag, value });
+
 async function toggleCollapse(id) {
   const c = _cellById(id);
-  renderAll(await api('POST', '/api/collapse/' + id, { collapsed: !(c && c.collapsed) }));
+  renderAll(await _setCellFlag('collapsed', !(c && c.collapsed), [id]));
 }
-// Hide / show a code cell's editor (output stays visible). Persisted in the .jl (`hidecode`
-// token) so it travels with the notebook.
+// Hide / show a code cell's editor (output stays visible). Persisted in the .jl (`hidecode` token).
 async function toggleHideCode(id) {
   const c = _cellById(id);
-  renderAll(await api('POST', '/api/hidecode/' + id, { hidden: !(c && c.codeHidden) }));
+  renderAll(await _setCellFlag('hidecode', !(c && c.codeHidden), [id]));
 }
 // 🔍 value tracing for a code cell. Persisted in the .jl (`trace` token). The cell keeps its
 // NORMAL output; the trace rows show in the inspector popup. If already tracing, clicking just
@@ -190,7 +194,7 @@ async function toggleHideCode(id) {
 async function toggleTrace(id) {
   const c = _cellById(id);
   if (c && c.trace) { if (typeof openTraceModal === 'function') openTraceModal(id); return; }
-  renderAll(await api('POST', '/api/trace/' + id, { trace: true }));
+  renderAll(await _setCellFlag('trace', true, [id]));
   if (typeof openTraceModal === 'function')
     requestAnimationFrame(() => requestAnimationFrame(() => openTraceModal(id)));
 }
@@ -201,16 +205,14 @@ function _cellHasPlot(c) {
   const el = document.getElementById('cell-' + c.id), out = el && el.querySelector('.output');
   return !!(out && out.querySelector('img, svg, canvas'));
 }
-// Bulk hide/show the code of every PLOT cell at once (command palette) — one server call (the plot
-// cell ids), so it's one history entry (the server skips no-op cells and only writes if changed).
+// Bulk hide/show the code of every PLOT cell at once (command palette) — one call, one history entry.
 async function hideAllPlotCode(hidden) {
   const cells = ((nbState && nbState.cells) || []).filter(_cellHasPlot).map(c => c.id);
-  renderAll(await api('POST', '/api/hidecode-all', { hidden, cells }));
+  renderAll(await _setCellFlag('hidecode', hidden, cells));
 }
-// Bulk hide/show the code of EVERY code cell at once (command palette). ONE server call → one file
-// write / one history entry (the per-cell endpoint would snapshot once per cell).
+// Bulk hide/show the code of EVERY code cell at once (command palette) — one call, one history entry.
 async function hideAllCode(hidden) {
-  renderAll(await api('POST', '/api/hidecode-all', { hidden }));
+  renderAll(await _setCellFlag('hidecode', hidden));
 }
 // Insertion row within a column element, by cursor y (before the first control
 // whose midpoint is below the cursor; else at the end).

@@ -899,62 +899,36 @@ function agent_surface_controls!(nb::LiveNotebook, id::AbstractString, controls:
         "surfaced $total control(s) on id=$id: " * join((join(col, "+") for col in cols), ", ")
 end
 
-# Fold / unfold a cell (view-only; persisted in the `.jl` header as the `collapsed` token, so it
-# travels with the notebook). No re-eval — just flip the flag and rewrite the file.
-function set_collapsed!(nb::LiveNotebook, id::AbstractString, collapsed::Bool)
-    lock(nb.lock) do
-        i = _index_of(nb.report.cells, id); i === nothing && return nb
-        f = nb.report.cells[i].flags
-        collapsed ? push!(f, :collapsed) : delete!(f, :collapsed)
-        _persist!(nb)
-    end
-    return nb
-end
+# ── Cell behavior flags ──────────────────────────────────────────────────────────────────────────
+# A single primitive drives every behavior-flag toggle (collapse / hidecode / trace / cache / …) and
+# their bulk forms, so there's ONE code path and ONE history entry per action (no per-cell flurry).
+# Flags fall in two classes: VIEW/meta flags (`:collapsed` fold, `:hidecode` hide the editor) that
+# just persist, and EVAL flags (`:trace`, `:cache`, `:nocache`, …) that change the run result — those
+# restale the cell so it re-runs. `:collapsed` is the only flag that applies to markdown cells too.
+const _EVAL_FLAGS = Set{Symbol}((:trace, :cache, :nocache, :resource, :volatile))
+flag_reruns(flag::Symbol) = flag in _EVAL_FLAGS
+_flag_code_only(flag::Symbol) = flag !== :collapsed
 
-# Hide / show a cell's code editor (view-only; persisted in the `.jl` header as the `hidecode`
-# token). The output (plot) stays visible — for clean, presentation-style cells. No re-eval.
-function set_code_hidden!(nb::LiveNotebook, id::AbstractString, hidden::Bool)
-    lock(nb.lock) do
-        i = _index_of(nb.report.cells, id); i === nothing && return nb
-        f = nb.report.cells[i].flags
-        hidden ? push!(f, :hidecode) : delete!(f, :hidecode)
-        _persist!(nb)
-    end
-    return nb
-end
-
-# Bulk hide/show code across many code cells in ONE persist — so a palette "hide/show all" is a single
-# history entry, not one snapshot per cell. `ids === nothing` targets EVERY code cell; a given list
-# targets just those (e.g. "all plot cells"). No-op cells (already in the wanted state) are skipped, and
-# the write only fires if something actually changed.
-function set_code_hidden_all!(nb::LiveNotebook, hidden::Bool; ids::Union{Nothing,AbstractVector} = nothing)
+# Set (`value=true`) or clear a single flag across one or many cells in ONE persist. `ids === nothing`
+# ⇒ every applicable cell; a list ⇒ just those (e.g. "all plot cells"). Persisted in the `.jl` header
+# token, so it travels with the notebook. Eval flags restale the cells they touch (the caller re-runs).
+# Returns whether anything changed — the write + history entry only happen when it did.
+function set_cell_flag!(nb::LiveNotebook, flag::Symbol, value::Bool; ids::Union{Nothing,AbstractVector} = nothing)
     idset = ids === nothing ? nothing : Set(String(x) for x in ids)
-    lock(nb.lock) do
+    codeonly = _flag_code_only(flag); restale = flag_reruns(flag)
+    return lock(nb.lock) do
         changed = false
         for c in nb.report.cells
-            c.kind == CODE || continue
             (idset === nothing || c.id in idset) || continue
-            (:hidecode in c.flags) == hidden && continue
-            hidden ? push!(c.flags, :hidecode) : delete!(c.flags, :hidecode)
+            (codeonly && c.kind != CODE) && continue
+            (flag in c.flags) == value && continue           # already in the wanted state → skip
+            value ? push!(c.flags, flag) : delete!(c.flags, flag)
+            restale && (c.state = STALE)
             changed = true
         end
         changed && _persist!(nb)
+        changed
     end
-    return nb
-end
-
-# Toggle a cell's `trace` flag (persisted in the `.jl` header as the `trace` token). Unlike
-# collapsed/hidecode this CHANGES the eval result (the cell runs wrapped in `@trace`), so we
-# mark it STALE — the frontend re-runs it to show/hide the trace table.
-function set_trace!(nb::LiveNotebook, id::AbstractString, trace::Bool)
-    lock(nb.lock) do
-        i = _index_of(nb.report.cells, id); i === nothing && return nb
-        c = nb.report.cells[i]
-        trace ? push!(c.flags, :trace) : delete!(c.flags, :trace)
-        c.state = STALE
-        _persist!(nb)
-    end
-    return nb
 end
 
 # Parse a user tag spec into sanitized, header-safe tag Symbols. Accepts either a collection of
@@ -985,8 +959,8 @@ end
 
 # Replace a cell's user TAGS from the editor UI — the known behaviour tags (collapsed / hidecode /
 # trace / nocache) plus any free-form metadata. The only internal flag, `:opaque`, is re-derived by
-# dependency inference each eval, so it's preserved here. Toggling `trace` changes the eval result, so
-# re-stale the cell in that case (mirrors set_trace!).
+# dependency inference each eval, so it's preserved here. Toggling an eval flag (`trace`/`cache`/…)
+# changes the run result, so re-stale the cell in that case (same policy as `set_cell_flag!`).
 function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
     lock(nb.lock) do
         i = _index_of(nb.report.cells, id); i === nothing && return nb

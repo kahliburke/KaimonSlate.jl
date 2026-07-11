@@ -108,7 +108,7 @@ function closeTraceModal() { document.getElementById('tracebg').classList.remove
 // Stop tracing the cell the popup is showing (turns the flag off + re-runs normally).
 async function stopTraceModal() {
   const id = _traceCell; closeTraceModal();
-  if (id != null) renderAll(await api('POST', '/api/trace/' + id, { trace: false }));
+  if (id != null) renderAll(await api('POST', '/api/cell-flag', { flag: 'trace', value: false, cells: [id] }));
 }
 
 // Esc closes it (capture phase, like the other modals); backdrop click closes it.
