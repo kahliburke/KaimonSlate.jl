@@ -383,25 +383,40 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[],
     return wire
 end
 
-# Re-execute ONLY the top-level `using`/`import` statements of a restored import-scaffold cell, so a
-# memoized provider keeps its imported names in scope even though its compute was skipped. Redundant
-# usings replay as cheap no-ops; a NOVEL `using X` (the sole importer of X) is re-established here so
-# a downstream cell that RE-RUNS after an edit still sees X's names + method tables. The import's
-# effect is a pure function of (source, environment), so replaying reproduces exactly what the real
-# run's `using` did. Returns false if any import statement throws (→ caller distrusts the restore and
-# recomputes) — a package that stored fine but won't `using` now is a genuine environment change.
-function _replay_imports!(m::Module, source::AbstractString)
+# The leaf name of a call's callee: `set_theme!` → :set_theme!, `CairoMakie.set_theme!` → :set_theme!.
+_call_leaf(f) = f isa Symbol ? f :
+                (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode) ?
+                    f.args[2].value : nothing
+# Collect every `set_theme!(...)`/`update_theme!(...)` CALL expression anywhere in `ex` (they're
+# typically nested inside a plot cell's `let … end`, so a top-level scan misses them).
+function _collect_theme_calls!(acc::Vector{Any}, ex)
+    ex isa Expr || return acc
+    (ex.head === :call && _call_leaf(ex.args[1]) in (:set_theme!, :update_theme!)) && push!(acc, ex)
+    for a in ex.args; _collect_theme_calls!(acc, a); end
+    return acc
+end
+
+# Re-execute a restored cell's cheap GLOBAL side effects — its top-level `using`/`import` statements
+# and any `set_theme!`/`update_theme!` calls — so the process state matches what the skipped run
+# would have left, for any downstream cell that later RE-RUNS. `using`: keeps imported names +
+# method tables in scope (a NOVEL `using X`, the sole importer of X, is re-established here). Theme:
+# re-applies the global Makie theme (the rendered figure itself rides the cached wire image; this
+# just fixes the ambient theme a re-running sibling would render against). Both effects are pure
+# functions of (source, environment), so replaying reproduces the real run. Returns false if any
+# replay throws (→ caller distrusts the restore and recomputes) — e.g. a `set_theme!(local_var)`
+# referencing a cell-local, or a package that stored fine but won't `using` now (a real env change).
+function _replay_scaffold!(m::Module, source::AbstractString)
     top = try; Meta.parseall(String(source)); catch; return true; end   # unparseable → nothing to replay
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
-    for s in stmts
+    for s in stmts                                   # top-level using/import — bring names into scope
         s isa LineNumberNode && continue
         (s isa Expr && s.head in (:using, :import)) || continue
-        try
-            Base.invokelatest(Core.eval, m, s)
-        catch e
-            @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n'))
-            return false
-        end
+        try; Base.invokelatest(Core.eval, m, s)
+        catch e; @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
+    end
+    for call in _collect_theme_calls!(Any[], top)    # set_theme!/update_theme! — restore the ambient theme
+        try; Base.invokelatest(Core.eval, m, call)
+        catch e; @info "slate memo: theme replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
     end
     return true
 end
@@ -540,11 +555,12 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # The fresh result still stores below, replacing the entry.
     if !isempty(memo_key) && !memo_force
         w = _memo_restore(memo_key; unread = memo_unread, trace = tr)
-        # A provider cell (`using X; v = solve()`) is memoized WITHOUT running its `using` — replay
-        # just its import statements so `X`'s names stay in scope for any downstream cell that later
-        # re-runs. A replay failure (env changed under us) distrusts the entry → fall through to a
-        # full recompute rather than serve a half-scoped restore.
-        if w !== nothing && _replay_imports!(_NS[], source)
+        # A restored cell is memoized WITHOUT running its source, so its cheap global side effects —
+        # `using X` (a provider's imported names) and `set_theme!` (the ambient Makie theme) — are
+        # replayed here so any downstream cell that later re-runs sees the right scope + theme. A
+        # replay failure (env changed under us) distrusts the entry → fall through to a full
+        # recompute rather than serve a half-scoped restore.
+        if w !== nothing && _replay_scaffold!(_NS[], source)
             @info "slate memo: restored (no recompute)" cell = cid
             tr["action"] = "restored"
             _trace_commit!(cid, tr)

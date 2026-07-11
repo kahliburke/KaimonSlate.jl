@@ -869,7 +869,8 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         # already covers. Matters for `:using_redundant` cells (a `using X; v = solve()` whose X is
         # anchored upstream): only `v` is cached, not X's exports. For ordinary cells provides is
         # empty, so this is a no-op.
-        defs = Set{Symbol}(w for w in cell.writes if !(w in cell.provides))
+        defs = Set{Symbol}(w for w in cell.writes
+                           if !(w in cell.provides) && w !== ReportEngine._THEME_SENTINEL)
         # Writes no OTHER cell reads — eligible for display-object elision at store time (the
         # worker decides by TYPE: a Makie Figure nobody reads stores as its wire image only, not
         # a multi-MB scene graph). Passed at restore time too: an entry that elided a name which
@@ -886,7 +887,8 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         # faithfulness depends on: an entry missing a mutated name restores the pre-mutation
         # namespace while downstream entries carry post-mutation results.
         m = (key = ReportEngine._memo_key(nb.report, cell),
-             names = unique!(String[string(w) for w in Iterators.flatten((defs, cell.mutates))]),
+             names = unique!(String[string(w) for w in Iterators.flatten((defs, cell.mutates))
+                                    if w !== ReportEngine._THEME_SENTINEL]),
              threshold = ReportEngine._MEMO_THRESHOLD_MS,
              force = frc,
              always = (:cache in cell.flags),   # `cache` tag → persist regardless of runtime

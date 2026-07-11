@@ -332,9 +332,14 @@ function _memoizable(cell::Cell)
     # build_dependencies!); `:using_redundant` is the subset whose replay is a proven no-op. A
     # provider reaching here is non-opaque (an unresolved `using` is `:opaque` and returned above).
     (isempty(cell.provides) || :import_scaffold in cell.flags) || return false
-    # Same for a global-theme setter (`set_theme!`): its effect is process state, not a binding —
-    # a restore would skip applying the theme. (Marked by the synthetic `_THEME_SENTINEL` write.)
-    _THEME_SENTINEL in cell.writes && return false
+    # A global-theme setter (`set_theme!`/`update_theme!`, marked by the synthetic `_THEME_SENTINEL`
+    # write) is memoizable via the SAME import-scaffold trick: its `set_theme!` effect is process
+    # state (not a binding), so on restore the worker REPLAYS the theme call from source — cheap,
+    # idempotent — to re-establish the global theme for any downstream cell that re-runs. The
+    # rendered figure itself rides the cached wire image; `_THEME_SENTINEL` is dropped from the memo
+    # names server-side (a synthetic marker, never a real global). Invalidation is already handled:
+    # graphics cells READ the sentinel, so a theme edit bumps their key. This unlocks the expensive
+    # self-theming plots (a `set_theme!(theme_dark())` before a heavy render) that dominate startup.
     return isempty(cell.binds)
 end
 
