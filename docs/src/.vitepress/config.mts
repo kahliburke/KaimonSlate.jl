@@ -117,6 +117,7 @@ export default withMermaid(defineConfig({
           { text: 'Cell Tags & Caching', link: '/cell-tags' },
           { text: 'Command Palette & Help', link: '/palette-and-help' },
           { text: 'Reactive Cells', link: '/reactivity' },
+          { text: 'The Dependency Graph', link: '/dag' },
           { text: 'Live Updates', link: '/live-updates' },
           { text: 'Widgets & @bind', link: '/widgets' },
           { text: 'Charts', link: '/visualization' },
@@ -130,6 +131,7 @@ export default withMermaid(defineConfig({
           { text: 'Publishing', link: '/publishing' },
           { text: 'Packages', link: '/packages' },
           { text: 'Configuration', link: '/configuration' },
+          { text: 'Remotes & Pools', link: '/remotes' },
         ],
       },
       {

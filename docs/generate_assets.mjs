@@ -217,6 +217,15 @@ async function main() {
           await page.evaluate(() => window.slateStore && window.slateStore.setFocus(null))
         } catch (e) { log('! deps-cone skipped:', e.message.split('\n')[0]) }
 
+        // DAG pane (🕸 / ⌘⇧G): the notebook's live dataflow graph
+        try {
+          await page.evaluate(() => window.toggleDag && window.toggleDag())
+          await page.waitForSelector('#dagpane svg, #dagpane .dagnode', { timeout: 8000 }).catch(() => {})
+          await sleep(1000)                                    // dagre layout settle
+          await elShot(page, '#dagpane', 'dag-pane.png')
+          await page.evaluate(() => window.toggleDag && window.toggleDag())
+        } catch (e) { log('! dag-pane skipped:', e.message.split('\n')[0]) }
+
         // history / time-machine panel
         try {
           await page.evaluate(() => window.toggleHistory && window.toggleHistory())
@@ -361,6 +370,9 @@ async function main() {
       await mockPublish(p2)
       await p2.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
       await sleep(1600)                                        // let loadPublished() refresh the strip
+      // Full front page — the open row (path + Run on + ⬆ Upload + 🖧 Remotes), ☁ Publishing, the
+      // open-notebooks list, and the mocked Sites strip. This is the "open or upload a document" shot.
+      await p2.screenshot({ path: join(OUT, 'home.png'), fullPage: true }); log('✓ home.png')
       await p2.evaluate(() => { const c = document.querySelector('#published .sitecard'); if (c) c.click() })
       await sleep(500)
       await shotCropped(p2, '#published', 'sites-strip.png', null, 6)

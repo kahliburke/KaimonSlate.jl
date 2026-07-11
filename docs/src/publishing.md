@@ -148,3 +148,11 @@ Under [Kaimon](agent.md), the agent can drive publishing through MCP tools:
 - **`slate_publish_history`** — the publish history / ledger view.
 
 Secret **values** are never returned by these tools — only reference names.
+
+## See also
+
+- [Remotes & Pools](remotes.md) — the front page's other power feature: run a notebook's worker on a
+  remote host, with warm pools and a cache that follows you.
+- [Export](export.md) — the self-contained HTML / PDF / reproducible `.jl` outputs a site is built from.
+- [Documents & Citations](documents.md) — title/abstract/bibliography front matter and the `home` +
+  `docindex` site-authoring tags.

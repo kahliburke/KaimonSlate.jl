@@ -9,15 +9,31 @@ Run the **`slate` app** (installed with `pkg> app add KaimonSlate` — see
 [Installation](installation.md)):
 
 ```sh
-slate intro.jl
+slate                 # start the hub + status TUI, and open the front page
+slate intro.jl        # …or jump straight into a notebook (created if new)
 ```
 
-It starts (or attaches to) the notebook hub, opens `intro.jl` in your browser (creating it if
-new), and shows a status TUI — server state, the hub URL, and every open notebook. Under
+`slate` starts (or attaches to) the notebook hub and shows a status TUI in your terminal. Under
 **Kaimon** it attaches to Kaimon's hub, so the **💬 agent** is available; standalone
-(`slate --own`) it owns the hub itself. Plain `slate` with no file just shows the TUI — open
-notebooks from the browser index at **`http://127.0.0.1:8765`**, with `slate <file>`, or by asking
-the agent.
+(`slate --own`) it owns the hub itself.
+
+### The front page
+
+Plain `slate` opens the hub's **front page** in your browser (at **`http://127.0.0.1:8765`**) — the
+launcher for every notebook, and where you open or upload a document:
+
+![The KaimonSlate hub front page: an open-a-notebook row with path completion, a Run-on selector, ⬆ Upload and 🖧 Remotes buttons, a ☁ Publishing manager, the list of open notebooks, and a published-sites strip](./assets/home.png)
+
+- **Open by path** — type a `.jl` path (Tab completes) and hit **Open**, or pass it on the shell as
+  `slate path/to/notebook.jl`. A path that doesn't exist yet is created.
+- **⬆ Upload** — pick a `.jl` from *this* computer; the hub saves it and opens it. (You can also just
+  ask the **💬 agent** to open one.)
+- **Open notebooks** — everything currently open on the hub; click to jump back in.
+- **Run on** — choose where a notebook's worker runs: locally, or on a remote SSH host you set up with
+  **🖧 Remotes**. See [Remotes & Pools](remotes.md).
+- **☁ Publishing** — manage published sites and destinations. See [Publishing](publishing.md).
+
+Open one and you're in the notebook itself:
 
 ![A KaimonSlate notebook: code, a slider widget, an inline ECharts chart, a table, and an error cell](./assets/overview.png)
 

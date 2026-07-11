@@ -51,6 +51,11 @@ tailable log (🪵), [package management](packages.md), and isolation. There's n
 this — it's chosen from the notebook's location. Restart a worker any time with **⟲ Restart
 worker** (top bar), or rebuild the namespace with **↻ Rebuild**.
 
+A worker can also run on **another machine** — a workstation, GPU box, or cloud VM — with the
+notebook behaving exactly as if local. Set hosts up on the front page's **🖧 Remotes** dialog and
+pick one with **Run on**; keep prewarmed workers ready with warm pools. See
+[Remotes & Pools](remotes.md).
+
 ## Ollama (local models)
 
 The agent model dropdown lists models from your local Ollama install, queried from its HTTP
