@@ -270,7 +270,9 @@ end
         # Zstd round-trip through the raw + base64 helpers.
         @test _inflate(_deflate(payload)) == payload
         @test _unzb64_bytes(_zb64(payload)) == payload
-        @test Vector{UInt8}(_unzb64(_zb64(String(payload)))) == payload
+        # `String(::Vector{UInt8})` STEALS the buffer (empties the vector) — copy so `payload` survives
+        # for the assertions below.
+        @test Vector{UInt8}(_unzb64(_zb64(String(copy(payload))))) == payload
         # Zstd actually compresses this (magic bytes 28 b5 2f fd).
         z = _deflate(payload)
         @test length(z) < length(payload)
