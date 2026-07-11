@@ -39,9 +39,9 @@ mkworker(port; alive = true, state = "idle", pool = "1", hub = gethostname(),
     @testset "pool config: round-trip, listing, target keyed by preload basename" begin
         host = "__pooltest-$(getpid())__"
         try
-            RE._pool_config!(host; n = 2, preload = "/tmp/My Proj", transport = :direct)
+            RE._pool_config!(host; n = 2, preload = "/tmp/My Proj", transport = :direct, base_port = 9200)
             cfg = RE._pool_config(host)
-            @test cfg == (n = 2, preload = "/tmp/My Proj", transport = :direct)
+            @test cfg == (n = 2, preload = "/tmp/My Proj", transport = :direct, base_port = 9200)
             t = RE._pool_target(host, cfg)
             @test t.project == "~/.cache/kaimonslate/remote/My Proj"   # same formula as _select_kernel
             @test t.transport === :direct && t.origin_env == "/tmp/My Proj"
