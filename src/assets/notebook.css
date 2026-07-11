@@ -462,6 +462,8 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .tagpop .tagaddbtn { border:1px solid var(--bg3); background:none; color:var(--dim); cursor:pointer;
                      border-radius:5px; padding:2px 9px; font-size:.72rem; }
 .tagpop .tagaddbtn:hover { color:var(--accent); border-color:var(--accent); }
+.tagpop .destadd { color:var(--accent); font-size:.76rem; text-decoration:none; }
+.tagpop .destadd:hover { text-decoration:underline; }
 .cellhead .tagbtn.on { color:var(--accent); }
 .cellhead .autoctl { color:var(--dim); }
 .cellhead .autoctl.on { color:var(--accent); }
@@ -857,6 +859,9 @@ body.modkey .cm-content { cursor: pointer; }
 .dagcard-acts button { background:var(--bg3); border:1px solid var(--border); color:var(--text); border-radius:6px;
   padding:4px 11px; cursor:pointer; font-size:.75rem; }
 .dagcard-acts button:hover { border-color:var(--accent); color:var(--accent); }
+.dagrunon { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--bg3); border-radius:6px;
+  padding:5px 8px; font-size:.78rem; margin-top:2px; }
+.dagrunon:focus { outline:none; border-color:var(--accent); }
 #dagheat.on { background:var(--accent); color:#fff; }
 #dagregions.on { background:var(--accent); color:#fff; }
 /* 🖧 region-map legend — floats over the pane corner while the overlay is on */
@@ -1089,6 +1094,22 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .rlmanage { margin-top:9px; border-top:1px solid var(--bg3); padding-top:7px; }
 .rlmanage a { color:var(--accent); font-size:.78rem; text-decoration:none; }
 .rlmanage a:hover { text-decoration:underline; }
+/* Destinations manager (per-cell run regions) — reuses the runloc modal shell + form controls. */
+#destbg { z-index:130; }                 /* above the DAG pane (z:60) — it's opened from the DAG toolbar */
+.destavail { margin-top:6px; }
+.desten { flex:0 0 auto; }
+.destsrc { color:var(--dim); font-size:.72rem; margin-left:6px; }
+.destlist { margin-bottom:10px; }
+.destempty { color:var(--dim); font-size:.82rem; padding:6px 2px 10px; }
+.destitem { display:flex; align-items:center; gap:10px; padding:6px 2px; border-bottom:1px solid color-mix(in srgb, var(--border) 45%, transparent); }
+.destinfo { flex:1 1 auto; min-width:0; font-size:.86rem; color:var(--text); }
+.destinfo .desthost { color:var(--dim); font-size:.78rem; font-family:var(--mono,monospace); margin-left:6px; }
+.destwarm { margin-left:8px; font-size:.7rem; color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); border-radius:8px; padding:1px 7px; }
+.destdel { flex:0 0 auto; border:1px solid color-mix(in srgb, var(--err,#e57575) 40%, var(--bg3)); background:none; color:var(--err,#e57575); cursor:pointer; border-radius:6px; padding:2px 8px; font-size:.78rem; }
+.destdel:hover { background:color-mix(in srgb, var(--err,#e57575) 14%, transparent); }
+.destaddform { border-top:1px solid var(--bg3); padding-top:10px; }
+.destaddform .rlcustom { margin-bottom:8px; }
+.destaddform .destname { font-family:inherit; }
 .rlworker { display:flex; align-items:center; gap:8px; padding:5px 4px; border-bottom:1px solid color-mix(in srgb, var(--border) 45%, transparent); }
 .rlworker .rlwinfo { flex:1 1 auto; font-size:.8rem; color:var(--text); }
 .rlworker .rldetail { color:var(--dim); font-size:.73rem; }

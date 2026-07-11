@@ -599,7 +599,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        warm_pool(host::String; n=1, preload="", transport="tunnel") -> String
+        warm_pool(host::String; n=1, preload="", transport="tunnel", base_port=0) -> String
 
     Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a booted Julia
     process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
@@ -607,13 +607,17 @@ function create_tools(GateTool::Type)
     notebook whose parent project matches `preload` then ADOPTS a pool worker (~1s: dial +
     namespace swap — packages and memo store survive) instead of paying the ~90s cold boot, and
     the pool refills itself in the background. `n=0` drains: idle pool workers are reaped;
-    attached workers are never touched. Blocking on first run (provisioning); safe to re-run —
-    it reconciles toward `n`. See the roster with `remote_workers`.
+    attached workers are never touched. `base_port` pins the port range for a `:direct` pool
+    (worker *i* binds `base_port+3i .. +3i+2`) so you know which ports to open in the firewall;
+    `0`/`:tunnel` auto-assigns. Blocking on first run (provisioning); safe to re-run — it
+    reconciles toward `n`. See the roster with `remote_workers`.
     """
-    function warm_pool(host::String; n::Int = 1, preload::String = "", transport::String = "tunnel")::String
+    function warm_pool(host::String; n::Int = 1, preload::String = "", transport::String = "tunnel",
+                       base_port::Int = 0)::String
         h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
-        return ReportEngine.warm_pool!(h; n = n, preload = String(strip(preload)), transport = tr)
+        return ReportEngine.warm_pool!(h; n = n, preload = String(strip(preload)), transport = tr,
+                                       base_port = base_port)
     end
 
     """
@@ -632,11 +636,7 @@ function create_tools(GateTool::Type)
     function region_on(notebook::String, host::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         h = strip(host)
-        NotebookServer._teardown_region!(nb)          # live region kernels (old spec) detach warm
-        lock(nb.lock) do
-            isempty(h) ? delete!(nb.report.meta, "regionon") : (nb.report.meta["regionon"] = String(h))
-            NotebookServer._persist!(nb)
-        end
+        NotebookServer.set_regionon!(nb, h)           # teardown old region kernels + persist the footer
         isempty(h) && return "✅ regions cleared — all cells run on the main kernel again."
         specs = NotebookServer._region_specs(nb)
         n = count(c -> !isempty(NotebookServer._cell_region(c)), nb.report.cells)
@@ -696,7 +696,9 @@ function create_tools(GateTool::Type)
         if !isempty(cfgs)
             println(io, "Configured pools (desired state; live roster → remote_workers(host)):")
             for c in cfgs
-                println(io, "  • $(c.host)  n=$(c.n)  transport=$(c.transport)  preload=",
+                ports = (c.transport === :direct && c.base_port > 0) ?
+                        "  ports=$(c.base_port)–$(c.base_port + 3c.n - 1)" : ""
+                println(io, "  • $(c.host)  n=$(c.n)  transport=$(c.transport)$ports  preload=",
                         isempty(c.preload) ? "(none — bare workers)" : c.preload)
             end
         end

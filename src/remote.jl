@@ -1518,9 +1518,10 @@ _attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true);
 const _POOL_DIR = joinpath(_slate_cache_dir(), "pool")
 _pool_path(host) = joinpath(_POOL_DIR, replace(String(host), r"[^A-Za-z0-9._-]" => "_") * ".json")
 
-function _pool_config!(host; n::Int, preload::AbstractString, transport::Symbol)
+function _pool_config!(host; n::Int, preload::AbstractString, transport::Symbol, base_port::Int = 0)
     esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"")
-    body = "{\"host\":\"$(esc(host))\",\"n\":\"$n\",\"preload\":\"$(esc(preload))\",\"transport\":\"$transport\"}"
+    body = "{\"host\":\"$(esc(host))\",\"n\":\"$n\",\"preload\":\"$(esc(preload))\"," *
+           "\"transport\":\"$transport\",\"base_port\":\"$base_port\"}"
     mkpath(_POOL_DIR)
     p = _pool_path(host); tmp = p * ".tmp"
     write(tmp, body); mv(tmp, p; force = true)
@@ -1534,7 +1535,8 @@ function _pool_config(host)
     n = tryparse(Int, _manifest_get(s, "n")); n === nothing && return nothing
     tr = _manifest_get(s, "transport")
     return (n = n, preload = _manifest_get(s, "preload"),
-            transport = Symbol(isempty(tr) ? "tunnel" : tr))
+            transport = Symbol(isempty(tr) ? "tunnel" : tr),
+            base_port = something(tryparse(Int, _manifest_get(s, "base_port")), 0))
 end
 
 # Every configured pool, host included — the hub's desired state (what `warm_pool!` was told),
@@ -1547,7 +1549,8 @@ function pool_configs()
         s = try; read(f, String); catch; continue; end
         h = _manifest_get(s, "host"); isempty(h) && continue
         cfg = _pool_config(h); cfg === nothing && continue
-        push!(out, (host = h, n = cfg.n, preload = cfg.preload, transport = cfg.transport))
+        push!(out, (host = h, n = cfg.n, preload = cfg.preload, transport = cfg.transport,
+                    base_port = cfg.base_port))
     end
     return out
 end
@@ -1613,7 +1616,7 @@ function _claim_pool_worker!(host, rproj, transport::Symbol)
 end
 
 """
-    warm_pool!(host; n = 1, preload = "", transport = :tunnel) -> String
+    warm_pool!(host; n = 1, preload = "", transport = :tunnel, base_port = 0) -> String
 
 Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a running Julia
 process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
@@ -1621,20 +1624,32 @@ additionally replicates that env remotely and imports its packages while idle �
 whose parent is that project opens in ~a second instead of ~90. Adoption wipes only the
 namespace; packages and the memo store survive. The pool refills itself after every adoption.
 `n = 0` drains: idle pool workers are reaped (attached/adopted ones are never touched).
-Blocking (provision + launch); safe to re-run — it reconciles toward `n`.
+
+`base_port` pins the port range for a `:direct` pool: worker *i* binds `base_port+3i .. +3i+2`
+(main/stream/data), so you know exactly which ports to open in the host's firewall. `0` (or any
+`:tunnel` pool, which forwards over loopback) auto-assigns from 9100+. Blocking (provision +
+launch); safe to re-run — it reconciles toward `n`.
 """
 function warm_pool!(host::AbstractString; n::Int = 1, preload::AbstractString = "",
-                    transport::Symbol = :tunnel)
+                    transport::Symbol = :tunnel, base_port::Int = 0, reconcile::Bool = true)
     h = String(strip(String(host)))
     isempty(h) && return "give an ssh host"
     n >= 0 || return "n must be ≥ 0"
     transport in (:tunnel, :direct) || return "transport must be :tunnel or :direct"
+    (base_port == 0 || 1024 <= base_port <= 65533) || return "base_port must be 0 (auto) or 1024–65533"
+    base_port > 0 && transport !== :direct &&
+        _rlog("pool[$h]: base_port ignored for :tunnel (ports are loopback-forwarded, auto is fine)")
     pl = strip(String(preload))
     pl = isempty(pl) ? "" : abspath(expanduser(String(pl)))
     (isempty(pl) || isdir(pl)) || return "preload project dir not found: $pl"
-    _pool_config!(h; n = n, preload = pl, transport = transport)
-    _rlog("═══ WARM POOL: $h → n=$n preload=$(isempty(pl) ? "(none)" : pl) transport=$transport ═══")
-    return _pool_reconcile!(h)
+    _pool_config!(h; n = n, preload = pl, transport = transport, base_port = base_port)
+    _rlog("═══ WARM POOL: $h → n=$n preload=$(isempty(pl) ? "(none)" : pl) transport=$transport" *
+          (base_port > 0 ? " base_port=$base_port" : "") * " ═══")
+    # The persist above is fast + durable; the reconcile (provision + launch) is the slow part. Callers
+    # driving a UI can persist now (reconcile=false) and fire _pool_reconcile! on a background task, so
+    # a follow-up read of the config sees the new desired state immediately instead of racing the launch.
+    return reconcile ? _pool_reconcile!(h) :
+           "pool[$h]: configured → n=$n$(base_port > 0 ? " base_port=$base_port" : "") (reconcile queued)"
 end
 
 # Drive the host toward the configured pool size: reap dead pool litter and stale-env idlers,
@@ -1660,13 +1675,37 @@ function _pool_reconcile!(host)
     cleaned = isempty(dead) && isempty(stale) ? "" : " (cleaned $(length(dead)) dead, $(length(stale)) stale-env)"
     if deficit > 0
         provision_remote!(t, cfg.preload)            # idempotent; one pass covers every launch below
-        floor = _port_floor(host; workers = roster)  # never deal a live worker's ports (see _port_floor)
-        for _ in 1:deficit
-            port, sp = _next_ports(; floor)
+        # Ports for the new workers. :direct pools with a pinned base march up from it in strides of 3
+        # (each worker owns port..port+2) so you know exactly which range to open in the firewall — the
+        # whole point of :direct. Slots a live worker already holds are skipped (replenish fills gaps).
+        # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster.
+        ports = Tuple{Int,Int}[]
+        if cfg.transport === :direct && cfg.base_port > 0
+            occupied = Set{Int}()
+            for w in roster
+                w["alive"] === true || continue
+                p = w["port"]; push!(occupied, p, p + 1, p + 2)
+            end
+            k = 0
+            while length(ports) < deficit && k < 256
+                p = cfg.base_port + 3k; k += 1
+                (p + 2) <= 65535 || break
+                (p in occupied || (p + 1) in occupied || (p + 2) in occupied) && continue
+                push!(ports, (p, p + 1))
+            end
+            length(ports) < deficit &&
+                _rlog("pool[$host]: only $(length(ports)) free port slot(s) from base $(cfg.base_port) — open a wider range for $deficit workers")
+        else
+            floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
+            for _ in 1:deficit
+                push!(ports, _next_ports(; floor))
+            end
+        end
+        for (port, sp) in ports
             _launch_worker!(t, port, sp; label = "", parent = "", pool = true,
                             warm_deps = !isempty(cfg.preload))
         end
-        return "pool[$host]: launched $deficit worker(s) → $(cfg.n) warm, env $(t.project)$cleaned"
+        return "pool[$host]: launched $(length(ports)) worker(s) → $(cfg.n) warm, env $(t.project)$cleaned"
     elseif deficit < 0
         for w in warm[1:(-deficit)]
             reap_remote_worker(host, w["port"])

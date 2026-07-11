@@ -108,6 +108,17 @@
   <div class="rlmanage"><a href="#" onclick="rlManageWorkers(event)">⚙ Manage remote workers…</a></div>
   <div class="row"><button onclick="closeRunLoc()">Close</button></div>
 </div></div>
+<!-- Destinations: named per-cell run regions (regionon footer). Enable a host/pool you already
+     configured on the home page as a target, then tag cells to it (🏷 → Run on) or drag them into
+     its DAG zone. Pointing at a warm pool lets the region ADOPT a ready worker (no cold boot). -->
+<div class="modal-bg" id="destbg"><div class="modal runlocmodal">
+  <div class="msg"><strong>Destinations</strong>
+    <span style="color:var(--dim);font-weight:400"> — enable a configured host or warm pool as a per-cell run target. Tag cells to it (🏷 → Run on) or drag them into its DAG zone; boundary values cross automatically.</span></div>
+  <div id="destlist" class="destlist"></div>
+  <div id="destavail" class="destavail"></div>
+  <div id="desthint" class="rlmanage"></div>
+  <div class="row"><button onclick="closeDestinations()">Close</button></div>
+</div></div>
 <div id="hydbanner" class="hydbanner" style="display:none"></div>
 <div id="srcbanner" class="srcbanner" style="display:none"></div>
 <!-- Blocking overlay while the worker installs + precompiles a package (the notebook is frozen meanwhile). -->
@@ -210,6 +221,7 @@
     <button class="hbtn" id="dagdock" onclick="dagDock()" title="dock side">◨</button>
     <button class="hbtn" id="dagheat" onclick="dagHeat()" title="cost heat map — color cells by accumulated compute time (hotter = more expensive)">🔥</button>
     <button class="hbtn" id="dagregions" onclick="dagRegions()" title="region map — color cells by WHERE they run (main kernel vs each remote region); a legend names the hosts">🖧</button>
+    <button class="hbtn" id="dagaddregion" onclick="openDestinations()" title="destinations — declare a run target (a host / warm pool), then drag cells into its zone or tag them to it">＋ region</button>
     <button class="hbtn" id="dagdir" onclick="dagDir()" title="layout direction — auto follows the pane shape (tall → top-down)">⇅ auto</button>
     <button class="hbtn" onclick="dagFit()" title="re-fit the graph">⤢ fit</button>
     <span class="hbtn daghelp">?<div class="daghelppop">
@@ -473,6 +485,7 @@
 <script src="/assets/js/runstatus.js"></script>
 <script src="/assets/js/dag.js"></script>
 <script src="/assets/js/runloc.js"></script>
+<script src="/assets/js/regions.js"></script>
 <script src="/assets/js/inspect.js"></script>
 <script src="/assets/js/dragdrop.js"></script>
 <script src="/assets/js/trace.js"></script>

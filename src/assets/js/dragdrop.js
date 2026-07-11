@@ -97,11 +97,14 @@ function _knownTagSet() { return new Set(TAG_INFO.map(t => t[0])); }
 
 function renderTagPop(pop, id) {
   const tags = new Set(_curTags(id)), known = _knownTagSet();
-  const custom = _curTags(id).filter(t => !known.has(t));
+  // Region tags (`remote` / `region=…`) are owned by the "Run on" radio above — don't also show
+  // them as free-form chips (applyTagChecks still recomputes from _curTags, so they're preserved).
+  const custom = _curTags(id).filter(t => !known.has(t) && t !== 'remote' && !t.startsWith('region='));
   const row = (n, desc) =>
     `<label class="ctlrow"><input type="checkbox" data-tag="${n}"${tags.has(n) ? ' checked' : ''}>` +
     `<span>${n}<span class="tagdesc">${_escc(desc)}</span></span></label>`;
   pop.innerHTML =
+    runOnSectionHtml(id) +
     '<div class="ctlhead">Cell tags</div>' +
     TAG_INFO.map(t => row(t[0], t[1])).join('') +
     '<div class="ctlsub">custom</div>' +
@@ -110,6 +113,7 @@ function renderTagPop(pop, id) {
                      : '<span class="tagnone">none</span>') +
     '</div>' +
     '<div class="tagadd"><input type="text" class="taginput" placeholder="add tag…" maxlength="40"><button class="tagaddbtn">add</button></div>';
+  wireRunOnSection(pop, id);
   pop.querySelectorAll('input[data-tag]').forEach(cb => cb.onchange = () => applyTagChecks(id));
   pop.querySelectorAll('.tagchip button').forEach(b => b.onclick = () => setTags(id, _curTags(id).filter(x => x !== b.dataset.del)));
   const inp = pop.querySelector('.taginput'), add = pop.querySelector('.tagaddbtn');

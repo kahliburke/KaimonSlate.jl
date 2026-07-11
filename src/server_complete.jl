@@ -577,6 +577,48 @@ function _make_router(h::Hub)
         isempty(host) && return _json(Dict("host" => "", "workers" => []))
         _json(Dict("host" => host, "workers" => ReportEngine.list_remote_workers(host)))
     end)
+    # Warm-pool desired state (what warm_pool! was told to maintain) + parked wires — the hub's
+    # own view, NO ssh. Per-host live rosters come from /api/remote-workers. Feeds the Remotes dialog.
+    HTTP.register!(router, "GET", "/api/pools", _ -> _json(Dict(
+        "pools" => [Dict("host" => c.host, "n" => c.n, "preload" => c.preload,
+                         "transport" => String(c.transport), "base_port" => c.base_port)
+                    for c in ReportEngine.pool_configs()],
+        "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
+                          "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
+    # Configure a host's warm pool and reconcile toward it. Body {host, n, preload, transport}.
+    # n=0 drains. The config is persisted synchronously (fast, durable); the reconcile — which may
+    # provision a cold host for minutes — runs in the background so the request returns at once. The
+    # UI watches workers appear via /api/remote-workers. Re-runnable: it reconciles toward n.
+    HTTP.register!(router, "POST", "/api/warm-pool", req -> begin
+        b = _body(req)
+        host = strip(String(get(b, "host", "")))
+        isempty(host) && return _json(Dict("ok" => false, "error" => "need a host"))
+        n = tryparse(Int, string(get(b, "n", "1")))
+        (n === nothing || n < 0) && return _json(Dict("ok" => false, "error" => "n must be ≥ 0"))
+        preload = strip(String(get(b, "preload", "")))
+        tr = Symbol(strip(String(get(b, "transport", "tunnel"))))
+        tr in (:tunnel, :direct) || (tr = :tunnel)
+        base_port = something(tryparse(Int, string(get(b, "base_port", "0"))), 0)
+        (base_port == 0 || 1024 <= base_port <= 65533) ||
+            return _json(Dict("ok" => false, "error" => "base_port must be 0 (auto) or 1024–65533"))
+        # Validate + persist synchronously so a bad preload path fails loudly and the config is durable
+        # before we return (a follow-up /api/pools then sees the new desired state, not a stale race);
+        # the slow reconcile (provision + launch) is fired off on a background task.
+        if !isempty(preload) && !isdir(expanduser(preload))
+            return _json(Dict("ok" => false, "error" => "preload project dir not found: $preload"))
+        end
+        msg = ReportEngine.warm_pool!(host; n = n, preload = preload, transport = tr,
+                                      base_port = base_port, reconcile = false)   # persist now, don't launch
+        startswith(msg, "pool[") ||                                               # any other string = a validation error
+            return _json(Dict("ok" => false, "error" => msg))
+        Threads.@spawn try
+            ReportEngine._pool_reconcile!(host)
+        catch e
+            @warn "slate: pool reconcile failed" host exception = (e, catch_backtrace())
+        end
+        _json(Dict("ok" => true, "host" => host, "n" => n, "preload" => preload,
+                   "transport" => String(tr), "base_port" => base_port))
+    end)
     # Manually reap a specific remote worker (kill process + remove its manifest). Body {host, port}.
     # Never automatic — the user decides, so a worker with useful results is never killed out from under them.
     HTTP.register!(router, "POST", "/api/reap-worker", req -> begin
@@ -714,6 +756,14 @@ function _make_router(h::Hub)
         tags = get(_body(req), "tags", String[])
         set_cell_tags!(nb, HTTP.getparam(req, "cid"), tags isa AbstractVector ? tags : String[])
         _eval!(nb)
+        _json(state_json(nb))
+    end))
+    # Set the notebook's declared destinations (regions). The client assembles the full `regionon`
+    # spec from its destination list ("host[,transport[,ports]]" or "name:spec;name2:spec2"); the
+    # server tears down the old region kernels, persists, and echoes the parsed set back in the state.
+    # Empty spec clears all regions. Cells are then tagged into a region via /api/{id}/tags.
+    HTTP.register!(router, "POST", "/api/{id}/regions", req -> _withnb(h, req, nb -> begin
+        set_regionon!(nb, strip(String(get(_body(req), "spec", ""))))
         _json(state_json(nb))
     end))
     # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`

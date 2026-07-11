@@ -561,6 +561,38 @@ function _region_specs(nb::LiveNotebook)
     return out
 end
 
+# Set (or clear) the durable region spec. Tears the OLD spec's live region kernels down first (they
+# detach warm), rewrites the `regionon` footer, and persists. Empty spec clears all regions. This is
+# the shared core of the `region_on` tool and the `/api/{id}/regions` endpoint. Returns the parsed specs.
+function set_regionon!(nb::LiveNotebook, spec::AbstractString)
+    _teardown_region!(nb)
+    h = strip(String(spec))
+    lock(nb.lock) do
+        isempty(h) ? delete!(nb.report.meta, "regionon") : (nb.report.meta["regionon"] = String(h))
+        _persist!(nb)
+    end
+    return _region_specs(nb)
+end
+
+# The notebook's declared destinations, for the browser (tag editor + DAG zones): each region's
+# name + its dialing parts split out of the spec ("host[,transport[,port,stream]]"). The frontend
+# cross-references these against /api/pools for warm-worker readiness.
+function _regions_json(nb::LiveNotebook)
+    out = Vector{Any}()
+    for (name, spec) in sort!(collect(_region_specs(nb)); by = first)
+        parts = split(spec, ',')
+        tr = length(parts) >= 2 ? strip(parts[2]) : ""
+        push!(out, Dict{String,Any}(
+            "name" => name,
+            "host" => String(strip(parts[1])),
+            "transport" => isempty(tr) ? "tunnel" : String(tr),
+            "port" => length(parts) >= 3 ? String(strip(parts[3])) : "",
+            "stream" => length(parts) >= 4 ? String(strip(parts[4])) : "",
+            "spec" => String(spec)))
+    end
+    return out
+end
+
 # The region a cell is TAGGED into: `region=NAME`, with the bare `remote` tag as sugar for
 # `region=default`. "" = the main kernel.
 function _cell_region(cell::Cell)

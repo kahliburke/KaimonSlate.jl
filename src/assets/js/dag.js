@@ -16,6 +16,7 @@
 let _dagChart = null, _dagRaf = 0, _dagAnim = 0;
 let _dagAnyRunning = false, _dagSel = null, _dagCtx = null;   // _dagCtx: {m, L, P} of the last render (click/tooltip)
 let _dagHoverId = null, _dagHoverIdx = null, _dagEdgeV = 0;   // hover lineage: node id → highlighted edge indices
+let _dagDrag = null, _dagGhost = null, _dagZoneHi = null, _dagSuppressClick = false;   // node drag → region retag
 const _dagRunning = new Set();          // ids running RIGHT NOW (cellrun → celldone)
 
 const _dagOpen = () => document.getElementById('dagpane').classList.contains('open');
@@ -292,14 +293,22 @@ function _dagCellRegion(c) {
   for (const t of tags) if (t.startsWith('region=')) return t.slice(7);
   return tags.includes('remote') ? 'default' : '';
 }
-// Stable name → hue over the regions present in this notebook (sorted, so colors don't dance).
+// Regions PRESENT in the graph (some cell is tagged/ran there).
 function _dagRegionNames() {
   const cs = _dagCtx ? Object.values(_dagCtx.m.byId) : [];
   return [...new Set(cs.map(_dagCellRegion).filter(Boolean))].sort();
 }
+// The notebook's DECLARED destinations (regionon footer) — may include regions with no cells yet,
+// which still get a zone (an empty drop target). nbState.regions is set by the server state.
+function _dagDeclaredRegions() { return (typeof nbState !== 'undefined' && nbState && nbState.regions) || []; }
+function _dagRegionHost(name) { const r = _dagDeclaredRegions().find(r => r.name === name); return r ? r.host : ''; }
+// All region names = declared ∪ present, sorted → stable hue/zone ordering that doesn't dance.
+function _dagRegionNamesAll() {
+  return [...new Set([..._dagDeclaredRegions().map(r => r.name), ..._dagRegionNames()])].sort();
+}
 function _dagRegionHue(name) {
   if (!name) return null;
-  return _DAG_REGION_HUES[Math.max(0, _dagRegionNames().indexOf(name)) % _DAG_REGION_HUES.length];
+  return _DAG_REGION_HUES[Math.max(0, _dagRegionNamesAll().indexOf(name)) % _DAG_REGION_HUES.length];
 }
 function _dagRegionLegend() {
   const pane = document.getElementById('dagpane') || document.getElementById('dag');
@@ -307,7 +316,7 @@ function _dagRegionLegend() {
   if (!_dagRegionsOn || !pane) { if (el) el.remove(); return; }
   if (!el) { el = document.createElement('div'); el.id = 'dagregleg'; el.className = 'dagregleg'; pane.appendChild(el); }
   el.innerHTML = `<span><i style="background:#3a3f55"></i>main (local)</span>` +
-    _dagRegionNames().map(n => `<span><i style="background:${_dagRegionHue(n)}"></i>${n}</span>`).join('');
+    _dagRegionNamesAll().map(n => `<span><i style="background:${_dagRegionHue(n)}"></i>${n === 'default' ? 'remote' : n}</span>`).join('');
 }
 
 function _dagState(c) { return _dagRunning.has(c.id) ? 'running' : (c.state || 'stale'); }
@@ -521,6 +530,57 @@ function _dagLayoutCached(m, w, h, dir) {
   return _dagLayoutVal;
 }
 
+// Region ZONES for the DAG: a hull around each region's member cells (a compute-env container you
+// can see the subgraph forming inside), plus a placeholder box for a declared-but-empty region so
+// there's somewhere to aim cells. Coords are in layout space (same as nodes) → api.coord() in the
+// renderItem maps them to pixels. Members can interleave with local flow; the hull just bounds them.
+function _dagComputeZones(L) {
+  const names = _dagRegionNamesAll();
+  if (!names.length) return [];
+  const PAD = 15, HEAD = 21;
+  const members = {}; names.forEach(n => (members[n] = []));
+  L.nodes.forEach(nd => { const r = _dagCellRegion(nd.c); if (r && members[r]) members[r].push(nd); });
+  let phX = L.gw + 46, phY = 8;                       // empty zones stack in the right pan-margin
+  return names.map(n => {
+    const ms = members[n];
+    let x0, y0, x1, y1, empty = false;
+    if (ms.length) {
+      x0 = Infinity; y0 = Infinity; x1 = -Infinity; y1 = -Infinity;
+      ms.forEach(nd => { x0 = Math.min(x0, nd.x - nd.b.w / 2); x1 = Math.max(x1, nd.x + nd.b.w / 2);
+        y0 = Math.min(y0, nd.y - nd.b.h / 2); y1 = Math.max(y1, nd.y + nd.b.h / 2); });
+      x0 -= PAD; x1 += PAD; y0 -= PAD + HEAD; y1 += PAD;
+    } else { empty = true; x0 = phX; y0 = phY; x1 = phX + 168; y1 = phY + 78; phY += 96; }
+    return { name: n, host: _dagRegionHost(n), hue: _dagRegionHue(n) || '#5a6a90', x0, y0, x1, y1, empty, count: ms.length };
+  });
+}
+
+// The region zone under a pixel (topmost wins), or null for the local/main area. Used for drop
+// hit-testing during a node drag — pixels → layout coords via the chart's cartesian.
+function _dagZoneAtPixel(px, py) {
+  if (!_dagChart || !_dagCtx || !_dagCtx.zones || !_dagCtx.zones.length) return null;
+  const d = _dagChart.convertFromPixel({ gridIndex: 0 }, [px, py]); if (!d) return null;
+  const x = d[0], y = d[1];
+  for (let i = _dagCtx.zones.length - 1; i >= 0; i--) {
+    const z = _dagCtx.zones[i];
+    if (x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1) return z;
+  }
+  return null;
+}
+// Outline the zone currently under the cursor while dragging (a zrender overlay, no chart re-render).
+function _dagSetZoneHi(zn) {
+  if (!_dagChart) return;
+  const zr = _dagChart.getZr();
+  if (_dagZoneHi) { zr.remove(_dagZoneHi); _dagZoneHi = null; }
+  if (!zn) return;
+  const tl = _dagChart.convertToPixel({ gridIndex: 0 }, [zn.x0, zn.y0]);
+  const br = _dagChart.convertToPixel({ gridIndex: 0 }, [zn.x1, zn.y1]);
+  if (!tl || !br) return;
+  _dagZoneHi = new echarts.graphic.Rect({ silent: true, z: 99,
+    shape: { x: tl[0], y: tl[1], width: br[0] - tl[0], height: br[1] - tl[1], r: 11 },
+    style: { fill: 'rgba(124,156,240,0.10)', stroke: zn.hue || '#7c9cf0', lineWidth: 2.5 } });
+  zr.add(_dagZoneHi);
+}
+
 function _dagOption() {
   const st = window.__slateState; if (!st) return null;
   const m = _dagModel(st.cells || []);
@@ -549,7 +609,8 @@ function _dagOption() {
   });
   const stOf = id => _dagState(m.byId[id]);
   _dagAnyRunning = m.nodes.some(c => _dagState(c) === 'running');
-  _dagCtx = { m, L, P };
+  const zones = _dagComputeZones(L);                 // region hulls + empty-region drop targets
+  _dagCtx = { m, L, P, zones };
   _dagRegionLegend();                              // regions-overlay legend follows every re-render
   _dagHoverIdx = _dagLineageIdx(L, _dagHoverId);   // keep hover lineage valid across live re-renders
   const cnt = document.getElementById('dagcount');
@@ -599,6 +660,10 @@ function _dagOption() {
     bx0 = Math.min(bx0, p[0] - 6); bx1 = Math.max(bx1, p[0] + 6);
     by0 = Math.min(by0, p[1] - 6); by1 = Math.max(by1, p[1] + 6);
   }));
+  zones.forEach(zn => {                              // empty zones live in the right margin — keep them in the fit window
+    bx0 = Math.min(bx0, zn.x0); bx1 = Math.max(bx1, zn.x1);
+    by0 = Math.min(by0, zn.y0); by1 = Math.max(by1, zn.y1);
+  });
   const bw = bx1 - bx0, bh = by1 - by0;
   const u = Math.max(bw / w, bh / h, 0.0001);
   const exX = (w * u - bw) / 2, exY = (h * u - bh) / 2;
@@ -626,6 +691,25 @@ function _dagOption() {
         zoomOnMouseWheel: false, moveOnMouseMove: true, moveOnMouseWheel: false },
     ],
     series: [
+      { // region ZONES — a translucent hull behind each region's cells (the compute-env container);
+        // dashed placeholder box for a declared-but-empty region. Sits under the edges/nodes.
+        type: 'custom', id: 'dag-zones', name: 'zones', coordinateSystem: 'cartesian2d', z: 0.5, silent: true,
+        data: zones.map((_, i) => [i]),
+        renderItem: (params, api) => {
+          const zn = zones[params.dataIndex]; if (!zn) return null;
+          const tl = api.coord([zn.x0, zn.y0]), br = api.coord([zn.x1, zn.y1]);
+          const x = tl[0], y = tl[1], wpx = br[0] - tl[0], hpx = br[1] - tl[1];
+          const label = (zn.name === 'default' ? 'remote' : zn.name) + (zn.host ? '  ·  ' + zn.host : '');
+          const kids = [{ type: 'rect', shape: { x, y, width: wpx, height: hpx, r: 11 },
+            style: { fill: _dagMix(P.bg, zn.hue, 0.09), stroke: zn.hue, lineWidth: 1.3,
+                     lineDash: zn.empty ? [6, 5] : null, opacity: 0.92 } }];
+          kids.push({ type: 'text', silent: true, style: { x: x + 11, y: y + 13,
+            text: (zn.empty ? '⃞ ' : '🖧 ') + label, fill: zn.hue, font: '600 12px sans-serif', textVerticalAlign: 'middle' } });
+          if (zn.empty) kids.push({ type: 'text', silent: true, style: { x: x + wpx / 2, y: y + hpx / 2 + 6,
+            text: 'no cells yet', fill: P.dim, font: '11px sans-serif', textAlign: 'center', textVerticalAlign: 'middle' } });
+          return { type: 'group', children: kids };
+        },
+      },
       { // edges under nodes — routed/S-curve waypoints, smoothed, arrowhead at the target border
         type: 'custom', id: 'dag-edges', name: 'edges', coordinateSystem: 'cartesian2d', z: 1,
         data: L.links.map((_, i) => [i, _dagEdgeV]),
@@ -807,8 +891,45 @@ function _dagRender() {
   _dagChart.setOption(opt, { notMerge: true });
   if (!_dagChart._dagWired) {
     _dagChart._dagWired = true;
+    // ── Node drag → retag into a region zone. Grabbing a node drags it (pan is frozen for the
+    // duration); grabbing empty canvas still pans (dataZoom). Only active when zones exist.
+    const _zr = _dagChart.getZr();
+    _dagChart.on('mousedown', p => {
+      if (_dagLinkMode || p.seriesName !== 'nodes' || !_dagCtx || !_dagCtx.zones || !_dagCtx.zones.length) return;
+      const nd = _dagCtx.L.nodes[p.dataIndex]; if (!nd) return;
+      const ev = p.event || {};
+      _dagDrag = { id: nd.c.id, from: _dagCellRegion(nd.c), moved: false, sx: ev.offsetX || 0, sy: ev.offsetY || 0 };
+    });
+    _zr.on('mousemove', e => {
+      if (!_dagDrag) return;
+      if (!_dagDrag.moved) {
+        if (Math.hypot(e.offsetX - _dagDrag.sx, e.offsetY - _dagDrag.sy) < 4) return;   // still a click, not a drag
+        _dagDrag.moved = true;
+        _dagChart.setOption({ dataZoom: [{ moveOnMouseMove: false }, { moveOnMouseMove: false }] });   // freeze pan now
+      }
+      if (!_dagGhost) {
+        _dagGhost = new echarts.graphic.Rect({ silent: true, z: 100,
+          shape: { x: 0, y: 0, width: 118, height: 32, r: 6 },
+          style: { fill: 'rgba(124,156,240,0.20)', stroke: '#7c9cf0', lineWidth: 1.5 } });
+        _zr.add(_dagGhost);
+      }
+      _dagGhost.attr({ shape: { x: e.offsetX - 59, y: e.offsetY - 16, width: 118, height: 32, r: 6 } });
+      _dagSetZoneHi(_dagZoneAtPixel(e.offsetX, e.offsetY));
+    });
+    _zr.on('mouseup', e => {
+      if (!_dagDrag) return;
+      const drag = _dagDrag; _dagDrag = null;
+      if (_dagGhost) { _zr.remove(_dagGhost); _dagGhost = null; }
+      _dagSetZoneHi(null);
+      _dagChart.setOption({ dataZoom: [{ moveOnMouseMove: true }, { moveOnMouseMove: true }] });   // restore pan
+      if (!drag.moved) return;                               // a click, not a drag → leave it to the click handler
+      _dagSuppressClick = true; setTimeout(() => { _dagSuppressClick = false; }, 0);   // swallow the click ECharts fires next
+      const zn = _dagZoneAtPixel(e.offsetX, e.offsetY);
+      const target = zn ? zn.name : '';                      // dropped in a zone → that region; empty canvas → local
+      if (target !== drag.from) setCellRegion(drag.id, target);
+    });
     _dagChart.on('click', p => {
-      if (!_dagCtx) return;
+      if (!_dagCtx || _dagSuppressClick) return;
       if (p.seriesName === 'edges') {                        // link mode: click a dashed (manual) edge → remove it
         const l = _dagCtx.L.links[p.dataIndex];
         if (_dagLinkMode && l && l.manual) {
@@ -901,6 +1022,8 @@ function _dagCard(id, cx, cy) {
   const P = _dagCtx.P, s = _dagState(c);
   const kind = _dagKind(c), K = _DAG_KINDS[kind];
   const cache = (c.tags || []).includes('cache');
+  const regs = (typeof _nbRegions === 'function') ? _nbRegions() : [];    // declared destinations → "run on" picker
+  const curReg = (typeof cellAssignedRegion === 'function') ? cellAssignedRegion(c) : '';
   let err = '';
   if (s === 'errored' && c.output) {
     const t = document.createElement('div'); t.innerHTML = c.output;
@@ -939,11 +1062,17 @@ function _dagCard(id, cx, cy) {
     (defs.length ? `<div class="dagcard-sec">defines (${defs.length})</div><div class="dagcard-defs">` +
       `${_esc(defs.slice(0, 12).join(', '))}${defs.length > 12 ? ` … +${defs.length - 12} more` : ''}</div>` : '') +
     ((c.tags || []).length ? `<div class="dagcard-sec">tags</div><div class="dagcard-defs">🏷 ${_esc(c.tags.join(', '))}</div>` : '') +
+    (regs.length ? `<div class="dagcard-sec">run on</div><select class="dagrunon" title="assign this cell to a run destination">` +
+      `<option value=""${curReg === '' ? ' selected' : ''}>💻 local (main kernel)</option>` +
+      regs.map(r => `<option value="${_esc(r.name)}"${curReg === r.name ? ' selected' : ''}>🖧 ${_esc(r.name === 'default' ? 'remote' : r.name)} · ${_esc(r.host)}</option>`).join('') +
+      `</select>` : '') +
     '<div class="dagcard-acts">' +
       '<button data-act="run" title="force re-evaluate this cell and its dependents">▶ Run</button>' +
       `<button data-act="cache" title="${cache ? 'stop persisting this cell’s result' : 'always persist this cell’s result (pipeline stage)'}">${cache ? '💾 Uncache' : '💾 Cache'}</button>` +
     '</div>';
   document.body.appendChild(card);   // viewport-centered (CSS) — big enough to read, above the pane
+  const _ro = card.querySelector('.dagrunon');               // "run on" → retag the cell to a region
+  if (_ro) _ro.addEventListener('change', async () => { const v = _ro.value; _dagCardClose(); await setCellRegion(c.id, v); });
   if (_dagChart) { try { _dagChart.dispatchAction({ type: 'hideTip' }); } catch (_) {} }
   _dagQueue();                                               // re-render with tooltip suppressed
   card.addEventListener('click', async e => {

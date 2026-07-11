@@ -106,6 +106,44 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rthrow.isdef{background:rgba(227,179,65,.06);border-radius:6px;padding-left:6px;padding-right:6px;}
 .rthrow.isdef em{color:#e3b341;}
 .rtportin{width:74px;background:#0d1120;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:5px 8px;font-size:.8rem;}
+/* Warm-pool + live-worker management: a focused per-host view inside the Remotes modal */
+.rthexp{flex:0 0 auto;background:none;border:1px solid #2a2e40;color:#8a90a8;cursor:pointer;font-size:.72rem;padding:2px 8px;border-radius:6px;transition:background .1s,color .1s,border-color .1s;}
+.rthexp:hover{background:rgba(88,110,240,.16);color:#cdd3e6;border-color:#3a4b7a;}
+.remotesmodal.focusmode>*:not(.rtfocus){display:none;}
+.rtfocus{display:none;}
+.remotesmodal.focusmode .rtfocus{display:block;}
+.rtfhead{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+.rtfhead strong{color:#e6ebf7;font-size:1.05rem;}
+.rtfhead .pddim{flex:1 1 auto;}
+.modal .rtfback{padding:3px 10px;font-size:.82rem;border-radius:6px;}
+.modal .rtfref{padding:3px 9px;font-size:.82rem;border-radius:6px;}
+.rppcfg{margin-bottom:6px;padding-bottom:12px;border-bottom:1px solid #21253a;}
+.rpprow{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
+.rpprow>label{flex:0 0 88px;color:#8a90a8;font-size:.8rem;}
+.rppact{display:flex;gap:8px;padding-left:98px;}
+.rppn{width:56px;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 8px;font-size:.82rem;text-align:center;}
+.rpppre{flex:1 1 auto;min-width:0;background:#10131f;color:#cdd3e6;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-family:Menlo,monospace;font-size:.78rem;}
+.rpptr{background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 8px;font-size:.8rem;}
+.rppport{width:110px;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-family:Menlo,monospace;font-size:.78rem;}
+.rppn:focus,.rpppre:focus,.rppport:focus,.rpptr:focus{outline:none;border-color:#569cd6;}
+.modal .rppwarm{padding:4px 13px;font-size:.8rem;border-radius:6px;color:#7cc0ff;border-color:#22405e;}
+.modal .rppdrain{padding:4px 11px;font-size:.8rem;border-radius:6px;color:#c08a5a;border-color:#3a3020;}
+.rppmsg{color:#7cc0ff;font-size:.78rem;min-height:1em;margin:8px 0 2px;}
+.rppmsg.err{color:#e57575;}
+.rppmsg:empty{display:none;}
+.rtfworkers{max-height:42vh;overflow:auto;margin-top:4px;}
+.rppworker{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid rgba(42,46,64,.5);}
+.rppw1{flex:1 1 auto;min-width:0;}
+.rppwport{color:#d4d8e8;font-weight:600;font-family:Menlo,monospace;font-size:.86rem;}
+.rppbadge{display:inline-block;font-size:.68rem;padding:1px 6px;border-radius:8px;margin-left:5px;vertical-align:middle;}
+.rppbadge.idle{color:#8a90a8;background:rgba(138,144,168,.14);}
+.rppbadge.attached{color:#56d364;background:rgba(86,211,100,.12);}
+.rppbadge.pool{color:#7cc0ff;background:rgba(124,192,255,.12);}
+.rppwnb{color:#9aa3c0;font-size:.78rem;margin-left:6px;}
+.rppwtel{color:#6a7090;font-size:.73rem;margin-top:2px;font-family:Menlo,monospace;}
+.modal .rppreap{flex:0 0 auto;padding:3px 9px;font-size:.74rem;border-radius:6px;color:#e57575;border-color:#3a2030;}
+.rpppark{color:#8a90a8;font-size:.76rem;padding:6px 0 1px;margin-top:8px;border-top:1px solid #21253a;}
+.rppempty{color:#6a7090;font-size:.8rem;padding:10px 2px;}
 .imrow label{color:#8a90b0;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;}
 .impath{font-family:Menlo,monospace;font-size:.8rem;color:#cdd3e6;word-break:break-all;}
 .imrow input{background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 10px;font-family:Menlo,monospace;font-size:.82rem;}
@@ -266,6 +304,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <span id="rtdefnote" class="pddim"></span></div>
   <div id="rtsteps" class="rtsteps"></div>
   <div class="rthosts" id="rthosts"></div>
+  <div id="rtfocus" class="rtfocus"></div>
   <div class="rthhead" style="margin-top:14px">Data transfer (all notebooks)</div>
   <div class="imrow"><label title="MB sent per round-trip when cached results move to a remote worker. Transfers ride their own channel, so this never delays cell results — it sets the round-trip granularity: smaller chunks bound per-chunk timeouts and let an abort land sooner on a slow uplink; bigger ones move data faster on a good link. Blank = default.">Transfer chunk size</label>
     <span class="rttr"><input id="rtxchunk" class="rtportin" type="number" min="0.1" step="0.5" placeholder="8"> <span class="pddim">MB / round-trip</span></span></div>
@@ -397,19 +436,125 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var all=_allRemoteHosts();
     if(!all.length){rtHostsEl.innerHTML='<div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div>';return;}
     rtHostsEl.innerHTML='<div class="rthhead">Known remotes</div>'+all.map(function(h){
-      var isDef=(h===_sshGlobal), isCustom=(_sshHosts.indexOf(h)<0);
-      return '<div class="rthrow'+(isDef?' isdef':'')+'"><span class="rthname" data-h="'+esc(h)+'" role="button" title="use this remote">'+(isDef?'★':'🖧')+' '+esc(h)+
-        (isDef?' <em>(default)</em>':'')+(isCustom?' <em>(custom)</em>':'')+'</span>'+
+      var isDef=(h===_sshGlobal), isCustom=(_sshHosts.indexOf(h)<0), hasPool=_rtHasPool(h);
+      return '<div class="rthrow'+(isDef?' isdef':'')+'">'+
+        '<span class="rthname" data-h="'+esc(h)+'" role="button" title="use this remote">'+(isDef?'★':'🖧')+' '+esc(h)+
+        (isDef?' <em>(default)</em>':'')+(isCustom?' <em>(custom)</em>':'')+(hasPool?' <em>(pool)</em>':'')+'</span>'+
         '<span class="rthbtns">'+
+        '<button class="rthexp" data-h="'+esc(h)+'" title="warm pool &amp; live workers on this host">Pool ›</button>'+
         (isDef?'<button data-h="" class="rthdef" title="stop using this as the default → new notebooks run local">★ Unset</button>'
               :'<button data-h="'+esc(h)+'" class="rthdef" title="make this the default for new notebooks">★ Default</button>')+
         (isCustom?'<button data-h="'+esc(h)+'" class="rthforget" title="forget this custom host">✕</button>':'')+'</span></div>';
     }).join('');
     Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthname'),function(b){b.onclick=function(){rtHost.value=b.dataset.h;};});
+    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthexp'),function(b){b.onclick=function(){rtFocusHost(b.dataset.h);};});
     Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthdef'),function(b){b.onclick=function(){rtSetDefaultHost(b.dataset.h);};});
     Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthforget'),function(b){b.onclick=function(){
       _knownRemotes().filter(function(s){return s.split(',')[0]===b.dataset.h;}).forEach(_forgetRemote);
       _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();};});
+  }
+  // ── Warm pools + live workers — a focused per-host view inside the Remotes modal ────────
+  var _rtPools={pools:[],parked:[]}, _rtRoster={}, _rtMsg={}, _rtFocus='';
+  function _rtPoolCfg(h){ return (_rtPools.pools||[]).filter(function(p){return p.host===h;})[0]||null; }
+  function _rtHasPool(h){ return !!_rtPoolCfg(h); }
+  function _rtParkedFor(h){ return (_rtPools.parked||[]).filter(function(p){return p.host===h;}); }
+  function _rtModal(){ return document.querySelector('#remotesbg .remotesmodal'); }
+  // Transport for this host's pool: the configured pool's, else inferred from a remembered ,direct spec.
+  function _rtHostTr(h){ var c=_rtPoolCfg(h); if(c) return c.transport;
+    var spec=(_knownRemotes().filter(function(s){return s.split(',')[0]===h;})[0])||'';
+    return spec.indexOf('direct')>=0?'direct':'tunnel'; }
+  function _rtLoadPools(){ return fetch('/api/pools').then(function(r){return r.json();})
+    .then(function(d){_rtPools=d||{pools:[],parked:[]};}).catch(function(){}); }
+  function _rtFmtBytes(b){ b=+b||0; if(b<1024) return b+'B'; if(b<1048576) return Math.round(b/1024)+'KB';
+    if(b<1073741824) return Math.round(b/1048576)+'MB'; return (b/1073741824).toFixed(1)+'GB'; }
+  function rtFocusHost(h){ _rtFocus=h; _rtModal().classList.add('focusmode'); rtRenderFocus(); rtFetchRoster(h); }
+  function rtUnfocus(){ _rtFocus=''; var m=_rtModal(); if(m)m.classList.remove('focusmode'); document.getElementById('rtfocus').innerHTML=''; }
+  // Build the focus shell (header + pool-config row + status + empty worker/parked containers). The
+  // worker list refreshes independently via rtRenderWorkers so a roster poll never clobbers a field
+  // the user is mid-edit. Config inputs are plain text (inputmode numeric) — no fiddly spinner arrows.
+  function rtRenderFocus(){
+    var h=_rtFocus; if(!h) return; var box=document.getElementById('rtfocus');
+    var cfg=_rtPoolCfg(h), tr=_rtHostTr(h), m=_rtMsg[h];
+    var head='<div class="rtfhead"><button class="rtfback">← Remotes</button><strong>🖧 '+esc(h)+
+      '</strong><span class="pddim">warm pool &amp; live workers</span><button class="rtfref" title="refresh roster">↻</button></div>';
+    var cfgHtml='<div class="rppcfg">'+
+      '<div class="rpprow"><label>Workers</label>'+
+      '<input class="rppn" type="text" inputmode="numeric" autocomplete="off" value="'+(cfg?cfg.n:1)+'" title="how many warm workers to keep ready for instant adoption">'+
+      '<span class="pddim" style="font-size:.76rem">kept warm for instant adoption</span></div>'+
+      '<div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="project dir (optional)" value="'+esc(cfg?cfg.preload:'')+'" title="local project whose env is replicated + imported while idle, so an adopting notebook opens in ~1s"></div>'+
+      '<div class="rpprow"><label>Transport</label>'+
+      '<select class="rpptr" title="transport for pool workers"><option value="tunnel"'+(tr==='tunnel'?' selected':'')+'>tunnel</option><option value="direct"'+(tr==='direct'?' selected':'')+'>direct</option></select>'+
+      '<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" title="first port for :direct workers — worker i binds base+3i..+3i+2 (main/stream/data). Open base..base+3n-1 in the firewall. Blank = auto (9100+)." value="'+((cfg&&cfg.base_port>0)?cfg.base_port:'')+'"'+(tr==='direct'?'':' style="display:none"')+'></div>'+
+      '<div class="rppact"><button class="rppwarm">Warm</button>'+((cfg&&cfg.n>0)?'<button class="rppdrain">Drain</button>':'')+'</div>'+
+      '</div>'+
+      '<div class="rppmsg'+(m&&m.err?' err':'')+'">'+(m?esc(m.text):'')+'</div>';
+    box.innerHTML=head+cfgHtml+'<div class="rtfworkers"></div><div class="rtfpark"></div>';
+    box.querySelector('.rtfback').onclick=rtUnfocus;
+    box.querySelector('.rtfref').onclick=function(){ rtFetchRoster(h); };
+    var trSel=box.querySelector('.rpptr'), portIn=box.querySelector('.rppport');
+    trSel.onchange=function(){ portIn.style.display=(trSel.value==='direct')?'':'none'; };
+    box.querySelector('.rppwarm').onclick=function(){ rtWarmPool(false); };
+    var dr=box.querySelector('.rppdrain'); if(dr) dr.onclick=function(){ rtWarmPool(true); };
+    rtRenderWorkers(h);
+  }
+  // Fill only the worker list + parked rows from the cached roster — leaves the config inputs alone.
+  function rtRenderWorkers(h){
+    var box=document.getElementById('rtfocus'), wl=box.querySelector('.rtfworkers'); if(!wl) return;
+    var roster=_rtRoster[h];
+    if(roster===undefined){ wl.innerHTML='<div class="rppempty"><span class="hydspin"></span> listing workers…</div>'; }
+    else if(!roster.length){ wl.innerHTML='<div class="rppempty">No workers on '+esc(h)+' yet.</div>'; }
+    else { wl.innerHTML=roster.map(function(w){
+        var mf={}; try{mf=JSON.parse(w.manifest||'{}');}catch(_){}
+        var st={}; try{st=JSON.parse(w.stats||'{}');}catch(_){}
+        var badges='';
+        if(w.state) badges+='<span class="rppbadge '+(w.state==='attached'?'attached':'idle')+'">'+esc(w.state)+'</span>';
+        if(mf.pool==='1') badges+='<span class="rppbadge pool">pool</span>';
+        var nb=(w.state==='attached'&&mf.notebook)?'<span class="rppwnb">'+esc(mf.notebook)+'</span>':'';
+        var tel=[];
+        if(st.cpu!==undefined&&st.cpu>=0) tel.push('cpu '+st.cpu+'%');
+        if(st.rss) tel.push('rss '+_rtFmtBytes(st.rss));
+        if(st.memo_bytes>0) tel.push('memo '+_rtFmtBytes(st.memo_bytes));
+        var th=tel.length?'<div class="rppwtel">'+tel.join(' · ')+'</div>':'';
+        return '<div class="rppworker"><div class="rppw1"><span class="rppwport">'+(w.alive?'🟢':'⚪')+' :'+w.port+'</span>'+badges+nb+th+'</div>'+
+          '<button class="rppreap" data-p="'+w.port+'" title="kill this worker + remove its files">✕ Reap</button></div>';
+      }).join('');
+      Array.prototype.forEach.call(wl.querySelectorAll('.rppreap'),function(b){ b.onclick=function(){ rtReapWorker(h,+b.dataset.p); }; });
+    }
+    var pk=box.querySelector('.rtfpark');
+    if(pk){ var parked=_rtParkedFor(h);
+      pk.innerHTML=parked.map(function(p){ return '<div class="rpppark">⇄ parked: '+esc(p.label)+' → :'+p.port+' <span style="opacity:.7">(idle '+p.idle_s+'s)</span></div>'; }).join(''); }
+  }
+  function rtFetchRoster(h){
+    if(_rtRoster[h]===undefined && _rtFocus===h) rtRenderWorkers(h);   // spinner
+    fetch('/api/remote-workers?host='+encodeURIComponent(h)).then(function(r){return r.json();})
+      .then(function(d){ _rtRoster[h]=(d&&d.workers)||[]; if(_rtFocus===h) rtRenderWorkers(h); })
+      .catch(function(){ _rtRoster[h]=[]; if(_rtFocus===h) rtRenderWorkers(h); });
+  }
+  // Apply a warm-pool config (or drain to 0). The server persists synchronously and reconciles in the
+  // background; we set the status line IN PLACE (so typed inputs survive the request), then reload the
+  // canonical config and poll the roster as workers boot.
+  function rtWarmPool(drain){
+    var h=_rtFocus, box=document.getElementById('rtfocus');
+    var n=drain?0:Math.max(0,parseInt(box.querySelector('.rppn').value,10)||0);
+    var preload=box.querySelector('.rpppre').value.trim(), transport=box.querySelector('.rpptr').value;
+    var base_port=(transport==='direct')?(parseInt(box.querySelector('.rppport').value,10)||0):0;
+    var msg=box.querySelector('.rppmsg'); msg.className='rppmsg'; msg.textContent=drain?'Draining…':'Warming…';
+    fetch('/api/warm-pool',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({host:h,n:n,preload:preload,transport:transport,base_port:base_port})})
+      .then(function(r){return r.json();}).then(function(d){
+        if(!d||!d.ok){ msg.className='rppmsg err'; msg.textContent=(d&&d.error)||'failed'; return; }
+        var ports=(base_port&&n>0)?(' · ports '+base_port+'–'+(base_port+3*n-1)):'';
+        _rtMsg[h]={text:drain?'Draining pool → 0 (idle workers reaped)':('Pool set → '+n+' warm · '+transport+ports+' — workers booting…')};
+        _rtLoadPools().then(function(){ if(_rtFocus===h) rtRenderFocus(); rtRenderHosts(); });   // canonical config → (pool) tag + Drain button + saved n
+        var polls=0; (function poll(){ if(_rtFocus!==h) return; rtFetchRoster(h); if(++polls<6) setTimeout(poll,2500); })();
+      }).catch(function(){ msg.className='rppmsg err'; msg.textContent='request failed'; });
+  }
+  function rtReapWorker(h,port){
+    confirmDark('Reap worker :'+port+' on '+h+'?\nThis kills it and removes its files — any un-fetched results are lost.','Reap','danger').then(function(ok){
+      if(!ok) return;
+      fetch('/api/reap-worker',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({host:h,port:port})})
+        .then(function(r){return r.json();}).then(function(){ rtFetchRoster(h); }).catch(function(){});
+    });
   }
   function rtSetDefaultHost(host){
     fetch('/api/run-on-default',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({host:host})})
@@ -432,8 +577,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var el=document.getElementById(id);if(el)el.onchange=_xferCommit;});})();
   function openRemotes(){_rtLastOK='';rtSteps.innerHTML='';
     rtHost.value='';var pp=document.getElementById('rtport'),ps=document.getElementById('rtstream');if(pp)pp.value='';if(ps)ps.value='';
-    _rtSyncPorts();rtRenderHosts();_xferLoad();remotesBg.classList.add('show');rtHost.focus();}
-  function closeRemotes(){if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}remotesBg.classList.remove('show');}
+    rtUnfocus();_rtRoster={};_rtMsg={};   // start on the list; rosters refetch when a host is focused
+    _rtSyncPorts();rtRenderHosts();_xferLoad();_rtLoadPools().then(function(){rtRenderHosts();});
+    remotesBg.classList.add('show');rtHost.focus();}
+  function closeRemotes(){if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}rtUnfocus();remotesBg.classList.remove('show');}
   function rtTest(){
     var host=rtHost.value.trim(); if(!host){rtSteps.innerHTML='<div class="pddim">Enter a host to test.</div>';return;}
     var tr=_rtTransport(); if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}
@@ -460,7 +607,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   rtTestBtn.onclick=rtTest;
   rtHost.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();rtTest();}});
   remotesBg.addEventListener('mousedown',function(e){if(e.target===remotesBg)closeRemotes();});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&remotesBg.classList.contains('show'))closeRemotes();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&remotesBg.classList.contains('show')){if(_rtFocus){e.stopPropagation();rtUnfocus();}else closeRemotes();}});
   function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
     if(moreTrunc)html+='<li class="more">… more entries — keep typing to filter</li>';
     comp.innerHTML=html;comp.style.display=(items.length||moreTrunc)?'block':'none';}
