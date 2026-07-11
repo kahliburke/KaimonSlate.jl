@@ -1055,6 +1055,9 @@ function _make_router(h::Hub)
         catch e
             return HTTP.Response(500, "write failed: " * first(sprint(showerror, e), 200))
         end
+        # The write lands on disk; the worker's Revise hot-reload watcher picks it up (restaling the
+        # affected cells) AND kicks a background `Pkg.precompile()` in the warm worker to refresh the
+        # now-stale on-disk cache — see `_kick_bg_precompile!` in worker.jl (logs to the worker log).
         _json(Dict("ok" => true, "path" => rel, "bytes" => sizeof(content)))
     end))
     # ── Notebook packages ─────────────────────────────────────────────────────

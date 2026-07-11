@@ -667,6 +667,7 @@ _cell_get(c, k, default) = c isa AbstractDict ? get(c, k, get(c, Symbol(k), defa
 # ids are unique within it. Guarded by a lock (mutated from the scheduler task + the cancel handler).
 const _CANCEL_LOCK = ReentrantLock()
 const _RUNNING_TASKS = Dict{String,Task}()
+const _WARM_STATUS = Ref{String}("")     # pool worker's preload/precompile progress → telemetry → pool UI
 const _BATCH_CANCEL = Ref(false)          # set by __slate_cancel; checked by the batch evalfn
 
 # The wire-form of a cancelled cell — an error result so the UI marks it interrupted (not stuck).
@@ -1310,6 +1311,48 @@ end
 
 const _LAST_SRC_ERR = Ref{String}("")
 
+# ── Background precompile (keep the warm environment hot after a source edit) ─────────────────────
+# After a src edit, Revise carries THIS session, but the on-disk precompile cache is stale — a fresh
+# or warm worker would pay the precompile on its boot path. So refresh it here, in the warm worker,
+# off the interactive path: `Pkg.precompile()` on a spawned thread. The per-package compile JOBS fork
+# regardless (Julia's model) — this just ORCHESTRATES them, so there's no extra orchestrator process,
+# and it logs to THIS worker's log. Debounced + coalesced: a burst of saves collapses to one trailing
+# precompile; a save mid-run schedules exactly one re-run. Only rebuilds what's stale (the edited pkg).
+const _BGPC_LOCK = ReentrantLock()
+const _BGPC_RUN = Ref(false)
+const _BGPC_PENDING = Ref(false)
+function _kick_bg_precompile!()
+    start = lock(_BGPC_LOCK) do
+        _BGPC_RUN[] ? (_BGPC_PENDING[] = true; false) : (_BGPC_RUN[] = true; true)
+    end
+    start && @async _bg_precompile_loop!()
+    return nothing
+end
+function _bg_precompile_loop!()
+    while true
+        try; sleep(1.5); catch; end                       # debounce a burst of saves
+        t0 = time()
+        @info "slate precompile: refreshing the env in the background — fresh workers will boot hot"
+        try
+            # In a SUBPROCESS, NOT in-process: `Pkg.precompile()` inside a live worker crashes it. The
+            # per-package compile jobs fork regardless (Julia's model), so this only adds a thin
+            # orchestrator; `run` on @async yields on the subprocess I/O, so interactive cells stay
+            # responsive. The worker still owns + logs it (worker log), off the interactive path.
+            root = dirname(Base.active_project()::String)
+            run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$root -e "using Pkg; Pkg.precompile()"`;
+                         stdout = devnull, stderr = devnull))
+            @info "slate precompile: env warm — fresh workers boot hot" seconds = round(time() - t0; digits = 1)
+        catch e
+            @warn "slate precompile: failed" reason = first(split(sprint(showerror, e), '\n'))
+        end
+        again = lock(_BGPC_LOCK) do
+            _BGPC_PENDING[] ? (_BGPC_PENDING[] = false; true) : (_BGPC_RUN[] = false; false)
+        end
+        again || break
+    end
+    return nothing
+end
+
 # Resilient headless hot-reload. Revise's own file watchers populate `revision_queue`
 # headlessly; we poll it, APPLY the revisions, and PUB either the changed def-names
 # (`slate_revise`) or a parse/load error (`slate_revise_err`). Every iteration is wrapped so a
@@ -1343,6 +1386,7 @@ function _start_src_watcher()
                 names = _changed_names(queue)
                 @info "slate hot-reload: revised" files = length(queue) changed = names
                 isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
+                _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
             end
         catch e
             try; @warn "slate hot-reload: watcher iteration failed" exception = e; catch; end
@@ -1548,17 +1592,36 @@ end
 # cpu%/rss (remote workers are the audience); elsewhere cpu is -1 and rss falls back to maxrss.
 # The memo-store walk is the one non-trivial sample, so it refreshes every 15th tick (~30s).
 function _telemetry_loop!(stats_path::String)
-    mkpath(dirname(stats_path))
+    isempty(stats_path) || mkpath(dirname(stats_path))   # sidecar is remote-only; the PUB runs for every worker
     pagesz = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 30)) : 4096   # _SC_PAGESIZE
     clk    = Sys.islinux() ? Int(ccall(:sysconf, Clong, (Cint,), 2))  : 100   # _SC_CLK_TCK
-    cputime() = try
-        s = read("/proc/self/stat", String)
-        rest = split(s[findlast(')', s)+2:end])        # stat fields from 3 on (comm may hold spaces)
-        (parse(Int, rest[12]) + parse(Int, rest[13])) / clk   # utime + stime (fields 14/15)
-    catch; -1.0; end
-    rssbytes() = try
-        parse(Int, split(read("/proc/self/statm", String))[2]) * pagesz
-    catch; Int(Sys.maxrss()); end
+    # macOS: proc_pid_rusage (libproc, unprivileged — no /proc, no Instruments, no root) gives CURRENT
+    # RSS + cumulative user/system CPU ns. Offsets from rusage_info_v0 (see perf_monitor_macos.jl).
+    macos_rusage() = try
+        buf = Vector{UInt8}(undef, 256)
+        ccall(:proc_pid_rusage, Cint, (Cint, Cint, Ptr{UInt8}), Int32(getpid()), Cint(0), buf) == 0 || return nothing
+        (user_ns = reinterpret(UInt64, @view buf[17:24])[1],
+         sys_ns  = reinterpret(UInt64, @view buf[25:32])[1],
+         rss     = reinterpret(UInt64, @view buf[65:72])[1])
+    catch; nothing; end
+    cputime() = if Sys.islinux()
+        try
+            s = read("/proc/self/stat", String)
+            rest = split(s[findlast(')', s)+2:end])     # stat fields from 3 on (comm may hold spaces)
+            (parse(Int, rest[12]) + parse(Int, rest[13])) / clk   # utime + stime (fields 14/15)
+        catch; -1.0; end
+    elseif Sys.isapple()
+        r = macos_rusage(); r === nothing ? -1.0 : (r.user_ns + r.sys_ns) / 1e9
+    else
+        -1.0                                            # Windows/other: no cheap cpu-time source → cpu% n/a
+    end
+    rssbytes() = if Sys.islinux()
+        try; parse(Int, split(read("/proc/self/statm", String))[2]) * pagesz; catch; Int(Sys.maxrss()); end
+    elseif Sys.isapple()
+        r = macos_rusage(); r === nothing ? Int(Sys.maxrss()) : Int(r.rss)   # current RSS (not peak)
+    else
+        Int(Sys.maxrss())                               # Windows/other: peak RSS fallback
+    end
     lastc = cputime(); lastw = time(); memo = -1; tick = 0
     while true
         sleep(2.0)
@@ -1573,10 +1636,11 @@ function _telemetry_loop!(stats_path::String)
         evals = length(runids)
         running = "[" * join(("\"" * replace(String(id), "\\" => "\\\\", "\"" => "\\\"") * "\"" for id in runids), ",") * "]"
         gcms = round(Int, Base.gc_num().total_time / 1e6)
+        warm = replace(_WARM_STATUS[], "\\" => "\\\\", "\"" => "\\\"")   # preload/precompile progress
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
-               "\"running\":$running,\"memo_bytes\":$memo,\"ts\":$(round(Int, time()))}"
+               "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo,\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
-        try
+        isempty(stats_path) || try                          # roster sidecar — remote workers only
             tmp = stats_path * ".tmp"
             write(tmp, line); mv(tmp, stats_path; force = true)
         catch
@@ -1641,16 +1705,21 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # fatal: the adopting notebook's own `using` cell will surface the real error with context.
     warm_deps && Threads.@spawn try
         t0 = time(); n = 0
-        for name in sort!(collect(keys(Pkg.project().dependencies)))
-            name in ("KaimonGate", "Revise", "ExpressionExplorer") && continue
+        names = [nm for nm in sort!(collect(keys(Pkg.project().dependencies)))
+                 if !(nm in ("KaimonGate", "Revise", "ExpressionExplorer"))]
+        total = length(names)
+        for name in names
+            _WARM_STATUS[] = "warming $(n)/$(total) · $(name)"   # live status → telemetry → the pool UI
             try
-                Base.require(Main, Symbol(name)); n += 1
+                Base.require(Main, Symbol(name)); n += 1          # loads + precompiles if needed
             catch e
                 @warn "slate worker: warm-deps import failed" pkg = name exception = e
             end
         end
+        _WARM_STATUS[] = "ready · $(n) pkgs · $(round(Int, (time() - t0) * 1000))ms"
         @info "slate worker: warm deps loaded" pkgs = n ms = round(Int, (time() - t0) * 1000)
     catch e
+        _WARM_STATUS[] = "warm failed"
         @warn "slate worker: warm-deps pass died" exception = e
     end
     isempty(stats_path) || Threads.@spawn try
