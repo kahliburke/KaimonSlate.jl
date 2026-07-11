@@ -166,12 +166,18 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 /* Featured "Sites" strip (published local sites), full-width under the header. Collapses when empty. */
 .sitesband{max-width:1160px;margin:0 0 26px;}.sitesband:empty{display:none;}
 /* Remote activity monitor — a compact live `top` for pool/region workers */
-.actmon{background:#141828;border:1px solid #2a2e40;border-radius:11px;padding:11px 13px;margin:0 0 16px;}
+/* Plain container so the `.sect` heading sits OUTSIDE the card (matching Recent/Running/Sites);
+   the meters live in `.actmon-body` (the bordered card). Hidden only when there are no pools/hosts. */
+.actmon{margin:0 0 16px;}
 .actmon:empty{display:none;}
-.actmonh{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;}
-.actmonh b{color:#cdd3e6;font-size:.82rem;font-weight:600;}
-.actmonh .agg{color:#6a7090;font-size:.74rem;font-family:Menlo,monospace;}
+.actmon-body{background:#141828;border:1px solid #2a2e40;border-radius:11px;padding:11px 13px;}
+.actagg{color:#6a7090;font-size:.74rem;font-family:Menlo,monospace;margin-bottom:8px;}
 .actlive{color:#56d364;font-size:.66rem;}
+.actloading{display:flex;align-items:center;gap:8px;color:#6a7090;font-size:.78rem;padding:3px 2px;}
+.actspin{width:13px;height:13px;border:2px solid #2a2e40;border-top-color:#7cc0ff;border-radius:50%;
+  display:inline-block;animation:actspin .8s linear infinite;}
+@keyframes actspin{to{transform:rotate(360deg)}}
+.actempty{color:#6a7090;font-size:.78rem;padding:3px 2px;}
 /* Fixed grid: the label block (host + badge) has a FIXED width, so every meter starts at the exact
    same x and the meters read as one clean aligned stack down the panel. The status column soaks up
    the rest. Columns: label | cpu-meter | cpu% | rss | status(fills rest). */
@@ -1507,7 +1513,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // ── Remote activity monitor — a compact live `top` of every pool/region worker ──────────────
   var _actTimer=null, _actInflight=false;
   function _actFmtBytes(b){ b=+b||0; if(b<1048576) return Math.round(b/1024)+'K'; if(b<1073741824) return Math.round(b/1048576)+'M'; return (b/1073741824).toFixed(1)+'G'; }
-  function _actStart(){ if(_actTimer) return; _actTick(); _actTimer=setInterval(function(){ if(!document.hidden) _actTick(); }, 3000); }
+  // Heading (matches the other columns' `.sect` headers) + a card body. Rendered for every state so
+  // the third column reads as a real column — a heading up top, a spinner/rows/empty note below.
+  function _actShell(inner){ return '<h2 class="sect">Remote activity</h2><div class="actmon-body">'+inner+'</div>'; }
+  function _actLoading(){ var el=document.getElementById('actmon'); if(!el||el.dataset.loaded) return;
+    el.innerHTML=_actShell('<div class="actloading"><span class="actspin"></span>checking hosts…</div>'); }
+  function _actStart(){ if(_actTimer) return; _actLoading(); _actTick(); _actTimer=setInterval(function(){ if(!document.hidden) _actTick(); }, 3000); }
   // Poll /api/pools for the configured/parked hosts, then each host's live roster (stats carry
   // cpu/rss/running from the telemetry sampler). Overlap-guarded so a slow ssh probe can't stack.
   function _actTick(){
@@ -1558,9 +1569,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         '<span class="actrss">'+(rss?_actFmtBytes(rss):'—')+'</span>'+
         '<span class="actrun'+(runTxt==='idle'?' idle':'')+'" title="'+esc(runTxt)+'">'+esc(runTxt)+'</span></div>');
     }); });
-    if(!nW){ el.innerHTML=''; return; }   // no remote workers → collapse (:empty hides it)
-    el.innerHTML='<div class="actmonh"><b>🖧 Remote activity</b><span class="agg">'+
-      nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+' busy <span class="actlive">●</span></span></div>'+rows.join('');
+    el.dataset.loaded='1';
+    if(!hostData.length){ el.innerHTML=''; return; }   // no pools/hosts at all → collapse (:empty hides it)
+    if(!nW){ el.innerHTML=_actShell('<div class="actempty">No workers running</div>'); return; }   // hosts, but idle
+    var agg='<div class="actagg">'+nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+
+      ' busy <span class="actlive">●</span></div>';
+    el.innerHTML=_actShell(agg+rows.join(''));
   }
   loadSessions(); loadPublished(); _actStart();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
