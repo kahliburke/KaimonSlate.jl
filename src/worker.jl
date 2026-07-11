@@ -383,6 +383,29 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[],
     return wire
 end
 
+# Re-execute ONLY the top-level `using`/`import` statements of a restored import-scaffold cell, so a
+# memoized provider keeps its imported names in scope even though its compute was skipped. Redundant
+# usings replay as cheap no-ops; a NOVEL `using X` (the sole importer of X) is re-established here so
+# a downstream cell that RE-RUNS after an edit still sees X's names + method tables. The import's
+# effect is a pure function of (source, environment), so replaying reproduces exactly what the real
+# run's `using` did. Returns false if any import statement throws (→ caller distrusts the restore and
+# recomputes) — a package that stored fine but won't `using` now is a genuine environment change.
+function _replay_imports!(m::Module, source::AbstractString)
+    top = try; Meta.parseall(String(source)); catch; return true; end   # unparseable → nothing to replay
+    stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+    for s in stmts
+        s isa LineNumberNode && continue
+        (s isa Expr && s.head in (:using, :import)) || continue
+        try
+            Base.invokelatest(Core.eval, m, s)
+        catch e
+            @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n'))
+            return false
+        end
+    end
+    return true
+end
+
 # Persist the entry: each defined global → its own content-addressed blob (+ one for the wire),
 # tied together by a small TOML manifest under the full key. Per-name blobs mean an unserializable
 # value is diagnosed BY NAME, identical data across entries/cells/notebooks stores once, and a
@@ -517,7 +540,11 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # The fresh result still stores below, replacing the entry.
     if !isempty(memo_key) && !memo_force
         w = _memo_restore(memo_key; unread = memo_unread, trace = tr)
-        if w !== nothing
+        # A provider cell (`using X; v = solve()`) is memoized WITHOUT running its `using` — replay
+        # just its import statements so `X`'s names stay in scope for any downstream cell that later
+        # re-runs. A replay failure (env changed under us) distrusts the entry → fall through to a
+        # full recompute rather than serve a half-scoped restore.
+        if w !== nothing && _replay_imports!(_NS[], source)
             @info "slate memo: restored (no recompute)" cell = cid
             tr["action"] = "restored"
             _trace_commit!(cid, tr)

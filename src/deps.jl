@@ -714,25 +714,30 @@ function build_dependencies!(report::Report)
     report.meta["multidef"] = Set{String}(string(w) for (w, ids) in wcells if length(ids) >= 2)
     report.meta["multidef_cells"] =                       # name → the cells defining it (for the UI popup)
         Dict{String,Vector{String}}(string(w) => ids for (w, ids) in wcells if length(ids) >= 2)
-    # Redundant `using`/`import` ⇒ memoizable. A cell that mixes a `using X` with real compute is
-    # normally unmemoizable: it PROVIDES X's names, and restoring cached values would skip the
-    # `using` (method-table effects), so `_memoizable` bails on any provider. But when every name
-    # the cell provides is ALREADY in scope from an UPSTREAM cell (a `using X` earlier — common:
-    # a per-section setup re-imports what a later heavy cell re-`using`s), this cell's `using` is a
-    # NO-OP: skipping it on restore is safe, because the upstream anchor runs and keeps X loaded.
-    # Doc-order sweep (sibling of the multidef sweep above): a code cell whose EVERY provided name
-    # was already provided upstream is flagged `:using_redundant`, which `_memoizable` honours to
-    # cache the cell's genuinely-defined values (the memo snapshot excludes `provides`). The FIRST
-    # provider of a name is never redundant → stays a barrier that runs → anchors the name; a cell
-    # that introduces even ONE novel name stays unmemoized (skipping it would leave that name
-    # undefined downstream). Unlocks e.g. `using KrylovKit; E0,ψ0 = solve(...)` when a cheap
-    # upstream setup already did `using KrylovKit`.
+    # Import-scaffold ⇒ a `using`/`import` cell is memoizable. A cell that mixes a `using X` with
+    # real compute normally can't be memoized: it PROVIDES X's names, and a plain restore would skip
+    # the `using` (its method-table / name-in-scope effect), so `_memoizable` bails on any provider.
+    # But `provides` holds ONLY import-brought names (function/struct DEFS land in `writes`, never
+    # here — see the statement loop), and an import's effect is a pure function of (its source, the
+    # resolved environment). So we can cache the cell's genuinely-defined values (`writes ∖ provides`)
+    # and, on restore, REPLAY just the cell's `using`/`import` statements (cheap — the package is
+    # already loaded) to re-establish scope. That makes every NON-OPAQUE provider memoizable:
+    #   • `:import_scaffold` — memoizable; the worker replays the usings on restore so a NOVEL
+    #     `using X` (the sole importer of X) keeps X's names in scope for any downstream cell that
+    #     later RE-RUNS. Unlocks e.g. `using KrylovKit, LegendrePolynomials; bvals = eigsolve(...)`.
+    #   • `:using_redundant` — the stricter subset where EVERY provided name is already in scope from
+    #     an upstream cell, so the replay is a proven no-op (kept as a hint; not required for safety).
+    # A cell reaching here with non-empty `provides` is non-opaque by construction (an UNRESOLVED
+    # `using` pushes `:opaque` and leaves `provides` empty), so its import names are known and its
+    # `using` source is safe to replay. Doc-order sweep (sibling of the multidef sweep above).
     provided_upstream = Set{Symbol}()
     for c in report.cells
         c.kind == CODE || continue
-        delete!(c.flags, :using_redundant)
-        (!isempty(c.provides) && all(n -> n in provided_upstream, c.provides)) &&
-            push!(c.flags, :using_redundant)
+        delete!(c.flags, :using_redundant); delete!(c.flags, :import_scaffold)
+        if !isempty(c.provides)
+            push!(c.flags, :import_scaffold)
+            all(n -> n in provided_upstream, c.provides) && push!(c.flags, :using_redundant)
+        end
         union!(provided_upstream, c.provides)
     end
     # Derived indexes: id → cell, and the transpose of `deps` (id → its direct dependents). Rebuilt

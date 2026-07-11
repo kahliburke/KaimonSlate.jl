@@ -325,13 +325,13 @@ const _MEMO_THRESHOLD_MS = 150.0    # only cells slower than this are worth pers
 function _memoizable(cell::Cell)
     cell.kind == CODE || return false
     (:opaque in cell.flags || :nocache in cell.flags || :volatile in cell.flags) && return false
-    # A refined `using`/`import` cell is no longer :opaque, but restoring cached export BINDINGS is
-    # not the same as executing the `using` (method-table effects, load order) — never memoize it.
-    # A cell that PROVIDES names (`using`/`import`) can't be memoized — restoring cached values
-    # skips the import's method-table effects. EXCEPTION: a `:using_redundant` cell, whose provided
-    # names are all in scope from an upstream anchor (see build_dependencies!), so skipping its
-    # `using` on restore is safe. Its genuinely-defined values (writes ∖ provides) are cached.
-    (isempty(cell.provides) || :using_redundant in cell.flags) || return false
+    # A cell that PROVIDES names (`using`/`import`) is memoizable via IMPORT SCAFFOLD: cache its
+    # genuinely-defined values (writes ∖ provides) and, on restore, replay just its `using`/`import`
+    # statements (the worker does this from the source) to re-establish the import's name-in-scope /
+    # method-table effect. `:import_scaffold` is set on every non-opaque provider (see
+    # build_dependencies!); `:using_redundant` is the subset whose replay is a proven no-op. A
+    # provider reaching here is non-opaque (an unresolved `using` is `:opaque` and returned above).
+    (isempty(cell.provides) || :import_scaffold in cell.flags) || return false
     # Same for a global-theme setter (`set_theme!`): its effect is process state, not a binding —
     # a restore would skip applying the theme. (Marked by the synthetic `_THEME_SENTINEL` write.)
     _THEME_SENTINEL in cell.writes && return false
