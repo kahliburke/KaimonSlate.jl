@@ -1360,11 +1360,20 @@ function __slate_revise()
     return _changed_names(queue)
 end
 
-"GateTools exposed to the KaimonSlate server."
+# GateTools exposed to the KaimonSlate server.
+"The cells this worker is evaluating RIGHT NOW (keys of `_RUNNING_TASKS`) — the authoritative in-flight
+set the hub reconciles its run-registry against. A cell the hub still marks `running` that is absent
+here was orphaned (the worker bounced under it) and can be safely reset. Cheap: a snapshot under the lock."
+function __slate_running()
+    ids = lock(_CANCEL_LOCK) do; String[String(k) for k in keys(_RUNNING_TASKS)]; end
+    return (; running = ids, ts = time())
+end
+
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),
+        KaimonGate.GateTool("__slate_running", __slate_running),
         KaimonGate.GateTool("__slate_cancel", __slate_cancel),
         KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
@@ -1558,10 +1567,14 @@ function _telemetry_loop!(stats_path::String)
         cpu = (c >= 0 && lastc >= 0 && w > lastw) ? round(100 * (c - lastc) / (w - lastw); digits = 1) : -1.0
         lastc = c; lastw = w
         (memo < 0 || tick % 15 == 0) && (memo = _dir_bytes(joinpath(_memo_dir(), "blobs")))
-        evals = lock(_CANCEL_LOCK) do; length(_RUNNING_TASKS); end
+        # The LIVE running-cell ids — the per-eval heartbeat the hub reconciles against (a cell the hub
+        # thinks is running but that's absent here is orphaned). Cheap: just the keys under the lock.
+        runids = lock(_CANCEL_LOCK) do; collect(keys(_RUNNING_TASKS)); end
+        evals = length(runids)
+        running = "[" * join(("\"" * replace(String(id), "\\" => "\\\\", "\"" => "\\\"") * "\"" for id in runids), ",") * "]"
         gcms = round(Int, Base.gc_num().total_time / 1e6)
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
-               "\"memo_bytes\":$memo,\"ts\":$(round(Int, time()))}"
+               "\"running\":$running,\"memo_bytes\":$memo,\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         try
             tmp = stats_path * ".tmp"
