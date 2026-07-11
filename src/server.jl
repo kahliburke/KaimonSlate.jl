@@ -539,6 +539,7 @@ end
 # cells stay local, cross-boundary MUTATION is undefined (same as the release-plan validity rule).
 const _REGION_KERNELS = Dict{Tuple{String,String},Any}()   # (nb id, region name) → GateKernel
 const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "side:name" → freshness token
+const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel objectid) → signature of primed `using` cells
 const _REGION_LOCK = ReentrantLock()
 
 # Named region specs from the durable footer. Two grammars: a bare "host[,transport[,ports]]"
@@ -676,11 +677,36 @@ function _side_label(nb::LiveNotebook, side::AbstractString)
     return side == "default" ? host : "$side ($host)"
 end
 
+# Namespace parity primer: run the notebook's pure-`using`/`import` cells on kernel `k` so a side
+# that's about to RECEIVE a boundary value can DECODE it (a DataFrame needs DataFrames loaded there,
+# an Arrow blob needs Arrow, a JLS blob needs whatever types it holds). The env is the SAME fork
+# project on every side — this only executes the imports, it never installs anything. Idempotent:
+# tracked per LIVE kernel against the imports' signature, so it fires once per kernel and again only
+# if the notebook's imports change (a fresh/replaced kernel has a new objectid ⇒ re-primes).
+function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
+    usings = [c for c in nb.report.cells if ReportEngine._is_pure_using(c.source)]
+    isempty(usings) && return nothing
+    sig = hash([c.src_hash for c in usings])
+    key = (nb.id, objectid(k))
+    lock(_REGION_LOCK) do; get(_REGION_PRIMED, key, UInt(0)); end == sig && return nothing
+    for c in usings
+        try
+            ReportEngine.eval_capture(k, nb.report, c.source, "cell:" * c.id * "#prime", nothing)
+        catch e
+            ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
+                               first(sprint(showerror, e), 160))
+        end
+    end
+    lock(_REGION_LOCK) do; _REGION_PRIMED[key] = sig; end
+    return nothing
+end
+
 # Detach (default) or kill every region kernel + forget the boundary sync state.
 function _teardown_region!(nb::LiveNotebook; kill::Bool = false)
     ks = lock(_REGION_LOCK) do
         got = [pop!(_REGION_KERNELS, key) for key in collect(keys(_REGION_KERNELS)) if key[1] == nb.id]
         delete!(_REGION_SYNCED, nb.id)
+        filter!(kv -> kv[1][1] != nb.id, _REGION_PRIMED)   # forget priming so a re-setup re-primes fresh kernels
         got
     end
     for k in ks
@@ -784,6 +810,11 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
         if !prepared                                      # both wires must be up before the first move
             ReportEngine.prepare!(src_k, nb.report)       # (idempotent + cheap when already connected;
             ReportEngine.prepare!(dst_k, nb.report)       #  a cold region kernel spawns/adopts here)
+            # The env must be present on BOTH sides: prime each with the notebook's imports so the
+            # receiver can decode what crosses (fixes "KeyError DataFrames" when a frame lands on a
+            # kernel that never ran `using DataFrames`). Idempotent + tracked per kernel.
+            _prime_namespace!(nb, src_k, src_side)
+            _prime_namespace!(nb, dst_k, dst_side)
             prepared = true
         end
         # zero-copy materialization is safe when nothing anywhere mutates the name
