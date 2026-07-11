@@ -160,6 +160,28 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .nb:hover,.ritem:hover{transform:translateX(2px);box-shadow:0 4px 18px rgba(0,0,0,.28);}
 /* Featured "Sites" strip (published local sites), full-width under the header. Collapses when empty. */
 .sitesband{max-width:1160px;margin:0 0 26px;}.sitesband:empty{display:none;}
+/* Remote activity monitor — a compact live `top` for pool/region workers */
+.actmon{background:#141828;border:1px solid #2a2e40;border-radius:11px;padding:11px 13px;margin:0 0 16px;}
+.actmon:empty{display:none;}
+.actmonh{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;}
+.actmonh b{color:#cdd3e6;font-size:.82rem;font-weight:600;}
+.actmonh .agg{color:#6a7090;font-size:.74rem;font-family:Menlo,monospace;}
+.actlive{color:#56d364;font-size:.66rem;}
+.actrow{display:flex;align-items:center;gap:9px;padding:5px 1px;border-top:1px solid rgba(42,46,64,.5);}
+.actrow.first{border-top:none;}
+.actwho{flex:0 0 auto;color:#d4d8e8;font-family:Menlo,monospace;font-size:.76rem;min-width:112px;}
+.actbadge{flex:0 0 auto;font-size:.64rem;padding:1px 6px;border-radius:8px;}
+.actbadge.idle{color:#8a90a8;background:rgba(138,144,168,.14);}
+.actbadge.attached{color:#56d364;background:rgba(86,211,100,.12);}
+.actbadge.dead{color:#e57575;background:rgba(229,117,117,.12);}
+.actcpu{flex:1 1 auto;display:flex;align-items:center;gap:6px;min-width:80px;}
+.actbar{flex:1;height:6px;background:#0d1120;border-radius:4px;overflow:hidden;}
+.actbarf{height:100%;background:linear-gradient(90deg,#3fb96e,#e8a13f 70%,#e5636e);transition:width .3s;}
+.actcpun{color:#9aa3c0;font-size:.72rem;font-family:Menlo,monospace;width:34px;text-align:right;}
+.actrss{flex:0 0 auto;color:#9aa3c0;font-family:Menlo,monospace;font-size:.74rem;width:62px;text-align:right;}
+.actrun{flex:0 0 auto;color:#7cc0ff;font-size:.74rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.actrun.idle{color:#5a6070;}
+.actempty{color:#6a7090;font-size:.76rem;padding:3px 1px;}
 .sitecards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;}
 .sitecard{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;column-gap:11px;align-items:center;
   background:#141828;border:1px solid #2a2e40;border-radius:11px;padding:12px 15px;text-decoration:none;
@@ -269,7 +291,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   </div>
   <div id="recent" class="recent"></div>
 </div>
-<div class="colR"><div id="sessions"></div></div>
+<div class="colR"><div id="actmon" class="actmon"></div><div id="sessions"></div></div>
 </div>
 <div class="modal-bg" id="modalbg"><div class="modal"><div class="msg" id="modalmsg"></div><div class="row" id="modalrow"></div></div></div>
 <div class="loading" id="loading"><div class="spinner"></div><div class="lmsg" id="lmsg"></div></div>
@@ -481,7 +503,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<div class="rpprow"><label>Workers</label>'+
       '<input class="rppn" type="text" inputmode="numeric" autocomplete="off" value="'+(cfg?cfg.n:1)+'" title="how many warm workers to keep ready for instant adoption">'+
       '<span class="pddim" style="font-size:.76rem">kept warm for instant adoption</span></div>'+
-      '<div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="project dir (optional)" value="'+esc(cfg?cfg.preload:'')+'" title="local project whose env is replicated + imported while idle, so an adopting notebook opens in ~1s"></div>'+
+      '<div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (the folder with Project.toml)" value="'+esc(cfg?cfg.preload:'')+'" title="A LOCAL project directory (one containing a Project.toml — usually the project your notebooks live in). Its environment is replicated to the host and its packages are pre-imported (loaded AND precompiled) on each idle worker, so a notebook from that project adopts a ready worker instead of a ~90s cold boot. Blank = bare workers (nothing warmed)."></div>'+
+      '<div class="rpprow"><label></label><span class="pddim" style="font-size:.73rem;line-height:1.35">A <b>local</b> project folder (has a <code>Project.toml</code>) — its packages are replicated &amp; <b>precompiled</b> on idle workers so matching notebooks adopt instantly. Blank = bare workers. Progress shows below &amp; in <b>Remote activity</b>.</span></div>'+
       '<div class="rpprow"><label>Transport</label>'+
       '<select class="rpptr" title="transport for pool workers"><option value="tunnel"'+(tr==='tunnel'?' selected':'')+'>tunnel</option><option value="direct"'+(tr==='direct'?' selected':'')+'>direct</option></select>'+
       '<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" title="first port for :direct workers — worker i binds base+3i..+3i+2 (main/stream/data). Open base..base+3n-1 in the firewall. Blank = auto (9100+)." value="'+((cfg&&cfg.base_port>0)?cfg.base_port:'')+'"'+(tr==='direct'?'':' style="display:none"')+'></div>'+
@@ -515,7 +538,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         if(st.rss) tel.push('rss '+_rtFmtBytes(st.rss));
         if(st.memo_bytes>0) tel.push('memo '+_rtFmtBytes(st.memo_bytes));
         var th=tel.length?'<div class="rppwtel">'+tel.join(' · ')+'</div>':'';
-        return '<div class="rppworker"><div class="rppw1"><span class="rppwport">'+(w.alive?'🟢':'⚪')+' :'+w.port+'</span>'+badges+nb+th+'</div>'+
+        var warm=st.warm||'', wc=warm.indexOf('ready')===0?'#56d364':warm.indexOf('warming')===0?'#e8a13f':'#8a90a8';
+        var wl2=warm?'<div class="rppwtel" style="color:'+wc+'">'+(warm.indexOf('warming')===0?'⏳ ':warm.indexOf('ready')===0?'✓ ':'')+esc(warm)+'</div>':'';
+        return '<div class="rppworker"><div class="rppw1"><span class="rppwport">'+(w.alive?'🟢':'⚪')+' :'+w.port+'</span>'+badges+nb+th+wl2+'</div>'+
           '<button class="rppreap" data-p="'+w.port+'" title="kill this worker + remove its files">✕ Reap</button></div>';
       }).join('');
       Array.prototype.forEach.call(wl.querySelectorAll('.rppreap'),function(b){ b.onclick=function(){ rtReapWorker(h,+b.dataset.p); }; });
@@ -1449,11 +1474,63 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var _pb=document.getElementById('published');
     if(_pb) _pb.innerHTML='<div class="siteload"><span class="spin-sm"></span> Loading sites…</div>';
   }
-  loadSessions(); loadPublished();
+  // ── Remote activity monitor — a compact live `top` of every pool/region worker ──────────────
+  var _actTimer=null, _actInflight=false;
+  function _actFmtBytes(b){ b=+b||0; if(b<1048576) return Math.round(b/1024)+'K'; if(b<1073741824) return Math.round(b/1048576)+'M'; return (b/1073741824).toFixed(1)+'G'; }
+  function _actStart(){ if(_actTimer) return; _actTick(); _actTimer=setInterval(function(){ if(!document.hidden) _actTick(); }, 3000); }
+  // Poll /api/pools for the configured/parked hosts, then each host's live roster (stats carry
+  // cpu/rss/running from the telemetry sampler). Overlap-guarded so a slow ssh probe can't stack.
+  function _actTick(){
+    if(_actInflight) return; _actInflight=true;
+    var done=function(){ _actInflight=false; };
+    fetch('/api/pools').then(function(r){return r.json();}).then(function(d){
+      var hs={}; (d.pools||[]).forEach(function(p){hs[p.host]=1;}); (d.parked||[]).forEach(function(p){hs[p.host]=1;});
+      var hosts=Object.keys(hs);
+      if(!hosts.length){ _actRender([]); done(); return; }
+      Promise.all(hosts.map(function(h){ return fetch('/api/remote-workers?host='+encodeURIComponent(h))
+        .then(function(r){return r.json();}).then(function(d){return {host:h,workers:(d.workers||[])};})
+        .catch(function(){return {host:h,workers:[]};}); }))
+        .then(function(hd){ _actRender(hd); done(); }).catch(done);
+    }).catch(done);
+  }
+  function _actRender(hostData){
+    var el=document.getElementById('actmon'); if(!el) return;
+    var rows=[], nW=0, totRss=0, busy=0;
+    hostData.forEach(function(hd){ (hd.workers||[]).forEach(function(w){
+      var st={}; try{st=JSON.parse(w.stats||'{}');}catch(_){}
+      var mf={}; try{mf=JSON.parse(w.manifest||'{}');}catch(_){}
+      nW++;
+      var alive=w.alive!==false;
+      var state=!alive?'dead':(w.state==='attached'?'attached':'idle');
+      var cpu=(st.cpu!==undefined&&st.cpu>=0)?st.cpu:null;
+      var rss=st.rss||0; totRss+=rss;
+      var running=Array.isArray(st.running)?st.running:[];
+      var warm=st.warm||'';
+      var warming=warm.indexOf('warming')===0;
+      var isBusy=alive&&(running.length>0||(st.evals||0)>0||warming);
+      if(isBusy) busy++;
+      var runTxt=!alive?'dead':running.length?('▶ '+running.join(', ')):
+        warming?('⏳ '+warm):
+        warm.indexOf('ready')===0?('✓ '+warm):
+        (state==='attached'&&mf.notebook?mf.notebook:'idle');
+      var cpuPct=cpu==null?0:Math.min(100,cpu);
+      rows.push('<div class="actrow'+(rows.length===0?' first':'')+'">'+
+        '<span class="actwho">'+esc((hd.host||'').split('.')[0])+' :'+w.port+'</span>'+
+        '<span class="actbadge '+state+'">'+state+(mf.pool==='1'?'·pool':'')+'</span>'+
+        '<span class="actcpu"><span class="actbar"><span class="actbarf" style="width:'+cpuPct+'%"></span></span>'+
+        '<span class="actcpun">'+(cpu==null?'—':cpu+'%')+'</span></span>'+
+        '<span class="actrss">'+(rss?_actFmtBytes(rss):'—')+'</span>'+
+        '<span class="actrun'+(runTxt==='idle'?' idle':'')+'" title="'+esc(runTxt)+'">'+esc(runTxt)+'</span></div>');
+    }); });
+    if(!nW){ el.innerHTML=''; return; }   // no remote workers → collapse (:empty hides it)
+    el.innerHTML='<div class="actmonh"><b>🖧 Remote activity</b><span class="agg">'+
+      nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+' busy <span class="actlive">●</span></span></div>'+rows.join('');
+  }
+  loadSessions(); loadPublished(); _actStart();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
   // from other tabs, agents, or MCP tools), and refresh immediately when the tab regains focus.
   setInterval(function(){ if(!document.hidden){ loadSessions(); } }, 4000);   // not loadPublished — its ledger read can hit the network (gist)
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadPublished(); } });
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadPublished(); _actTick(); } });
   window.addEventListener('pageshow',function(){ loadSessions(); loadPublished(); });   // back/forward cache restore
   // Prefill the last directory we opened from (but DON'T open the completion
   // dropdown on load — it would cover the open-sessions list; it opens when the
