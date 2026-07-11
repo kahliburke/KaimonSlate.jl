@@ -10,18 +10,26 @@
 
 </div>
 
-A warm-session, **reactive** Julia notebook with a live browser UI — packaged as a
-[Kaimon](https://github.com/…/Kaimon.jl) extension.
+A **reactive** Julia notebook with a live browser UI, packaged as a
+[Kaimon](https://github.com/…/Kaimon.jl) extension. Cells form a dependency graph, so changing a
+value recomputes exactly what depends on it — no hidden kernel state, no manual "run all". It's a
+plain `.jl` file the whole way down, so the browser, the AI agent, and git share one source of truth.
 
 📖 **Documentation:** <https://kahliburke.github.io/KaimonSlate.jl/dev/>
 
-Edit a cell or drag a `@bind` widget and only the *downstream* cells recompute
-(pruned dependency graph). Makie/MIME figures and interactive ECharts render inline.
-The source round-trips to a plain `.jl` file, so the agent and the browser share one
-source of truth.
+### Highlights
 
-Runs **out-of-process on HTTP 2.0** — independent of Kaimon core's HTTP version; the
-two talk over the Gate (ZMQ).
+- ⚡ **Reactive cells** — edit a cell or drag a `@bind` widget and only the *downstream* cells
+  recompute; every output always reflects its current inputs.
+- 📊 **Rich, live output** — inline CairoMakie figures, interactive ECharts charts, sortable and
+  filterable tables, and animations played back in the browser.
+- 🤖 **Built-in AI agent** — builds and edits the notebook cell-by-cell through the `slate.*` tools,
+  driven by Claude or a local model.
+- 🖧 **Run anywhere** — a notebook's worker runs locally or on a remote host, with warm pools for
+  near-instant startup and a durable cache that follows you.
+- ☁ **Publish & cite** — turn notebooks into a web portfolio (GitHub Pages, Cloudflare, Netlify, …)
+  or mint a permanent, citable Zenodo DOI.
+- 🕰 **Time machine** — every run is recorded, so you can scrub back through a notebook's full history.
 
 ## Install
 
