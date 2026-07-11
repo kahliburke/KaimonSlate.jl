@@ -119,7 +119,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .remotesmodal.focusmode .rtfocus{display:block;}
 .rtfhead{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
 .rtfhead strong{color:#e6ebf7;font-size:1.05rem;}
-.rtfhead .pddim{flex:1 1 auto;}
+.rtfhead .pddim{margin-right:auto;}   /* tight left group (back · title · subtitle); ↻ pushed right */
 .modal .rtfback{padding:3px 10px;font-size:.82rem;border-radius:6px;}
 .modal .rtfref{padding:3px 9px;font-size:.82rem;border-radius:6px;}
 .rppcfg{margin-bottom:6px;padding-bottom:12px;border-bottom:1px solid #21253a;}
@@ -221,7 +221,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pubdest{display:inline-flex;align-items:center;gap:5px;background:#10131f;border:1px solid #2a2e40;border-radius:7px;padding:5px 10px;color:#9aa3c0;font-size:.78rem;text-decoration:none;}
 .pubdest:hover{border-color:#569cd6;color:#569cd6;transform:none;}
 /* Publishing dashboard — full-screen global ledger surface (documents, targets, secrets, sites) */
-.herobtn{margin-left:auto;align-self:center;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.85rem;}
+.heroactions{margin-left:auto;display:flex;align-items:center;gap:10px;}   /* settings-like actions, top-right */
+.herobtn{align-self:center;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.85rem;white-space:nowrap;}
 .herobtn:hover{border-color:#569cd6;color:#569cd6;}
 .pubdash{max-width:none;width:min(1040px,94vw);max-height:88vh;display:flex;flex-direction:column;}
 .pdhead{display:flex;align-items:center;gap:10px;margin-bottom:2px;}
@@ -291,7 +292,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <circle cx="22" cy="34" r="4" fill="#56d364"/>
   </svg>
   <div><h1>Kaimon Slate</h1><div class="tag">reactive Julia notebooks · live · agent-assisted</div></div>
-  <button id="pubdashbtn" class="herobtn" title="Manage publishing — targets, secrets, history">☁ Publishing</button>
+  <div class="heroactions">
+    <button id="remotesbtn" class="herobtn" title="Set up &amp; test remote hosts for running notebooks">🖧 Remotes</button>
+    <button id="pubdashbtn" class="herobtn" title="Manage publishing — targets, secrets, history">☁ Publishing</button>
+  </div>
 </div>
 <div id="published" class="sitesband"></div>
 <!-- Opener spans the full width ABOVE the columns, so the path input keeps a long line of its own
@@ -308,7 +312,6 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <input id="openrunonhost" class="runonsel" type="text" placeholder="ssh host" title="type any SSH host (or user@host)" spellcheck="false" autocomplete="off" style="display:none">
     <button id="openbtn">Open</button>
     <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
-    <button id="remotesbtn" title="Set up &amp; test remote hosts for running notebooks">🖧 Remotes</button>
     <input type="file" id="uploadin" accept=".jl" style="display:none"/>
   </div>
 </div>
