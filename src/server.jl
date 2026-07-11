@@ -575,20 +575,49 @@ function set_regionon!(nb::LiveNotebook, spec::AbstractString)
     return _region_specs(nb)
 end
 
+# Parse a region spec — `host[,transport[,port[,stream]]]` plus optional `key=value` tokens
+# (currently `root=PATH`, the region's pinned data root → the worker's `KAIMONSLATE_DATADIR`).
+# Comma-separated: the bare tokens fill host/transport/port/stream in document order; any `k=v`
+# token is pulled out by name and may appear anywhere (so `host,direct,root=/x` and
+# `host,root=/x,direct` parse the same). Returns strings, "" when absent. One deliberate limit: a
+# `root=` path must not contain a comma (the spec's field separator). Unknown `k=v` keys are
+# ignored — forward-compatible with later options (e.g. a `shared` skip).
+function _parse_region_spec(spec::AbstractString)
+    host = ""; transport = ""; port = ""; stream = ""; root = ""
+    positional = String[]
+    for raw in split(String(spec), ',')
+        tok = strip(raw)
+        isempty(tok) && continue
+        eq = findfirst('=', tok)
+        if eq === nothing
+            push!(positional, String(tok))
+        else
+            key = lowercase(strip(tok[1:prevind(tok, eq)]))
+            val = strip(tok[nextind(tok, eq):end])
+            key == "root" && (root = String(val))
+        end
+    end
+    length(positional) >= 1 && (host = positional[1])
+    length(positional) >= 2 && (transport = positional[2])
+    length(positional) >= 3 && (port = positional[3])
+    length(positional) >= 4 && (stream = positional[4])
+    return (; host, transport, port, stream, root)
+end
+
 # The notebook's declared destinations, for the browser (tag editor + DAG zones): each region's
-# name + its dialing parts split out of the spec ("host[,transport[,port,stream]]"). The frontend
-# cross-references these against /api/pools for warm-worker readiness.
+# name + its dialing parts split out of the spec ("host[,transport[,port,stream]][,root=…]"). The
+# frontend cross-references these against /api/pools for warm-worker readiness.
 function _regions_json(nb::LiveNotebook)
     out = Vector{Any}()
     for (name, spec) in sort!(collect(_region_specs(nb)); by = first)
-        parts = split(spec, ',')
-        tr = length(parts) >= 2 ? strip(parts[2]) : ""
+        p = _parse_region_spec(spec)
         push!(out, Dict{String,Any}(
             "name" => name,
-            "host" => String(strip(parts[1])),
-            "transport" => isempty(tr) ? "tunnel" : String(tr),
-            "port" => length(parts) >= 3 ? String(strip(parts[3])) : "",
-            "stream" => length(parts) >= 4 ? String(strip(parts[4])) : "",
+            "host" => p.host,
+            "transport" => isempty(p.transport) ? "tunnel" : p.transport,
+            "port" => p.port,
+            "stream" => p.stream,
+            "root" => p.root,
             "spec" => String(spec)))
     end
     return out
@@ -682,11 +711,11 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         spec = get(_region_specs(nb), name, "")
         isempty(spec) && error("region '$name' has no host — configure it: " *
             "region_on(notebook, \"" * (name == "default" ? "host[,transport]" : "$name:host[,transport]") * "\")")
-        parts = split(spec, ',')
-        rhost = String(strip(parts[1]))
-        transport = length(parts) >= 2 && !isempty(strip(parts[2])) ? Symbol(strip(parts[2])) : :tunnel
-        pport  = length(parts) >= 3 ? something(tryparse(Int, strip(parts[3])), 0) : 0
-        psport = length(parts) >= 4 ? something(tryparse(Int, strip(parts[4])), 0) : 0
+        p = _parse_region_spec(spec)
+        rhost = p.host
+        transport = isempty(p.transport) ? :tunnel : Symbol(p.transport)
+        pport  = isempty(p.port)   ? 0 : something(tryparse(Int, p.port), 0)
+        psport = isempty(p.stream) ? 0 : something(tryparse(Int, p.stream), 0)
         proj = Base.current_project(dirname(abspath(nb.path)))
         parent = proj === nothing ? "" : dirname(proj)
         rproj = "~/.cache/kaimonslate/remote/" * (isempty(parent) ? "detached" : basename(parent))
@@ -694,8 +723,10 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
                      (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
         target = ReportEngine.RemoteTarget(rhost; transport = transport, project = rproj,
-                                           port = pport, stream_port = psport, origin_env = origin_env)
-        ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $rhost ($transport)")
+                                           port = pport, stream_port = psport, origin_env = origin_env,
+                                           datadir = p.root)
+        ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $rhost ($transport)" *
+                           (isempty(p.root) ? "" : " root=$(p.root)"))
         k = ReportEngine.GateKernel(rproj; parent = parent, target = target,
                                     label = basename(abspath(nb.path)) * "#" * (name == "default" ? "region" : name))
         _REGION_KERNELS[(nb.id, name)] = k
@@ -706,7 +737,8 @@ end
 # Human-facing location of a side: "local", the host (default region), or "name (host)".
 function _side_label(nb::LiveNotebook, side::AbstractString)
     isempty(side) && return "local"
-    host = String(first(split(get(_region_specs(nb), String(side), "?"), ',')))
+    host = _parse_region_spec(get(_region_specs(nb), String(side), "?")).host
+    isempty(host) && (host = "?")
     return side == "default" ? host : "$side ($host)"
 end
 
@@ -841,8 +873,149 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
         try; _reconcile_nb_runs!(nb)
         catch e; ReportEngine._rlog("supervisor: reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
         end
+        try; _watchdog_scan!(nb)
+        catch e; ReportEngine._rlog("watchdog: scan error on $(nb.id): " * first(sprint(showerror, e), 120))
+        end
     end
     return nothing
+end
+
+# ── Watchdog: stall + runaway detection ─────────────────────────────────────────────────────
+# Rides the same 5s sweep as the run-reconciler, but where the reconciler HEALS orphans (RUNNING
+# cells no worker is evaluating), the watchdog CLASSIFIES trouble on cells that ARE still alive:
+# slow/stalled by duration, and — where telemetry flows — runaway cpu/mem and gc-thrash. It only
+# reports (into `_NB_HEALTH`, surfaced to the health panel); acting on an alert (interrupt/reboot)
+# is a deliberate user gesture (the recovery buttons), never automatic. Thresholds are generous on
+# purpose: a late "slow" is cheap, a false "stalled" cries wolf.
+const _WD_SLOW        = 90.0          # a cell RUNNING this long (still confirmed alive) is "slow"
+const _WD_STALL       = 300.0         # ... this long is "stalled"
+const _WD_CPU_HOT     = 90.0          # cpu% at/above this counts as pegged
+const _WD_CPU_SAMPLES = 5             # ...sustained across this many samples (~10s) → runaway-cpu
+const _WD_RSS_CEIL    = 4 * 2^30      # rss above this AND climbing → runaway-mem
+const _WD_STALE_TEL   = 20.0          # telemetry silent this long while a cell runs → unreachable
+const _WD_TEL_FRESH   = 10.0          # a telemetry sample older than this isn't trusted as "current"
+const _NB_HEALTH = Dict{String,Any}() # nb id → (; status, alerts, ts)
+const _WD_LOCK   = ReentrantLock()
+
+nb_health(id::AbstractString) = lock(_WD_LOCK) do; get(_NB_HEALTH, String(id), nothing); end
+
+# Human side label for a kernel: "local" for the main kernel, else the region name it serves.
+# (The name lookup returns from INSIDE the lock closure, so capture its value — a bare `return`
+# in a `do` block returns from the closure, not the function.)
+function _kernel_side_label(nb::LiveNotebook, k)
+    k === nb.kernel && return "local"
+    return lock(_REGION_LOCK) do
+        for (key, rk) in _REGION_KERNELS
+            key[1] == nb.id && rk === k && return key[2]
+        end
+        "region"
+    end
+end
+
+# (side, latest, history) for each of a notebook's connected kernels that has telemetry.
+function _nb_kernel_stats(nb::LiveNotebook)
+    out = Any[]
+    for k in _nb_kernels(nb)
+        (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
+        cn = try; k.conn.name; catch; ""; end
+        isempty(cn) && continue
+        st = ReportEngine.kernel_stats(cn)
+        st === nothing && continue
+        push!(out, (_kernel_side_label(nb, k), st.latest, st.history))
+    end
+    return out
+end
+
+# Union of cell ids the kernels' latest FRESH telemetry says are running, or `nothing` if no kernel
+# has a current sample (then we can't confirm liveness → cells stay "unconfirmed", never "stalled").
+function _running_from_telemetry(nb::LiveNotebook)
+    ids = Set{String}(); any = false; now = time()
+    for (_, latest, _) in _nb_kernel_stats(nb)
+        now - latest.rcv <= _WD_TEL_FRESH || continue
+        union!(ids, latest.running); any = true
+    end
+    return any ? ids : nothing
+end
+
+_gib(b::Integer) = string(round(b / 2^30; digits = 1), "GiB")
+
+function _watchdog_scan!(nb::LiveNotebook)
+    nb.kernel isa ReportEngine.GateKernel || return nothing   # in-process kernels have no worker to watch
+    now = time()
+    alerts = Any[]
+    confirmed = _running_from_telemetry(nb)   # telemetry-derived liveness (no extra RPC)
+    # Per running cell: slow / stalled. A cell absent from FRESH telemetry is an orphan the reconciler
+    # owns — skip it here so the two supervisors don't both shout about the same cell.
+    for c in nb.report.cells
+        c.state == RUNNING || continue
+        since = get(_RUN_SINCE, (nb.id, c.id), now)
+        dur = now - since
+        dur >= _WD_SLOW || continue
+        (confirmed !== nothing && !(c.id in confirmed)) && continue
+        kind = dur >= _WD_STALL ? "stalled" : "slow"
+        note = confirmed === nothing ? " (unconfirmed — no telemetry)" : ""
+        push!(alerts, (kind = kind, scope = "cell", target = c.id, since = since,
+                       detail = "running $(round(Int, dur))s$note"))
+    end
+    # Per kernel: runaway cpu / mem, gc-thrash, unreachable.
+    for (side, latest, hist) in _nb_kernel_stats(nb)
+        stale = now - latest.rcv
+        if stale > _WD_STALE_TEL && !isempty(latest.running)
+            push!(alerts, (kind = "unreachable", scope = "kernel", target = side, since = latest.rcv,
+                           detail = "no telemetry for $(round(Int, stale))s while a cell runs"))
+            continue   # a silent kernel's cpu/rss are stale too — don't pile on runaway alerts
+        end
+        recent = length(hist) >= _WD_CPU_SAMPLES ? hist[end - _WD_CPU_SAMPLES + 1:end] : hist
+        if length(recent) >= _WD_CPU_SAMPLES && all(s -> s.cpu >= _WD_CPU_HOT, recent) && !isempty(latest.running)
+            push!(alerts, (kind = "runaway-cpu", scope = "kernel", target = side, since = recent[1].rcv,
+                           detail = "cpu ≥$(round(Int, _WD_CPU_HOT))% for $(length(recent)) samples"))
+        end
+        if latest.rss >= _WD_RSS_CEIL && length(hist) >= 3 && hist[end].rss > hist[1].rss
+            push!(alerts, (kind = "runaway-mem", scope = "kernel", target = side, since = hist[1].rcv,
+                           detail = "rss $(_gib(latest.rss)) and climbing"))
+        end
+        if length(hist) >= 3
+            dgc = (hist[end].gc_ms - hist[1].gc_ms) / 1000
+            dwall = hist[end].rcv - hist[1].rcv
+            (dwall > 0 && dgc / dwall > 0.5) &&
+                push!(alerts, (kind = "gc-thrash", scope = "kernel", target = side, since = hist[1].rcv,
+                               detail = "gc $(round(Int, 100 * dgc / dwall))% of walltime"))
+        end
+    end
+    status = isempty(alerts) ? "ok" :
+             any(a -> a.kind in ("stalled", "runaway-mem", "unreachable"), alerts) ? "critical" :
+             "warning"
+    rec = (status = status, alerts = alerts, ts = now)
+    _health_transition!(nb, rec)
+    lock(_WD_LOCK) do; _NB_HEALTH[nb.id] = rec; end
+    return rec
+end
+
+# Log a line only when an alert first appears or clears — the sweep runs every 5s, so we mustn't
+# re-log a standing condition each pass.
+function _health_transition!(nb::LiveNotebook, rec)
+    prev = lock(_WD_LOCK) do; get(_NB_HEALTH, nb.id, nothing); end
+    prevkeys = prev === nothing ? Set{String}() : Set(string(a.kind, ':', a.target) for a in prev.alerts)
+    newkeys  = Set(string(a.kind, ':', a.target) for a in rec.alerts)
+    for a in rec.alerts
+        string(a.kind, ':', a.target) in prevkeys ||
+            ReportEngine._rlog("watchdog: $(nb.id) $(a.kind) [$(a.scope) $(a.target)] — $(a.detail)")
+    end
+    for k in prevkeys
+        k in newkeys || ReportEngine._rlog("watchdog: $(nb.id) cleared $k")
+    end
+    return nothing
+end
+
+# JSON view for the health panel / state meta.
+function _health_json(nb::LiveNotebook)
+    rec = nb_health(nb.id)
+    rec === nothing && return Dict{String,Any}("status" => "ok", "alerts" => Any[])
+    now = time()
+    Dict{String,Any}("status" => rec.status, "ts" => rec.ts,
+        "alerts" => Any[Dict{String,Any}("kind" => a.kind, "scope" => a.scope, "target" => a.target,
+                                          "since" => a.since, "age" => round(Int, now - a.since),
+                                          "detail" => a.detail) for a in rec.alerts])
 end
 
 # One shared 5 s sweeper for the whole hub (started once at serve). Timer catches its own errors so a
@@ -885,11 +1058,74 @@ function _xfer_plan_gate(nb::LiveNotebook, cell::Cell, host::AbstractString,
     end
 end
 
+# Tolerant field read off a gate-tool result — a NamedTuple locally, but a JSON3.Object (Symbol
+# props) or a Dict (String/Symbol keys) once it's ridden back over the gate. Returns `dv` on any miss.
+function _gf(o, k::Symbol, dv)
+    try
+        o isa AbstractDict && return haskey(o, k) ? o[k] : get(o, String(k), dv)
+        return hasproperty(o, k) ? getproperty(o, k) : dv
+    catch
+        return dv
+    end
+end
+
+# Established `:resource` handles, per (nb id, dst kernel objectid, resource cell src_hash) — a handle
+# opens ONCE per kernel and is re-opened only if its source changes or the kernel is replaced.
+const _REGION_RESOURCED = Dict{Tuple{String,UInt,UInt},Bool}()
+
+# Establish a `:resource` cell's per-side state (a live DB / file / socket handle) on `dst_k` by
+# RE-RUNNING its source there — a live handle can't cross a region boundary (it deserializes to a
+# dangling pointer), so each side opens its OWN. Same reason the memo layer re-inits a resource on
+# restore instead of caching it (`_memoizable`); this is the region analogue, and it mirrors how
+# `_prime_namespace!` re-establishes using/import/theme and `_replay_scaffold!` replays on restore.
+# Each cross-side INPUT the resource needs is staged first: a `:resource` upstream is replayed
+# recursively (e.g. `db` needs the side-local `dbpath = @sfile(…)`, which must resolve to THIS side's
+# datadir, so it too replays rather than shipping main's path); anything else is portable data and is
+# transferred. Dedup per (nb, dst kernel, source) so a shared handle opens exactly once per kernel.
+function _ensure_resource_on!(nb::LiveNotebook, cell::Cell, dst_k, dst_side::AbstractString;
+                              seen::Set{UInt} = Set{UInt}())
+    key = (nb.id, objectid(dst_k), cell.src_hash)
+    lock(_REGION_LOCK) do; get(_REGION_RESOURCED, key, false); end && return nothing
+    cell.src_hash in seen && return nothing        # diamond/cycle guard within a single establish
+    push!(seen, cell.src_hash)
+    for r in cell.reads
+        r === ReportEngine._THEME_SENTINEL && continue
+        writer = nothing
+        for o in nb.report.cells
+            (o !== cell && r in o.writes && _cell_side(nb, o) != dst_side &&
+             !ReportEngine._is_pure_using(o.source)) && (writer = o; break)
+        end
+        (writer === nothing || writer.output === nothing || r in writer.provides) && continue
+        if :resource in writer.flags
+            _ensure_resource_on!(nb, writer, dst_k, dst_side; seen)      # a per-side upstream → replay it too
+        else
+            src_k = _side_kernel!(nb, _cell_side(nb, writer))            # portable input → ship the value
+            try
+                ReportEngine.prepare!(src_k, nb.report)
+                ReportEngine.transfer_binding!(src_k, dst_k, string(r);
+                                               zc = !any(o -> r in o.mutates, nb.report.cells))
+            catch e
+                ReportEngine._rlog("resource: staging '$r' for cell $(cell.id) on " *
+                    "$(_side_label(nb, dst_side)) failed — $(first(sprint(showerror, e), 160))")
+            end
+        end
+    end
+    # Open the handle HERE by replaying the cell's source on `dst_k` — its value never crosses the wire.
+    tag = "cell:" * cell.id * "#resource@" * (isempty(dst_side) ? "main" : dst_side)
+    ReportEngine.eval_capture(dst_k, nb.report, cell.source, tag, nothing)
+    opened = isempty(cell.writes) ? cell.id : join(cell.writes, ", ")
+    ReportEngine._rlog("resource: opened $opened on $(_side_label(nb, dst_side)) — " *
+                       "replayed cell $(cell.id) (handle not shipped)")
+    lock(_REGION_LOCK) do; _REGION_RESOURCED[key] = true; end
+    return nothing
+end
+
 # Ship every cross-boundary input of `cell` to the kernel it is about to run on: each read name
 # whose latest WRITER lives on the other kernel, skipped when the writer's freshness token says
 # the destination already holds that exact run's value (dedup makes a re-ship of an unchanged
-# value one round-trip even when the token is lost). Runs BEFORE the cell — DAG order guarantees
-# writers already ran. Throws (→ the cell errors) if a needed value can't cross.
+# value one round-trip even when the token is lost). A `:resource` writer is the exception — its
+# per-side handle is REPLAYED on the reader (see `_ensure_resource_on!`), never shipped. Runs BEFORE
+# the cell — DAG order guarantees writers already ran. Throws (→ the cell errors) if a value can't cross.
 function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::AbstractString = _cell_region(cell))
     _region_active(nb) || return nothing
     # ── Validity gate: cross-boundary MUTATION is invalid, and must fail FAST and clearly.
@@ -911,6 +1147,9 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
               "so each mutation runs where its value lives, or derive a NEW binding instead " *
               "(e.g. $(m)2 = transform($m, …)).")
     end
+    # Portable data: ensure this remote worker has the notebook's datadir() files (`@sfile`) before it
+    # runs — content-addressed, dedup-aware, once per kernel. Best-effort; a miss just errors in-cell.
+    try; _sync_datadir_to!(nb, dst_k; cell_id = cell.id); catch e; @warn "slate region: datadir sync failed" cell = cell.id exception = e; end
     prepared = false
     for r in cell.reads
         # The theme sentinel (`##makie_theme##`) is a synthetic ordering/effect token the graphics
@@ -932,6 +1171,18 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
         (r in writer.provides || ReportEngine._is_pure_using(writer.source)) && continue
         src_side = _cell_side(nb, writer)
         src_k = _side_kernel!(nb, src_side)
+        # A `:resource` writer is a live per-side handle (DB / file / socket) — it must NOT cross the
+        # wire (it would land as a dangling pointer). Open it on THIS side instead: replay the resource
+        # cell's source on `dst_k` so the reader gets its own handle (its upstreams staged inside).
+        if :resource in writer.flags
+            if !prepared
+                ReportEngine.prepare!(src_k, nb.report); ReportEngine.prepare!(dst_k, nb.report)
+                _prime_namespace!(nb, src_k, src_side); _prime_namespace!(nb, dst_k, dst_side)
+                prepared = true
+            end
+            _ensure_resource_on!(nb, writer, dst_k, dst_side)
+            continue
+        end
         # Freshness token: the writer's latest run PLUS every same-side mutator's — a mutation
         # changes the value without touching the writer, and a stale transfer would resurrect
         # the pre-mutation bytes on the other side.
@@ -969,6 +1220,21 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
             _prime_namespace!(nb, src_k, src_side)
             _prime_namespace!(nb, dst_k, dst_side)
             prepared = true
+        end
+        # Portability guard: a live handle (DB / socket / file — a `Ptr`) shipped across a boundary
+        # lands as a dangling pointer and throws a cryptic error on the far side (the "Failed to open
+        # connection" trap). Catch it HERE, where we can name the binding and the fix, instead. Runs
+        # only on an ACTUAL transfer (past the token dedup) → one cheap check per crossing value.
+        port = try
+            ReportEngine._tool(src_k, "__slate_portable", Dict{String,Any}("name" => string(r)); timeout = 20.0)
+        catch; nothing; end
+        if port !== nothing && _gf(port, :portable, true) === false
+            ptype = string(_gf(port, :type, "a handle")); preason = string(_gf(port, :reason, "a live handle"))
+            error("cell needs '$r' from " * _side_label(nb, src_side) * ", but it's a " * ptype *
+                  " — " * preason * " that can't cross to " * _side_label(nb, dst_side) *
+                  ". Tag the cell that creates '$r' as `resource` so each side opens its OWN handle " *
+                  "(e.g. from `@sfile(...)`) rather than shipping it — a live DB/socket/file handle is " *
+                  "process state, no more transferable than it is cacheable.")
         end
         # zero-copy materialization is safe when nothing anywhere mutates the name
         zc = !any(o -> r in o.mutates, nb.report.cells)

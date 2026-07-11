@@ -39,17 +39,22 @@ mkworker(port; alive = true, state = "idle", pool = "1", hub = gethostname(),
     @testset "pool config: round-trip, listing, target keyed by preload basename" begin
         host = "__pooltest-$(getpid())__"
         try
-            RE._pool_config!(host; n = 2, preload = "/tmp/My Proj", transport = :direct, base_port = 9200)
+            RE._pool_config!(host; n = 2, preload = "/tmp/My Proj", transport = :direct,
+                             base_port = 9200, root = "/scratch/flights")
             cfg = RE._pool_config(host)
-            @test cfg == (n = 2, preload = "/tmp/My Proj", transport = :direct, base_port = 9200)
+            @test cfg == (n = 2, preload = "/tmp/My Proj", transport = :direct,
+                          base_port = 9200, root = "/scratch/flights")
             t = RE._pool_target(host, cfg)
             @test t.project == "~/.cache/kaimonslate/remote/My Proj"   # same formula as _select_kernel
             @test t.transport === :direct && t.origin_env == "/tmp/My Proj"
-            @test any(c -> c.host == host && c.n == 2, RE.pool_configs())
-            RE._pool_config!(host; n = 0, preload = "", transport = :tunnel)
+            @test t.datadir == "/scratch/flights"                      # pool workers boot with the data root
+            @test any(c -> c.host == host && c.n == 2 && c.root == "/scratch/flights", RE.pool_configs())
+            RE._pool_config!(host; n = 0, preload = "", transport = :tunnel)   # root omitted ⇒ ""
             @test RE._pool_config(host).preload == ""
+            @test RE._pool_config(host).root == ""
             @test RE._pool_target(host, RE._pool_config(host)).project ==
                   "~/.cache/kaimonslate/remote/detached"
+            @test RE._pool_target(host, RE._pool_config(host)).datadir == ""
             @test RE._pool_config("__no-such-host__") === nothing
         finally
             rm(RE._pool_path(host); force = true)

@@ -599,7 +599,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        warm_pool(host::String; n=1, preload="", transport="tunnel", base_port=0) -> String
+        warm_pool(host::String; n=1, preload="", transport="tunnel", base_port=0, root="") -> String
 
     Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a booted Julia
     process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
@@ -609,15 +609,17 @@ function create_tools(GateTool::Type)
     the pool refills itself in the background. `n=0` drains: idle pool workers are reaped;
     attached workers are never touched. `base_port` pins the port range for a `:direct` pool
     (worker *i* binds `base_port+3i .. +3i+2`) so you know which ports to open in the firewall;
-    `0`/`:tunnel` auto-assigns. Blocking on first run (provisioning); safe to re-run — it
-    reconciles toward `n`. See the roster with `remote_workers`.
+    `0`/`:tunnel` auto-assigns. `root` pins the workers' data dir (`datadir()`/`@sfile`) to a REMOTE
+    absolute path on `host` (a fast scratch disk or a shared mount that already holds the data) — a
+    region enabled from this pool inherits it, so `@sfile` there resolves under `root`. Blocking on
+    first run (provisioning); safe to re-run — it reconciles toward `n`. See the roster with `remote_workers`.
     """
     function warm_pool(host::String; n::Int = 1, preload::String = "", transport::String = "tunnel",
-                       base_port::Int = 0)::String
+                       base_port::Int = 0, root::String = "")::String
         h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
         return ReportEngine.warm_pool!(h; n = n, preload = String(strip(preload)), transport = tr,
-                                       base_port = base_port)
+                                       base_port = base_port, root = String(strip(root)))
     end
 
     """

@@ -459,6 +459,41 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         path === nothing && error("@asset needs a path, e.g. @asset \"file.js\" (or @asset bytes \"logo.png\")")
         return esc(:(__slate_readfile($(path); bytes = $(bytes))))
     end))
+    # ── Portable data storage (`datadir()` / `@sfile`) ────────────────────────────
+    # `datadir()` is the notebook's canonical DATA directory — `<project>/data`, created on demand.
+    # A stable place to read AND write data files without hardcoding a machine path, so the notebook
+    # stays portable between machines. `@sfile "data.csv"` returns a PATH under it — contrast
+    # `@asset`, which reads a file's CONTENTS; `@sfile` is big-file / read-write friendly:
+    # `CSV.read(@sfile("data.csv"), DataFrame)` · `CSV.write(@sfile("out.csv"), result)`.
+    # (v2: a referenced blob transfers content-addressed over the data channel to remote workers.)
+    Core.eval(m, :(function datadir()
+        # A region/worker can PIN its data root via `KAIMONSLATE_DATADIR` (a fast scratch disk, a
+        # shared mount that already holds the data, …); otherwise it's `<project>/data`. Resolves
+        # PER SITE, which is what lets `@sfile` follow the compute across a region boundary.
+        r = strip(get(ENV, "KAIMONSLATE_DATADIR", ""))
+        b = __slate_assetbase()
+        d = !isempty(r) ? String(r) : (isempty(b) ? joinpath(pwd(), "data") : joinpath(b, "data"))
+        try
+            mkpath(d)
+            gi = joinpath(d, ".gitignore")
+            isfile(gi) || write(gi, "*\n")   # a data dir isn't source — self-ignore so a DB never gets tracked
+        catch
+        end
+        return d
+    end))
+    # Resolve a name (which MAY contain subdirs, `joinpath`-style: `@sfile("raw/2025/x.duckdb")`)
+    # under `datadir()`, ensuring the parent dir exists so a WRITE target is usable immediately. This
+    # is the portable way to build paths — anchor on `datadir()`, never `homedir()`/an absolute path,
+    # which resolve differently (or not at all) on a remote site.
+    Core.eval(m, :(function __slate_dpath(name::AbstractString)
+        p = joinpath(datadir(), String(name))
+        try; mkpath(dirname(p)); catch; end
+        return p
+    end))
+    Core.eval(m, :(macro sfile(parts...)
+        # `@sfile "a" "b" "c.csv"` OR `@sfile "a/b/c.csv"` — join the parts, then resolve under datadir.
+        return esc(:(__slate_dpath(joinpath($(parts...)))))
+    end))
     # `@use "d3" => "https://esm.sh/d3@7"` — DECLARE a browser ES-module import at the NOTEBOOK level.
     # A runtime no-op: it's a declaration, statically extracted by the engine (deps.jl `_scan_imports!`)
     # and merged into the page's `<script type="importmap">` in the shell `<head>` (live) and the export

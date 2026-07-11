@@ -849,13 +849,69 @@ function __slate_sizeof(name::String)
     return (; bytes = b, type = string(typeof(v)))
 end
 
+# Why a value can't survive being serialized and reconstructed in ANOTHER process: it holds a live
+# `Ptr` — a DB / socket / file handle, i.e. process state — which deserializes to a dangling address
+# on the far side. Same reason such a value can't be memo-restored on a fresh worker. Bounded,
+# cycle-safe walk over STRUCT FIELDS (and small non-bits containers) — never array elements of a
+# bits-eltype array (a `Vector{Float64}` can't hide a handle, and walking a huge frame would be
+# absurd). Returns "" when portable, else a human-readable reason. Conservative: unseen exotic
+# wrappers pass (we only flag a definite live pointer), so it never blocks legitimate data.
+function _unportable_reason(v)
+    seen = Base.IdSet{Any}(); found = Ref("")
+    function walk(x, path, depth)
+        (depth > 6 || !isempty(found[])) && return
+        if x isa Ptr
+            x != C_NULL && (found[] = string(isempty(path) ? "it" : path, " is a live ",
+                                             typeof(x), " (a process-local handle)"))
+            return
+        end
+        (x === nothing || x isa Symbol || x isa AbstractString || x isa Number ||
+         x isa Char || x isa Function || x isa Type) && return
+        (x in seen) && return
+        push!(seen, x)
+        if x isa Tuple || x isa AbstractArray
+            (isbitstype(eltype(x)) || length(x) > 64) && return
+            for (i, el) in pairs(x)
+                walk(el, string(path, "[", i, "]"), depth + 1); isempty(found[]) || return
+            end
+            return
+        end
+        isstructtype(typeof(x)) || return
+        for f in fieldnames(typeof(x))
+            isdefined(x, f) || continue
+            walk(getfield(x, f), string(path, ".", f), depth + 1); isempty(found[]) || return
+        end
+    end
+    try; walk(v, "", 0); catch; end   # never let a walk error block a transfer — default to portable
+    return found[]
+end
+
+"Is the namespace global `name` safe to serialize + reconstruct in another process — i.e. can it
+CROSS a region boundary (or be restored on a fresh worker)? `(; portable, reason, type)`. `false`
+means it holds a live handle (process state); tag its cell `resource` so each side opens its own."
+function __slate_portable(name::String)
+    m = _NS[]; s = Symbol(name)
+    Base.invokelatest(isdefined, m, s) || return (; portable = true, reason = "", type = "")
+    v = Base.invokelatest(getglobal, m, s)
+    reason = _unportable_reason(v)
+    return (; portable = isempty(reason), reason = reason, type = string(typeof(v)))
+end
+
 "Adopt this worker for a notebook (warm-pool handoff): point `PARENT_PROJECT` at the remote
 project dir and swap in a fresh namespace. Loaded packages + the memo store survive — that is
-the warmth a pool worker exists to hold; only the (empty) namespace is discarded."
-function __slate_adopt(parent::String)
+the warmth a pool worker exists to hold; only the (empty) namespace is discarded. `datadir` is
+the adopting REGION's declared data root (`datadir()`/`@sfile`): set-or-clear so a generic pool
+worker takes on this region's root — or falls back to `<parent>/data` when the region has none
+(clearing a prior region's root). Optional args are kwargs (the gate strips optional positionals)."
+function __slate_adopt(parent::String; datadir::AbstractString = "")
     PARENT_PROJECT[] = parent
+    if isempty(strip(String(datadir)))
+        haskey(ENV, "KAIMONSLATE_DATADIR") && delete!(ENV, "KAIMONSLATE_DATADIR")
+    else
+        ENV["KAIMONSLATE_DATADIR"] = String(datadir)
+    end
     _NS[] = _new_ns()
-    @info "slate: adopted by a notebook" parent = parent
+    @info "slate: adopted by a notebook" parent = parent datadir = datadir
     return true
 end
 
@@ -1413,6 +1469,41 @@ function __slate_running()
     return (; running = ids, ts = time())
 end
 
+# Materialize content-addressed blobs into THIS worker's data dir (`datadir()`) — the receiving half
+# of the datadir sync. Reuses the CAS the memo/boundary transport already fills via `push_blob!`
+# (`MemoStore.blob_path`); the only new concept vs `__slate_bind_blob` (blob → namespace var) is
+# placing a blob at a FILE path (a portable `@sfile`). `files`: [{rel, hash}]. Path-escape guarded.
+function __slate_materialize_datadir(; files = Any[])
+    _MEMO_OK || return (; materialized = 0, error = "memo layer off")
+    root = _memo_dir()
+    # Same resolution as `datadir()`: a region-pinned root (`KAIMONSLATE_DATADIR`) wins, else <project>/data.
+    _rr = strip(get(ENV, "KAIMONSLATE_DATADIR", ""))
+    ddir = if !isempty(_rr)
+        String(_rr)
+    else
+        base = PARENT_PROJECT[]
+        isempty(base) && (ap = Base.active_project(); base = ap === nothing ? "" : dirname(ap))
+        isempty(base) && return (; materialized = 0, error = "no project dir")
+        joinpath(base, "data")
+    end
+    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
+    n = 0
+    for f in (files isa AbstractVector ? files : Any[])
+        f isa AbstractDict || continue
+        rel = String(_g(f, "rel", "")); h = String(_g(f, "hash", ""))
+        (isempty(rel) || isempty(h) || isabspath(rel) || occursin("..", rel)) && continue
+        bp = MemoStore.blob_path(root, h); isfile(bp) || continue
+        tgt = joinpath(ddir, rel)
+        try
+            (isfile(tgt) && filesize(tgt) == filesize(bp)) && (n += 1; continue)   # already present
+            mkpath(dirname(tgt)); cp(bp, tgt; force = true)
+            n += 1
+        catch
+        end
+    end
+    return (; materialized = n)
+end
+
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
@@ -1427,7 +1518,9 @@ function tools()
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
+        KaimonGate.GateTool("__slate_materialize_datadir", __slate_materialize_datadir),
         KaimonGate.GateTool("__slate_sizeof", __slate_sizeof),
+        KaimonGate.GateTool("__slate_portable", __slate_portable),
         KaimonGate.GateTool("__slate_table_page", __slate_table_page),
         KaimonGate.GateTool("__slate_interp", __slate_interp),
         KaimonGate.GateTool("__slate_complete", __slate_complete),
@@ -1722,7 +1815,10 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         _WARM_STATUS[] = "warm failed"
         @warn "slate worker: warm-deps pass died" exception = e
     end
-    isempty(stats_path) || Threads.@spawn try
+    # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
+    # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the
+    # hub's watchdog can see cpu/rss/gc on a local kernel and not just remote regions.
+    Threads.@spawn try
         _telemetry_loop!(stats_path)
     catch e
         @warn "slate worker: telemetry sampler died" exception = e

@@ -695,6 +695,7 @@ function state_json(nb::LiveNotebook)
     meta["runLocationSession"] = get(nb.report.meta, "runon_session", "")    # the runtime session override ("" = none)
     meta["runLocationGlobal"] = RUNON_DEFAULT[]                              # the machine global default ("" = local)
     meta["regions"] = _regions_json(nb)                                     # declared per-cell destinations (regionon footer) → tag editor + DAG zones
+    meta["health"] = _health_json(nb)                                       # watchdog status + alerts (stall/runaway) → health panel
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true

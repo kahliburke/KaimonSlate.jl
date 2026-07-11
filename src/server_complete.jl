@@ -451,6 +451,76 @@ function _proj_tree(root::AbstractString, dir::AbstractString; depth::Int = 0)
     return nodes
 end
 
+# ── Portable data-dir transport: sync `datadir()` to a remote worker ────────────────────────────────
+# When a cell runs on a REMOTE worker, its `@sfile`/`datadir()` files must be present there. We
+# content-address each datadir file into the local CAS (`MemoStore.put_blob`) and ship it over the SAME
+# dedup-aware blob data channel the memo/boundary transport uses (`push_blob!`); the worker copies each
+# into its own `datadir()` (`__slate_materialize_datadir`). Once per (nb, remote kernel), skipped when
+# unchanged (a manifest signature) and when the dst shares our filesystem (local / localhost region);
+# mtime-cached so an unchanged multi-GB file is never re-hashed. Reuses the transport, adds no socket.
+const _DATADIR_LOCK = ReentrantLock()
+const _DATADIR_SYNCED = Dict{Tuple{String,UInt},UInt}()             # (nb id, dst objectid) → last manifest sig
+const _DATADIR_SHACACHE = Dict{Tuple{String,Float64,Int},String}()  # (path, mtime, size) → sha (skip re-hash)
+function _sync_datadir_to!(nb::LiveNotebook, dst_k; cell_id::AbstractString = "")
+    (dst_k isa ReportEngine.GateKernel && dst_k.target isa ReportEngine.RemoteTarget) || return nothing
+    # A localhost region shares our filesystem — its `datadir()` resolves to the SAME path, so the
+    # files are already there. Skip the pointless (and slow) content-address + push.
+    host = String(dst_k.target.ssh_host)
+    (isempty(host) || host in ("localhost", "127.0.0.1", "::1") || host == gethostname()) && return nothing
+    # Only a LIVE, connected region kernel — never hash the datadir or dial a dead host for a region
+    # that was merely DECLARED (regionon footer) but isn't actually up.
+    (try; dst_k.conn !== nothing; catch; false; end) || return nothing
+    root = _proj_root(nb); (isempty(root) || !isdir(joinpath(root, "data"))) && return nothing
+    ddir = joinpath(root, "data")
+    cas = joinpath(ReportEngine._slate_cache_dir(), "memo")
+    # Drive the running cell's progress bar (SSE) — a multi-GB DuckDB push is otherwise a silent
+    # multi-minute stall with no indication of what's happening. Off (cell_id empty) ⇒ no reporting.
+    pid = "datadir-" * String(cell_id)
+    prog(frac, msg, done) = isempty(cell_id) ? nothing :
+        (try; ReportEngine._do_userprog(nb.report.id, Float64(frac), msg, pid, done); catch; end; nothing)
+    files = Any[]; fbytes = Int[]
+    for (dir, _, names) in walkdir(ddir), name in names
+        p = joinpath(dir, name)
+        st = try; stat(p); catch; continue; end
+        (st.size == 0 || islink(p)) && continue
+        ckey = (p, st.mtime, Int(st.size))
+        h = lock(_DATADIR_LOCK) do; get(_DATADIR_SHACACHE, ckey, ""); end
+        if isempty(h)
+            # First sight of a (possibly large) file — content-addressing reads the whole thing, so a
+            # 166 MB DuckDB is minutes right here. Say so; the sha is mtime-cached, so re-runs are instant.
+            prog(0.0, "⇄ data: hashing $(relpath(p, ddir)) ($(round(Int, st.size / 2^20)) MB)…", false)
+            h = try; String(MemoStore.put_blob(io -> open(f -> write(io, f), p), cas)[1]); catch; ""; end
+            isempty(h) && continue
+            lock(_DATADIR_LOCK) do; _DATADIR_SHACACHE[ckey] = h; end
+        end
+        push!(files, Dict{String,Any}("rel" => relpath(p, ddir), "hash" => h)); push!(fbytes, Int(st.size))
+    end
+    isempty(files) && return nothing
+    sig = hash(sort!([String(f["hash"]) for f in files]))
+    skey = (nb.id, objectid(dst_k))
+    lock(_DATADIR_LOCK) do; get(_DATADIR_SYNCED, skey, UInt(0)); end == sig && return nothing
+    ep = try; ReportEngine._data_endpoint!(dst_k.target, dst_k); catch; return nothing; end
+    total = max(sum(fbytes), 1); moved = 0
+    for (i, f) in enumerate(files)
+        prog(moved / total, "⇄ data → $host: $(f["rel"]) [$i/$(length(files))] " *
+             "($(round(Int, moved / 2^20))/$(round(Int, total / 2^20)) MB)", false)
+        try; ReportEngine.push_blob!(ep.ip, ep.port, String(f["hash"]); server_key = ep.server_key); catch; end
+        moved += fbytes[i]
+    end
+    prog(1.0, "⇄ data → $host: placing $(length(files)) file(s)…", false)
+    try
+        ReportEngine._tool(dst_k, "__slate_materialize_datadir", Dict{String,Any}("files" => files); timeout = 600.0)
+    catch e
+        prog(1.0, "⇄ data sync to $host failed", true)
+        ReportEngine._rlog("datadir sync: materialize failed on $host — $(first(sprint(showerror, e), 160))")
+        return nothing
+    end
+    prog(1.0, "", true)   # clear the bar
+    lock(_DATADIR_LOCK) do; _DATADIR_SYNCED[skey] = sig; end
+    ReportEngine._rlog("datadir sync → $host: $(length(files)) file(s)")
+    return nothing
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html()))   # front page + inlined last-known ledger (see _index_html)
@@ -626,7 +696,8 @@ function _make_router(h::Hub)
     # own view, NO ssh. Per-host live rosters come from /api/remote-workers. Feeds the Remotes dialog.
     HTTP.register!(router, "GET", "/api/pools", _ -> _json(Dict(
         "pools" => [Dict("host" => c.host, "n" => c.n, "preload" => c.preload,
-                         "transport" => String(c.transport), "base_port" => c.base_port)
+                         "transport" => String(c.transport), "base_port" => c.base_port,
+                         "root" => c.root)
                     for c in ReportEngine.pool_configs()],
         "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
                           "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
@@ -646,23 +717,29 @@ function _make_router(h::Hub)
         base_port = something(tryparse(Int, string(get(b, "base_port", "0"))), 0)
         (base_port == 0 || 1024 <= base_port <= 65533) ||
             return _json(Dict("ok" => false, "error" => "base_port must be 0 (auto) or 1024–65533"))
+        root = strip(String(get(b, "root", "")))   # workers' data dir ON THE HOST (remote path) — verbatim
+        # `reconcile` (default true) decouples config-WRITE from worker-LAUNCH: false persists the desired
+        # state (root/preload/transport/ports/n) and touches NO workers — "Save settings" without booting a
+        # warm pool. Running workers keep their old config until reaped/replaced; a later warm applies it.
+        do_reconcile = string(get(b, "reconcile", "true")) != "false"
         # Validate + persist synchronously so a bad preload path fails loudly and the config is durable
         # before we return (a follow-up /api/pools then sees the new desired state, not a stale race);
-        # the slow reconcile (provision + launch) is fired off on a background task.
+        # the slow reconcile (provision + launch), when requested, is fired off on a background task.
         if !isempty(preload) && !isdir(expanduser(preload))
             return _json(Dict("ok" => false, "error" => "preload project dir not found: $preload"))
         end
         msg = ReportEngine.warm_pool!(host; n = n, preload = preload, transport = tr,
-                                      base_port = base_port, reconcile = false)   # persist now, don't launch
+                                      base_port = base_port, root = root, reconcile = false)   # persist now, don't launch
         startswith(msg, "pool[") ||                                               # any other string = a validation error
             return _json(Dict("ok" => false, "error" => msg))
-        Threads.@spawn try
+        do_reconcile && Threads.@spawn try
             ReportEngine._pool_reconcile!(host)
         catch e
             @warn "slate: pool reconcile failed" host exception = (e, catch_backtrace())
         end
         _json(Dict("ok" => true, "host" => host, "n" => n, "preload" => preload,
-                   "transport" => String(tr), "base_port" => base_port))
+                   "transport" => String(tr), "base_port" => base_port, "root" => root,
+                   "reconcile" => do_reconcile))
     end)
     # Manually reap a specific remote worker (kill process + remove its manifest). Body {host, port}.
     # Never automatic — the user decides, so a worker with useful results is never killed out from under them.
@@ -1093,6 +1170,8 @@ function _make_router(h::Hub)
     # The worker's stdout/stderr log — what the kernel is doing when evaluating cells.
     HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb ->
         _json(Dict("log" => worker_log(nb), "worker" => _kernel_status(nb.kernel)))))
+    # Watchdog health: stall/runaway alerts the 5s supervisor sweep classified (also rides state meta).
+    HTTP.register!(router, "GET", "/api/{id}/health", req -> _withnb(h, req, nb -> _json(_health_json(nb))))
     HTTP.register!(router, "POST", "/api/{id}/bind/{cid}", req -> _withnb(h, req, nb -> begin
         body = _body(req)
         set_bind!(nb, HTTP.getparam(req, "cid"), get(body, "name", ""), get(body, "value", nothing))

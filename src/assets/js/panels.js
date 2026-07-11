@@ -15,27 +15,47 @@ function _reltime(ts) {
 }
 // ── Worker log ────────────────────────────────────────────────────────────────
 // Tail the gate worker's stdout/stderr — what the kernel is doing when it evaluates.
-let _logPoll = null, _logTail = true;
+let _logPoll = null, _logTail = true, _logLast = null;
+const _logAtBottom = box => box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+function _setTail(on) {
+  if (on === _logTail) return;
+  _logTail = on;
+  const t = document.getElementById('logtail'); if (t) t.classList.toggle('stop', !on);
+}
 function toggleLog() {
   const p = document.getElementById('logpanel'); p.classList.toggle('open');
-  if (p.classList.contains('open')) { loadLog(); _logPoll = _logPoll || setInterval(loadLog, 1500); }
-  else if (_logPoll) { clearInterval(_logPoll); _logPoll = null; }
+  if (p.classList.contains('open')) {
+    loadLog(); _logPoll = _logPoll || setInterval(loadLog, 1500);
+    // Follow is STICKY to the bottom: scrolling up to read pauses it (so a poll can't snap you back
+    // out from underneath); scrolling back to the bottom resumes it. Wire once per box.
+    const box = document.getElementById('logbox');
+    if (box && !box._tailWired) {
+      box._tailWired = true;
+      box.addEventListener('scroll', () => _setTail(_logAtBottom(box)));
+    }
+  } else if (_logPoll) { clearInterval(_logPoll); _logPoll = null; }
 }
 function toggleTail() {
-  _logTail = !_logTail;
-  document.getElementById('logtail').classList.toggle('stop', !_logTail);
+  _setTail(!_logTail);
   if (_logTail) { const b = document.getElementById('logbox'); b.scrollTop = b.scrollHeight; }
 }
 async function loadLog() {
   try {
     const r = await api('GET', '/api/worker-log'); if (!r) return;
     const box = document.getElementById('logbox');
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-    box.textContent = r.log || '(empty)';
+    const log = r.log || '(empty)';
+    // Only rewrite when the text actually CHANGED — an unchanged poll must not clobber the user's
+    // text selection or scroll. The log is append-only, so preserving scrollTop keeps the lines the
+    // user is reading in place; only follow (jump to bottom) while pinned to the bottom.
+    if (log !== _logLast) {
+      _logLast = log;
+      const keepTop = box.scrollTop;
+      box.textContent = log;
+      box.scrollTop = _logTail ? box.scrollHeight : keepTop;
+    }
     const w = r.worker || {};
     document.getElementById('logstatus').textContent =
       w.kind === 'gate' ? `worker :${w.port} · ${w.connected ? 'connected' : 'down'}` : (w.kind || '');
-    if (_logTail || atBottom) box.scrollTop = box.scrollHeight;
   } catch (_) {}
 }
 
@@ -248,15 +268,20 @@ async function histReplay() {
 function hideSrcBanner() { const b = document.getElementById('srcbanner'); b.style.display = 'none'; b.innerHTML = ''; }
 function showSrcReload(n) {
   const b = document.getElementById('srcbanner'); b.className = 'srcbanner';
+  // n>0: we mapped the edit to cells (Run affected, or Re-run all to be safe). n===0: a source def
+  // changed but we couldn't pin it to any cell — never stay silent; lead with Re-run all.
+  const msg = n > 0
+    ? `🔁 <b>Project source changed</b> — ~${n} cell${n === 1 ? '' : 's'} likely affected (our guess may be incomplete).`
+    : `🔁 <b>Project source changed</b> — couldn't tell which cells; re-run all to be safe.`;
   b.innerHTML =
-    `<span class="msg">🔁 <b>Project source changed</b> — ~${n} cell${n === 1 ? '' : 's'} likely affected ` +
-    `(our guess may be incomplete).</span>` +
-    `<button class="primary" id="srcrunaff">Run affected${n ? ` (${n})` : ''}</button>` +
-    `<button id="srcrunall">Re-run all (safe)</button>` +
+    `<span class="msg">${msg}</span>` +
+    (n > 0 ? `<button class="primary" id="srcrunaff">Run affected (${n})</button>` : '') +
+    `<button class="${n > 0 ? '' : 'primary'}" id="srcrunall">Re-run all (safe)</button>` +
     `<button class="x" title="dismiss">✕</button>`;
   b.style.display = 'flex';
   b.querySelector('.x').onclick = hideSrcBanner;
-  b.querySelector('#srcrunaff').onclick = async () => { hideSrcBanner(); updateStates(await api('POST', '/api/run', {})); };
+  const aff = b.querySelector('#srcrunaff');
+  if (aff) aff.onclick = async () => { hideSrcBanner(); updateStates(await api('POST', '/api/run', {})); };
   b.querySelector('#srcrunall').onclick = async () => { hideSrcBanner(); updateStates(await api('POST', '/api/rerun-all', {})); };
 }
 function showSrcError(msg) {

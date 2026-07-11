@@ -221,7 +221,22 @@ const SLATE_API = SlateApiEntry[
         ```
         DYNAMIC caveat: a COMPUTED path can't be tracked statically — use `readfile(path)` for that
         (an escape hatch with no memo-invalidation and no watcher). Prefer `@asset "literal"` whenever
-        the path is known at author time. See also `readfile`, `@use`, `WebPage`."""),
+        the path is known at author time. See also `readfile`, `@use`, `WebPage`, `datadir`."""),
+    SlateApiEntry("datadir", "Assets & front-end", "datadir() -> String   ·   @sfile \"name\" -> String (path)",
+        """The notebook's canonical DATA directory and portable references into it. `datadir()` returns
+        `<project>/data` (created on demand) — a stable place to read AND write data files WITHOUT
+        hardcoding a machine path, so the notebook stays portable between machines. `@sfile "flights.csv"`
+        is sugar for `joinpath(datadir(), "flights.csv")` — it returns a PATH (contrast `@asset`, which
+        reads a file's CONTENTS), so it suits big files and read/write data:
+        ```julia
+        df = CSV.read(@sfile("flights.csv"), DataFrame)     # read a data file by portable path
+        CSV.write(@sfile("summary.csv"), result)            # write output to the same portable place
+        con = DBInterface.connect(DuckDB.DB, @sfile("warehouse.duckdb"))
+        ```
+        Unlike `@asset`, `@sfile` is NOT folded into the memo key (it's a read/write store, not tracked
+        source). Roadmap: files referenced here transfer content-addressed over the DATA CHANNEL to
+        remote workers (the same transport as memo/boundary blobs — dedup-aware, fetched by sha on
+        demand), so a notebook's data follows it across sites. See also `@asset`, `readfile`."""),
     SlateApiEntry("readfile", "Assets & front-end", "readfile(path; bytes=false) -> String | Vector{UInt8}",
         """The runtime escape hatch for `@asset` when the path is COMPUTED (not a literal Slate can
         extract). Same resolution — relative to the notebook's project dir, or absolute. UNLIKE

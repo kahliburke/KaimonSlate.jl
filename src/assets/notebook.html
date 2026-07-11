@@ -42,10 +42,11 @@
 <div class="topbar">
   <a class="brand" href="/" title="all notebooks"><span class="brandmark">S</span>Slate</a>
   <span id="wdot" class="wdot" title=""></span>
-  <h1 id="title">Notebook</h1>
+  <h1 id="title" onclick="toggleFiles()" title="open Files — edit this notebook's package source" style="cursor:pointer">Notebook</h1>
   <span id="runloc" class="runloc" onclick="toggleRunLoc(event)" title="where this notebook's worker runs">
     <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span class="runloccaret">▾</span></span>
   <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span>
+  <span id="healthbadge" class="healthbadge" style="display:none" onclick="window.__healthToggle && window.__healthToggle()" title="watchdog health — stalls &amp; runaway workers; click for details + recovery"></span>
   <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
   <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
@@ -53,6 +54,7 @@
   <button onclick="enterPresent()" title="present this notebook as a slide deck (⌘⇧P)">▶ Present</button>
   <button onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
   <button onclick="toggleDag()" title="pipeline graph — the notebook's dataflow DAG, live (⌘⇧G)">🕸 DAG</button>
+  <button onclick="toggleFiles()" title="edit this notebook's package source (src/ + notebooks/) — save reloads via Revise">📁 Files</button>
   <button onclick="togglePalette()" title="controls palette — all @bind widgets">🎛 Controls</button>
   <button id="agentbtn" onclick="toggleAgent()" title="agent chat">💬 Agent</button>
   <div class="menuwrap">
@@ -165,6 +167,22 @@
   <div id="palette-list" class="plist"></div>
   <div class="pfoot hint">Click a chip to jump to its cell. Drag a chip into a cell's control strip to surface it.</div>
 </aside>
+<aside id="filespanel" class="filespanel">
+  <div class="phead"><strong>📁 Files</strong><span id="filesroot" class="hint"></span>
+    <button class="pclose" onclick="toggleFiles()" title="close">✕</button></div>
+  <div class="filesbody">
+    <div id="filestree" class="filestree"></div>
+    <div class="filesedit-wrap">
+      <div class="filebar">
+        <span id="filedirty" class="filedirty" title="unsaved changes">●</span>
+        <span id="filepath" class="filepath hint">select a file</span>
+        <button id="filesave" class="filesave" onclick="_filesSave()" disabled>Saved</button>
+      </div>
+      <div id="fileedit" class="fileedit"></div>
+    </div>
+  </div>
+  <div class="pfoot hint">Editing the notebook's own package. Save (⌘S) writes to disk — Revise reloads it and restales the cells that use it.</div>
+</aside>
 <aside id="agentpanel" class="agentpanel">
   <div class="aphead"><strong>🤖 Agent</strong><span id="apstatus" class="hint"></span>
     <button id="thinkbtn" onclick="toggleThink()" title="show/hide the agent's thinking" style="margin-left:auto">💭</button>
@@ -210,6 +228,8 @@
   <span class="runchipbar"><span id="runchipfill"></span></span>
   <button id="runchipstop" class="runchipstop" onclick="event.stopPropagation(); window.cancelRun && window.cancelRun()" title="stop the run (interrupts running cells; keeps the namespace)">✕</button>
 </div>
+<!-- Watchdog health drop-down (populated by js/health.js; toggled from #healthbadge). -->
+<div id="healthpanel" class="healthpanel"></div>
 <aside id="dagpane" class="dagpane">
   <div class="daggrip" id="daggrip" title="drag to resize"></div>
   <div class="aphead"><strong>🕸 Pipeline</strong><span id="dagcount" class="hint"></span>
@@ -487,8 +507,10 @@
 <script src="/assets/js/outputs.js"></script>
 <script src="/assets/js/agent.js"></script>
 <script src="/assets/js/panels.js"></script>
+<script src="/assets/js/files.js"></script>
 <script src="/assets/js/config.js"></script>
 <script src="/assets/js/runstatus.js"></script>
+<script src="/assets/js/health.js"></script>
 <script src="/assets/js/dag.js"></script>
 <script src="/assets/js/runloc.js"></script>
 <script src="/assets/js/regions.js"></script>

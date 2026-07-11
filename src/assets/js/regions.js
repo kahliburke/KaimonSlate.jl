@@ -43,9 +43,11 @@ async function removeDestination(name) {
   await _postRegions(_regionSpecStr(list));
 }
 // The region spec for a configured pool — carries its transport + (for :direct) base port, so the
-// declared region matches the pool and adoption kicks in.
+// declared region matches the pool and adoption kicks in, plus the pool's data root (`root=…`) so a
+// region enabled from it resolves `datadir()`/`@sfile` under the same path the pool workers use.
 function _destSpecFromPool(p) {
-  return p.transport === 'direct' ? (p.host + ',direct' + (p.base_port > 0 ? ',' + p.base_port : '')) : p.host;
+  const base = p.transport === 'direct' ? (p.host + ',direct' + (p.base_port > 0 ? ',' + p.base_port : '')) : p.host;
+  return p.root ? (base + ',root=' + p.root) : base;
 }
 
 // Set a cell's region ('' = local/main): drop any region tag, add the new one. `default` → `remote`.
@@ -98,7 +100,7 @@ function _destAvailable() {
     byHost.set(h, { host: h, transport: parts[1] === 'direct' ? 'direct' : 'tunnel', warm: 0, spec: String(spec), src: 'remembered' });
   }); } catch (_) {}
   (_destPools.pools || []).forEach(p =>
-    byHost.set(p.host, { host: p.host, transport: p.transport, warm: p.n, spec: _destSpecFromPool(p), src: 'pool' }));
+    byHost.set(p.host, { host: p.host, transport: p.transport, warm: p.n, spec: _destSpecFromPool(p), src: 'pool', root: p.root || '' }));
   return [...byHost.values()].sort((a, b) => a.host.localeCompare(b.host));
 }
 
@@ -111,7 +113,8 @@ function renderDestinations() {
       ? '<div class="ctlsub">Enabled for this notebook</div>' + cur.map(r => {
           const warm = _destWarm(r.host);
           const badge = warm > 0 ? `<span class="destwarm" title="warm pool workers ready to adopt">${warm} warm</span>` : '';
-          const where = _escc(r.host) + (r.transport === 'direct' ? ' · direct' + (r.port ? ' :' + _escc(r.port) : '') : '');
+          const where = _escc(r.host) + (r.transport === 'direct' ? ' · direct' + (r.port ? ' :' + _escc(r.port) : '') : '') +
+            (r.root ? ' · root ' + _escc(r.root) : '');
           return `<div class="destitem"><div class="destinfo"><b>🖧 ${_escc(r.name === 'default' ? 'remote' : r.name)}</b> <span class="desthost">${where}</span>${badge}</div>` +
             `<button class="destdel" data-n="${_escc(r.name)}" title="disable this destination">✕</button></div>`;
         }).join('')
@@ -124,7 +127,8 @@ function renderDestinations() {
     const avail = _destAvailable().filter(a => !enabled.has(a.host));
     av.innerHTML = '<div class="ctlsub">Available compute (configured on the home page)</div>' +
       (avail.length ? avail.map(a => {
-        const meta = [a.transport, a.warm > 0 ? `${a.warm} warm` : '', a.src === 'pool' ? 'pool' : ''].filter(Boolean).join(' · ');
+        const meta = [a.transport, a.warm > 0 ? `${a.warm} warm` : '', a.src === 'pool' ? 'pool' : '',
+                      a.root ? `root ${a.root}` : ''].filter(Boolean).join(' · ');
         return `<div class="destitem"><div class="destinfo"><b>${_escc(a.host)}</b> <span class="destsrc">${_escc(meta)}</span></div>` +
           `<button class="desten" data-h="${_escc(a.host)}" data-s="${_escc(a.spec)}" title="enable as a run destination">Enable →</button></div>`;
       }).join('') : '<div class="destempty">Nothing configured yet — set up a host or warm pool on the home page (🖧 Remotes).</div>');

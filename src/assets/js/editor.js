@@ -292,6 +292,17 @@
   // cell has no local edits, so its text IS its source. Keeps save/run/backup correct pre-hydration.
   window.edText = id => { const v = editors[id]; return v ? v.state.doc.toString() : ((window.srcMap && window.srcMap[id]) || ''); };
   window.edSetText = (id, s) => { const v = editors[id]; if (v && v.state.doc.toString() !== s) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: s } }); };
+  // Standalone CM6 editor for the Files tab. Delegates to the full cell factory `mkEditor` so a
+  // source file gets the SAME feature set as a cell — Julia autocomplete (server `/api/complete`,
+  // which keys off the code + cursor, not a cell id), snippets, comment-toggle (⌘/), bracket
+  // match/close, indent-on-input, Tab-completion, ⌘-Space. No `cellId` ⇒ it isn't registered as a
+  // cell editor. `opts`: {filename, onSave, onChange}; ⌘S saves (the caller owns persistence).
+  window.mkFileEditor = (parent, text, opts = {}) => mkEditor(parent, {
+    doc: text,
+    markdown: /\.(md|markdown|qmd)$/i.test(opts.filename || ''),
+    keys: opts.onSave ? [{ key: 'Mod-s', run: () => { opts.onSave(); return true; } }] : [],
+    onDoc: () => { if (opts.onChange) opts.onChange(); },
+  });
   window.edFocus = id => { const v = window.ensureEditor(id); if (v) v.focus(); };
   window.edInsert = (id, text) => { const v = editors[id]; if (!v) return; v.dispatch(v.state.replaceSelection(text)); v.focus(); };
 

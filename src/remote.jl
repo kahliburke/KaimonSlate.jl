@@ -105,11 +105,14 @@ struct RemoteTarget <: RunTarget
     port::Int                    # pinned remote main/REP port (0 ⇒ auto via _next_ports)
     stream_port::Int             # pinned remote stream/PUB port (0 ⇒ port+1)
     origin_env::String           # LOCAL project dir whose exact env to replicate on the remote ("" ⇒ none)
+    datadir::String              # region-declared data root on the remote → the worker's KAIMONSLATE_DATADIR ("" ⇒ <project>/data)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
              project::AbstractString = "~/.cache/kaimonslate/remote",
-             port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "") =
-    RemoteTarget(String(ssh_host), transport, String(project), port, stream_port, String(origin_env))
+             port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "",
+             datadir::AbstractString = "") =
+    RemoteTarget(String(ssh_host), transport, String(project), port, stream_port,
+                 String(origin_env), String(datadir))
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -535,8 +538,13 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     # stack a separate KaimonGate env on the LOAD_PATH: that caused Revise (precompiled against its env's
     # deps) to skew against the notebook env's versions of shared deps (OrderedCollections, …) and crash
     # its package-load callback. One consistent resolve = no skew.
+    # A region can PIN this worker's data root (`datadir()`/`@sfile`) to a declared path — a fast
+    # scratch disk, a shared mount that already holds the data. Set it BEFORE the worker starts so
+    # `datadir()` resolves it from t=0 (a cold-spawned region worker is correct from birth; an
+    # ADOPTED pool worker gets the same via `__slate_adopt`). Empty ⇒ the worker's own <project>/data.
+    dd = isempty(t.datadir) ? "" : "ENV[\"KAIMONSLATE_DATADIR\"] = raw\"$(t.datadir)\"\n    "
     return """
-    _wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
+    $(dd)_wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
     import KaimonGate
     try; @eval using Revise; catch; end
     include(_wk)
@@ -761,7 +769,9 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         if r.conn !== nothing
             adopted = try
                 k.conn = r.conn                     # _tool needs the conn on the kernel
-                _tool(k, "__slate_adopt", Dict{String,Any}("parent" => t.project); timeout = 15.0)
+                # Stamp the region's data root as we tie this generic pool worker to us — same handoff
+                # that re-points PARENT_PROJECT. Empty datadir clears any prior region's root (set-or-clear).
+                _tool(k, "__slate_adopt", Dict{String,Any}("parent" => t.project, "datadir" => t.datadir); timeout = 15.0)
                 true
             catch e
                 _rlog("adopt: worker-$(pool.port) refused adoption ($(sprint(showerror, e))) — falling back to fresh spawn")
@@ -1518,10 +1528,11 @@ _attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true);
 const _POOL_DIR = joinpath(_slate_cache_dir(), "pool")
 _pool_path(host) = joinpath(_POOL_DIR, replace(String(host), r"[^A-Za-z0-9._-]" => "_") * ".json")
 
-function _pool_config!(host; n::Int, preload::AbstractString, transport::Symbol, base_port::Int = 0)
+function _pool_config!(host; n::Int, preload::AbstractString, transport::Symbol, base_port::Int = 0,
+                       root::AbstractString = "")
     esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"")
     body = "{\"host\":\"$(esc(host))\",\"n\":\"$n\",\"preload\":\"$(esc(preload))\"," *
-           "\"transport\":\"$transport\",\"base_port\":\"$base_port\"}"
+           "\"transport\":\"$transport\",\"base_port\":\"$base_port\",\"data_root\":\"$(esc(root))\"}"
     mkpath(_POOL_DIR)
     p = _pool_path(host); tmp = p * ".tmp"
     write(tmp, body); mv(tmp, p; force = true)
@@ -1536,7 +1547,8 @@ function _pool_config(host)
     tr = _manifest_get(s, "transport")
     return (n = n, preload = _manifest_get(s, "preload"),
             transport = Symbol(isempty(tr) ? "tunnel" : tr),
-            base_port = something(tryparse(Int, _manifest_get(s, "base_port")), 0))
+            base_port = something(tryparse(Int, _manifest_get(s, "base_port")), 0),
+            root = _manifest_get(s, "data_root"))   # region data root (`datadir()`) for workers here; "" ⇒ default
 end
 
 # Every configured pool, host included — the hub's desired state (what `warm_pool!` was told),
@@ -1550,7 +1562,7 @@ function pool_configs()
         h = _manifest_get(s, "host"); isempty(h) && continue
         cfg = _pool_config(h); cfg === nothing && continue
         push!(out, (host = h, n = cfg.n, preload = cfg.preload, transport = cfg.transport,
-                    base_port = cfg.base_port))
+                    base_port = cfg.base_port, root = cfg.root))
     end
     return out
 end
@@ -1568,7 +1580,8 @@ end
 # worker adoptable: matching basename ⇒ matching remote env dir ⇒ matching --project.
 _pool_target(host, cfg) = RemoteTarget(String(host); transport = cfg.transport,
     project = "~/.cache/kaimonslate/remote/" * (isempty(cfg.preload) ? "detached" : basename(rstrip(cfg.preload, '/'))),
-    origin_env = cfg.preload)
+    origin_env = cfg.preload,
+    datadir = get(cfg, :root, ""))   # pool workers boot with the pool's data root → a region adopting one already has it
 
 # In-flight adoption claims (hub-local — only THIS hub adopts its own pool workers). The state
 # sidecar flips to `attached` asynchronously after adoption, so without a claim two notebooks
@@ -1616,7 +1629,7 @@ function _claim_pool_worker!(host, rproj, transport::Symbol)
 end
 
 """
-    warm_pool!(host; n = 1, preload = "", transport = :tunnel, base_port = 0) -> String
+    warm_pool!(host; n = 1, preload = "", transport = :tunnel, base_port = 0, root = "") -> String
 
 Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a running Julia
 process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
@@ -1627,11 +1640,14 @@ namespace; packages and the memo store survive. The pool refills itself after ev
 
 `base_port` pins the port range for a `:direct` pool: worker *i* binds `base_port+3i .. +3i+2`
 (main/stream/data), so you know exactly which ports to open in the host's firewall. `0` (or any
-`:tunnel` pool, which forwards over loopback) auto-assigns from 9100+. Blocking (provision +
-launch); safe to re-run — it reconciles toward `n`.
+`:tunnel` pool, which forwards over loopback) auto-assigns from 9100+. `root` pins these workers'
+data dir (`datadir()`/`@sfile`) to a REMOTE absolute path on `host` (kept verbatim — never expanded
+locally); a region enabled from this pool inherits it via its spec. Blocking (provision + launch);
+safe to re-run — it reconciles toward `n`.
 """
 function warm_pool!(host::AbstractString; n::Int = 1, preload::AbstractString = "",
-                    transport::Symbol = :tunnel, base_port::Int = 0, reconcile::Bool = true)
+                    transport::Symbol = :tunnel, base_port::Int = 0, root::AbstractString = "",
+                    reconcile::Bool = true)
     h = String(strip(String(host)))
     isempty(h) && return "give an ssh host"
     n >= 0 || return "n must be ≥ 0"
@@ -1642,7 +1658,11 @@ function warm_pool!(host::AbstractString; n::Int = 1, preload::AbstractString = 
     pl = strip(String(preload))
     pl = isempty(pl) ? "" : abspath(expanduser(String(pl)))
     (isempty(pl) || isdir(pl)) || return "preload project dir not found: $pl"
-    _pool_config!(h; n = n, preload = pl, transport = transport, base_port = base_port)
+    # `root` is the workers' data dir (`datadir()`/`@sfile`) ON THE HOST — a REMOTE absolute path (fast
+    # scratch, a shared mount). Kept verbatim: never expanduser/abspath it locally (it names a path on
+    # the host, not here). A region enabled from this pool inherits it; pool workers boot with it set.
+    rt = String(strip(String(root)))
+    _pool_config!(h; n = n, preload = pl, transport = transport, base_port = base_port, root = rt)
     _rlog("═══ WARM POOL: $h → n=$n preload=$(isempty(pl) ? "(none)" : pl) transport=$transport" *
           (base_port > 0 ? " base_port=$base_port" : "") * " ═══")
     # The persist above is fast + durable; the reconcile (provision + launch) is the slow part. Callers

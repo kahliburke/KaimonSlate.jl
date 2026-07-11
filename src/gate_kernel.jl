@@ -200,11 +200,57 @@ end
 const _GATE_SESSION = Dict{String,String}()
 const _POLLER = Ref{Any}(nothing)
 
-# report id → the worker's latest telemetry sample (raw JSON from its 2s `slate_telemetry`
-# PUB) + hub arrival time. Overwritten in place — only the newest sample matters. Idle/detached
-# workers surface theirs via `list_remote_workers` (the `.stats` sidecar) instead.
-const _WORKER_STATS = Dict{String,Tuple{String,Float64}}()
-worker_stats(report_id::AbstractString) = get(_WORKER_STATS, String(report_id), nothing)
+# conn name → rolling history of that worker's telemetry samples (newest last). Keyed PER-KERNEL
+# by the stable connect-time `conn.name` — a notebook's main + region kernels each get their own
+# series (they'd collide under a shared report id). Bounded ring: the watchdog needs a short window
+# to read TRENDS (rss climbing, cpu sustained), not just the latest point. Idle/detached workers
+# still surface theirs via `list_remote_workers` (the `.stats` sidecar).
+const _KERNEL_STATS = Dict{String,Vector{Any}}()
+const _KERNEL_STATS_MAX = 30              # ~60s of history at the worker's 2s cadence
+const _STATS_LOCK = ReentrantLock()
+
+# Parse one `slate_telemetry` line into a flat NamedTuple + hub arrival time; nothing on garbage.
+function _parse_telemetry(raw::AbstractString)
+    try
+        d = JSON.parse(String(raw))
+        (cpu     = Float64(get(d, "cpu", -1.0)),
+         rss     = Int(get(d, "rss", 0)),
+         gc_ms   = Int(get(d, "gc_ms", 0)),
+         evals   = Int(get(d, "evals", 0)),
+         running = String[String(x) for x in get(d, "running", Any[])],
+         warm    = String(get(d, "warm", "")),
+         memo    = Int(get(d, "memo_bytes", -1)),
+         ts      = Float64(get(d, "ts", 0.0)),
+         rcv     = time())
+    catch
+        nothing
+    end
+end
+
+function _record_telemetry!(conn_name::AbstractString, raw::AbstractString)
+    s = _parse_telemetry(raw); s === nothing && return nothing
+    lock(_STATS_LOCK) do
+        h = get!(_KERNEL_STATS, String(conn_name), Any[])
+        push!(h, s)
+        length(h) > _KERNEL_STATS_MAX && deleteat!(h, 1:(length(h) - _KERNEL_STATS_MAX))
+    end
+    return nothing
+end
+
+# Latest sample + a copy of the recent history for one kernel connection (nothing if never seen).
+function kernel_stats(conn_name::AbstractString)
+    lock(_STATS_LOCK) do
+        h = get(_KERNEL_STATS, String(conn_name), nothing)
+        (h === nothing || isempty(h)) && return nothing
+        return (latest = h[end], history = copy(h))
+    end
+end
+
+# Forget a kernel's series when its connection is torn down (reap / respawn), so stale telemetry
+# can't linger and mislead the watchdog into a phantom "unreachable".
+forget_kernel_stats(conn_name::AbstractString) = lock(_STATS_LOCK) do
+    delete!(_KERNEL_STATS, String(conn_name)); nothing
+end
 
 # Pull the next batch of gate-stream messages. Prefer the event-driven blocking
 # `wait_stream_messages!` (parks on the SUB FDs — near-zero idle CPU) when the Kaimon build
@@ -268,8 +314,8 @@ function _ensure_poller!()
                             prog[(rid, String(parts[1]))] =
                                 (something(tryparse(Float64, parts[2]), 0.0), String(parts[4]), parts[3] == "1")
                         end
-                    elseif m.channel == "slate_telemetry"     # worker's 2s sample — latest only
-                        _WORKER_STATS[rid] = (String(m.data), time())
+                    elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring
+                        _record_telemetry!(m.conn_name, String(m.data))
                     end
                 end
                 for (rid, vars) in pending
