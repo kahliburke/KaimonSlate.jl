@@ -1077,7 +1077,7 @@ function _dagCard(id, cx, cy) {
   // Condensed stats — four chips carry what matters; the strip shows the shape.
   const st = c.stats;
   const chips = st ? [
-    ['last', _dagFmtMs(st.last_ms) + (st.memo ? ` ${st.memo === 'restored' ? '♻' : '💾'}` : '') + ` · ${_dagAgo(st.last_ts)}`],
+    ['last', _dagFmtMs(st.last_ms) + (st.memo ? ` ${st.memo === 'restored' ? '♻' : st.memo === 'handle' ? '🔌' : '💾'}` : '') + ` · ${_dagAgo(st.last_ts)}`],
     ['typical', `${_dagFmtMs(st.mean_ms)} ± ${_dagFmtMs(st.std_ms)}`],
     ['total', `${_dagFmtMs(st.total_ms)} · ×${st.evals}${st.restores ? ` ♻${st.restores}` : ''}`],
     ['used downstream', `↓ ${st.pulls}`],

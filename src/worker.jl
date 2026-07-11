@@ -496,6 +496,18 @@ function _memo_store(cellkey::String, names::Vector{String}, wire;
         if v isa Function && parentmodule(v) === m
             return fail("cell defines the notebook-local function '$nm' — not cacheable (restores unfaithfully)")
         end
+        # A live process-state handle (DB/socket/file — a non-null Ptr) serialises to a dangling pointer,
+        # so a restore hands back a dead handle. Refuse to cache it (this is what `:resource` DECLARES;
+        # the user just hasn't tagged it) and record a hint so the UI can SUGGEST the tag — the author-
+        # time advisory, caught here before a stale restore or a region transfer bites.
+        let why = _unportable_reason(v)
+            if !isempty(why)
+                trace === nothing || (trace["handle_hint"] =
+                    Dict{String,Any}("name" => nm, "type" => string(typeof(v)), "reason" => why))
+                @info "slate memo: not cached — live handle; tag the cell `resource`" cell = cellkey name = nm type = string(typeof(v))
+                return fail("'$nm' is a live handle ($(string(typeof(v)))) — not cacheable; tag the cell `resource`")
+            end
+        end
         if nm in unread && _is_display_object(v)
             push!(elided, Dict{String,Any}("name" => nm, "type" => string(typeof(v))))
             @info "slate memo: display object elided (wire image only)" cell = cellkey name = nm
@@ -631,6 +643,10 @@ function _eval_one(source::String, filename::String, memo_key::String,
     end
     tr["ms"] = round(r.duration_ms; digits = 1)
     _trace_commit!(cid, tr)
+    # A cell that writes a live handle can't be cached (and shouldn't cross a region) — surface it as a
+    # `handle` memo status (reusing the existing memo field) so the UI can nudge the `resource` tag; the
+    # binding name/type live in the memo trace (`slate_memo_trace`). This is the author-time advisory.
+    haskey(tr, "handle_hint") && return merge(r, (memo = "handle",))
     return r
 end
 
