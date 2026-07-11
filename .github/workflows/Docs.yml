@@ -69,21 +69,11 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: docs
-        run: |
-          if [ -f generate_assets.mjs ]; then
-            npx playwright install --with-deps chromium
-          else
-            echo "No docs/generate_assets.mjs yet — skipping Playwright install."
-          fi
+        run: npx playwright install --with-deps chromium
 
       - name: Generate doc assets
         working-directory: docs
-        run: |
-          if [ -f generate_assets.mjs ]; then
-            node generate_assets.mjs
-          else
-            echo "No docs/generate_assets.mjs yet — skipping asset generation."
-          fi
+        run: node generate_assets.mjs
 
       # ── TUI asset (terminal dashboard) ──────────────────────────────────────
       # Pure Julia: records the `slate` status TUI with Tachikoma into an animated
@@ -92,12 +82,8 @@ jobs:
       - name: Generate TUI assets
         working-directory: docs
         run: |
-          if [ -f generate_tui_assets.jl ]; then
-            sudo apt-get update && sudo apt-get install -y fonts-jetbrains-mono || true
-            julia --project=. generate_tui_assets.jl
-          else
-            echo "No docs/generate_tui_assets.jl yet — skipping TUI asset generation."
-          fi
+          sudo apt-get update && sudo apt-get install -y fonts-jetbrains-mono || true
+          julia --project=. generate_tui_assets.jl
 
       - name: Upload assets to docs-assets release
         if: github.ref == 'refs/heads/main'

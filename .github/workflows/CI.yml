@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+    tags: ['*']
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    env:
+      # Single GC thread — the Pkg.test subprocess inherits this and avoids the intermittent
+      # Julia 1.12 parallel-GC sweep-race SIGSEGV that otherwise crashes a heavy suite.
+      JULIA_NUM_GC_THREADS: "1"
+    permissions: # julia-actions/cache proactively deletes old caches it created
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.12'   # the `slate` app + engine target Julia 1.12
+        os:
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+      - name: Load Julia packages from cache
+        id: julia-cache
+        uses: julia-actions/cache@v2
+      - name: Refresh registry
+        # julia-actions/cache can restore a ~/.julia/registries snapshot that predates a
+        # just-published dependency (e.g. a fresh Tachikoma release), making resolve fail
+        # until the cache expires. Force the registry current.
+        run: julia -e 'using Pkg; Pkg.Registry.update()'
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+      - name: Save Julia depot cache on cancel or failure
+        id: julia-cache-save
+        if: cancelled() || failure()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ steps.julia-cache.outputs.cache-paths }}
+          key: ${{ steps.julia-cache.outputs.cache-key }}
