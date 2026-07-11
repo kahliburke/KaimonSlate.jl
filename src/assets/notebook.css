@@ -105,7 +105,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .act-err .acticon, .act-err .actdetail { color:var(--red); }
 
 /* Floating "currently running" chip — bottom-centre so it clears the bottom-right docs launcher. */
-.runchip { position:fixed; left:50%; transform:translateX(-50%); bottom:18px; z-index:60;
+.runchip { position:fixed; left:50%; transform:translateX(-50%); bottom:18px; z-index:66;   /* above the DAG pane (60) so the running chip stays visible over it */
            display:flex; align-items:center; gap:9px; padding:6px 8px 6px 12px; border-radius:13px;
            background:var(--bg2); border:1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
            box-shadow:0 6px 22px rgba(0,0,0,.42); font-size:.78rem; color:var(--text);
