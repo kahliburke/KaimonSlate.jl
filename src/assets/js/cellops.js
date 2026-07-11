@@ -4,6 +4,9 @@
 async function runCell(id, force = false) {
   if (_hydrating) return;                      // env still reconstructing — preview is read-only
   const before = _cellById(id);                // shape BEFORE the run (from the live state)
+  // An ERRORED cell always re-runs on an explicit run (⇧⏎ / palette), even with unchanged source —
+  // the whole point is to retry it. A clean cell with unchanged source is still skipped (advance-only).
+  if (!force && before && before.state === 'errored') force = true;
   setState(id, 'running');
   const state = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || ''), force: !!force });
   const after = (state.cells || []).find(c => c.id === id);

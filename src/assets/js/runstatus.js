@@ -219,14 +219,14 @@
     const box = document.getElementById('actlog'); if (!box) return;
     const icon = kind === 'run' ? '▶' : kind === 'err' ? '✗' : kind === 'done' ? '✓' : '·';
     const ts = new Date().toLocaleTimeString();
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    const atTop = box.scrollTop < 30;            // newest lands on top; keep the view pinned there
     const line = document.createElement('div');
     line.className = 'actline act-' + kind;
     line.innerHTML = `<span class="actts">${ts}</span><span class="acticon">${icon}</span>` +
       `<span class="actid" data-cid="${esc(id)}" title="jump to cell">${esc(id)}</span><span class="actdetail">${esc(detail)}</span>`;
-    box.appendChild(line);
-    while (box.children.length > 600) box.removeChild(box.firstChild);
-    if (atBottom) box.scrollTop = box.scrollHeight;
+    box.insertBefore(line, box.firstChild);      // prepend → newest at top (reverse-chronological)
+    while (box.children.length > 600) box.removeChild(box.lastChild);   // trim the OLDEST (bottom)
+    if (atTop) box.scrollTop = 0;
   }
   window.slateActivity = activity;   // so other modules can log to the same feed
 

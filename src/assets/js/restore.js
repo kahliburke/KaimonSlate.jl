@@ -185,10 +185,10 @@ function _rcRender() {
       ? `<div class="rc-warn">⚠ An <b>external edit</b> (an agent, the file on disk, or another tab) just changed this cell while you had unsaved edits here. Keep the incoming change, or your edit.</div>`
       : c.conflict
       ? `<div class="rc-warn">⚠ This cell <b>also changed on the server</b> since your edit — review carefully.</div>`
-      : `<div class="rc-note">The saved version is unchanged; your edit is newer.</div>`}
+      : `<div class="rc-note">The saved version matches what you started from — your unsaved edit here just isn't on disk yet.</div>`}
     <div class="rc-legend"><span class="dl del">− ${c.live ? 'incoming change' : 'saved version'}</span><span class="dl add">+ your unsaved edit</span></div>
-    ${!c.live && (c.ts || c.serverTs) && typeof _reltime === 'function'
-      ? `<div class="rc-times">saved on disk ${c.serverTs ? _reltime(c.serverTs) : 'unknown'} · your edit ${c.ts ? _reltime(c.ts) : 'unknown'}</div>` : ''}
+    ${!c.live && c.ts && typeof _reltime === 'function'
+      ? `<div class="rc-times">${c.conflict && c.serverTs ? `saved on disk ${_reltime(c.serverTs)} · ` : ''}your edit ${_reltime(c.ts)}</div>` : ''}
     <div class="rc-diff">${diff || '<span class="hint">(no line differences)</span>'}</div>
     <div class="rc-acts">
       <button class="rc-server">${c.live ? 'Use the incoming change' : 'Use saved'}</button>
