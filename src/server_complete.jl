@@ -497,7 +497,7 @@ function _sync_datadir_to!(nb::LiveNotebook, dst_k; cell_id::AbstractString = ""
     end
     isempty(files) && return nothing
     sig = hash(sort!([String(f["hash"]) for f in files]))
-    skey = (nb.id, objectid(dst_k))
+    skey = (nb.id, _worker_key(dst_k))   # ns_gen-folded: a swapped worker's empty datadir re-materialises
     lock(_DATADIR_LOCK) do; get(_DATADIR_SYNCED, skey, UInt(0)); end == sig && return nothing
     ep = try; ReportEngine._data_endpoint!(dst_k.target, dst_k); catch; return nothing; end
     total = max(sum(fbytes), 1); moved = 0

@@ -147,10 +147,15 @@ mutable struct GateKernel <: Kernel
     label::String    # gate-session display label (the notebook's filename) — names the session in `ping`/TUI
     target::Any      # RunTarget: nothing ⇒ local spawn; RemoteTarget ⇒ provision + spawn on a host, connect over CURVE/tunnel
     tunnel::Any      # supervised SSH Tunnel for a :ssh_tunnel RemoteTarget (closed on teardown), else nothing
+    ns_gen::Int      # namespace generation — bumped whenever a FRESH (empty) namespace is bound: a cold
+                     # spawn, a pool ADOPTION (`__slate_adopt` swaps in a new namespace), a reprovision.
+                     # NOT bumped on a reattach (park/record/probe reuse the SAME live process + namespace).
+                     # The region dedups (prime / resource / datadir / synced) fold this into their key, so
+                     # a swapped worker's blank namespace is correctly re-established instead of skipped.
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "", label::AbstractString = "",
                target = nothing) =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing)
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing, 0)
 end
 
 """
@@ -531,6 +536,10 @@ _eval_timeout() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_EVAL_TIMEOUT
 
 # Synchronous gate tool call → the tool's raw return value (binary wire-form).
 function _tool(k::GateKernel, name::String, args::Dict; timeout::Float64 = 120.0)
+    # A clear, retryable error instead of a cryptic `_req_send_recv(::Nothing,…)` MethodError when the
+    # kernel is mid-swap (a reprovision transiently nulls `conn`). Best-effort callers (datadir sync)
+    # skip and the next presync re-establishes on the fresh worker (its ns_gen already bumped).
+    k.conn === nothing && error("gate $name: kernel '$(k.label)' has no connection (worker reprovisioning?)")
     K = _kaimon()
     req = (type = :tool_call, name = name, arguments = Dict{String,Any}(args))
     r = K._req_send_recv(k.conn, req; caller_timeout = timeout)

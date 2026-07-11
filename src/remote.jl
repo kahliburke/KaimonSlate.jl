@@ -655,13 +655,11 @@ end
 # ⇒ false, and `attached!` reaps + cold-spawns it. A flaky env_info call ⇒ true (don't reap on a
 # transient error; liveness is validated separately). Gated OFF by default — see the body.
 function _payload_current(k)::Bool
-    # Reprovision-on-drift is OPT-IN (KAIMONSLATE_REPROVISION_STALE=1). The worker SWAP it triggers has
-    # integration bugs: the fresh worker's empty namespace isn't re-primed / re-resourced (the per-kernel
-    # dedups — _REGION_RESOURCED / _REGION_SYNCED / _REGION_PRIMED — key by the REUSED kernel object, so
-    # they wrongly report `db`/transfers as already established), and a nil-conn race during the swap can
-    # fail an in-flight datadir sync. Until those are fixed (key the namespace dedups by a per-worker
-    # generation + guard the swap against concurrent use), default to "current" so we reattach, not swap.
-    get(ENV, "KAIMONSLATE_REPROVISION_STALE", "") == "1" || return true
+    # Reprovision-on-drift is ON by default (skip with KAIMONSLATE_SKIP_PAYLOAD_CHECK=1). The worker SWAP
+    # is now safe: `k.ns_gen` bumps on a fresh namespace (cold spawn / adopt) and the region dedups fold it
+    # into their key, so the swapped worker's blank namespace is re-primed / re-resourced / re-synced; and
+    # `_tool` errors cleanly (not a MethodError) if a best-effort caller hits the transient nil-conn window.
+    get(ENV, "KAIMONSLATE_SKIP_PAYLOAD_CHECK", "") == "1" && return true
     want = _payload_sha()
     got = try
         String(_infofield(_tool(k, "__slate_env_info", Dict{String,Any}(); timeout = 6.0), "payload_sha", ""))
@@ -753,6 +751,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads)
         r = dial(port, stream_port; deadline = 120.0)   # deadline covers remote Julia boot + KaimonGate load (~90s)
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
+        k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
                         transport = t.transport, server_key = r.server_key, remote_ip = r.remote_ip)
         _rlog("connect OK: attached to worker on $host:$port → notebook now runs on $host")
@@ -861,6 +860,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                 # Stamp the region's data root as we tie this generic pool worker to us — same handoff
                 # that re-points PARENT_PROJECT. Empty datadir clears any prior region's root (set-or-clear).
                 _tool(k, "__slate_adopt", Dict{String,Any}("parent" => t.project, "datadir" => t.datadir); timeout = 15.0)
+                k.ns_gen += 1   # adopt swaps in a fresh namespace ⇒ region dedups must re-establish it
                 true
             catch e
                 _rlog("adopt: worker-$(pool.port) refused adoption ($(sprint(showerror, e))) — falling back to fresh spawn")

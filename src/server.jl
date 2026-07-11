@@ -758,7 +758,7 @@ function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
     env = [c for c in nb.report.cells if ReportEngine._cell_effect(c) == ReportEngine.PER_SIDE]
     isempty(env) && return nothing
     sig = hash([c.src_hash for c in env])
-    key = (nb.id, objectid(k))
+    key = (nb.id, _worker_key(k))
     lock(_REGION_LOCK) do; get(_REGION_PRIMED, key, UInt(0)); end == sig && return nothing
     for c in env
         try
@@ -1098,6 +1098,14 @@ function _xfer_plan_gate(nb::LiveNotebook, cell::Cell, host::AbstractString,
     end
 end
 
+# Fold a kernel's NAMESPACE GENERATION into the per-kernel dedup keys. On a worker SWAP (cold spawn /
+# pool adopt / reprovision) `ns_gen` bumps → a key that includes it MISSES → the region layer
+# re-establishes prime / resource / datadir / transfers on the fresh (empty) namespace. On a REATTACH
+# the gen is unchanged → the key hits (the live worker still holds the state). Hashed into the existing
+# `UInt` slot so no dedup-Dict type changes. `_kgen` tolerates a non-GateKernel (→ 0) for local kernels.
+_kgen(k) = try; k.ns_gen; catch; 0; end
+_worker_key(k)::UInt = hash((objectid(k), _kgen(k)))
+
 # Tolerant field read off a gate-tool result — a NamedTuple locally, but a JSON3.Object (Symbol
 # props) or a Dict (String/Symbol keys) once it's ridden back over the gate. Returns `dv` on any miss.
 function _gf(o, k::Symbol, dv)
@@ -1124,7 +1132,7 @@ const _REGION_RESOURCED = Dict{Tuple{String,UInt,UInt},Bool}()
 # transferred. Dedup per (nb, dst kernel, source) so a shared handle opens exactly once per kernel.
 function _ensure_resource_on!(nb::LiveNotebook, cell::Cell, dst_k, dst_side::AbstractString;
                               seen::Set{UInt} = Set{UInt}())
-    key = (nb.id, objectid(dst_k), cell.src_hash)
+    key = (nb.id, _worker_key(dst_k), cell.src_hash)
     lock(_REGION_LOCK) do; get(_REGION_RESOURCED, key, false); end && return nothing
     cell.src_hash in seen && return nothing        # diamond/cycle guard within a single establish
     push!(seen, cell.src_hash)
@@ -1248,7 +1256,9 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
             (o.output !== nothing && _cell_side(nb, o) == src_side) &&
                 (token *= string('~', o.src_hash, ':', objectid(o.output)))
         end
-        key = string(isempty(dst_side) ? "main" : dst_side, ':', r)
+        # `:g<gen>` folds the dst worker's namespace generation in, so a SWAP (fresh namespace) re-ships
+        # this value (the new worker doesn't hold it) while a reattach still dedups.
+        key = string(isempty(dst_side) ? "main" : dst_side, ':', r, ":g", _kgen(dst_k))
         seen = lock(_REGION_LOCK) do; get(get(_REGION_SYNCED, nb.id, Dict{String,String}()), key, ""); end
         seen == token && continue
         if !prepared                                      # both wires must be up before the first move
