@@ -37,6 +37,25 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test :K in c.writes
     end
 
+    @testset "_cell_effect: one classifier for transfer/cache policy (region ↔ memo can't drift)" begin
+        ce = ReportEngine._cell_effect
+        E = ReportEngine
+        @test ce(Cell("p", CODE, "y = f(x)")) == E.PURE                    # plain compute → transfer/cache
+        pu = Cell("u", CODE, "using LinearAlgebra"); infer_bindings!(pu)
+        @test ce(pu) == E.PER_SIDE                                         # pure `using` → re-run per side
+        scaf = Cell("s", CODE, "x = 1"); push!(scaf.flags, :import_scaffold)
+        @test ce(scaf) == E.PER_SIDE                                       # import scaffold → per side
+        thm = Cell("t", CODE, "set_theme!(theme_dark())"); push!(thm.writes, E._THEME_SENTINEL)
+        @test ce(thm) == E.PER_SIDE                                        # theme setter → per side (the regression)
+        res = Cell("r", CODE, "db = DuckDB.DB(p)"); push!(res.flags, :resource)
+        @test ce(res) == E.RESOURCE                                        # handle → replay at read
+        vol = Cell("v", CODE, "t = rand()"); push!(vol.flags, :volatile)
+        @test ce(vol) == E.VOLATILE                                        # non-deterministic → transfer, not cache
+        # an explicit tag WINS over an inferred per-side/pure shape
+        rt = Cell("rt", CODE, "set_theme!(x)"); push!(rt.flags, :resource); push!(rt.writes, E._THEME_SENTINEL)
+        @test ce(rt) == E.RESOURCE
+    end
+
     @testset "anonymous functions never enter writes (synthetic __ExprExpl_anon__ names)" begin
         # ExpressionExplorer reports an anonymous function as a definition named
         # `__ExprExpl_anon__<rand>` — synthetic AND random per analysis. If one leaks into `writes`

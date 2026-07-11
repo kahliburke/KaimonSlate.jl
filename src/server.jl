@@ -749,17 +749,13 @@ end
 # tracked per LIVE kernel against the imports' signature, so it fires once per kernel and again only
 # if the notebook's imports change (a fresh/replaced kernel has a new objectid ⇒ re-primes).
 function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
-    # Cells that ESTABLISH per-side state on a side — re-run (never transferred), in document order so
-    # imports precede a scaffold/effect that builds on them:
-    #   • pure `using`/`import` and the import scaffold — load packages so downstream calls resolve;
-    #   • a global-THEME setter (`set_theme!`/`update_theme!`, marked by the synthetic `_THEME_SENTINEL`
-    #     write) — its effect is process state, not a binding, so like the memo-restore replay each side
-    #     must RE-RUN it for remote figures to match. A theme cell that also `using`s is already caught
-    #     by import_scaffold; a STANDALONE `set_theme!(…)` (no `using`) is caught here — else its theme
-    #     silently never reaches the region (the sentinel is deliberately NOT shipped — see presync).
-    env = [c for c in nb.report.cells
-           if c.kind == CODE && (ReportEngine._is_pure_using(c.source) || :import_scaffold in c.flags ||
-                                 ReportEngine._THEME_SENTINEL in c.writes)]
+    # Cells that ESTABLISH per-side state — pure `using`/`import`, the import scaffold, a `set_theme!`
+    # setter — re-run (never transferred) in document order so imports precede a scaffold/effect that
+    # builds on them. This is exactly the `PER_SIDE` category of the single `_cell_effect` classifier
+    # (deps.jl), so the region prime and the memo replay read the SAME definition — a standalone
+    # `set_theme!` can no longer silently miss the region. `RESOURCE` is per-side too but has data
+    # deps, so it replays at READ (`_ensure_resource_on!`), not here.
+    env = [c for c in nb.report.cells if ReportEngine._cell_effect(c) == ReportEngine.PER_SIDE]
     isempty(env) && return nothing
     sig = hash([c.src_hash for c in env])
     key = (nb.id, objectid(k))
@@ -1130,7 +1126,7 @@ function _ensure_resource_on!(nb::LiveNotebook, cell::Cell, dst_k, dst_side::Abs
              !ReportEngine._is_pure_using(o.source)) && (writer = o; break)
         end
         (writer === nothing || writer.output === nothing || r in writer.provides) && continue
-        if :resource in writer.flags
+        if ReportEngine._cell_effect(writer) == ReportEngine.RESOURCE
             _ensure_resource_on!(nb, writer, dst_k, dst_side; seen)      # a per-side upstream → replay it too
         else
             src_k = _side_kernel!(nb, _cell_side(nb, writer))            # portable input → ship the value
@@ -1208,7 +1204,7 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
         # A `:resource` writer is a live per-side handle (DB / file / socket) — it must NOT cross the
         # wire (it would land as a dangling pointer). Open it on THIS side instead: replay the resource
         # cell's source on `dst_k` so the reader gets its own handle (its upstreams staged inside).
-        if :resource in writer.flags
+        if ReportEngine._cell_effect(writer) == ReportEngine.RESOURCE
             if !prepared
                 ReportEngine.prepare!(src_k, nb.report); ReportEngine.prepare!(dst_k, nb.report)
                 _prime_namespace!(nb, src_k, src_side); _prime_namespace!(nb, dst_k, dst_side)
