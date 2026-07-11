@@ -317,7 +317,7 @@ code cell becomes `FRESH` on success or `ERRORED` if it threw; the error is
 captured, never propagated, so one bad cell doesn't abort the report.
 """
 # ── Durable memoization key (server side) ─────────────────────────────────────────────────────
-const _MEMO_THRESHOLD_MS = 400.0    # only cells slower than this are worth persisting to disk
+const _MEMO_THRESHOLD_MS = 150.0    # only cells slower than this are worth persisting to disk (export ignores it)
 
 # A cell is memoizable if its result is a pure function of its source + upstream sources + bind
 # inputs. Excluded: markdown, `using`/`import` barriers (:opaque — namespace effects not captured by

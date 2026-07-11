@@ -72,6 +72,7 @@ function exportHtml(dl) {
   if ((document.getElementById('htmlrunnable') || {}).checked) {
     parts.push('bundle=1');
     if ((document.getElementById('htmlhistory') || {}).checked) parts.push('history=1');   // ship full git history
+    const mp = _memoParam(); if (mp !== '') parts.push('memo=' + mp);   // precomputed-results budget for the embedded bundle
   }
   const q = parts.length ? '?' + parts.join('&') : '';
   if (dl === false) { window.open(_apipath('/api/export.html' + q), '_blank'); return; }
@@ -142,11 +143,52 @@ function _slug(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, 
 async function exportStandalone() {
   showLoading('Bundling environment + source…');
   try {
-    const r = await fetch(_apipath('/api/export.standalone.jl'));
+    const mp = _memoParam();
+    const r = await fetch(_apipath('/api/export.standalone.jl') + (mp === '' ? '' : '?memo=' + mp));
     if (!r.ok) { await alertDark('Standalone export failed:\n' + (await r.text())); return; }
     _saveBlob(await r.blob(), '.standalone.jl');
   } catch (e) { await alertDark('Standalone export failed: ' + e); }
   finally { hideLoading(); }
+}
+// ── Precomputed-results (memo) quality slider ─────────────────────────────────
+// The standalone / runnable-HTML formats can embed THIS notebook's memoizable cell results so it
+// springs to life on import (expensive cells RESTORE instead of recompute). The slider is a byte
+// BUDGET over the density-ranked catalog (compute-saved-per-byte): drag it down and only the
+// densest entries survive. The client mirrors the server's greedy fill so the live readout ("N
+// results · size · seconds saved") matches exactly what ships.
+let _memoCat = null;   // { entries:[{cell,bytes,ms}], total_bytes, total_ms } — densest first
+async function _memoLoadCatalog() {
+  _memoCat = null;
+  const ro = document.getElementById('memoreadout'); if (ro) ro.textContent = 'measuring…';
+  try { const r = await fetch(_apipath('/api/memo-catalog')); if (r.ok) _memoCat = await r.json(); } catch (_) {}
+  _memoSyncReadout();
+}
+function _memoPlan() {   // {count, bytes, ms, total} at the current slider budget
+  const q = +((document.getElementById('memoquality') || {}).value) || 0;
+  const ents = (_memoCat && _memoCat.entries) || [];
+  const budget = (q / 100) * ((_memoCat && _memoCat.total_bytes) || 0);
+  let count = 0, bytes = 0, ms = 0;
+  for (const e of ents) { if (bytes + e.bytes > budget) continue; count++; bytes += e.bytes; ms += e.ms || 0; }
+  return { count, bytes, ms, total: ents.length };
+}
+function _fmtBytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+function _memoSyncReadout() {
+  const ro = document.getElementById('memoreadout'); if (!ro) return;
+  const mq = document.getElementById('memoquality'); if (mq) localStorage.setItem('slate_memoquality', mq.value);
+  if (!_memoCat || !(_memoCat.entries || []).length) { ro.innerHTML = 'no cacheable results in this notebook'; return; }
+  const p = _memoPlan();
+  if (p.count === 0) { ro.innerHTML = '<b>off</b> — cells recompute on import'; return; }
+  const s = p.ms / 1000;
+  ro.innerHTML = `<b>${p.count}</b> of ${p.total} · <b>${_fmtBytes(p.bytes)}</b> · saves ~${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
+}
+// The `memo=<MB>` value for the export URL: "" = all (slider max / nothing to embed), "0" = none,
+// else the budget in MB (server re-derives bytes and fills densest-first within it).
+function _memoParam() {
+  const q = +((document.getElementById('memoquality') || {}).value);
+  if (!_memoCat || !(_memoCat.entries || []).length) return '';
+  if (q >= 100) return '';
+  if (q <= 0) return '0';
+  return (((q / 100) * (_memoCat.total_bytes || 0)) / 1048576).toFixed(3);
 }
 // Publication-quality PDF via Typst, driven by the modal's pdf* controls. Can take a few seconds
 // (first run also fetches Typst packages) → loading overlay + blob-download. Figures embed as vector.
@@ -191,6 +233,17 @@ function _exSyncRows() {
   const f = _exFormat();
   document.querySelectorAll('#exportbg .exrow').forEach(el => { el.style.display = el.classList.contains('fmt-' + f) ? '' : 'none'; });
   if (f === 'pdf') _pdfSyncSlides();
+  // The bundle-only rows (git history + precomputed results) apply only to a RUNNABLE html page —
+  // hide them when html isn't runnable, where they'd have nowhere to embed.
+  if (f === 'html') {
+    const run = (document.getElementById('htmlrunnable') || {}).checked;
+    ['htmlhistory', 'memorow'].forEach(id => {
+      const el = document.getElementById(id); const row = el && el.closest('.exrow');
+      if (row) row.style.display = run ? '' : 'none';
+    });
+  }
+  // Standalone / runnable-HTML can embed precomputed results — measure the catalog once the row shows.
+  if ((f === 'standalone' || f === 'html') && _memoCat === null) _memoLoadCatalog();
 }
 // Two separate flows, deliberately: LIVE SITES (github/s3/r2/rsync/cloudflare/netlify) are a
 // re-pushable multiselect; ZENODO is a distinct "mint a permanent DOI version" action (immutable —
@@ -383,6 +436,8 @@ function openExport(preset) {
   const sh = document.getElementById('sitehistory'); if (sh) sh.checked = localStorage.getItem('slate_sitehistory') === '1';
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
+  _memoCat = null;                                          // re-measure precomputed results per dialog open
+  const mq = document.getElementById('memoquality'); if (mq) mq.value = localStorage.getItem('slate_memoquality') || '100';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
   _loadSitePicker();             // populate the "Into site" picker from saved sites + destinations

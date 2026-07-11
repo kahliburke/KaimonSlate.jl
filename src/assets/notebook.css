@@ -1194,6 +1194,12 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
    action buttons to the bottom so they're always reachable and the progress log stays in view. */
 #exportbg .modal { max-width:720px; max-height:88vh; overflow-y:auto; }
 #exportbg .setrow { margin:11px 0; }
+/* Precomputed-results quality slider (export dialog): a JPEG-quality-style budget knob with a live
+   "N results · size · compute saved" readout. */
+.memoq { display:flex; align-items:center; gap:10px; flex:1 1 auto; min-width:0; }
+.memoq input[type=range] { flex:0 0 42%; accent-color:var(--accent); }
+.memoreadout { color:var(--dim); font-size:.76rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.memoreadout b { color:var(--val); font-weight:600; }
 #exportbg .row { position:sticky; bottom:-18px; background:var(--bg2); margin:8px -20px -18px; padding:12px 20px; border-top:1px solid var(--border); z-index:2; }
 /* Themed scrollbars for the publish/manager scroll areas (Firefox + WebKit), matching the dark UI. */
 #exportbg .modal, .publog, .pubmodal, .pubbody, .pubdash, .pdbody { scrollbar-width:thin; scrollbar-color:var(--border) transparent; }

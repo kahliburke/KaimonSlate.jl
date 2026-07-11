@@ -772,10 +772,14 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.html", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         _run = get(qp, "bundle", "0") == "1"   # embed the reproducible bundle + a "Run live" launcher
+        mb = get(qp, "memo", "")               # precomputed-results budget (MB) for the embedded bundle
+        budget = isempty(mb) ? typemax(Int) :
+                 (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
                            theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
                            outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run,
-                           history = get(qp, "history", "0") == "1")   # source-only by default (public page)
+                           history = get(qp, "history", "0") == "1",   # source-only by default (public page)
+                           memo_budget = budget)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
             fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
