@@ -1476,6 +1476,9 @@ Start the single notebook server with an empty registry. Add notebooks with
 [`open_notebook!`](@ref). Non-blocking.
 """
 function start_hub(; host = "127.0.0.1", port = 8765)
+    # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
+    # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
+    _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
     h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock())
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream

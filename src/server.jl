@@ -1038,11 +1038,21 @@ function _health_transition!(nb::LiveNotebook, rec)
 end
 
 # JSON view for the health panel / state meta.
+# The worker-payload SHA the hub's OWN code was loaded from, stamped at `start_hub`. Compared to the
+# live on-disk SHA to tell whether Slate's `src/` changed since THIS server process started. Revise
+# applies function-body edits live, but struct/const/new-gate-tool changes don't take until a restart
+# — and a silently-stale hub (edits not taking effect) is exactly the confusion that cost us today. So
+# we surface a passive "restart to apply" hint rather than trying to hot-reload the live server.
+const _HUB_START_SHA = Ref("")
+_hub_src_stale() = !isempty(_HUB_START_SHA[]) &&
+    (try; ReportEngine._payload_sha() != _HUB_START_SHA[]; catch; false; end)
+
 function _health_json(nb::LiveNotebook)
     rec = nb_health(nb.id)
-    rec === nothing && return Dict{String,Any}("status" => "ok", "alerts" => Any[])
+    stale = _hub_src_stale()
+    rec === nothing && return Dict{String,Any}("status" => "ok", "alerts" => Any[], "src_stale" => stale)
     now = time()
-    Dict{String,Any}("status" => rec.status, "ts" => rec.ts,
+    Dict{String,Any}("status" => rec.status, "ts" => rec.ts, "src_stale" => stale,
         "alerts" => Any[Dict{String,Any}("kind" => a.kind, "scope" => a.scope, "target" => a.target,
                                           "since" => a.since, "age" => round(Int, now - a.since),
                                           "detail" => a.detail) for a in rec.alerts])

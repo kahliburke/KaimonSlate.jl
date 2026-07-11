@@ -35,6 +35,7 @@
     .healthbadge.warn{color:#e8a13f;background:rgba(232,161,63,.14);border:1px solid rgba(232,161,63,.3);}
     .healthbadge.crit{color:#e5636e;background:rgba(229,99,110,.15);border:1px solid rgba(229,99,110,.35);
       animation:healthpulse 1.6s ease-in-out infinite;}
+    .healthbadge.info{color:#7cc0ff;background:rgba(124,192,255,.12);border:1px solid rgba(124,192,255,.3);}
     @keyframes healthpulse{0%,100%{opacity:1}50%{opacity:.55}}
     .healthpanel{display:none;position:fixed;top:44px;right:12px;z-index:60;width:340px;max-width:92vw;
       background:#141828;border:1px solid #2a2e40;border-radius:11px;padding:8px;
@@ -95,23 +96,37 @@
   function renderBadge() {
     const b = badge(); if (!b) return;
     const a = last.alerts || [];
-    if (!a.length || last.status === 'ok') {
+    const alerting = a.length && last.status !== 'ok';
+    if (!alerting && !last.src_stale) {                    // nothing to show
       b.style.display = 'none';
       if (open) { open = false; const p = panel(); if (p) p.classList.remove('open'); }
       return;
     }
-    const crit = last.status === 'critical';
-    b.className = 'healthbadge ' + (crit ? 'crit' : 'warn');
-    b.innerHTML = (crit ? '⛔' : '⚠') + ' ' + a.length;
+    if (alerting) {                                        // a watchdog alert wins the badge; ↻ if also stale
+      const crit = last.status === 'critical';
+      b.className = 'healthbadge ' + (crit ? 'crit' : 'warn');
+      b.innerHTML = (crit ? '⛔' : '⚠') + ' ' + a.length + (last.src_stale ? ' ↻' : '');
+    } else {                                               // only "server source changed" — a passive info nudge
+      b.className = 'healthbadge info';
+      b.innerHTML = '↻ restart to apply';
+    }
     b.style.display = 'inline-flex';
   }
 
   function renderPanel() {
     const p = panel(); if (!p) return;
     const a = last.alerts || [];
+    // "server source changed" is a PASSIVE nudge — no action button, because the fix is a manual
+    // restart of the Slate server (hot-reloading it in place is fragile; Revise handles function edits).
+    const stale = last.src_stale
+      ? `<div class="hprow warn"><span class="hpico">↻</span><span class="hpmain">` +
+        `<b>server source changed</b> since it started<span class="hpdetail">Revise applies function ` +
+        `edits live — RESTART the Slate server to pick up struct / new-tool changes</span></span></div>`
+      : '';
     p.innerHTML = `<div class="hphdr"><b>Watchdog health</b>` +
       `<span class="hpclose" onclick="window.__healthToggle()">✕</span></div>` +
-      (a.length ? a.map(alertRow).join('') : `<div class="hpok">✓ all clear</div>`);
+      stale +
+      (a.length ? a.map(alertRow).join('') : (stale ? '' : `<div class="hpok">✓ all clear</div>`));
   }
 
   async function poll() {
