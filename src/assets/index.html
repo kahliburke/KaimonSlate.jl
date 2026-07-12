@@ -230,6 +230,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .heroactions{margin-left:auto;display:flex;align-items:center;gap:10px;}   /* settings-like actions, top-right */
 .herobtn{align-self:center;background:#141828;color:#d4d8e8;border:1px solid #2a2e40;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.85rem;white-space:nowrap;}
 .herobtn:hover{border-color:#569cd6;color:#569cd6;}
+/* Persistent docs link, pinned lower-right — quiet until hovered. */
+.docslink{position:fixed;right:18px;bottom:16px;z-index:40;display:inline-flex;align-items:center;gap:6px;
+  background:#141828;border:1px solid #2a2e40;border-radius:8px;padding:6px 11px;color:#7a82a4;
+  text-decoration:none;font-size:.82rem;transition:color .15s,border-color .15s;}
+.docslink:hover{color:#569cd6;border-color:#569cd6;}
+.docslink svg{display:block;}
 .pubdash{max-width:none;width:min(1040px,94vw);max-height:88vh;display:flex;flex-direction:column;}
 .pdhead{display:flex;align-items:center;gap:10px;margin-bottom:2px;}
 .pdhead strong{font-size:1.05rem;color:#fff;} .pdhead .pdsub{color:#6a7090;font-size:.78rem;}
@@ -1604,4 +1610,13 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   try{var last=localStorage.getItem('slateLastDir'); if(last){inp.value=last;}}catch(e){}
 })();
 </script>
+<a class="docslink" href="https://kahliburke.github.io/KaimonSlate.jl/" target="_blank" rel="noopener"
+   title="Open the Kaimon Slate documentation">
+  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"
+       stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 4.6A1.6 1.6 0 0 1 5.6 3H11v16.5H5.6A1.6 1.6 0 0 0 4 21z"/>
+    <path d="M20 4.6A1.6 1.6 0 0 0 18.4 3H13v16.5h5.4A1.6 1.6 0 0 1 20 21z"/>
+  </svg>
+  <span>Docs</span>
+</a>
 </body></html>
