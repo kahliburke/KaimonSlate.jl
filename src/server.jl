@@ -398,6 +398,8 @@ end
 # the running loop. Version-guarded: a cell edited/deleted mid-run discards its in-flight result.
 const _RUNNERS = Dict{String,Bool}()          # nb.id → a runner task is active
 const _RUNNER_LOCK = ReentrantLock()
+const _RUNNER_FAILS = Dict{String,Int}()      # nb.id → consecutive runner failures; backs off + gives up so a
+                                              # persistently-throwing drain can't re-arm in a tight loop (hub spin + log flood)
 
 # Per-notebook MAIN-kernel worker identity we last re-established (`_worker_key` = objectid + ns_gen). A
 # worker swap (cold spawn / pool adopt / reprovision — never a reattach) bumps `k.ns_gen`, handing us a
@@ -1347,6 +1349,17 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         catch e
             ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
                                first(sprint(showerror, e), 160))
+            # The region worker couldn't come up — surface it AS the cell's error and STOP. Running on the
+            # dead kernel just errors anyway, but leaving the cell unresolved let the runner re-arm and
+            # churn (relogging every pass → the hub spun + the log ballooned).
+            lock(nb.lock) do
+                cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
+                    ReportEngine.BindSpec[], "", "region worker on $host could not start: " *
+                    first(sprint(showerror, e), 160), nothing, 0.0)
+                cell.state = ERRORED
+                _broadcast_progress(nb, cell)
+            end
+            return nothing            # the finally still drops the status bar
         finally
             ReportEngine._do_userprog(nb.report.id, 1.0, "", "spawn-" * cell.id, true)   # drop the status bar
         end
@@ -1752,13 +1765,26 @@ function _run_loop!(nb::LiveNotebook)
             lock(nb.lock) do; nb.version += 1; end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
         end
+        lock(_RUNNER_LOCK) do; delete!(_RUNNER_FAILS, nb.id); end   # clean drain (cells may have ERRORED, but no throw) → clear the streak
     catch e
-        @warn "slate async runner error" notebook = nb.id exception = (e, catch_backtrace())
+        fails = lock(_RUNNER_LOCK) do; _RUNNER_FAILS[nb.id] = get(_RUNNER_FAILS, nb.id, 0) + 1; end
+        @warn "slate async runner error" notebook = nb.id fails = fails exception = (e, catch_backtrace()) maxlog = 5
+        # A throw that leaves work pending would re-arm INSTANTLY below → a tight busy-loop that pins the
+        # hub and floods the log (seen: a dead region churned to a 1GB log). Back off (capped) so a wedged
+        # drain retries slowly, not hot.
+        sleep(min(0.5 * fails, 15.0))
     finally
         lock(_RUNNER_LOCK) do; delete!(_RUNNERS, nb.id); end
-        # Re-arm if work appeared between our last empty check and clearing the flag.
         again = lock(nb.lock) do; _next_stale_cell(nb.report) !== nothing; end
-        again && _ensure_runner!(nb)
+        # Give up re-arming after too many consecutive failures — the work is wedged (a dead region, a cell
+        # that can't resolve). A user edit / explicit re-run clears the counter (the drain path above) and
+        # revives it. Without this cap a permanently-failing pass spins forever.
+        giveup = lock(_RUNNER_LOCK) do; get(_RUNNER_FAILS, nb.id, 0) >= 20; end
+        if again && !giveup
+            _ensure_runner!(nb)
+        elseif again && giveup
+            ReportEngine._rlog("slate: notebook $(nb.id) runner gave up after 20 failed passes — edit or re-run a cell to retry")
+        end
     end
     return nothing
 end
