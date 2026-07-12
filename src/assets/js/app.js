@@ -4,3 +4,4 @@
 // <Notebook> into #nb and owns the cell rendering. Importing it here boots the whole UI.
 import './notebook.js';
 import './toc.js';       // Table of Contents — first island migrated off the classic scripts
+import './health.js';    // Watchdog health badge + panel
