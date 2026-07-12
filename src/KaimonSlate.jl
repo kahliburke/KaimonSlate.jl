@@ -573,12 +573,20 @@ function create_tools(GateTool::Type)
             if !isempty(stj)
                 g(key) = (m = match(Regex("\"" * key * "\":(-?[0-9.]+)"), stj); m === nothing ? nothing : m.captures[1])
                 mb(v) = string(round(parse(Float64, v) / 2^20; digits = 1), "MB")
+                hb(v) = (x = parse(Float64, v); x >= 2^30 ? string(round(x / 2^30; digits = 1), "GB") : mb(string(x)))
                 cpu = g("cpu"); rss = g("rss"); memo = g("memo_bytes"); ev = g("evals")
                 parts = String[]
                 (cpu !== nothing && cpu != "-1.0") && push!(parts, "cpu $(cpu)%")
                 rss === nothing || push!(parts, "rss $(mb(rss))")
                 memo === nothing || push!(parts, "memo $(mb(memo))")
                 ev === nothing || push!(parts, "$(ev) running")
+                # System-wide (the whole HOST, not just this worker) — added for remote regions so the
+                # box's overall load/memory is visible next to the process figures.
+                scpu = g("sys_cpu"); load1 = g("load1"); smt = g("sys_mem_total"); smf = g("sys_mem_free")
+                (scpu !== nothing && scpu != "-1.0") && push!(parts, "host-cpu $(scpu)%")
+                (load1 !== nothing && load1 != "-1.0") && push!(parts, "load $(load1)")
+                (smt !== nothing && smf !== nothing && smt != "0") &&
+                    push!(parts, "host-mem $(hb(string(parse(Float64, smt) - parse(Float64, smf))))/$(hb(smt))")
                 isempty(parts) || println(io, "      stats: ", join(parts, " · "))
             end
         end

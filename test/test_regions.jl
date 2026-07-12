@@ -52,7 +52,8 @@ const RE = KaimonSlate.ReportEngine
         s0 = RE._remote_worker_script(t0, 9100, 9101, "/home/me/proj", "PUB")
         s1 = RE._remote_worker_script(t1, 9100, 9101, "/home/me/proj", "PUB")
         @test !occursin("KAIMONSLATE_DATADIR", s0)                     # no root → no env line at all
-        @test occursin("ENV[\"KAIMONSLATE_DATADIR\"] = raw\"/scratch/flights\"", s1)
+        @test occursin("ENV[\"KAIMONSLATE_DATADIR\"] = expanduser(raw\"/scratch/flights\")", s1)  # expanded on the remote
+        @test occursin("PARENT_PROJECT[] = expanduser(", s1)           # project base absolute → no tilde @asset/@sfile paths
         @test startswith(strip(s1), "ENV[\"KAIMONSLATE_DATADIR\"]")    # set BEFORE the worker boots
         @test Meta.parseall(s1) isa Expr                               # the generated script is valid Julia
     end

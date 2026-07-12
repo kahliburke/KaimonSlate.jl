@@ -1226,10 +1226,14 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
         # A name the writer PROVIDES — a `using`/`import` export or a Slate-injected helper harvested
         # into the import scaffold (`ylims!`, `Slider`, `Figure`, …) — is NAMESPACE, not data: it's
         # defined on EVERY kernel already (the using-mirror + helper injection). Shipping it errors
-        # (assign-to-const, or JLS decode without the package). Only genuine data writes cross. This
-        # generalises the old pure-`using` skip: a cell like `using X; set_theme!()` isn't pure-using,
-        # but its exports are still namespace and must not ship.
-        (r in writer.provides || ReportEngine._is_pure_using(writer.source)) && continue
+        # (assign-to-const, or JLS decode without the package). Only genuine data writes cross.
+        # More broadly: a value WRITTEN BY A PER_SIDE cell (pure `using`, an import SCAFFOLD like
+        # `using X; render_graph(…) = …`, a theme setter) is re-established on each side by PRIMING
+        # that cell's whole source (`_prime_namespace!`), so a FUNCTION/const it defines must not ship
+        # either — such a value lives in the notebook's anonymous `NB` module, which JLS records as
+        # `Main.NB.<name>` and the far side (no `Main.NB` binding) can't decode. Priming defines it
+        # natively there instead. (Subsumes the old pure-`using` skip.)
+        (r in writer.provides || ReportEngine._cell_effect(writer) == ReportEngine.PER_SIDE) && continue
         src_side = _cell_side(nb, writer)
         src_k = _side_kernel!(nb, src_side)
         # A `:resource` writer is a live per-side handle (DB / file / socket) — it must NOT cross the

@@ -1776,7 +1776,22 @@ function _telemetry_loop!(stats_path::String)
     else
         Int(Sys.maxrss())                               # Windows/other: peak RSS fallback
     end
+    # SYSTEM-WIDE cpu — the whole HOST, not just this worker process — so a remote region shows what the
+    # box is doing (a CUDA precompile pegging every core, a neighbour hogging it). Linux /proc/stat's
+    # aggregate line → (busy, total) jiffies; the loop deltas them into a %. Non-Linux → n/a (loadavg
+    # still rides along cross-platform).
+    sysstat() = if Sys.islinux()
+        try
+            f = split(first(eachline("/proc/stat")))          # "cpu" user nice system idle iowait irq softirq steal …
+            v = parse.(Int, f[2:end])
+            total = sum(v); idle = v[4] + (length(v) >= 5 ? v[5] : 0)   # idle + iowait
+            (total - idle, total)
+        catch; (-1, -1); end
+    else
+        (-1, -1)
+    end
     lastc = cputime(); lastw = time(); memo = -1; tick = 0
+    lastsb, lastst = sysstat()
     while true
         sleep(2.0)
         tick += 1
@@ -1791,8 +1806,18 @@ function _telemetry_loop!(stats_path::String)
         running = "[" * join(("\"" * replace(String(id), "\\" => "\\\\", "\"" => "\\\"") * "\"" for id in runids), ",") * "]"
         gcms = round(Int, Base.gc_num().total_time / 1e6)
         warm = replace(_WARM_STATUS[], "\\" => "\\\\", "\"" => "\\\"")   # preload/precompile progress
+        # System-wide load: host CPU% (delta), 1-min load average, and total/free RAM — the "in addition to
+        # process-level" view for a region worker's whole box.
+        sb, st = sysstat()
+        syscpu = (st > 0 && lastst > 0 && st > lastst) ? round(100 * (sb - lastsb) / (st - lastst); digits = 1) : -1.0
+        lastsb, lastst = sb, st
+        load1 = try; round(Sys.loadavg()[1]; digits = 2); catch; -1.0; end
+        smt = try; Int(Sys.total_memory()); catch; 0; end
+        smf = try; Int(Sys.free_memory()); catch; 0; end
         line = "{\"cpu\":$cpu,\"rss\":$(rssbytes()),\"gc_ms\":$gcms,\"evals\":$evals," *
-               "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo,\"ts\":$(round(Int, time()))}"
+               "\"running\":$running,\"warm\":\"$warm\",\"memo_bytes\":$memo," *
+               "\"sys_cpu\":$syscpu,\"load1\":$load1,\"sys_mem_total\":$smt,\"sys_mem_free\":$smf," *
+               "\"ts\":$(round(Int, time()))}"
         try; KaimonGate._publish_stream("slate_telemetry", line); catch; end
         isempty(stats_path) || try                          # roster sidecar — remote workers only
             tmp = stats_path * ".tmp"

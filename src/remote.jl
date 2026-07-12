@@ -217,6 +217,34 @@ function _run_logged(cmd::Cmd, what::AbstractString)
     return (ok, s)
 end
 
+# Like `_run_logged`, but STREAMS the merged stdout/stderr into the remote log LINE-BY-LINE as it
+# arrives, tagged with `what`, so a long remote step (env instantiate / precompile — minutes, otherwise
+# silent) is visible live via `tail -f ~/.cache/kaimonslate/remote.log`. Each line is also handed to
+# `online` (a callback the caller can point at the UI bring-up banner). Returns (ok, full output).
+function _run_streamed(cmd::Cmd, what::AbstractString; online = nothing)
+    out = Pipe()
+    proc = try; run(pipeline(cmd; stdout = out, stderr = out); wait = false)
+            catch e; _rlog("FAILED: $what (could not start: $(sprint(showerror, e)))"); return (false, ""); end
+    close(out.in)
+    lines = String[]
+    for line in eachline(out)                     # blocks per line until the remote closes the pipe (process exit)
+        push!(lines, line)
+        s = strip(line); isempty(s) && continue
+        _rlog("  ⟨$what⟩ $s")                     # live progress — the remote step narrates itself into the log
+        online === nothing || try; online(String(s)); catch; end
+    end
+    wait(proc)
+    ok = success(proc)
+    ok || _rlog("FAILED: $what (exit $(proc.exitcode))")
+    return (ok, join(lines, "\n"))
+end
+
+# Optional sink the SERVER registers to surface a live remote bring-up line in the browser (the hydrating
+# banner), so a remote provision narrates itself in the UI, not only in `remote.log`. Best-effort and
+# global — unset (the default) makes `_bringup_note` a no-op, so the log streaming stands on its own.
+const _BRINGUP_SINK = Ref{Any}(nothing)
+_bringup_note(line::AbstractString) = (f = _BRINGUP_SINK[]; f === nothing || (try; f(String(line)); catch; end); nothing)
+
 _ssh_ok(host, argv::Cmd) = first(_run_logged(_ssh(host, argv), "ssh $host"))
 
 # Existence/predicate check over ssh — a nonzero exit is a normal FALSE (e.g. `test -f` on a missing
@@ -230,7 +258,7 @@ _ssh_test(host, argv::Cmd) =
 # and zsh globbed `Pkg.activate(ARGS[1])` → "no matches found"). A script path is a single clean token, so
 # it survives. The script self-activates via `homedir()` (a `--project=~/…` wouldn't expand under ssh).
 # Returns ok::Bool; the remote script is removed after.
-function _ssh_julia!(host, code::AbstractString, what::AbstractString)
+function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::Bool = false, online = nothing)
     _ssh_ok(host, `mkdir -p $_REMOTE_ROOT`) || return (false, "")
     tmp = tempname()
     write(tmp, code)
@@ -240,7 +268,8 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString)
     catch; false; end
     rm(tmp; force = true)
     scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return (false, ""))
-    ok, out = _run_logged(_ssh(host, `julia --startup-file=no $remote`), what)
+    jcmd = _ssh(host, `julia --startup-file=no $remote`)
+    ok, out = stream ? _run_streamed(jcmd, what; online = online) : _run_logged(jcmd, what)
     try; run(pipeline(_ssh(host, `rm -f $remote`); stdout = devnull, stderr = devnull)); catch; end
     return (ok, out)
 end
@@ -416,8 +445,9 @@ const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # rsync'd sources for dev'd deps
 
 Reproduce `t.origin_env` (the notebook's local project) on the remote at `t.project`: rsync it wholesale
 (Project.toml + Manifest.toml + any /src), rsync each dev'd dep's source into `devsrc/<name>` and rewrite
-the Manifest to point there, then instantiate. The Manifest makes registry versions exact and clones git
-deps from their recorded urls; the dev-source rsync makes local checkouts resolve on the host.
+BOTH the Manifest `path` and Project.toml's `[sources]` path (Julia ≥1.11 resolves dev deps from the
+latter) to point there, then instantiate. The Manifest makes registry versions exact and clones git deps
+from their recorded urls; the dev-source rsync makes local checkouts resolve on the host.
 """
 function _replicate_env!(t::RemoteTarget)
     host = t.ssh_host
@@ -430,6 +460,14 @@ function _replicate_env!(t::RemoteTarget)
     devs = _dev_deps(joinpath(origin, "Manifest.toml"), origin)
     rewrites = Tuple{String,String}[]
     for (name, lpath) in devs
+        # The project itself appears in its own Manifest as a path dep (`path = "."`). It IS `t.project`
+        # on the remote (the active project) — don't copy it into devsrc or redirect its path there.
+        # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/"), so it
+        # compares equal to the env dir.
+        if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(origin)), '/')
+            _rlog("env: dev dep '$name' is the project itself — left as the active project (not redirected to devsrc)")
+            continue
+        end
         if !isdir(lpath)
             _rlog("env: dev dep '$name' source missing locally ($lpath) — skipping (its Manifest path will dangle)")
             continue
@@ -442,7 +480,10 @@ function _replicate_env!(t::RemoteTarget)
     end
     # 3. rewrite the remote Manifest's dev paths to the rsync'd locations, then instantiate.
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
-    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise()), "instantiate replicated env on $host")
+    # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
+    # multi-minute bring-up narrates its progress (resolve, install, Precompiling …) instead of going dark.
+    ok, out = _ssh_julia!(host, _env_instantiate_script(projrel, rewrites, _local_has_revise()),
+                          "instantiate on $host"; stream = true, online = _bringup_note)
     ok || error("env: instantiate failed on $host — $(first(strip(out), 500))")
     return nothing
 end
@@ -481,6 +522,22 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
             println(io, "  end")
         end
         println(io, "  open(mf, \"w\") do _io; TOML.print(_io, data); end")
+        println(io, "end")
+        # Julia ≥1.11 records a `Pkg.develop`'d path in Project.toml's `[sources]`, and that is what the
+        # RESOLVER reads (`Pkg.add`/instantiate) — rewriting only the Manifest leaves `[sources]` pointing
+        # at the local `../dep` path, which dangles on the remote. Redirect it to the rsync'd devsrc too.
+        println(io, "pf = joinpath(proj, \"Project.toml\")")
+        println(io, "if isfile(pf)")
+        println(io, "  pdata = TOML.parsefile(pf)")
+        println(io, "  src = get(pdata, \"sources\", nothing)")
+        println(io, "  if src isa AbstractDict")
+        for (name, rp) in rewrites
+            println(io, "    if get(src, raw\"$name\", nothing) isa AbstractDict && haskey(src[raw\"$name\"], \"path\")")
+            println(io, "      src[raw\"$name\"][\"path\"] = joinpath(homedir(), raw\"$rp\")")
+            println(io, "    end")
+        end
+        println(io, "    open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
+        println(io, "  end")
         println(io, "end")
     end
     println(io, "Pkg.activate(proj)")
@@ -567,13 +624,13 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     # scratch disk, a shared mount that already holds the data. Set it BEFORE the worker starts so
     # `datadir()` resolves it from t=0 (a cold-spawned region worker is correct from birth; an
     # ADOPTED pool worker gets the same via `__slate_adopt`). Empty ⇒ the worker's own <project>/data.
-    dd = isempty(t.datadir) ? "" : "ENV[\"KAIMONSLATE_DATADIR\"] = raw\"$(t.datadir)\"\n    "
+    dd = isempty(t.datadir) ? "" : "ENV[\"KAIMONSLATE_DATADIR\"] = expanduser(raw\"$(t.datadir)\")\n    "
     return """
     $(dd)_wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
     import KaimonGate
     try; @eval using Revise; catch; end
     include(_wk)
-    SlateWorker.PARENT_PROJECT[] = raw"$parent"
+    SlateWorker.PARENT_PROJECT[] = expanduser(raw"$parent")   # `~/.cache/…` → absolute, so @asset/@sfile/datadir don't emit un-expandable tilde paths
     SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),

@@ -487,6 +487,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(function __slate_readfile(p::AbstractString; bytes::Bool = false)
         base = __slate_assetbase()
         ap = isabspath(p) ? String(p) : joinpath(isempty(base) ? pwd() : base, String(p))
+        ap = expanduser(ap)   # a remote worker's asset base is `~/.cache/…` (tilde) — `read`/`open` don't expand it
         return bytes ? read(ap) : read(ap, String)
     end))
     Core.eval(m, :(const readfile = __slate_readfile))

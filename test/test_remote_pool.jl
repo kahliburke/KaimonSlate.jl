@@ -143,4 +143,39 @@ mkworker(port; alive = true, state = "idle", pool = "1", hub = gethostname(),
         @test RE._manifest_get(s, "port") == "9100"
         @test RE._manifest_get(s, "missing") == ""
     end
+
+    @testset "_dev_deps: path deps detected; registry deps excluded" begin
+        dir = mktempdir()
+        write(joinpath(dir, "Manifest.toml"), """
+        [[deps.JSON]]
+        uuid = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+        version = "0.21.4"
+
+        [[deps.NeuroDSL]]
+        deps = ["JSON"]
+        path = "../NeuroDSL"
+        uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+        [[deps.NeuroSlate]]
+        path = "."
+        uuid = "5e9a7c2b-1d4f-4a6e-b3c8-0f2a9d5e8b71"
+        """)
+        d = Dict(RE._dev_deps(joinpath(dir, "Manifest.toml"), dir))
+        @test !haskey(d, "JSON")                                   # registry dep (no path) → not a dev dep
+        @test d["NeuroDSL"] == abspath(joinpath(dir, "../NeuroDSL"))
+        @test rstrip(d["NeuroSlate"], '/') == abspath(dir)         # path="." → the project itself (self-skip target)
+    end
+
+    @testset "_env_instantiate_script: rewrites Manifest AND Project.toml [sources]" begin
+        s = RE._env_instantiate_script(".cache/kaimonslate/remote/NeuroSlate",
+                                       [("NeuroDSL", ".cache/kaimonslate/devsrc/NeuroDSL")], false)
+        @test !any(a -> a isa Expr && a.head === :error, Meta.parseall(s).args)   # valid Julia
+        @test occursin("Manifest.toml", s) && occursin("Project.toml", s)
+        @test occursin("\"sources\"", s)                           # the resolver-facing path (Julia ≥1.11)
+        @test occursin("devsrc/NeuroDSL", s)
+        # No dev deps → no TOML surgery at all, just activate + instantiate.
+        s0 = RE._env_instantiate_script("x", Tuple{String,String}[], false)
+        @test !occursin("sources", s0) && !occursin("parsefile", s0)
+        @test occursin("Pkg.instantiate()", s0)
+    end
 end

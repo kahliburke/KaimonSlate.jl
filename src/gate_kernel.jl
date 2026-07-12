@@ -203,6 +203,10 @@ end
 # Worker connection name → report id, for routing gate-stream `slate_refresh`
 # events back to the right notebook's recompute callback.
 const _GATE_SESSION = Dict{String,String}()
+const _GATE_SESSION_LOCK = ReentrantLock()   # `_GATE_SESSION` is read by the poller task while prepare!/kill
+                                             # mutate it from other threads — a Dict is not thread-safe, so an
+                                             # unlocked concurrent access tears (UndefRefError) and kills the
+                                             # poller cycle (dropping reactivity/stream events). Guard all access.
 const _POLLER = Ref{Any}(nothing)
 
 # conn name → rolling history of that worker's telemetry samples (newest last). Keyed PER-KERNEL
@@ -300,7 +304,7 @@ function _ensure_poller!()
                     # human DISPLAY label (`display_name`) — once a session carries a notebook-filename
                     # label, display_name diverges from name and a `session_name` lookup silently misses,
                     # dropping every slate_refresh/progress/hot-reload event (dead reactivity).
-                    rid = get(_GATE_SESSION, m.conn_name, nothing)
+                    rid = lock(_GATE_SESSION_LOCK) do; get(_GATE_SESSION, m.conn_name, nothing); end
                     rid === nothing && continue
                     if m.channel == "slate_refresh"
                         s = get!(pending, rid, Set{String}())
@@ -482,7 +486,7 @@ function _kill_worker!(k::GateKernel; kill_remote::Bool = false)
     # detached (kept warm for reattach) unless `kill_remote` — see `teardown_remote!`.
     (k.target isa RemoteTarget || k.tunnel !== nothing) && teardown_remote!(k; kill = kill_remote)
     if k.conn !== nothing
-        try; delete!(_GATE_SESSION, k.conn.name); catch; end
+        try; lock(_GATE_SESSION_LOCK) do; delete!(_GATE_SESSION, k.conn.name); end; catch; end
         # Tear the client connection DOWN, not just drop the reference: `disconnect!` closes the
         # DEALER, stops its background reader task, and parks/closes the ZMQ context. Without it the
         # reader keeps `recv`-ing on the now-dead worker port — throwing every iteration (an
@@ -511,7 +515,7 @@ function prepare!(k::GateKernel, report::Report)
             # connection reconnects on the next prepare (gate on `conn === nothing`).
             if k.conn === nothing
                 k.conn, k.tunnel = spawn_and_connect_remote!(k, k.target, k.parent)
-                _GATE_SESSION[k.conn.name] = report.id
+                lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end
                 _ensure_poller!()
                 # Carry the local memo store over NOW — the eval that triggered this prepare
                 # dispatches next, and a push after it races the recompute (same-key clobber).
@@ -523,7 +527,7 @@ function prepare!(k::GateKernel, report::Report)
             # reconnects (we can't respawn someone else's worker), so gate on `conn === nothing`.
             if k.conn === nothing
                 _connect!(k)
-                _GATE_SESSION[k.conn.name] = report.id
+                lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end
                 _ensure_poller!()
             end
         # Spawn if never started, OR respawn if the worker died (OOM / segfault / user exit()) —
@@ -532,7 +536,7 @@ function prepare!(k::GateKernel, report::Report)
             _kill_worker!(k)                      # tear down a dead/old proc before replacing (no leak/orphan)
             _spawn_worker!(k)
             _connect!(k)
-            _GATE_SESSION[k.conn.name] = report.id   # route this worker's stream events back to the notebook
+            lock(_GATE_SESSION_LOCK) do; _GATE_SESSION[k.conn.name] = report.id; end   # route this worker's stream events back to the notebook
             _ensure_poller!()
             _reconstruct_env!(k)                  # env dir absent but footer has a delta → rebuild it
             _maybe_sync_parent!(k)                # forked + parent drifted → re-resolve once, up front

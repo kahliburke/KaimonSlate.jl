@@ -1513,25 +1513,47 @@ _plainify(x) = x
 # JSON-able reply Dict (`ok`/`value` or `ok=false`/`error`). Never throws — a dead kernel / missing
 # channel / throwing handler all come back as a clean `error` so the browser Promise rejects cleanly.
 function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args)
-    k = nb.kernel
     args = _plainify(args)   # strip JSON.jl types so ANY worker env can deserialize the request payload
+    # A `slate_on` handler lives in the namespace of the kernel its cell RAN ON — under a region that may
+    # be a region worker, not the main one. Try the main kernel, then each active region kernel, and use
+    # whichever actually has the channel registered: a "no handler here" moves on, a handler that RETURNS
+    # or THROWS stops the search (its outcome is the answer).
+    kernels = Any[nb.kernel]
+    append!(kernels, lock(_REGION_LOCK) do
+        Any[k for ((id, _side), k) in _REGION_KERNELS if id == nb.id]
+    end)
+    lasterr = "no slate_on handler registered for channel '$channel'"
+    for k in kernels
+        found, reply = _try_slate_call(nb, k, channel, args)
+        found && return reply
+        lasterr = get(reply, "error", lasterr)
+    end
+    return Dict{String,Any}("ok" => false, "error" => lasterr)
+end
+
+# Attempt the call on ONE kernel. Returns (found, reply): found=true if this kernel owns the channel
+# (the handler returned a value or threw — either way, that's the answer); found=false only for
+# "no handler here" or an infra hiccup, so the caller tries the next kernel.
+function _try_slate_call(nb::LiveNotebook, k, channel::AbstractString, args)
+    _nohandler(e) = occursin("no slate_on handler", e) || occursin("handlers unavailable", e)
     try
         if k isa ReportEngine.GateKernel
             r = ReportEngine._tool(k, "__slate_call",
                     Dict{String,Any}("channel" => String(channel), "args" => args); timeout = 30.0)
-            return _gf(r, :ok, false) === true ?
-                Dict{String,Any}("ok" => true, "value" => _gf(r, :value, nothing)) :
-                Dict{String,Any}("ok" => false, "error" => string(_gf(r, :error, "call failed")))
+            _gf(r, :ok, false) === true &&
+                return (true, Dict{String,Any}("ok" => true, "value" => _gf(r, :value, nothing)))
+            err = string(_gf(r, :error, "call failed"))
+            return (!_nohandler(err), Dict{String,Any}("ok" => false, "error" => err))
         end
         # In-process kernel: invoke the handler directly in the report's namespace module.
         m = ReportEngine.report_module(nb.report)
         hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
-        (hs isa AbstractDict) || return Dict{String,Any}("ok" => false, "error" => "call handlers unavailable")
+        (hs isa AbstractDict) || return (false, Dict{String,Any}("ok" => false, "error" => "call handlers unavailable"))
         f = get(hs, String(channel), nothing)
-        f === nothing && return Dict{String,Any}("ok" => false, "error" => "no slate_on handler for '$channel'")
-        return Dict{String,Any}("ok" => true, "value" => Base.invokelatest(f, args))
+        f === nothing && return (false, Dict{String,Any}("ok" => false, "error" => "no slate_on handler registered for channel '$channel'"))
+        return (true, Dict{String,Any}("ok" => true, "value" => Base.invokelatest(f, args)))
     catch e
-        return Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300))
+        return (false, Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300)))
     end
 end
 
