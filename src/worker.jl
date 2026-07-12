@@ -1828,6 +1828,36 @@ function _telemetry_loop!(stats_path::String)
     end
 end
 
+# An IO that mirrors writes to an inner stream (the worker's real stderr / log pipe) AND republishes each
+# COMPLETED line over the gate stream as `slate_log`, so the hub can PUSH worker log records to open pages
+# live (uniform for local + remote workers) instead of the browser polling the log file. Line-buffered:
+# bytes accumulate until '\n', then the line (sans newline) is PUBbed. Thread-safe — many cells can log
+# concurrently; the lock keeps one record from interleaving mid-line in the buffer.
+mutable struct _LogTee <: IO
+    inner::IO
+    buf::IOBuffer
+    lock::ReentrantLock
+end
+_LogTee(inner::IO) = _LogTee(inner, IOBuffer(), ReentrantLock())
+function Base.unsafe_write(t::_LogTee, p::Ptr{UInt8}, n::UInt)
+    lock(t.lock) do
+        r = unsafe_write(t.inner, p, n)      # mirror verbatim to the real stream (file logging intact) — inside
+        for i in 1:n                         # the lock so concurrent records can't interleave in the file or buffer
+            b = unsafe_load(p, i)
+            if b == UInt8('\n')
+                line = String(take!(t.buf))
+                isempty(line) || (try; KaimonGate._publish_stream("slate_log", line); catch; end)
+            else
+                write(t.buf, b)
+            end
+        end
+        return r
+    end
+end
+Base.flush(t::_LogTee) = flush(t.inner)
+Base.isopen(t::_LogTee) = isopen(t.inner)
+Base.get(t::_LogTee, k, d) = get(t.inner, k, d)   # IOContext property probing (e.g. :color) delegates through
+
 """
     start(; host="127.0.0.1", port, stream_port)
 
@@ -1848,7 +1878,10 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # Timestamp every worker log record (local file + remote tail) so a bring-up / eval is legible after
     # the fact — the default logger emits none. Prepends `HH:MM:SS ` to the metadata prefix.
     try
-        Base.global_logger(Logging.ConsoleLogger(stderr, Logging.Info;
+        # Tee the log stream so every formatted record ALSO PUBs on `slate_log` (→ hub → the worker popup,
+        # live) while still writing to the worker-<port>.log file. Mirrors the pipe that `worker_log_tail`
+        # reads, so the pushed lines and the polled snapshot are the same text.
+        Base.global_logger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
             meta_formatter = (lvl, m, g, id, f, l) -> begin
                 c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
                 (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)

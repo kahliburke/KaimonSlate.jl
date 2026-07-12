@@ -218,6 +218,13 @@ const _KERNEL_STATS = Dict{String,Vector{Any}}()
 const _KERNEL_STATS_MAX = 30              # ~60s of history at the worker's 2s cadence
 const _STATS_LOCK = ReentrantLock()
 
+# Server-injected push hooks (same inversion as `_BRINGUP_SINK` / `register_emit!`): after a telemetry
+# sample is recorded — and for each worker log line — fire these so the hub can PUSH the value over the
+# per-page WebSocket instead of the browser polling. ReportEngine stays HTTP-agnostic; the server injects
+# the impls and re-registers them in `_hub()` for Revise reload-safety. Both fire on the poller task.
+const _TELEMETRY_SINK = Ref{Any}(nothing)   # (conn_name::String, sample::NamedTuple) -> nothing
+const _LOG_SINK = Ref{Any}(nothing)         # (conn_name::String, line::String)       -> nothing
+
 # Parse one `slate_telemetry` line into a flat NamedTuple + hub arrival time; nothing on garbage.
 function _parse_telemetry(raw::AbstractString)
     try
@@ -248,6 +255,18 @@ function _record_telemetry!(conn_name::AbstractString, raw::AbstractString)
         push!(h, s)
         length(h) > _KERNEL_STATS_MAX && deleteat!(h, 1:(length(h) - _KERNEL_STATS_MAX))
     end
+    # Push this fresh sample to any open page of the owning notebook (main/region pill + popup) — so an
+    # IDLE worker's number updates live rather than lagging until the next notebook state version-bump.
+    f = _TELEMETRY_SINK[]
+    f === nothing || (try; f(String(conn_name), s); catch; end)
+    return nothing
+end
+
+# Worker log record (`slate_log`) → server push hook. No hub-side history is kept: the `worker-<port>.log`
+# file already holds the scrollback (`worker_log_tail`); this is only the live tail for an open popup.
+function _relay_log!(conn_name::AbstractString, line::AbstractString)
+    f = _LOG_SINK[]
+    f === nothing || (try; f(String(conn_name), String(line)); catch; end)
     return nothing
 end
 
@@ -335,8 +354,10 @@ function _ensure_poller!()
                             val = try; Serialization.deserialize(IOBuffer(Base64.base64decode(String(parts[2])))); catch; nothing; end
                             push!(emits, (rid, String(parts[1]), val))
                         end
-                    elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring
+                    elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring + WS push
                         _record_telemetry!(m.conn_name, String(m.data))
+                    elseif m.channel == "slate_log"           # worker log record → live tail push (no store)
+                        _relay_log!(m.conn_name, String(m.data))
                     end
                 end
                 for (rid, vars) in pending

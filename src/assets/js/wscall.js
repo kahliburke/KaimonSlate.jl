@@ -41,6 +41,14 @@
           try { window.onSlateHealth && window.onSlateHealth(m.data); } catch (_) {}
           return;
         }
+        if (m.t === 'telemetry') {                            // per-worker telemetry push (replaces the pill/popup stat poll)
+          try { window.onWorkerTelemetry && window.onWorkerTelemetry(m.side, m.stats); } catch (_) {}
+          return;
+        }
+        if (m.t === 'log') {                                  // worker log line push (live tail into an open popup)
+          try { window.onWorkerLog && window.onWorkerLog(m.side, m.line); } catch (_) {}
+          return;
+        }
         const p = pending.get(m.id); if (!p) return;          // else: a call reply
         pending.delete(m.id);
         m.ok ? p.resolve(m.value) : p.reject(new Error(m.error || 'slateCall failed'));

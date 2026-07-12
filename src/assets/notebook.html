@@ -85,11 +85,13 @@
 </div>
 <div class="modal-bg" id="workerpopbg"><div class="modal workerpop">
   <div class="workerpop-head">
-    <span id="workerpop-title">Worker</span>
-    <span id="workerpop-stats" class="workerpop-stats"></span>
-    <span class="workerpop-x" onclick="closeWorkerPop()" title="close">×</span>
+    <div class="workerpop-headtop">
+      <span id="workerpop-title">Worker</span>
+      <span class="workerpop-x" onclick="closeWorkerPop()" title="close">×</span>
+    </div>
+    <div id="workerpop-stats" class="workerpop-stats"></div>
   </div>
-  <pre id="workerpop-log" class="workerpop-log">loading…</pre>
+  <div id="workerpop-log" class="workerpop-log">loading…</div>
 </div></div>
 <div class="modal-bg" id="runlocbg"><div class="modal runlocmodal">
   <div class="msg"><strong>Run location</strong> <span id="rlsourcebadge" class="rlbadge"></span>

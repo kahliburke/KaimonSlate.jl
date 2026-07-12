@@ -1159,20 +1159,44 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   border:1px solid color-mix(in srgb, var(--green) 55%, var(--border)); background:color-mix(in srgb, var(--green) 12%, var(--bg3)); }
 .wpill:hover { border-color:color-mix(in srgb, var(--accent) 55%, var(--border)); }
 /* Compact at-a-glance load on the pill face (cpu% · rss); full breakdown is in the popup. */
-.wstat { color:var(--dim); font-size:.72rem; font-family:var(--mono,ui-monospace,monospace); }
+.wstat { color:var(--dim); font-size:.72rem; font-family:var(--mono,ui-monospace,monospace); font-variant-numeric:tabular-nums; }
+#runlocstat { font-variant-numeric:tabular-nums; }
 .wstat:empty { display:none; }
 .wpill.reconnecting { color:#e8a13f; border-color:color-mix(in srgb, #e8a13f 55%, var(--border));
   background:color-mix(in srgb, #e8a13f 12%, var(--bg3)); animation:btnpulse 1.1s ease-in-out infinite; }
 /* Worker / region status + live-log popup. */
 .workerpop { width:min(760px, 92vw); max-height:80vh; display:flex; flex-direction:column; padding:0; overflow:hidden; }
-.workerpop-head { display:flex; align-items:center; gap:12px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.86rem; }
-#workerpop-title { font-weight:600; color:var(--text); flex:0 0 auto; }
-.workerpop-stats { color:var(--dim); font-size:.78rem; font-family:var(--mono,ui-monospace,monospace); flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.workerpop-head { display:flex; flex-direction:column; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.86rem; }
+.workerpop-headtop { display:flex; align-items:center; gap:12px; }
+#workerpop-title { font-weight:600; color:var(--text); flex:1 1 auto; min-width:0; }
+/* Full telemetry breakdown as wrapping chips (no ellipsis truncation — every metric stays visible). */
+.workerpop-stats { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; }
+.wchip { font-family:var(--mono,ui-monospace,monospace); font-size:.72rem; color:var(--text); font-variant-numeric:tabular-nums;
+  background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:1px 7px; white-space:nowrap; }
+.wchip-k { color:var(--dim); margin-right:5px; }
+/* Reserve the value's width (min-width set inline per metric) so the chip doesn't resize as the number ticks. */
+.wchip-v { display:inline-block; text-align:left; }
+.wchip-note { color:var(--dim); background:transparent; border:none; padding:1px 0; }
 .workerpop-x { cursor:pointer; color:var(--dim); font-size:1.25rem; line-height:1; flex:0 0 auto; padding:0 4px; }
 .workerpop-x:hover { color:var(--text); }
-.workerpop-log { margin:0; padding:12px 14px; overflow:auto; flex:1 1 auto; min-height:200px;
-  font-family:var(--mono,ui-monospace,monospace); font-size:.76rem; line-height:1.5; color:var(--text);
-  white-space:pre-wrap; word-break:break-word; background:var(--bg); }
+.workerpop-log { margin:0; padding:6px 0; overflow:auto; flex:1 1 auto; min-height:200px;
+  font-family:var(--mono,ui-monospace,monospace); font-size:.76rem; line-height:1.5; color:var(--text); background:var(--bg); }
+/* One parsed log RECORD (a whole @info/@warn block); newest on top, lines within a record in natural order. */
+.wlog-rec { padding:2px 14px; border-bottom:1px solid rgba(255,255,255,.045); white-space:pre-wrap; word-break:break-word; }
+.wlog-rec:hover { background:rgba(255,255,255,.02); }
+.wlog-ts { color:var(--dim); margin-right:6px; }
+.wlog-lvl { font-weight:600; margin-right:6px; }
+.wlog-info .wlog-lvl { color:var(--accent); }
+.wlog-warn .wlog-lvl { color:#e3b341; }
+.wlog-error .wlog-lvl { color:#f85149; }
+.wlog-debug .wlog-lvl { color:var(--dim); }
+.wlog-warn { background:rgba(227,179,65,.05); }
+.wlog-error { background:rgba(248,81,73,.07); }
+.wlog-x { margin-left:6px; font-size:.68rem; font-weight:600; color:var(--dim); background:var(--bg3);
+  border:1px solid var(--border); border-radius:20px; padding:0 6px; vertical-align:middle; }
+.wlog-cont { padding-left:16px; opacity:.9; }
+.wlog-loc { padding-left:16px; color:var(--dim); font-size:.72rem; }
+.wlog-plain { color:var(--dim); }
 .rlbadge { font-size:.68rem; font-weight:600; color:var(--dim); background:var(--bg3);
   border:1px solid var(--border); border-radius:20px; padding:1px 8px; }
 .rlhosts { margin-bottom:4px; }

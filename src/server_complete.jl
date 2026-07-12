@@ -1179,9 +1179,6 @@ function _make_router(h::Hub)
         tgt = String(get(b, "target", "notebook")); tgt in ("notebook", "project") || (tgt = "notebook")
         _json(notebook_pkg_op!(nb, String(get(b, "op", "")), String(get(b, "name", "")); target = tgt))
     end))
-    # The worker's stdout/stderr log — what the kernel is doing when evaluating cells.
-    HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb ->
-        _json(Dict("log" => worker_log(nb), "worker" => _kernel_status(nb.kernel)))))
     # Watchdog health: stall/runaway alerts the 5s supervisor sweep classified (also rides state meta).
     HTTP.register!(router, "GET", "/api/{id}/health", req -> _withnb(h, req, nb -> _json(_health_json(nb))))
     HTTP.register!(router, "POST", "/api/{id}/bind/{cid}", req -> _withnb(h, req, nb -> begin
@@ -1624,6 +1621,70 @@ _ws_health!(nb::LiveNotebook) = (try
     _ws_broadcast!(nb, string("{\"t\":\"health\",\"data\":", JSON.json(_health_json(nb)), "}"))
 catch; end; nothing)
 
+# ── Worker telemetry + log → per-page WebSocket push ──────────────────────────────────────────────────
+# The gate-stream poller (gate_kernel.jl) records each worker's 2s telemetry sample and every log record,
+# then fires the sinks below (ReportEngine._TELEMETRY_SINK / _LOG_SINK, installed by `_install_worker_push!`).
+# These map the worker's stable gate `conn.name` back to its notebook + side and PUSH a frame to that
+# notebook's open pages — so the worker pills/popup update from "just what the server sends", no polling.
+
+# conn_name → (LiveNotebook, side) for the live worker owning that gate connection: the MAIN kernel is
+# side "", a region kernel its region name. Matches the SAME kernels `_worker_entry` enumerates. Returns
+# nothing when no open notebook owns the conn (reaped worker / race) — the push is then a silent no-op.
+# Takes the two locks separately (never nested) to avoid a lock-order hazard with `_REGION_LOCK`.
+function _worker_conn_owner(h, conn_name::AbstractString)
+    isempty(conn_name) && return nothing
+    nbs = try; lock(h.lock) do; collect(values(h.notebooks)); end; catch; return nothing; end
+    for nb in nbs
+        k = nb.kernel
+        if k isa ReportEngine.GateKernel && k.conn !== nothing && k.conn.name == conn_name
+            return (nb, "")
+        end
+    end
+    reg = lock(_REGION_LOCK) do
+        [(id, side, k) for ((id, side), k) in _REGION_KERNELS]
+    end
+    for (id, side, k) in reg
+        if k isa ReportEngine.GateKernel && k.conn !== nothing && k.conn.name == conn_name
+            nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+            nb === nothing || return (nb, side)
+        end
+    end
+    return nothing
+end
+
+# Telemetry sample → `{t:"telemetry",side,stats}`. `stats` is the SAME JSON STRING the roster pill parses
+# (`_worker_entry` sets `d["stats"] = JSON.json(sample)`), so the browser reuses its `_wpStats`/`_wpPillStat`
+# verbatim — hence the double-encode (JSON string embedded as a JSON string value).
+function _telemetry_push!(h, conn_name::AbstractString, sample)
+    owner = _worker_conn_owner(h, conn_name); owner === nothing && return nothing
+    nb, side = owner
+    frame = try
+        string("{\"t\":\"telemetry\",\"side\":", JSON.json(String(side)),
+               ",\"stats\":", JSON.json(JSON.json(sample)), "}")
+    catch; return nothing; end
+    _ws_broadcast!(nb, frame)
+    return nothing
+end
+
+# Worker log line → `{t:"log",side,line}`. The browser appends it only if the popup for that side is open.
+function _log_push!(h, conn_name::AbstractString, line::AbstractString)
+    owner = _worker_conn_owner(h, conn_name); owner === nothing && return nothing
+    nb, side = owner
+    frame = try
+        string("{\"t\":\"log\",\"side\":", JSON.json(String(side)), ",\"line\":", JSON.json(String(line)), "}")
+    catch; return nothing; end
+    _ws_broadcast!(nb, frame)
+    return nothing
+end
+
+# Install the telemetry + log push sinks (ReportEngine → hub → WS). Mirrors the bring-up sink: re-registered
+# on every `_hub()` access so a Revise reload re-wires without a full restart. Closures capture the live hub.
+function _install_worker_push!(h)
+    try; ReportEngine._TELEMETRY_SINK[] = (cn, sample) -> _telemetry_push!(h, cn, sample); catch; end
+    try; ReportEngine._LOG_SINK[]       = (cn, line)   -> _log_push!(h, cn, line);         catch; end
+    return nothing
+end
+
 function _ws_calls(stream, nb::LiveNotebook)
     if !HTTP.WebSockets.isupgrade(stream.message)
         HTTP.setstatus(stream, 426); HTTP.startwrite(stream); return nothing
@@ -1686,6 +1747,7 @@ function start_hub(; host = "127.0.0.1", port = 8765)
     # Surface a remote worker's live bring-up output (streamed instantiate/precompile) in the browser
     # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
     try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
+    _install_worker_push!(h)   # worker telemetry + log → per-page WebSocket push (no browser polling)
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.

@@ -149,6 +149,7 @@ function _hub()
         # runs on every hub access, so a Revise reload of the server picks it up WITHOUT a full restart
         # (start_hub only runs once, at boot). The closure reads `_HUB[]` at call time → always the live hub.
         try; ReportEngine._BRINGUP_SINK[] = line -> NotebookServer._bringup_broadcast(_HUB[], line); catch; end
+        try; NotebookServer._install_worker_push!(_HUB[]); catch; end   # re-wire telemetry/log WS push on reload
         return _HUB[]::Hub
     end
 end
