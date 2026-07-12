@@ -113,11 +113,9 @@ function _wpPillStat(statsJson) {
   return p.join(' · ');
 }
 
-// Display label for a worker. `"default"` is the UNNAMED region's internal name — don't surface it (it
-// reads like "the default worker"); show its host instead. A NAMED region shows "name · host".
+// Display label for a worker. "" = the main/local kernel; a region shows "name · host".
 function _wpLabel(side, host) {
   if (!side) return host || 'local';
-  if (side === 'default') return host || 'region';
   return side + (host ? ' · ' + host : '');
 }
 

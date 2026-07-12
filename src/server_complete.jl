@@ -693,58 +693,58 @@ function _make_router(h::Hub)
         isempty(host) && return _json(Dict("host" => "", "workers" => []))
         _json(Dict("host" => host, "workers" => ReportEngine.list_remote_workers(host)))
     end)
-    # Warm-pool desired state (what warm_pool! was told to maintain) + parked wires — the hub's
-    # own view, NO ssh. Per-host live rosters come from /api/remote-workers. Feeds the Remotes dialog.
-    HTTP.register!(router, "GET", "/api/pools", _ -> _json(Dict(
-        "pools" => [Dict("host" => c.host, "n" => c.n, "preload" => c.preload,
-                         "transport" => String(c.transport), "base_port" => c.base_port,
-                         "root" => c.root,
-                         # Last warm/reconcile outcome — so a silent background spawn failure is visible.
-                         "status" => c.status === nothing ? nothing :
-                                     Dict("ok" => c.status.ok, "msg" => c.status.msg,
-                                          "age" => round(Int, time() - c.status.ts)))
-                    for c in ReportEngine.pool_configs()],
+    # Global region registry (named compute defs) + parked wires — the hub's own view, NO ssh. Per-host
+    # live rosters come from /api/remote-workers. Feeds the home-page Regions manager + Destinations picker.
+    HTTP.register!(router, "GET", "/api/regions", _ -> _json(Dict(
+        "regions" => [begin
+            st = ReportEngine.region_status(r.name)
+            Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
+                 "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
+                 "warm" => r.warm, "threads" => r.threads,
+                 # Last reconcile outcome — so a silent background spawn failure is visible.
+                 "status" => st === nothing ? nothing :
+                             Dict("ok" => st.ok, "msg" => st.msg, "age" => round(Int, time() - st.ts)))
+        end for r in ReportEngine.regions()],
         "parked" => [Dict("host" => p.host, "label" => p.label, "port" => p.port,
                           "idle_s" => p.idle_s) for p in ReportEngine.parked_wires()])))
-    # Configure a host's warm pool and reconcile toward it. Body {host, n, preload, transport}.
-    # n=0 drains. The config is persisted synchronously (fast, durable); the reconcile — which may
-    # provision a cold host for minutes — runs in the background so the request returns at once. The
-    # UI watches workers appear via /api/remote-workers. Re-runnable: it reconciles toward n.
-    HTTP.register!(router, "POST", "/api/warm-pool", req -> begin
+    # Create/update a named region (full-record upsert) and reconcile toward its warm count. The def is
+    # persisted synchronously (fast, durable); the reconcile — which may provision a cold host for minutes —
+    # runs in the background so the request returns at once. Re-runnable: it reconciles toward `warm`.
+    HTTP.register!(router, "POST", "/api/regions", req -> begin
         b = _body(req)
+        name = strip(String(get(b, "name", "")))
+        isempty(name) && return _json(Dict("ok" => false, "error" => "need a region name"))
         host = strip(String(get(b, "host", "")))
-        isempty(host) && return _json(Dict("ok" => false, "error" => "need a host"))
-        n = tryparse(Int, string(get(b, "n", "1")))
-        (n === nothing || n < 0) && return _json(Dict("ok" => false, "error" => "n must be ≥ 0"))
-        preload = strip(String(get(b, "preload", "")))
-        tr = Symbol(strip(String(get(b, "transport", "tunnel"))))
-        tr in (:tunnel, :direct) || (tr = :tunnel)
+        tr = Symbol(strip(String(get(b, "transport", "tunnel")))); tr in (:tunnel, :direct) || (tr = :tunnel)
         base_port = something(tryparse(Int, string(get(b, "base_port", "0"))), 0)
         (base_port == 0 || 1024 <= base_port <= 65533) ||
             return _json(Dict("ok" => false, "error" => "base_port must be 0 (auto) or 1024–65533"))
-        root = strip(String(get(b, "root", "")))   # workers' data dir ON THE HOST (remote path) — verbatim
-        # `reconcile` (default true) decouples config-WRITE from worker-LAUNCH: false persists the desired
-        # state (root/preload/transport/ports/n) and touches NO workers — "Save settings" without booting a
-        # warm pool. Running workers keep their old config until reaped/replaced; a later warm applies it.
-        do_reconcile = string(get(b, "reconcile", "true")) != "false"
-        # Validate + persist synchronously so a bad preload path fails loudly and the config is durable
-        # before we return (a follow-up /api/pools then sees the new desired state, not a stale race);
-        # the slow reconcile (provision + launch), when requested, is fired off on a background task.
-        if !isempty(preload) && !isdir(expanduser(preload))
+        warm = something(tryparse(Int, string(get(b, "warm", "0"))), 0); warm < 0 && (warm = 0)
+        preload = strip(String(get(b, "preload", "")))
+        (isempty(preload) || isdir(expanduser(preload))) ||
             return _json(Dict("ok" => false, "error" => "preload project dir not found: $preload"))
-        end
-        msg = ReportEngine.warm_pool!(host; n = n, preload = preload, transport = tr,
-                                      base_port = base_port, root = root, reconcile = false)   # persist now, don't launch
-        startswith(msg, "pool[") ||                                               # any other string = a validation error
-            return _json(Dict("ok" => false, "error" => msg))
+        data_root = strip(String(get(b, "data_root", "")))   # workers' data dir ON THE HOST (remote path) — verbatim
+        threads = strip(String(get(b, "threads", "")))
+        do_reconcile = string(get(b, "reconcile", "true")) != "false"
+        r = ReportEngine.region_set!(name; host = host, transport = tr, base_port = base_port,
+                                     preload = isempty(preload) ? "" : abspath(expanduser(preload)),
+                                     data_root = data_root, warm = warm, threads = threads)
         do_reconcile && Threads.@spawn try
-            ReportEngine._pool_reconcile!(host)
+            ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
         catch e
-            @warn "slate: pool reconcile failed" host exception = (e, catch_backtrace())
+            @warn "slate: region reconcile failed" region = r.name exception = (e, catch_backtrace())
         end
-        _json(Dict("ok" => true, "host" => host, "n" => n, "preload" => preload,
-                   "transport" => String(tr), "base_port" => base_port, "root" => root,
-                   "reconcile" => do_reconcile))
+        _json(Dict("ok" => true, "name" => r.name))
+    end)
+    # Delete a region: drain its warm workers first (best-effort), then drop the definition.
+    HTTP.register!(router, "POST", "/api/regions/delete", req -> begin
+        b = _body(req)
+        name = strip(String(get(b, "name", "")))
+        isempty(name) && return _json(Dict("ok" => false, "error" => "need a region name"))
+        Threads.@spawn try; ReportEngine.region_remove!(name); catch e
+            @warn "slate: region remove failed" region = name exception = (e, catch_backtrace())
+        end
+        _json(Dict("ok" => true, "name" => name))
     end)
     # Manually reap a specific remote worker (kill process + remove its manifest). Body {host, port}.
     # Never automatic — the user decides, so a worker with useful results is never killed out from under them.
@@ -892,12 +892,11 @@ function _make_router(h::Hub)
         _eval!(nb)
         _json(state_json(nb))
     end))
-    # Set the notebook's declared destinations (regions). The client assembles the full `regionon`
-    # spec from its destination list ("host[,transport[,ports]]" or "name:spec;name2:spec2"); the
-    # server tears down the old region kernels, persists, and echoes the parsed set back in the state.
-    # Empty spec clears all regions. Cells are then tagged into a region via /api/{id}/tags.
+    # Set which named regions this notebook uses — a comma-separated list of names from the global
+    # registry. Tears down the old region kernels, persists the `regions` footer, echoes the new state.
+    # Empty clears all. Cells are then tagged into a region via /api/{id}/tags (`region=<name>`).
     HTTP.register!(router, "POST", "/api/{id}/regions", req -> _withnb(h, req, nb -> begin
-        set_regionon!(nb, strip(String(get(_body(req), "spec", ""))))
+        set_notebook_regions!(nb, strip(String(get(_body(req), "regions", ""))))
         _json(state_json(nb))
     end))
     # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`

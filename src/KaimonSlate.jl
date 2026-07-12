@@ -563,14 +563,14 @@ function create_tools(GateTool::Type)
         io = IOBuffer(); println(io, "Workers on '$h':")
         for w in ws
             mf = w["manifest"]
-            pool = ReportEngine._manifest_get(mf, "pool") == "1"
-            nbk = ReportEngine._manifest_get(mf, "notebook"); nbk = isempty(nbk) ? (pool ? "—" : "?") : nbk
+            reg = ReportEngine._manifest_get(mf, "region")
+            nbk = ReportEngine._manifest_get(mf, "notebook"); nbk = isempty(nbk) ? (isempty(reg) ? "?" : "warm·$reg") : nbk
             spawned = ReportEngine._manifest_get(mf, "spawned")
             la = w["lastActivity"]; age = la == 0 ? "never" : string(round(Int, (time() - la) / 60), "m ago")
             # lifecycle sidecar: attached (a hub is using it) / idle (detached, warm, adoptable)
             st = get(w, "state", "")
             badge = !w["alive"] ? "⚪ stopped" :
-                    st == "idle" ? (pool ? "🔵 pool (warm, adoptable)" : "🟡 idle (warm)") :
+                    st == "idle" ? (isempty(reg) ? "🟡 idle (warm)" : "🔵 warm·$reg (adoptable)") :
                     st == "attached" ? "🟢 attached" : "🟢 running"
             println(io, "  • port $(w["port"])  $badge  notebook=$(nbk)  last activity: $age", isempty(spawned) ? "" : "  (spawned $spawned)")
             # latest telemetry sample (2s sampler → .stats sidecar); numbers are unquoted JSON
@@ -612,52 +612,49 @@ function create_tools(GateTool::Type)
     end
 
     """
-        warm_pool(host::String; n=1, preload="", transport="tunnel", base_port=0, root="") -> String
+        region(name::String; host="", transport="tunnel", base_port=0, preload="", data_root="", warm=0, threads="") -> String
 
-    Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a booted Julia
-    process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
-    additionally replicates that env on the host and imports its packages while idle. Opening a
-    notebook whose parent project matches `preload` then ADOPTS a pool worker (~1s: dial +
-    namespace swap — packages and memo store survive) instead of paying the ~90s cold boot, and
-    the pool refills itself in the background. `n=0` drains: idle pool workers are reaped;
-    attached workers are never touched. `base_port` pins the port range for a `:direct` pool
-    (worker *i* binds `base_port+3i .. +3i+2`) so you know which ports to open in the firewall;
-    `0`/`:tunnel` auto-assigns. `root` pins the workers' data dir (`datadir()`/`@sfile`) to a REMOTE
-    absolute path on `host` (a fast scratch disk or a shared mount that already holds the data) — a
-    region enabled from this pool inherits it, so `@sfile` there resolves under `root`. Blocking on
-    first run (provisioning); safe to re-run — it reconciles toward `n`. See the roster with `remote_workers`.
+    Define (or update) a named region — a global compute target: a `host` reached over `transport`
+    (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
+    packages load warm), a `data_root` (a REMOTE absolute path pinned as the workers' `datadir()`/`@sfile`),
+    and `warm` (how many workers to keep booted and ready to adopt — 0 = cold spin on demand). Many
+    regions may point at the same host with different config. Full-record upsert; reconciles toward
+    `warm` in the background. Notebooks reference a region by NAME via `region_on` + `region=<name>`
+    cell tags. `base_port` pins the port range for a `:direct` region (worker *i* → base_port+3i..+2).
     """
-    function warm_pool(host::String; n::Int = 1, preload::String = "", transport::String = "tunnel",
-                       base_port::Int = 0, root::String = "")::String
-        h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
+    function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
+                    preload::String = "", data_root::String = "", warm::Int = 0, threads::String = "")::String
+        nm = strip(name); isempty(nm) && return "Give a region name."
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
-        return ReportEngine.warm_pool!(h; n = n, preload = String(strip(preload)), transport = tr,
-                                       base_port = base_port, root = String(strip(root)))
+        pl = strip(preload); (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"
+        r = ReportEngine.region_set!(nm; host = String(strip(host)), transport = tr, base_port = base_port,
+                                     preload = isempty(pl) ? "" : abspath(expanduser(pl)),
+                                     data_root = String(strip(data_root)), warm = max(0, warm), threads = String(strip(threads)))
+        r.warm > 0 && Threads.@spawn try; ReportEngine.region_reconcile!(r.name); catch; end
+        return "✅ region '$(r.name)' → $(isempty(r.host) ? "(no host)" : r.host) ($(r.transport))" *
+               (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
+               (isempty(r.data_root) ? "" : ", data_root=$(r.data_root)")
     end
 
     """
-        region_on(notebook, host) -> String
+        region_on(notebook, regions) -> String
 
-    Run tagged cells on other machines while everything else stays on the main kernel — the
-    region runner. `host` grammars: "host[,transport[,port,stream]]" (same as run_on) = the
-    DEFAULT region, targeted by the `remote` cell tag; or the multi-region form
-    "name:spec;name2:spec2" (e.g. "gpu:hetzner-a100,direct;bigmem:slate-remote"), targeted by
-    `region=name` tags. Boundary values cross automatically as content-addressed blobs (a
-    DataFrame crosses as Arrow IPC; unchanged values dedup to nothing), so a huge frame produced
-    AND consumed inside one region never moves — only what other sides actually read does.
-    Mutations auto-follow their data. Durable (notebook footer). `host=""` clears all regions.
-    Pure `using` cells run on every side; keep `@bind` cells on the main kernel.
+    Choose which named regions this notebook uses — a comma-separated list of names from the global
+    registry (define them with `region`). Cells tagged `region=<name>` then run on that region's
+    worker; boundary values cross automatically as content-addressed blobs (a DataFrame crosses as
+    Arrow IPC; unchanged values dedup to nothing), so a huge frame produced AND consumed inside one
+    region never moves. Mutations auto-follow their data. Durable (notebook footer). `regions=""`
+    clears. Pure `using` cells run on every side; keep `@bind` cells on the main kernel.
     """
-    function region_on(notebook::String, host::String)::String
+    function region_on(notebook::String, regions::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        h = strip(host)
-        NotebookServer.set_regionon!(nb, h)           # teardown old region kernels + persist the footer
-        isempty(h) && return "✅ regions cleared — all cells run on the main kernel again."
-        specs = NotebookServer._region_specs(nb)
+        names = NotebookServer.set_notebook_regions!(nb, regions)   # teardown old region kernels + persist the footer
+        isempty(names) && return "✅ regions cleared — all cells run on the main kernel again."
+        unknown = [nm for nm in names if ReportEngine.region_get(nm) === nothing]
         n = count(c -> !isempty(NotebookServer._cell_region(c)), nb.report.cells)
-        return "✅ $(basename(nb.path)): regions " * join(sort!(collect(keys(specs))), ", ") *
-               " configured ($n cell(s) tagged now). Workers spawn/adopt on the next run; tag " *
-               "cells with `remote` (default region) or `region=<name>`."
+        return "✅ $(basename(nb.path)) uses region(s): " * join(names, ", ") *
+               (isempty(unknown) ? "" : "  ⚠ not defined in the registry: " * join(unknown, ", ")) *
+               ". Tag cells with `region=<name>` ($n tagged now)."
     end
 
     """
@@ -694,27 +691,31 @@ function create_tools(GateTool::Type)
     end
 
     """
-        pools() -> String
+        regions() -> String
 
-    The remote-execution state at a glance, no ssh: every configured warm pool (host, target
-    size, preload env, transport — what `warm_pool` was told to maintain) and every parked
-    wire (a live connection kept across a notebook close for instant reattach). For the LIVE
-    per-host roster — which workers actually run, their state and telemetry — use
-    `remote_workers(host)`; for one notebook's placement use `whereis(notebook)`.
+    The compute registry at a glance, no ssh: every configured region (name, host, transport, warm
+    count, preload env, data root, and the last reconcile outcome) and every parked wire (a live
+    connection kept across a notebook close for instant reattach). For the LIVE per-host roster —
+    which workers actually run, their state and telemetry — use `remote_workers(host)`; for one
+    notebook's placement use `whereis(notebook)`.
     """
-    function pools()::String
-        cfgs = ReportEngine.pool_configs()
+    function regions()::String
+        rs = ReportEngine.regions()
         parked = ReportEngine.parked_wires()
-        isempty(cfgs) && isempty(parked) &&
-            return "No warm pools configured and no parked wires. Start one with warm_pool(host; n, preload)."
+        isempty(rs) && isempty(parked) &&
+            return "No regions configured and no parked wires. Define one with region(name; host, warm, …)."
         io = IOBuffer()
-        if !isempty(cfgs)
-            println(io, "Configured pools (desired state; live roster → remote_workers(host)):")
-            for c in cfgs
-                ports = (c.transport === :direct && c.base_port > 0) ?
-                        "  ports=$(c.base_port)–$(c.base_port + 3c.n - 1)" : ""
-                println(io, "  • $(c.host)  n=$(c.n)  transport=$(c.transport)$ports  preload=",
-                        isempty(c.preload) ? "(none — bare workers)" : c.preload)
+        if !isempty(rs)
+            println(io, "Regions (desired state; live roster → remote_workers(host)):")
+            for r in rs
+                ports = (r.transport === :direct && r.base_port > 0 && r.warm > 0) ?
+                        "  ports=$(r.base_port)–$(r.base_port + 3r.warm - 1)" : ""
+                println(io, "  • $(r.name)  → $(isempty(r.host) ? "(no host)" : r.host)  warm=$(r.warm)  ",
+                        "transport=$(r.transport)$ports  preload=",
+                        isempty(r.preload) ? "(none)" : r.preload,
+                        isempty(r.data_root) ? "" : "  data_root=$(r.data_root)")
+                st = ReportEngine.region_status(r.name)
+                st === nothing || println(io, "      last: ", st.ok ? "ok" : "FAILED", " — ", st.msg)
             end
         end
         if !isempty(parked)
@@ -1414,8 +1415,8 @@ function create_tools(GateTool::Type)
         GateTool("check_remote", check_remote),
         GateTool("remote_workers", remote_workers),
         GateTool("reap_worker", reap_worker),
-        GateTool("warm_pool", warm_pool),
-        GateTool("pools", pools),
+        GateTool("region", region),
+        GateTool("regions", regions),
         GateTool("whereis", whereis),
         GateTool("memo_trace", memo_trace),
         GateTool("read", read_cells),

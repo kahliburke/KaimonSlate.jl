@@ -554,99 +554,70 @@ const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "side:nam
 const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel objectid) → signature of primed `using` cells
 const _REGION_LOCK = ReentrantLock()
 
-# Named region specs from the durable footer. Two grammars: a bare "host[,transport[,ports]]"
-# is the `default` region (what the plain `remote` tag targets); the multi-region form is
-# "name:spec;name2:spec2" (e.g. "gpu:host-a,direct;bigmem:host-b"). Names are
-# identifiers so a bare host spec (commas, no leading `name:`) can't be misread as one.
-function _region_specs(nb::LiveNotebook)
-    raw = strip(String(get(nb.report.meta, "regionon", "")))
-    out = Dict{String,String}()
-    isempty(raw) && return out
-    if match(r"^[A-Za-z][A-Za-z0-9_]*:", raw) !== nothing
-        for seg in eachsplit(raw, ';')
-            s = strip(seg); isempty(s) && continue
-            i = findfirst(':', s); i === nothing && continue
-            out[String(s[1:i-1])] = String(strip(s[i+1:end]))
-        end
-    else
-        out["default"] = raw
+# The region NAMES this notebook uses — a comma-separated list in the durable footer (`regions` meta).
+# Each name references a GLOBAL region definition (the registry, remote.jl); the notebook stores only
+# the reference, resolved at spawn time. Deduped, order-preserved.
+function _nb_region_names(nb::LiveNotebook)
+    raw = strip(String(get(nb.report.meta, "regions", "")))
+    isempty(raw) && return String[]
+    seen = Set{String}(); out = String[]
+    for seg in split(raw, ',')
+        n = String(strip(seg)); (isempty(n) || n in seen) && continue
+        push!(seen, n); push!(out, n)
     end
     return out
 end
 
-# Set (or clear) the durable region spec. Tears the OLD spec's live region kernels down first (they
-# detach warm), rewrites the `regionon` footer, and persists. Empty spec clears all regions. This is
-# the shared core of the `region_on` tool and the `/api/{id}/regions` endpoint. Returns the parsed specs.
-function set_regionon!(nb::LiveNotebook, spec::AbstractString)
+# Set (or clear) which named regions this notebook uses. Tears the OLD region kernels down first (they
+# detach warm), rewrites the `regions` footer, and persists. Shared core of the `region_on` tool and
+# the `/api/{id}/regions` endpoint. Returns the normalized name list.
+function set_notebook_regions!(nb::LiveNotebook, csv::AbstractString)
     _teardown_region!(nb)
-    h = strip(String(spec))
+    names = String[]; seen = Set{String}()
+    for seg in split(String(csv), ',')
+        n = String(strip(seg)); (isempty(n) || n in seen) && continue
+        push!(seen, n); push!(names, n)
+    end
+    joined = join(names, ",")
     lock(nb.lock) do
-        isempty(h) ? delete!(nb.report.meta, "regionon") : (nb.report.meta["regionon"] = String(h))
-        _persist!(nb; label = isempty(h) ? "cleared regions" : "regions · $h")
+        isempty(joined) ? delete!(nb.report.meta, "regions") : (nb.report.meta["regions"] = joined)
+        _persist!(nb; label = isempty(joined) ? "cleared regions" : "regions · $joined")
     end
-    return _region_specs(nb)
+    return names
 end
 
-# Parse a region spec — `host[,transport[,port[,stream]]]` plus optional `key=value` tokens
-# (currently `root=PATH`, the region's pinned data root → the worker's `KAIMONSLATE_DATADIR`).
-# Comma-separated: the bare tokens fill host/transport/port/stream in document order; any `k=v`
-# token is pulled out by name and may appear anywhere (so `host,direct,root=/x` and
-# `host,root=/x,direct` parse the same). Returns strings, "" when absent. One deliberate limit: a
-# `root=` path must not contain a comma (the spec's field separator). Unknown `k=v` keys are
-# ignored — forward-compatible with later options (e.g. a `shared` skip).
-function _parse_region_spec(spec::AbstractString)
-    host = ""; transport = ""; port = ""; stream = ""; root = ""
-    positional = String[]
-    for raw in split(String(spec), ',')
-        tok = strip(raw)
-        isempty(tok) && continue
-        eq = findfirst('=', tok)
-        if eq === nothing
-            push!(positional, String(tok))
-        else
-            key = lowercase(strip(tok[1:prevind(tok, eq)]))
-            val = strip(tok[nextind(tok, eq):end])
-            key == "root" && (root = String(val))
-        end
-    end
-    length(positional) >= 1 && (host = positional[1])
-    length(positional) >= 2 && (transport = positional[2])
-    length(positional) >= 3 && (port = positional[3])
-    length(positional) >= 4 && (stream = positional[4])
-    return (; host, transport, port, stream, root)
-end
-
-# The notebook's declared destinations, for the browser (tag editor + DAG zones): each region's
-# name + its dialing parts split out of the spec ("host[,transport[,port,stream]][,root=…]"). The
-# frontend cross-references these against /api/pools for warm-worker readiness.
+# The notebook's regions for the browser (tag editor + DAG zones): each USED name resolved against the
+# global registry — host/transport/warm/root + whether it's actually defined. A name tagged on a cell
+# but not in the notebook's `regions` list is included too, so a stray tag still surfaces.
 function _regions_json(nb::LiveNotebook)
+    names = _nb_region_names(nb); seen = Set(names)
+    for c in nb.report.cells
+        r = _cell_region(c); (isempty(r) || r in seen) && continue
+        push!(seen, r); push!(names, r)
+    end
     out = Vector{Any}()
-    for (name, spec) in sort!(collect(_region_specs(nb)); by = first)
-        p = _parse_region_spec(spec)
-        push!(out, Dict{String,Any}(
-            "name" => name,
-            "host" => p.host,
-            "transport" => isempty(p.transport) ? "tunnel" : p.transport,
-            "port" => p.port,
-            "stream" => p.stream,
-            "root" => p.root,
-            "spec" => String(spec)))
+    for name in sort!(collect(names))
+        r = ReportEngine.region_get(name)
+        push!(out, r === nothing ?
+            Dict{String,Any}("name" => name, "defined" => false, "host" => "",
+                             "transport" => "tunnel", "root" => "", "warm" => 0) :
+            Dict{String,Any}("name" => r.name, "defined" => true, "host" => r.host,
+                             "transport" => String(r.transport), "base_port" => r.base_port,
+                             "root" => r.data_root, "warm" => r.warm, "preload" => r.preload))
     end
     return out
 end
 
-# The region a cell is TAGGED into: `region=NAME`, with the bare `remote` tag as sugar for
-# `region=default`. "" = the main kernel.
+# The region a cell is TAGGED into: `region=NAME`. "" = the main kernel.
 function _cell_region(cell::Cell)
     for f in cell.flags
         s = String(f)
         startswith(s, "region=") && return String(chopprefix(s, "region="))
     end
-    return (:remote in cell.flags) ? "default" : ""
+    return ""
 end
 
-_region_active(nb::LiveNotebook) =
-    !isempty(_region_specs(nb)) && any(c -> !isempty(_cell_region(c)), nb.report.cells)
+_region_active(nb::LiveNotebook) = any(c -> !isempty(_cell_region(c)), nb.report.cells)
 
 # The EFFECTIVE side a cell executes on (region name; "" = main): its tag — except that an
 # untagged MUTATOR follows the tagged writer of its mutation target (a mutation must run where
@@ -720,38 +691,28 @@ function _region_kernel!(nb::LiveNotebook, name::String)
     lock(_REGION_LOCK) do
         k = get(_REGION_KERNELS, (nb.id, name), nothing)
         k === nothing || return k
-        spec = get(_region_specs(nb), name, "")
-        isempty(spec) && error("region '$name' has no host — configure it: " *
-            "region_on(notebook, \"" * (name == "default" ? "host[,transport]" : "$name:host[,transport]") * "\")")
-        p = _parse_region_spec(spec)
-        rhost = p.host
-        transport = isempty(p.transport) ? :tunnel : Symbol(p.transport)
-        pport  = isempty(p.port)   ? 0 : something(tryparse(Int, p.port), 0)
-        psport = isempty(p.stream) ? 0 : something(tryparse(Int, p.stream), 0)
+        r = ReportEngine.region_get(name)
+        r === nothing && error("region '$name' is not defined — create it in the registry: " *
+                               "region(\"$name\"; host=…, warm=…) or the home-page Regions manager")
+        isempty(r.host) && error("region '$name' has no host — set one in the Regions manager")
+        target = ReportEngine._region_target(r)   # env dir + transport + datadir + region tag, from the registry def
         proj = Base.current_project(dirname(abspath(nb.path)))
-        parent = proj === nothing ? "" : dirname(proj)
-        rproj = "~/.cache/kaimonslate/remote/" * (isempty(parent) ? "detached" : basename(parent))
-        envdir = ReportEngine.notebook_env_dir(nb.path)
-        origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
-                     (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
-        target = ReportEngine.RemoteTarget(rhost; transport = transport, project = rproj,
-                                           port = pport, stream_port = psport, origin_env = origin_env,
-                                           datadir = p.root)
-        ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $rhost ($transport)" *
-                           (isempty(p.root) ? "" : " root=$(p.root)"))
-        k = ReportEngine.GateKernel(rproj; parent = parent, target = target,
-                                    label = basename(abspath(nb.path)) * "#" * (name == "default" ? "region" : name))
+        parent = proj === nothing ? "" : dirname(proj)   # notebook's own /src synced for hot-reload provenance
+        ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $(r.host) ($(r.transport))" *
+                           (isempty(r.data_root) ? "" : " root=$(r.data_root)"))
+        k = ReportEngine.GateKernel(target.project; parent = parent, target = target,
+                                    label = basename(abspath(nb.path)) * "#" * name)
         _REGION_KERNELS[(nb.id, name)] = k
         return k
     end
 end
 
-# Human-facing location of a side: "local", the host (default region), or "name (host)".
+# Human-facing location of a side: "local" or "name (host)" — resolved against the global registry.
 function _side_label(nb::LiveNotebook, side::AbstractString)
     isempty(side) && return "local"
-    host = _parse_region_spec(get(_region_specs(nb), String(side), "?")).host
-    isempty(host) && (host = "?")
-    return side == "default" ? host : "$side ($host)"
+    r = ReportEngine.region_get(String(side))
+    (r === nothing || isempty(r.host)) && return String(side)
+    return "$side ($(r.host))"
 end
 
 # Namespace parity primer: run the notebook's pure-`using`/`import` cells on kernel `k` so a side
@@ -1164,7 +1125,8 @@ function _ensure_resource_on!(nb::LiveNotebook, cell::Cell, dst_k, dst_side::Abs
             try
                 ReportEngine.prepare!(src_k, nb.report)
                 ReportEngine.transfer_binding!(src_k, dst_k, string(r);
-                                               zc = !any(o -> r in o.mutates, nb.report.cells))
+                                               zc = !any(o -> r in o.mutates, nb.report.cells),
+                                               mode = _region_xfer_mode())
             catch e
                 ReportEngine._rlog("resource: staging '$r' for cell $(cell.id) on " *
                     "$(_side_label(nb, dst_side)) failed — $(first(sprint(showerror, e), 160))")
@@ -1179,6 +1141,15 @@ function _ensure_resource_on!(nb::LiveNotebook, cell::Cell, dst_k, dst_side::Abs
                        "replayed cell $(cell.id) (handle not shipped)")
     lock(_REGION_LOCK) do; _REGION_RESOURCED[key] = true; end
     return nothing
+end
+
+# Which transport the region runner asks `transfer_binding!` to use for a cross-boundary value.
+# Default `:auto` — try a direct worker→worker pull (one leg) and fall back to the hub relay when
+# not viable (see WORKER_CHANNEL_SPIKE.md). `KAIMONSLATE_REGION_XFER=relay` is the kill switch (force
+# the star); `=direct` forces strict direct (errors if not viable — useful when validating the path).
+function _region_xfer_mode()
+    v = lowercase(strip(get(ENV, "KAIMONSLATE_REGION_XFER", "")))
+    v == "relay" ? :relay : v == "direct" ? :direct : :auto
 end
 
 # Ship every cross-boundary input of `cell` to the kernel it is about to run on: each read name
@@ -1324,12 +1295,12 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
             return nothing
         end
         t0 = time()
-        t = ReportEngine.transfer_binding!(src_k, dst_k, string(r); zc = zc,
+        t = ReportEngine.transfer_binding!(src_k, dst_k, string(r); zc = zc, mode = _region_xfer_mode(),
                                            on_plan = _xfer_plan_gate(nb, cell, whost, r, token),
                                            on_progress = onprog)
         secs = round(time() - t0; digits = 1)
         ReportEngine._rlog("region: '$(r)' → $(_side_label(nb, dst_side)) " *
-                           "($(t.bytes) bytes over the wire in $(secs)s, $(t.codec)) for cell $(cell.id)")
+                           "($(t.bytes) bytes over the wire in $(secs)s, $(t.codec), $(t.mode)) for cell $(cell.id)")
         t.bytes > 0 && _stats_xfer!(nb, cell.id,
             "'$(r)' $(round(t.bytes / 2^20; digits = 1)) MB $(t.codec) in $(secs)s $arrow $whost", t.bytes)
         lock(_REGION_LOCK) do

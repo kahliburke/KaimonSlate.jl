@@ -13,7 +13,7 @@ function _nbRegions() { return (typeof nbState !== 'undefined' && nbState && nbS
 function cellAssignedRegion(c) {
   const tags = (c && c.tags) || [];
   for (const t of tags) if (t.startsWith('region=')) return t.slice(7);
-  return tags.includes('remote') ? 'default' : '';
+  return '';
 }
 
 // Assemble the `regionon` footer spec from a destination list. A lone `default` writes the bare
@@ -50,10 +50,10 @@ function _destSpecFromPool(p) {
   return p.root ? (base + ',root=' + p.root) : base;
 }
 
-// Set a cell's region ('' = local/main): drop any region tag, add the new one. `default` → `remote`.
+// Set a cell's region ('' = local/main): drop any region tag, add the new one.
 async function setCellRegion(id, name) {
   const cur = _curTags(id).filter(t => t !== 'remote' && !t.startsWith('region='));
-  await setTags(id, name ? [...cur, name === 'default' ? 'remote' : ('region=' + name)] : cur);
+  await setTags(id, name ? [...cur, 'region=' + name] : cur);
 }
 
 // ── "Run on" section for the 🏷 tag editor ───────────────────────────────────────────────────────

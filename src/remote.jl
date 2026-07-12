@@ -106,13 +106,14 @@ struct RemoteTarget <: RunTarget
     stream_port::Int             # pinned remote stream/PUB port (0 ⇒ port+1)
     origin_env::String           # LOCAL project dir whose exact env to replicate on the remote ("" ⇒ none)
     datadir::String              # region-declared data root on the remote → the worker's KAIMONSLATE_DATADIR ("" ⇒ <project>/data)
+    region::String               # the named region this worker serves — the adoption key ("" ⇒ a notebook's own remote main kernel)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
              project::AbstractString = "~/.cache/kaimonslate/remote",
              port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "",
-             datadir::AbstractString = "") =
+             datadir::AbstractString = "", region::AbstractString = "") =
     RemoteTarget(String(ssh_host), transport, String(project), port, stream_port,
-                 String(origin_env), String(datadir))
+                 String(origin_env), String(datadir), String(region))
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -658,8 +659,8 @@ end
 # pays the preload env's package loads while nobody is attached).
 function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
                          label::AbstractString, parent::AbstractString,
-                         threads::AbstractString = "", pool::Bool = false,
-                         warm_deps::Bool = false)
+                         threads::AbstractString = "", warm::Bool = false,
+                         region::AbstractString = "", warm_deps::Bool = false)
     host = t.ssh_host
     hubkey = _hub_client_pubkey()
     script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps)
@@ -681,7 +682,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
     jl = "julia --project=$proj --startup-file=no --threads=$nthreads $remote_script"
     launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
-    _rlog("spawn: launching $(pool ? "POOL " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)\n    remote log: $host:$logf")
+    _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
     # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
     # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
     _ssh_ok(host, `$launch`) ||
@@ -692,9 +693,9 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
               "transport" => string(t.transport), "project" => t.project,
               "port" => string(port), "stream_port" => string(stream_port),
               "client_pubkey" => hubkey, "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")]
-    pool && push!(fields, "pool" => "1")
+    isempty(region) || push!(fields, "region" => String(region))   # the named region this worker serves (adoption key)
     _write_worker_manifest!(host, port, fields)
-    _write_worker_state!(host, port, pool ? "idle" : "attached")
+    _write_worker_state!(host, port, warm ? "idle" : "attached")
     return nothing
 end
 
@@ -824,7 +825,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         port, stream_port = t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
                             _next_ports(floor = try; _port_floor(host); catch; 0; end)
         k.port = port; k.stream_port = stream_port
-        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads)
+        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, region = t.region)
         r = dial(port, stream_port; deadline = 120.0)   # deadline covers remote Julia boot + KaimonGate load (~90s)
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
@@ -924,10 +925,10 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     #     its manifest to this notebook. Any failure falls through to a fresh spawn. The claim
     #     set stops two notebooks opening concurrently from adopting the same worker.
     pool = nothing
-    try; pool = _claim_pool_worker!(host, t.project, t.transport); catch e; _rlog("adopt: pool scan failed ($(sprint(showerror, e)))"); end
+    try; pool = _claim_region_worker!(t.region, host); catch e; _rlog("adopt: region scan failed ($(sprint(showerror, e)))"); end
     if pool !== nothing
         k.port = pool.port; k.stream_port = pool.stream_port
-        _rlog("adopt: pool worker-$(pool.port) on $host matches env $(t.project) — adopting for '$(k.label)'")
+        _rlog("adopt: warm worker-$(pool.port) on $host for region '$(t.region)' — adopting for '$(k.label)'")
         r = dial(pool.port, pool.stream_port; deadline = 15.0)
         adopted = false
         if r.conn !== nothing
@@ -956,20 +957,21 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                         "notebook" => k.label, "parent" => k.parent, "hub" => gethostname(),
                         "transport" => string(t.transport), "project" => t.project,
                         "port" => string(port), "stream_port" => string(sp),
-                        "client_pubkey" => _hub_client_pubkey(),
+                        "client_pubkey" => _hub_client_pubkey(), "region" => t.region,
                         "spawned" => Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), "adopted" => "1",
                     ])
+                    _write_worker_state!(host, port, "attached")   # no longer warm — exclude from the region's warm count
                 catch e
                     _rlog("adopt: manifest rewrite failed ($(sprint(showerror, e)))")
                 end
-                # claim held until the manifest no longer says pool=1 — else a concurrent open
-                # could rescan the roster mid-rewrite and adopt this worker a second time
-                _release_pool_claim!(host, port)
-                try; _pool_reconcile!(host); catch e; _rlog("pool: replenish after adopt failed ($(sprint(showerror, e)))"); end
+                # claim held until the worker is marked attached — else a concurrent open could rescan
+                # the roster mid-rewrite and adopt this worker a second time
+                _release_region_claim!(host, port)
+                try; region_reconcile!(t.region); catch e; _rlog("region: replenish after adopt failed ($(sprint(showerror, e)))"); end
             end
             return attached!(r, "adopt")
         end
-        _release_pool_claim!(host, pool.port)
+        _release_region_claim!(host, pool.port)
         k.conn = nothing
     end
 
@@ -1575,31 +1577,94 @@ end
 # throw to abort before anything moves: the transfer-preview gate lives there, so its numbers
 # are the encoded blob's, not a summarysize guess — mmap-backed arrow frames price correctly
 # and dedup'd content never triggers a preview.
-function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, on_plan = nothing,
-                           on_progress = nothing)
+# Transfer MODE (see WORKER_CHANNEL_SPIKE.md):
+#   :relay  — the star (default): A→hub-CAS→B. Always correct, and free when a side is the local
+#             worker (it shares the hub's store). This is the code documented above.
+#   :direct — the mesh: the hub BROKERS a single B←A pull over the workers' own blob channels (one
+#             leg, no hub relay). Viable only between two DISTINCT :direct remote workers.
+#   :auto   — try :direct when viable, transparently fall back to :relay on any failure.
+# :direct is STRICT (errors if not viable / the pull fails) — for tests + observability; :auto is the
+# forgiving mode the region runner uses. Return gains `mode` (the path actually taken).
+_direct_viable(src_k, dst_k) =
+    src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget &&
+    getfield(src_k.target, :transport) === :direct && src_k !== dst_k
+
+# Broker one direct B←A pull: authorise B's client key on A's blob channel, hand B A's data endpoint,
+# have B pull the blob straight into its CAS, then revoke. Returns bytes moved (0 = deduped). THROWS
+# on any failure — the caller (`:auto`) decides whether to fall back to relay.
+function _pull_direct!(src_k, dst_k, name, h::String, meta; on_plan = nothing)
+    epA = _data_endpoint!(src_k.target, src_k)              # A's blob endpoint (routable ip+key on :direct)
+    bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
+    bkerr = try; getproperty(bk, :error); catch; nothing; end
+    bkerr === nothing || error("direct: dest client key unavailable: $bkerr")
+    bpub = String(bk.key)
+    authed = !isempty(epA.server_key)                      # allow-list gate only exists under CURVE
+    if authed
+        ak = _tool(src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => bpub); timeout = 60.0)
+        akerr = try; getproperty(ak, :error); catch; nothing; end
+        akerr === nothing || error("direct: authorise on source failed: $akerr")
+    end
+    try
+        on_plan === nothing || on_plan(Int(meta.bytes), meta)   # preview gate — exact encoded bytes
+        pr = _tool(dst_k, "__slate_pull_blob", Dict{String,Any}(
+            "ip" => epA.ip, "port" => epA.port, "server_key" => epA.server_key, "hash" => h); timeout = 600.0)
+        perr = try; getproperty(pr, :error); catch; nothing; end
+        perr === nothing || error("direct pull on dest failed: $perr")
+        return Int(pr.bytes)
+    finally
+        authed && try
+            _tool(src_k, "__slate_revoke_client", Dict{String,Any}("pubkey" => bpub); timeout = 30.0)
+        catch
+        end
+    end
+end
+
+function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, mode::Symbol = :relay,
+                           on_plan = nothing, on_progress = nothing)
     meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = 600.0)
     err = try; getproperty(meta, :error); catch; nothing; end
     err === nothing || error("transfer '$name': $err")
     h = String(meta.hash); codec = String(meta.codec)
-    root = joinpath(_slate_cache_dir(), "memo")
+
     moved = 0
-    if src_k.target isa RemoteTarget                       # remote source → land the blob locally
-        have = isfile(joinpath(root, "blobs", "sha256", h[1:2], h))
-        on_plan === nothing || on_plan(have ? 0 : Int(meta.bytes), meta)
-        ep = _data_endpoint!(src_k.target, src_k)
-        moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key, on_progress = on_progress)
+    used = :relay
+    if mode === :direct || mode === :auto
+        if _direct_viable(src_k, dst_k)
+            try
+                moved = _pull_direct!(src_k, dst_k, name, h, meta; on_plan = on_plan)
+                used = :direct
+            catch e
+                mode === :direct && rethrow()               # strict: surface the failure
+                _rlog("region transfer '$name': direct failed, falling back to relay — " *
+                      first(sprint(showerror, e), 160))
+            end
+        elseif mode === :direct
+            error("transfer '$name': direct not viable — needs source and destination on two distinct " *
+                  ":direct remote workers")
+        end
     end
-    if dst_k.target isa RemoteTarget                       # remote destination → ship it there
-        ep = _data_endpoint!(dst_k.target, dst_k)
-        moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key,
-                            on_plan = src_k.target isa RemoteTarget ? nothing : on_plan, meta = meta,
-                            on_progress = on_progress)
+
+    if used !== :direct                                     # :relay (default) or :auto fallback
+        root = joinpath(_slate_cache_dir(), "memo")
+        if src_k.target isa RemoteTarget                   # remote source → land the blob locally
+            have = isfile(joinpath(root, "blobs", "sha256", h[1:2], h))
+            on_plan === nothing || on_plan(have ? 0 : Int(meta.bytes), meta)
+            ep = _data_endpoint!(src_k.target, src_k)
+            moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key, on_progress = on_progress)
+        end
+        if dst_k.target isa RemoteTarget                   # remote destination → ship it there
+            ep = _data_endpoint!(dst_k.target, dst_k)
+            moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key,
+                                on_plan = src_k.target isa RemoteTarget ? nothing : on_plan, meta = meta,
+                                on_progress = on_progress)
+        end
     end
+
     r = _tool(dst_k, "__slate_bind_blob", Dict{String,Any}(
         "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = 600.0)
     rerr = try; getproperty(r, :error); catch; nothing; end
     rerr === nothing || error("transfer '$name' (bind): $rerr")
-    return (; bytes = moved, codec = codec)
+    return (; bytes = moved, codec = codec, mode = used)
 end
 
 # Boot-window memo carry — "your session follows you", automatically. Called from `prepare!`
@@ -1673,47 +1738,110 @@ _attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true);
 # regex discipline as the manifests); replenishment is hub-driven — every adoption triggers a
 # background `_pool_reconcile!`, so the pool refills while the user is already working.
 
-const _POOL_DIR = joinpath(_slate_cache_dir(), "pool")
-_pool_path(host) = joinpath(_POOL_DIR, replace(String(host), r"[^A-Za-z0-9._-]" => "_") * ".json")
+# ── Region registry (global, named compute definitions) ───────────────────────────────────────────────
+# A REGION is the unit of remote-compute config: a user-named definition pointing at a host with its own
+# transport, data root, and warm-worker count. Many regions may target the SAME host with different config.
+# Persisted GLOBALLY (not per-notebook) as a single JSON list in the config home — alongside slate.json —
+# so a notebook references regions by NAME only. This supersedes the old per-host warm-pool store (`warm`
+# folds in the pool count: warm>0 ⇒ keep that many workers ready to adopt).
+#
+# Config-home resolution mirrors SlateHome.config_file(); ReportEngine loads before SlateHome so it can't
+# call it directly (same reason `_slate_cache_dir` is inlined here). KEEP IN SYNC with slate_home.jl.
+function _slate_config_dir()
+    h = get(ENV, "KAIMONSLATE_CONFIG_HOME", "");  isempty(h) || return h
+    kh = get(ENV, "KAIMONSLATE_HOME", "");        isempty(kh) || return joinpath(kh, "config")
+    joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "kaimonslate")
+end
+_regions_path() = joinpath(_slate_config_dir(), "regions.json")
 
-function _pool_config!(host; n::Int, preload::AbstractString, transport::Symbol, base_port::Int = 0,
-                       root::AbstractString = "")
-    esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"")
-    body = "{\"host\":\"$(esc(host))\",\"n\":\"$n\",\"preload\":\"$(esc(preload))\"," *
-           "\"transport\":\"$transport\",\"base_port\":\"$base_port\",\"data_root\":\"$(esc(root))\"}"
-    mkpath(_POOL_DIR)
-    p = _pool_path(host); tmp = p * ".tmp"
-    write(tmp, body); mv(tmp, p; force = true)
+struct Region
+    name::String        # unique global identity — the cell-tag target AND the adoption key (user-chosen)
+    host::String        # ssh target (later: cluster ref)
+    transport::Symbol   # :tunnel | :direct
+    base_port::Int      # :direct port pinning (0 = auto)
+    preload::String     # LOCAL project dir replicated for env/warm-deps parity ("" = none)
+    data_root::String   # REMOTE KAIMONSLATE_DATADIR ("" = worker default)
+    warm::Int           # warm workers kept ready (0 = cold spin on demand)
+    threads::String     # worker "<compute>,<interactive>" ("" = global default)
+end
+
+const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
+_asint(x) = x isa Integer ? Int(x) : x isa AbstractFloat ? round(Int, x) : something(tryparse(Int, String(x)), 0)
+_region_from_dict(d::AbstractDict) = Region(
+    String(get(d, "name", "")), String(get(d, "host", "")),
+    Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
+    _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
+    _asint(get(d, "warm", 0)), String(get(d, "threads", "")))
+_region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
+    "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
+    "warm" => r.warm, "threads" => r.threads)
+
+# Every configured region (sorted by name). Lock-free: a concurrent writer swaps the file atomically, so a
+# reader sees either the old or the new complete file, never a torn one.
+function regions()
+    p = _regions_path(); isfile(p) || return Region[]
+    data = try; JSON.parse(read(p, String)); catch; return Region[]; end
+    data isa AbstractVector || return Region[]
+    out = Region[]
+    for d in data
+        d isa AbstractDict || continue
+        r = _region_from_dict(d); isempty(r.name) && continue
+        push!(out, r)
+    end
+    sort!(out; by = r -> r.name)
+    return out
+end
+region_get(name) = (n = String(name); for r in regions(); r.name == n && return r; end; nothing)
+
+function _write_regions!(list::AbstractVector{Region})
+    mkpath(_slate_config_dir())
+    p = _regions_path(); tmp = p * ".tmp"
+    write(tmp, JSON.json([_region_to_dict(r) for r in list], 2)); mv(tmp, p; force = true)
     return nothing
 end
 
-function _pool_config(host)
-    p = _pool_path(host)
-    isfile(p) || return nothing
-    s = try; read(p, String); catch; return nothing; end
-    n = tryparse(Int, _manifest_get(s, "n")); n === nothing && return nothing
-    tr = _manifest_get(s, "transport")
-    return (n = n, preload = _manifest_get(s, "preload"),
-            transport = Symbol(isempty(tr) ? "tunnel" : tr),
-            base_port = something(tryparse(Int, _manifest_get(s, "base_port")), 0),
-            root = _manifest_get(s, "data_root"))   # region data root (`datadir()`) for workers here; "" ⇒ default
+# Create or update a region by name (upsert). Returns the stored Region.
+function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
+                     data_root = "", warm = 0, threads = "")
+    n = strip(String(name)); isempty(n) && error("region name required")
+    r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
+               String(data_root), Int(warm), String(threads))
+    lock(_REGIONS_LOCK) do
+        list = regions()
+        i = findfirst(x -> x.name == r.name, list)
+        i === nothing ? push!(list, r) : (list[i] = r)
+        _write_regions!(list)
+    end
+    return r
 end
 
-# Every configured pool, host included — the hub's desired state (what `warm_pool!` was told),
-# NOT the live roster (ask `list_remote_workers` for that). Sorted by host for stable output.
-function pool_configs()
-    out = NamedTuple[]
-    isdir(_POOL_DIR) || return out
-    for f in sort!(readdir(_POOL_DIR; join = true))
-        endswith(f, ".json") || continue
-        s = try; read(f, String); catch; continue; end
-        h = _manifest_get(s, "host"); isempty(h) && continue
-        cfg = _pool_config(h); cfg === nothing && continue
-        push!(out, (host = h, n = cfg.n, preload = cfg.preload, transport = cfg.transport,
-                    base_port = cfg.base_port, root = cfg.root, status = pool_status(h)))
+function region_delete!(name)
+    n = String(name)
+    lock(_REGIONS_LOCK) do
+        _write_regions!(filter(x -> x.name != n, regions()))
     end
-    return out
+    return nothing
 end
+
+# Delete a region AND reap its warm workers (best-effort) so none linger orphaned. Defined here as a
+# thin wrapper; the reap machinery lives further down (forward-referenced, resolved at call time).
+function region_remove!(name)
+    r = region_get(name)
+    if r !== nothing && !isempty(r.host)
+        try
+            for w in list_remote_workers(r.host)
+                _region_warm_worker(w, r.name) && reap_remote_worker(r.host, w["port"])
+            end
+        catch e
+            _rlog("region[$(r.name)]: drain-on-delete failed ($(sprint(showerror, e)))")
+        end
+    end
+    region_delete!(name)
+    delete!(_REGION_STATUS, String(name))
+    return nothing
+end
+
+# Warm workers are now driven by the global Region registry (above) — the per-host pool store is gone.
 
 # Snapshot of the parked wires (host, label, port, idle seconds) — for the query surface.
 function parked_wires()
@@ -1723,155 +1851,105 @@ function parked_wires()
     end
 end
 
-# The pool's RemoteTarget: env dir keyed by the preload project's basename — the SAME formula
-# `_select_kernel` uses for a notebook's parent (server.jl), which is exactly what makes a pool
-# worker adoptable: matching basename ⇒ matching remote env dir ⇒ matching --project.
-_pool_target(host, cfg) = RemoteTarget(String(host); transport = cfg.transport,
-    project = "~/.cache/kaimonslate/remote/" * (isempty(cfg.preload) ? "detached" : basename(rstrip(cfg.preload, '/'))),
-    origin_env = cfg.preload,
-    datadir = get(cfg, :root, ""))   # pool workers boot with the pool's data root → a region adopting one already has it
+# A region's RemoteTarget. Env dir keyed by the preload basename (the same formula a notebook's parent
+# uses → --project parity); `region` tags the worker so its OWN region reclaims it on adoption.
+_region_target(r::Region) = RemoteTarget(r.host; transport = r.transport,
+    project = "~/.cache/kaimonslate/remote/" * (isempty(r.preload) ? "detached" : basename(rstrip(r.preload, '/'))),
+    origin_env = r.preload, datadir = r.data_root, region = r.name)
 
-# In-flight adoption claims (hub-local — only THIS hub adopts its own pool workers). The state
-# sidecar flips to `attached` asynchronously after adoption, so without a claim two notebooks
-# opening at once could both scan the roster, see the same idle worker, and both reset it.
-const _POOL_CLAIMS = Set{Tuple{String,Int}}()
-const _POOL_CLAIM_LOCK = ReentrantLock()
+# In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
+# the roster, see the same idle worker, and both adopt it.
+const _REGION_CLAIMS = Set{Tuple{String,Int}}()
+const _REGION_CLAIM_LOCK = ReentrantLock()
+_region_claimed(host, port::Int) =
+    lock(_REGION_CLAIM_LOCK) do; (String(host), port) in _REGION_CLAIMS; end
+_release_region_claim!(host, port::Int) =
+    (lock(_REGION_CLAIM_LOCK) do; delete!(_REGION_CLAIMS, (String(host), port)); end; nothing)
 
-_pool_claimed(host, port::Int) =
-    lock(_POOL_CLAIM_LOCK) do; (String(host), port) in _POOL_CLAIMS; end
-_release_pool_claim!(host, port::Int) =
-    (lock(_POOL_CLAIM_LOCK) do; delete!(_POOL_CLAIMS, (String(host), port)); end; nothing)
-
-# Is this roster entry a pool worker THIS hub could adopt at all (alive, idle, ours)? The
-# env/transport fit is `_adoptable` — split so the claim loop can log near-misses.
-_pool_candidate(w) =
+# A roster entry this hub can adopt for region `name`: alive, idle, ours, tagged with this region.
+_region_warm_worker(w, name::AbstractString) =
     w["alive"] === true && get(w, "state", "") == "idle" &&
-    _manifest_get(w["manifest"], "pool") == "1" &&
+    _manifest_get(w["manifest"], "region") == String(name) &&
     _manifest_get(w["manifest"], "hub") == gethostname()
 
-# Does a candidate FIT this notebook: same env dir (--project is fixed at boot) and same
-# transport (bind address/CURVE mode is fixed at boot)?
-_adoptable(w, rproj, transport::Symbol) =
-    _manifest_get(w["manifest"], "transport") == string(transport) &&
-    _manifest_get(w["manifest"], "project") == String(rproj)
-
-# Find + claim an adoptable pool worker. First unclaimed match wins — pool members are
-# interchangeable. Returns (port, stream_port) | nothing.
-function _claim_pool_worker!(host, rproj, transport::Symbol)
-    seen = 0   # pool members that were alive+idle but didn't fit — logged so a mismatch isn't silent
+# Find + claim a warm worker for region `name` on `host`. First unclaimed wins — a region's warm
+# workers are interchangeable. Returns (port, stream_port) | nothing.
+function _claim_region_worker!(name::AbstractString, host)
+    isempty(String(name)) && return nothing
     for w in list_remote_workers(host)
-        _pool_candidate(w) || continue
-        seen += 1
-        _adoptable(w, rproj, transport) || continue
+        _region_warm_worker(w, name) || continue
         sp = tryparse(Int, _manifest_get(w["manifest"], "stream_port")); sp === nothing && continue
         port = w["port"]
-        claimed = lock(_POOL_CLAIM_LOCK) do
-            (String(host), port) in _POOL_CLAIMS && return false
-            push!(_POOL_CLAIMS, (String(host), port)); true
+        claimed = lock(_REGION_CLAIM_LOCK) do
+            (String(host), port) in _REGION_CLAIMS && return false
+            push!(_REGION_CLAIMS, (String(host), port)); true
         end
         claimed || continue
         return (port = port, stream_port = sp)
     end
-    seen > 0 && _rlog("adopt: $seen warm pool worker(s) on $host, but none match env=$rproj transport=$transport — check warm_pool!'s preload (its basename must equal the notebook's parent project's)")
     return nothing
 end
 
-"""
-    warm_pool!(host; n = 1, preload = "", transport = :tunnel, base_port = 0, root = "") -> String
+# region name → last reconcile outcome (ok?, message, when). A BACKGROUND reconcile that throws (host
+# down / ssh banner timeout / provision error) would die silently in its @async task; the outcome lands
+# here so the Regions UI can surface it.
+const _REGION_STATUS = Dict{String,Any}()
+_set_region_status!(name, ok::Bool, msg::AbstractString) =
+    (_REGION_STATUS[String(name)] = (ok = ok, msg = String(msg), ts = time()); nothing)
+region_status(name) = get(_REGION_STATUS, String(name), nothing)
 
-Keep `n` warm Slate workers on `host`, ready for instant adoption: each is a running Julia
-process with the gate serving and the eval path prewarmed; `preload` (a local project dir)
-additionally replicates that env remotely and imports its packages while idle — so a notebook
-whose parent is that project opens in ~a second instead of ~90. Adoption wipes only the
-namespace; packages and the memo store survive. The pool refills itself after every adoption.
-`n = 0` drains: idle pool workers are reaped (attached/adopted ones are never touched).
-
-`base_port` pins the port range for a `:direct` pool: worker *i* binds `base_port+3i .. +3i+2`
-(main/stream/data), so you know exactly which ports to open in the host's firewall. `0` (or any
-`:tunnel` pool, which forwards over loopback) auto-assigns from 9100+. `root` pins these workers'
-data dir (`datadir()`/`@sfile`) to a REMOTE absolute path on `host` (kept verbatim — never expanded
-locally); a region enabled from this pool inherits it via its spec. Blocking (provision + launch);
-safe to re-run — it reconciles toward `n`.
-"""
-function warm_pool!(host::AbstractString; n::Int = 1, preload::AbstractString = "",
-                    transport::Symbol = :tunnel, base_port::Int = 0, root::AbstractString = "",
-                    reconcile::Bool = true)
-    h = String(strip(String(host)))
-    isempty(h) && return "give an ssh host"
-    n >= 0 || return "n must be ≥ 0"
-    transport in (:tunnel, :direct) || return "transport must be :tunnel or :direct"
-    (base_port == 0 || 1024 <= base_port <= 65533) || return "base_port must be 0 (auto) or 1024–65533"
-    base_port > 0 && transport !== :direct &&
-        _rlog("pool[$h]: base_port ignored for :tunnel (ports are loopback-forwarded, auto is fine)")
-    pl = strip(String(preload))
-    pl = isempty(pl) ? "" : abspath(expanduser(String(pl)))
-    (isempty(pl) || isdir(pl)) || return "preload project dir not found: $pl"
-    # `root` is the workers' data dir (`datadir()`/`@sfile`) ON THE HOST — a REMOTE absolute path (fast
-    # scratch, a shared mount). Kept verbatim: never expanduser/abspath it locally (it names a path on
-    # the host, not here). A region enabled from this pool inherits it; pool workers boot with it set.
-    rt = String(strip(String(root)))
-    _pool_config!(h; n = n, preload = pl, transport = transport, base_port = base_port, root = rt)
-    _rlog("═══ WARM POOL: $h → n=$n preload=$(isempty(pl) ? "(none)" : pl) transport=$transport" *
-          (base_port > 0 ? " base_port=$base_port" : "") * " ═══")
-    # The persist above is fast + durable; the reconcile (provision + launch) is the slow part. Callers
-    # driving a UI can persist now (reconcile=false) and fire _pool_reconcile! on a background task, so
-    # a follow-up read of the config sees the new desired state immediately instead of racing the launch.
-    return reconcile ? _pool_reconcile!(h) :
-           "pool[$h]: configured → n=$n$(base_port > 0 ? " base_port=$base_port" : "") (reconcile queued)"
-end
-
-# host → last reconcile outcome (ok?, message, when). A BACKGROUND reconcile that throws (host down /
-# ssh banner timeout / provision error) used to die silently in its @async task — logged, but invisible
-# to the user ("the workers don't come up, no errors I can see"). Now the outcome lands here and the
-# pool UI surfaces it.
-const _POOL_STATUS = Dict{String,Any}()
-_set_pool_status!(host, ok::Bool, msg::AbstractString) =
-    (_POOL_STATUS[String(host)] = (ok = ok, msg = String(msg), ts = time()); nothing)
-pool_status(host) = get(_POOL_STATUS, String(host), nothing)
-
-# Drive the host toward the configured pool size — recording the outcome so a failure is visible.
-function _pool_reconcile!(host)
-    cfg = _pool_config(host)
-    cfg === nothing && return "no pool configured for '$host' — call warm_pool!(host; n, preload)"
+# Drive a region's host toward its `warm` count (0 drains), recording the outcome for the UI. Safe to
+# re-run — reconciles toward `warm`, re-reading the region definition from the registry each call.
+function region_reconcile!(name)
+    r = region_get(name)
+    r === nothing && return "no region '$name'"
+    isempty(r.host) && return "region '$(r.name)' has no host"
     try
-        msg = _pool_reconcile_impl!(host, cfg)
-        _set_pool_status!(host, true, msg)
+        msg = _region_reconcile_impl!(r)
+        _set_region_status!(r.name, true, msg)
         return msg
     catch e
         emsg = "reconcile failed — " * first(sprint(showerror, e), 140)
-        _set_pool_status!(host, false, emsg)
-        _rlog("pool[$host]: $emsg")
+        _set_region_status!(r.name, false, emsg)
+        _rlog("region[$(r.name)]: $emsg")
         rethrow()
     end
 end
 
-# Reap dead pool litter and stale-env idlers, launch the deficit (one provision pass covers them all),
-# trim any excess idlers. Never touches an attached worker, a claimed worker, or anything not
-# pool-tagged by this hub. Wrapped by `_pool_reconcile!`, which records the outcome for the UI.
-function _pool_reconcile_impl!(host, cfg)
-    t = _pool_target(host, cfg)
+# Reconcile every region that keeps warm workers — the hub's desired-state driver.
+reconcile_all_regions!() = for r in regions()
+    r.warm > 0 && (try; region_reconcile!(r.name); catch; end)
+end
+
+# Reap this region's dead workers + idlers of an old preload env/transport, launch the deficit (one
+# provision pass covers them all), trim excess idlers. Never touches an attached worker, a claimed
+# worker, or another region's workers. Wrapped by `region_reconcile!`, which records the outcome.
+function _region_reconcile_impl!(r::Region)
+    host = r.host
+    t = _region_target(r)
     roster = list_remote_workers(host)
     mine = [w for w in roster
-            if _manifest_get(w["manifest"], "pool") == "1" &&
+            if _manifest_get(w["manifest"], "region") == r.name &&
                _manifest_get(w["manifest"], "hub") == gethostname()]
+    # A region's def can change (new preload/transport) — its old idle workers still carry the region tag
+    # but the wrong env dir/transport, so they can't serve it. `fits` distinguishes usable warm from stale.
+    fits(w) = _manifest_get(w["manifest"], "project") == t.project &&
+              _manifest_get(w["manifest"], "transport") == string(r.transport)
     dead  = [w for w in mine if w["alive"] !== true]
-    stale = [w for w in mine if _pool_candidate(w) && !_adoptable(w, t.project, cfg.transport) &&
-                                !_pool_claimed(host, w["port"])]
-    for w in vcat(dead, stale)                       # litter: dead members + idlers of an old preload env/transport
+    stale = [w for w in mine if _region_warm_worker(w, r.name) && !fits(w) && !_region_claimed(host, w["port"])]
+    for w in vcat(dead, stale)
         reap_remote_worker(host, w["port"])
     end
-    warm = [w for w in mine if _pool_candidate(w) && _adoptable(w, t.project, cfg.transport) &&
-                               !_pool_claimed(host, w["port"])]
-    deficit = cfg.n - length(warm)
+    warm = [w for w in mine if _region_warm_worker(w, r.name) && fits(w) && !_region_claimed(host, w["port"])]
+    deficit = r.warm - length(warm)
     cleaned = isempty(dead) && isempty(stale) ? "" : " (cleaned $(length(dead)) dead, $(length(stale)) stale-env)"
     if deficit > 0
-        provision_remote!(t, cfg.preload)            # idempotent; one pass covers every launch below
-        # Ports for the new workers. :direct pools with a pinned base march up from it in strides of 3
-        # (each worker owns port..port+2) so you know exactly which range to open in the firewall — the
-        # whole point of :direct. Slots a live worker already holds are skipped (replenish fills gaps).
+        provision_remote!(t, r.preload)              # idempotent; one pass covers every launch below
+        # Ports for the new workers. A :direct region with a pinned base marches up from it in strides of
+        # 3 (each worker owns port..port+2) so you know exactly which range to open in the firewall.
         # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster.
         ports = Tuple{Int,Int}[]
-        if cfg.transport === :direct && cfg.base_port > 0
+        if r.transport === :direct && r.base_port > 0
             occupied = Set{Int}()
             for w in roster
                 w["alive"] === true || continue
@@ -1879,13 +1957,13 @@ function _pool_reconcile_impl!(host, cfg)
             end
             k = 0
             while length(ports) < deficit && k < 256
-                p = cfg.base_port + 3k; k += 1
+                p = r.base_port + 3k; k += 1
                 (p + 2) <= 65535 || break
                 (p in occupied || (p + 1) in occupied || (p + 2) in occupied) && continue
                 push!(ports, (p, p + 1))
             end
             length(ports) < deficit &&
-                _rlog("pool[$host]: only $(length(ports)) free port slot(s) from base $(cfg.base_port) — open a wider range for $deficit workers")
+                _rlog("region[$(r.name)]: only $(length(ports)) free port slot(s) from base $(r.base_port) — open a wider range for $deficit workers")
         else
             floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
             for _ in 1:deficit
@@ -1893,17 +1971,17 @@ function _pool_reconcile_impl!(host, cfg)
             end
         end
         for (port, sp) in ports
-            _launch_worker!(t, port, sp; label = "", parent = "", pool = true,
-                            warm_deps = !isempty(cfg.preload))
+            _launch_worker!(t, port, sp; label = "", parent = "", threads = r.threads,
+                            warm = true, region = r.name, warm_deps = !isempty(r.preload))
         end
-        return "pool[$host]: launched $(length(ports)) worker(s) → $(cfg.n) warm, env $(t.project)$cleaned"
+        return "region[$(r.name)]: launched $(length(ports)) worker(s) → $(r.warm) warm on $host$cleaned"
     elseif deficit < 0
         for w in warm[1:(-deficit)]
             reap_remote_worker(host, w["port"])
         end
-        return "pool[$host]: reaped $(-deficit) excess idle worker(s) → $(cfg.n) warm$cleaned"
+        return "region[$(r.name)]: reaped $(-deficit) excess idle worker(s) → $(r.warm) warm$cleaned"
     end
-    return "pool[$host]: $(length(warm)) warm — nothing to do$cleaned"
+    return "region[$(r.name)]: $(length(warm)) warm — nothing to do$cleaned"
 end
 
 # ── Parked connections (detach keeps the wire) ───────────────────────────────────────────────
