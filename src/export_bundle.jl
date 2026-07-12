@@ -435,7 +435,11 @@ function _memo_specs(report)
         # but its cached wire IMAGE (from an interactive run) is worth shipping so the figure RESTORES
         # on import instead of re-rendering. Kept — the worker snapshot reports its EXISTING entry for
         # an empty-names cell rather than force-storing a synthetic (image-less) wire over the real one.
-        defs = [w for w in cell.writes if !(w in cell.provides) && w !== ReportEngine._THEME_SENTINEL]
+        # …minus @bind control vars too: re-established by the `@bind` replay on restore, not embedded
+        # (mirrors `_eval_one!`). A MIXED cell ships only its genuine compute; its control replays.
+        bindnames = Set{Symbol}(b.name for b in cell.binds)
+        defs = [w for w in cell.writes
+                if !(w in cell.provides) && !(w in bindnames) && w !== ReportEngine._THEME_SENTINEL]
         unread = String[string(w) for w in defs if !any(o -> o !== cell && w in o.reads, report.cells)]
         safe   = String[string(w) for w in defs if !any(o -> o !== cell && w in o.mutates, report.cells)]
         ms = cell.output === nothing ? 0.0 : Float64(cell.output.duration_ms)

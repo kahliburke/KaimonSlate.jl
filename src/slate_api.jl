@@ -275,6 +275,15 @@ const SLATE_API = SlateApiEntry[
         run chip. `@progress`/`@withprogress` loops also drive it automatically.
         `for i in 1:n; slate_progress(i/n; msg=\"step \$i\"); end`."""),
 
+    # ── Live custom stream ───────────────────────────────────────────────────────────────────────
+    SlateApiEntry("slate_emit", "Live stream", "slate_emit(channel::AbstractString, json::AbstractString)",
+        """Push a pre-serialized JSON string to a browser-side handler on `channel`, with NO cell
+        recompute and NO output swap — the low-latency path for a custom `@asset` JS renderer that
+        owns its cell's output. The gate stream carries strings, so serialize first (`JSON.json(…)`).
+        In the browser the asset registers `slateOnStream(channel, data => …)` and receives the
+        PARSED value. Region-transparent (works when the cell runs on a remote worker).
+        `slate_emit("mypanel", JSON.json(Dict("node" => "x", "phase" => "forward")))`."""),
+
     # ── Fingerprints & the memo store ── real functions, documented in their own docstrings ─────────
     SlateApiEntry("slate_fingerprint", "Caching", Base.Docs.Binding(ReportEngine, :slate_fingerprint)),
     SlateApiEntry("slate_memo_stats", "Caching", Base.Docs.Binding(ReportEngine, :slate_memo_stats)),

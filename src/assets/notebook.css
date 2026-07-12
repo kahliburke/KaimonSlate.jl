@@ -194,17 +194,21 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 #nb.zen-fading { opacity:0; }
 body.zen .topbar, body.zen .hydbanner, body.zen #runchip, body.zen #runstale, body.zen #scratchrun,
 body.zen .focusbar, body.zen .dagpane, body.zen .agentpanel, body.zen .filespanel, body.zen #healthbadge,
-body.zen .cellhead, body.zen .coldrop, body.zen .cellprog, body.zen .cell .controls.empty { display:none !important; }
+body.zen .cellhead, body.zen .coldrop, body.zen .cellprog, body.zen .cell .controls.empty,
+/* the "⊞ … surfaced in ‘cell’" chip is authoring chrome — the live control renders in its host cell */
+body.zen .hostedph { display:none !important; }
 body.zen .cell > textarea, body.zen .cell .cm-editor, body.zen .cell .srcedit { display:none !important; }
 body.zen .cell { border:none !important; background:none !important; box-shadow:none !important;
   padding:2px 0 !important; margin:0 !important; }
-body.zen .cell .md { margin:0; }
+body.zen .cell .md { margin:0; padding:7px 16px; }   /* reading flow: tighter vertical rhythm between blocks */
 /* Width follows the page's own mode (the column-width slider / Full-page-width toggle on `.page`) —
    zen only frees vertical space by adding a little top room now that the topbar is hidden. */
 body.zen #nb { margin-top:22px; }
-/* Collapse a code cell that renders nothing (no markdown / output / table / chart / control) so a
-   reading pass has no blank gaps where a pure definition cell used to be. `:has()` — modern browsers. */
-body.zen #nb .cell:not(:has(.md)):not(:has(.output *)):not(:has(.tables *)):not(:has(.echarts *)):not(:has(.controls:not(.empty))):not(:has(.binds *)) { display:none !important; }
+/* Collapse a code cell that renders nothing (no markdown / output / table / chart / live control) so a
+   reading pass has no blank gaps where a pure definition cell used to be. A bind cell whose only content
+   is a surfaced-elsewhere `.hostedph` chip counts as empty — its live control renders in its host cell.
+   `:has()` — modern browsers. */
+body.zen #nb .cell:not(:has(.md)):not(:has(.output *)):not(:has(.tables *)):not(:has(.echarts *)):not(:has(.controls:not(.empty))):not(:has(.binds > :not(.hostedph))) { display:none !important; }
 /* Floating exit affordance (the topbar with the toggle is hidden in zen). */
 .zenexit { display:none; }
 body.zen .zenexit { display:inline-flex; align-items:center; gap:6px; position:fixed; top:14px; right:18px;
@@ -492,7 +496,12 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md .katex { font-size:1.12em; }                        /* markdown math: a touch above body text */
 .md .katex-display { overflow-x:auto; overflow-y:hidden; }
 .md .katex-display .katex { font-size:1.3em; }
-.md { padding:14px 16px; }
+.md { padding:12px 16px; }
+/* Collapse the first/last block's OWN margin into the padding: a markdown cell that opens with a
+   heading/paragraph otherwise stacks that element's default margin on top of the padding, doubling the
+   space above (and below) the block — reads as too much air, worst in a reading pass. */
+.md > :first-child { margin-top:0; }
+.md > :last-child { margin-bottom:0; }
 .md h1 { font-size:1.7rem; border-bottom:1px solid var(--border); padding-bottom:.2em; }
 .md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
 .md code { background:var(--bg3); padding:1px 5px; border-radius:4px; }

@@ -48,6 +48,17 @@ Base.:(==)(a::Choice, b) = getfield(a, :value) == b
 Base.:(==)(a, b::Choice) = a == getfield(b, :value)
 Base.hash(c::Choice, h::UInt) = hash(getfield(c, :value), h)
 Base.isequal(a::Choice, b::Choice) = isequal(getfield(a, :value), getfield(b, :value))
+# Transparent in CONVERT/INDEX contexts too — typed struct fields, typed local assignment (`x::Int = c`),
+# typed collections (`Int[c]`, `push!(::Vector{Int}, c)`), indexing (`arr[c]`), and explicit numeric
+# construction (`Int(c)`) — so a labeled option's `Choice` works wherever its bare value would flow
+# through a `convert`. `convert` is restricted to SCALAR targets so it can't shadow the Choice→Choice
+# conversion that `Choice[…]` collections (e.g. `Selection`) depend on. NOTE: a typed *keyword/positional
+# argument* (`f(; n::Int)`, `f(n::Int)`) ASSERTS/DISPATCHES rather than converting — Julia rejects even a
+# `Float64` there — so it still needs `Int(c)`/`c.value`; no `Choice` method can change that.
+Base.convert(::Type{T}, c::Choice) where {T<:Union{Number,AbstractString,AbstractChar,Symbol}} =
+    convert(T, getfield(c, :value))
+(::Type{T})(c::Choice) where {T<:Number} = T(getfield(c, :value))
+Base.to_index(c::Choice) = Base.to_index(getfield(c, :value))
 
 # A multi-selection — an ordered, read-only `value => label` dict (emulates OrderedDict on Base
 # alone). `keys(picks)` → values, `values(picks)` → labels, `picks[v]` → label, `haskey`,
@@ -345,6 +356,17 @@ function Base.show(io::IO, ::MIME"text/html", w::WebPage)
     return nothing
 end
 
+# Normalize call args to NAMED-TUPLE shape so a handler reads `args.n` (not `args["n"]`): a JSON object
+# → NamedTuple (Symbol keys), arrays stay Vectors (recursing into elements so nested objects convert
+# too), scalars pass through. Applied at BOTH handler boundaries (the WS `__slate_call` and `slate_call`),
+# so a handler written against `args.field` works from JS and from Julia alike. `get(args, :n, default)`
+# and `haskey` work as usual; a non-identifier JSON key lands as `var"my-key"` (reach it via
+# `getproperty(args, Symbol("my-key"))`). Type-unstable by construction — fine for the fixed arg shapes
+# a given call uses (the field names ARE the type); don't route huge dynamic key-sets through it.
+_slate_args(x::AbstractDict) = NamedTuple{Tuple(Symbol.(keys(x)))}(Tuple(_slate_args(v) for v in values(x)))
+_slate_args(x::AbstractVector) = Any[_slate_args(v) for v in x]
+_slate_args(x) = x
+
 # ── The namespace contract ────────────────────────────────────────────────────
 # Inject the COMPLETE, identical set of notebook-namespace names into module `m`.
 # Context-specific helper *implementations* (echart/tables/refresh) are passed in;
@@ -352,6 +374,7 @@ end
 # once. The per-eval `@bind` sink is task-local (run_capture seeds it); returns the populated module.
 function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTable,
                                 slate_query, slate_refresh, slate_progress = (frac; msg = "", id = "", done = false) -> nothing,
+                                slate_emit = (channel, data) -> nothing,
                                 assetbase = () -> "")
     Core.eval(m, :(const echart = $echart))
     Core.eval(m, :(const EChart = $EChart))
@@ -363,6 +386,22 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const slate_query = $slate_query))
     Core.eval(m, :(const slate_refresh = $slate_refresh))
     Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress
+    Core.eval(m, :(const slate_emit = $slate_emit))           # slate_emit(channel, data) → live push to a cell's custom JS (cellstream:)
+    # JS→Julia CALLS — the request/response counterpart to `slate_emit`'s push. A cell registers
+    # `slate_on("channel", args -> result)`; browser JS calls `await window.slateCall("channel", args)`.
+    # The `__slate_call` worker tool (dispatched off the page WebSocket on the interactive thread) looks
+    # the handler up in this per-namespace registry and invokes it. Fresh dict per namespace, so a
+    # rebuild drops stale closures; a cell re-run just replaces its channel's handler.
+    Core.eval(m, :(const __slate_handlers = $(Dict{String,Any}())))
+    Core.eval(m, :(const slate_on = (channel, f) -> (__slate_handlers[string(channel)] = f; nothing)))
+    # Invoke a `slate_on` handler FROM Julia (same as `window.slateCall` does from JS, but in-process —
+    # no round-trip). For testing a handler in a cell, or wiring one to a control:
+    # `@onclick go slate_call("compute", (n = n_slider,))`. Errors if the channel isn't registered.
+    Core.eval(m, :(function slate_call(channel, args = nothing)
+        f = get(__slate_handlers, string(channel), nothing)
+        f === nothing && error("no slate_on handler registered for channel '" * string(channel) * "'")
+        return f($(_slate_args)(args))   # NamedTuple-shape, same as the JS call path — `args.field`
+    end))
     Core.eval(m, :(const slate_fingerprint = $slate_fingerprint))   # canonical value hash (fingerprint.jl)
     Core.eval(m, :(const slate_memo_stats = $slate_memo_stats))     # durable memo store: shape
     Core.eval(m, :(const slate_memo_entries = $slate_memo_entries)) # durable memo store: entry listing

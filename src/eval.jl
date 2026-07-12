@@ -11,6 +11,7 @@ export Kernel, InProcessKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
 export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
 export register_userprog!, unregister_userprog!
+export register_emit!, unregister_emit!
 export register_celldone!, unregister_celldone!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
@@ -70,6 +71,21 @@ function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = fals
     return nothing
 end
 
+# Custom per-channel live stream: a running cell calls `slate_emit(channel, data)` to push an
+# arbitrary JSON-serializable value straight to a browser-side handler registered on that channel
+# (`slateOnStream(channel, fn)`), with NO cell recompute and NO output swap — the low-latency path
+# for a custom `@asset` renderer that owns its cell's output. Same out-of-band registry pattern; the
+# server callback JSON-encodes and broadcasts a `cellstream:` frame. The callback takes (channel, data).
+const _EMIT_REGISTRY = Dict{String,Any}()
+register_emit!(report_id::AbstractString, cb) = (_EMIT_REGISTRY[String(report_id)] = cb; nothing)
+unregister_emit!(report_id::AbstractString) = (delete!(_EMIT_REGISTRY, String(report_id)); nothing)
+function _do_emit(report_id::AbstractString, channel, payload)
+    cb = get(_EMIT_REGISTRY, String(report_id), nothing)
+    cb === nothing && return nothing
+    try; cb(String(channel), payload); catch e; @debug "eval: emit callback failed" report_id exception = e; end   # payload is a Julia VALUE (gate: deserialized; in-process: passed straight through) — the emit callback JSON-encodes it
+    return nothing
+end
+
 # Parallel batch results: the gate worker evaluates a batch of stale cells CONCURRENTLY and PUBs each
 # cell's wire-form result on the `slate_celldone` channel the instant it finishes (see worker.jl
 # `__slate_eval_batch`). The poller routes each here; the server merges it version-guarded and pushes a
@@ -115,6 +131,7 @@ function _new_module(report::Report)
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars),
         slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, frac, msg, id, done),
+        slate_emit = (channel, data) -> _do_emit(rid, channel, data),
         assetbase = () -> String(get(report.meta, "assetbase", "")))   # `@asset` base (notebook project dir)
     return m
 end
@@ -348,7 +365,15 @@ function _memoizable(cell::Cell)
     # names server-side (a synthetic marker, never a real global). Invalidation is already handled:
     # graphics cells READ the sentinel, so a theme edit bumps their key. This unlocks the expensive
     # self-theming plots (a `set_theme!(theme_dark())` before a heavy render) that dominate startup.
-    return isempty(cell.binds)
+    #
+    # A cell that DECLARES a `@bind` is memoizable via the SAME scaffold trick: cache the cell's
+    # genuinely-computed writes and, on restore, REPLAY just its `@bind` statement (`_replay_scaffold!`)
+    # to re-register the widget + re-assign the control global — the expensive body never re-runs. This
+    # is what makes a MIXED cell (a `@bind` beside real compute) cacheable. The control's current value
+    # is already folded into the memo key (`_memo_key`), so changing the control invalidates the entry;
+    # and the fresh-namespace re-establish seeds the registry with the host's value first, so the replay
+    # reconciles to it rather than the widget default (values and cached compute can't drift).
+    return true
 end
 
 # Is this source purely `using`/`import` statements (comments/whitespace aside)? Such a cell is

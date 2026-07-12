@@ -108,6 +108,32 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test !isempty(findcell(r, "mix").binds)           # control reported even though mixed
     end
 
+    @testset "Choice is transparent in convert/index/construct contexts" begin
+        # A labeled Select binds a `Choice`; it must behave like its value wherever a `convert` flows.
+        c = RE.Choice(8, "8 heads", 4)
+        @test convert(Int, c) === 8                        # typed field / local / collection element
+        @test Int(c) === 8                                 # explicit numeric construction
+        @test (let x::Int = c; x end) === 8                # typed local assignment
+        @test Int[c, c] == [8, 8]                          # typed collection element
+        @test [10, 20, 30, 40, 50, 60, 70, 80][c] == 80    # indexing (to_index)
+        @test c == 8 && c.value === 8 && c.label == "8 heads"
+        # The scalar-only `convert` restriction keeps Choice→Choice conversion intact (Selection needs it).
+        @test eltype(RE.Choice[c, c]) === RE.Choice
+    end
+
+    @testset "a mixed @bind cell is memoizable, keyed on the control value" begin
+        r = parse_report("#%% code id=up\nd = 3\n#%% code id=mix\n@bind k Slider(1:5)\ny = d * k")
+        build_dependencies!(r); eval_stale!(r)
+        mix = findcell(r, "mix")
+        @test !isempty(mix.binds)
+        @test RE._memoizable(mix)                          # bind cells now cacheable (scaffold-replay on restore)
+        # the control's current value is folded into the key, so changing it invalidates the entry
+        k1 = RE._memo_key(r, mix)
+        set_bind_value!(r, mix, :k, 5)
+        k2 = RE._memo_key(r, mix)
+        @test !isempty(k1) && k1 != k2
+    end
+
     @testset "dynamic range: widget args are reads; range re-evaluates" begin
         r = parse_report("#%% code id=hi\nhi = 5\n#%% code id=ctl\n@bind k Slider(1:hi)")
         build_dependencies!(r)

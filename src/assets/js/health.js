@@ -149,5 +149,13 @@ async function poll() {
   } finally { inflight = false; }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
-function start() { if (timer) return; poll(); timer = setInterval(poll, POLL_MS); }
+// The hub PUSHES health over the page WebSocket (server: `_ws_health!` on each watchdog scan + on
+// connect), so there's no interval poll — no constant GET /api/health in the network tab. We keep one
+// initial `poll()` for the very first paint (before the socket is up) and the visibility one-shot above.
+function start() {
+  poll();
+  window.onSlateHealth = (payload) => {
+    health.value = (payload && Array.isArray(payload.alerts)) ? payload : { status: 'ok', alerts: [] };
+  };
+}
 start();

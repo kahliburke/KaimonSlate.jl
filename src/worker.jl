@@ -12,6 +12,8 @@ module SlateWorker
 
 import KaimonGate
 import Pkg                                   # project dep listing for eager docs auto-index
+import Serialization                         # slate_emit value → bytes (unconditional; memo re-imports under its guard)
+import Base64                                # …then base64 so an arbitrary Julia value rides the string stream
 
 # The enclosing/parent project dir stacked behind this notebook env on LOAD_PATH (set by
 # the boot script; "" when the notebook is detached). Used to attribute package provenance
@@ -59,6 +61,14 @@ function _new_ns()
         # wire: "id|frac|done|msg" (id/frac/done are |-free; msg is the rest — split limit=4)
         slate_progress = (frac; msg = "", id = "", done = false) ->
             KaimonGate._publish_stream("slate_progress", string(id, "|", Float64(frac), "|", done === true ? 1 : 0, "|", msg)),
+        # slate_emit(channel, value): push ANY Julia value to a browser handler (slateOnStream) — no
+        # hand-built JSON. The gate stream frames are strings, so the value is Serialization-serialized
+        # then base64'd and wired as `channel\x1fb64` (unit separator — absent from identifiers and from
+        # base64's alphabet); the hub deserializes it back to a Julia value and JSON-encodes it for the
+        # `cellstream:` frame. (In-process notebooks skip this and pass the value straight through.) Bulk
+        # data belongs on the blob channel, not here — base64+serialize suits small streaming payloads.
+        slate_emit = (channel, value) -> KaimonGate._publish_stream("slate_emit",
+            string(channel) * "\x1f" * Base64.base64encode(Serialization.serialize, value)),
         # `@asset`/`readfile` resolve relative paths against the notebook's project dir (what
         # `pkgdir(...)` gives, and where a package notebook's assets live). Read at call time so a
         # provenance change is picked up; falls back to the active project when PARENT_PROJECT is unset.
@@ -431,6 +441,16 @@ function _replay_scaffold!(m::Module, source::AbstractString)
         (s isa Expr && s.head in (:using, :import)) || continue
         try; Base.invokelatest(Core.eval, m, s)
         catch e; @info "slate memo: import replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
+    end
+    for s in stmts                                   # top-level `@bind name W(…)` — RE-REGISTER the widget
+        s isa LineNumberNode && continue             # (assign the control global) without running the cell's
+        # compute. `@bind` expands to `name = __slate_bind(:name, W)`, so evaluating it re-establishes the
+        # per-namespace registry entry + the global; `_do_bind` reconciles the value against the registry
+        # (seeded with the host's current value on a fresh namespace), NOT the widget default. Runs AFTER
+        # the imports above so a data-dependent widget (`Select(sort(keys(d)))`) sees its upstream names.
+        (s isa Expr && s.head === :macrocall && s.args[1] === Symbol("@bind")) || continue
+        try; Base.invokelatest(Core.eval, m, s)
+        catch e; @info "slate memo: @bind replay failed on restore — recomputing" reason = first(split(sprint(showerror, e), '\n')); return false; end
     end
     for call in _collect_theme_calls!(Any[], top)    # set_theme!/update_theme! — restore the ambient theme
         try; Base.invokelatest(Core.eval, m, call)
@@ -805,6 +825,25 @@ and assign the global — via the namespace's injected `__slate_set_bind`. Retur
 coerced value."
 function __slate_set_bind(name::String, value)
     return Base.invokelatest(getfield(_NS[], :__slate_set_bind), Symbol(name), value)
+end
+
+# JS→Julia CALL — the `window.slateCall` counterpart to `slate_emit`'s one-way push. Look up the
+# handler a cell registered with `slate_on(channel, …)` in the LIVE namespace and invoke it with the
+# caller's (already-decoded) args. Dispatched off the page WebSocket over the gate's REQ/REP, so it
+# rides the interactive path and stays responsive even while a compute batch runs. Returns
+# `(; ok, value)` (the hub JSON-encodes `value` for the socket) or `(; ok=false, error)` — a missing
+# channel or a throwing handler is a clean error, never a hang.
+function __slate_call(channel::String, args)
+    m = _NS[]
+    hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
+    (hs isa AbstractDict) || return (; ok = false, error = "call handlers unavailable on this worker")
+    f = get(hs, String(channel), nothing)
+    f === nothing && return (; ok = false, error = "no slate_on handler registered for channel '$channel'")
+    try
+        return (; ok = true, value = Base.invokelatest(f, _slate_args(args)))   # Dict → NamedTuple so the handler reads `args.field`
+    catch e
+        return (; ok = false, error = first(sprint(showerror, e), 400))
+    end
 end
 
 "Discard the namespace (full rebuild)."
@@ -1533,6 +1572,7 @@ function tools()
         KaimonGate.GateTool("__slate_cancel", __slate_cancel),
         KaimonGate.GateTool("__slate_cancel_cells", __slate_cancel_cells),
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
+        KaimonGate.GateTool("__slate_call", __slate_call),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),

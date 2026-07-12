@@ -66,13 +66,14 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_progress!(nb.report.id, c -> _broadcast_progress(nb, c))                      # stream per-cell run status to the UI
     register_runbatch!(nb.report.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
     register_userprog!(nb.report.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
+    register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     return nb
 end
 function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
-    unregister_userprog!(nb.report.id); unregister_celldone!(nb.report.id)
+    unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
     return nb
 end
 
@@ -397,6 +398,14 @@ end
 # the running loop. Version-guarded: a cell edited/deleted mid-run discards its in-flight result.
 const _RUNNERS = Dict{String,Bool}()          # nb.id → a runner task is active
 const _RUNNER_LOCK = ReentrantLock()
+
+# Per-notebook MAIN-kernel worker identity we last re-established (`_worker_key` = objectid + ns_gen). A
+# worker swap (cold spawn / pool adopt / reprovision — never a reattach) bumps `k.ns_gen`, handing us a
+# BLANK namespace mid-session where every global (imports, theme, @bind registrations) is gone while the
+# cells still read FRESH. We detect the change (see `_reestablish_fresh_namespace!`) and re-establish; a
+# reattach (same worker key) is a no-op. Same key the region layer uses, for the main kernel.
+const _MAIN_GEN = Dict{String,UInt}()
+const _MAIN_GEN_LOCK = ReentrantLock()
 
 # Per-notebook mutex serialising WORKER EVALUATION: the runner's per-cell / per-batch steps take
 # it, and so does any out-of-band eval (slate.eval scratch pokes). Without it a scratch eval can
@@ -909,6 +918,7 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
         try; _watchdog_scan!(nb)
         catch e; ReportEngine._rlog("watchdog: scan error on $(nb.id): " * first(sprint(showerror, e), 120))
         end
+        try; _ws_health!(nb); catch; end   # push watchdog status to open pages over the WS (replaces the GET /api/health poll)
     end
     return nothing
 end
@@ -1393,13 +1403,16 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
                 (delete!(ids, cell.id); isempty(ids) && delete!(_FORCE_RUN, nb.id); true) : false
         end
         # The cell's genuinely-DEFINED names: writes minus `provides` (names brought in by
-        # `using`/`import`). A provided name is a function/module reference, not a value to cache —
-        # snapshotting it would try to serialize a function, and restoring it is a no-op the anchor
-        # already covers. Matters for `:using_redundant` cells (a `using X; v = solve()` whose X is
-        # anchored upstream): only `v` is cached, not X's exports. For ordinary cells provides is
-        # empty, so this is a no-op.
+        # `using`/`import`) and minus @bind CONTROL variables. A provided name is a function/module
+        # reference, not a value to cache; a bind variable is a UI `Choice`/value that the `@bind` REPLAY
+        # re-establishes on restore (`_replay_scaffold!`) — snapshotting it would serialize a wrapper
+        # object into the durable store (and a decode failure would sink the whole entry). Same
+        # scaffold pattern as `using` exports. Matters for `:using_redundant` and MIXED (`@bind x W; y =
+        # solve(x)`) cells: only the genuine compute (`v`/`y`) is cached. For ordinary cells both sets
+        # are empty, so this is a no-op.
+        bindnames = Set{Symbol}(b.name for b in cell.binds)
         defs = Set{Symbol}(w for w in cell.writes
-                           if !(w in cell.provides) && w !== ReportEngine._THEME_SENTINEL)
+                           if !(w in cell.provides) && !(w in bindnames) && w !== ReportEngine._THEME_SENTINEL)
         # Writes no OTHER cell reads — eligible for display-object elision at store time (the
         # worker decides by TYPE: a Makie Figure nobody reads stores as its wire image only, not
         # a multi-MB scene graph). Passed at restore time too: an entry that elided a name which
@@ -1417,7 +1430,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         # namespace while downstream entries carry post-mutation results.
         m = (key = ReportEngine._memo_key(nb.report, cell),
              names = unique!(String[string(w) for w in Iterators.flatten((defs, cell.mutates))
-                                    if w !== ReportEngine._THEME_SENTINEL]),
+                                    if w !== ReportEngine._THEME_SENTINEL && !(w in bindnames)]),
              threshold = ReportEngine._MEMO_THRESHOLD_MS,
              force = frc,
              always = (:cache in cell.flags),   # `cache` tag → persist regardless of runtime
@@ -1683,8 +1696,36 @@ function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::Abstract
     return nothing
 end
 
+# Re-establish a fresh main-kernel namespace (see `_MAIN_GEN`). Called at the top of every drain: bring the
+# worker up, and if its `ns_gen` advanced since we last primed it, (1) SEED the worker's bind registry with
+# the host's authoritative control values — so a bind cell that re-runs OR restores reconciles to the user's
+# selection, not the widget default (the value can't drift from the cached compute keyed on it) — and (2)
+# re-stale every code cell so the drain re-runs/restores them against the blank namespace (memoized cells
+# RESTORE, not recompute). In-process kernels (no `ns_gen`) and reattaches (gen unchanged) are no-ops. This is
+# the main-kernel counterpart to the region layer's ns_gen-keyed re-priming.
+function _reestablish_fresh_namespace!(nb::LiveNotebook)
+    nb.kernel isa ReportEngine.GateKernel || return nothing               # in-process never swaps namespaces
+    try; ReportEngine.prepare!(nb.kernel, nb.report); catch; return nothing; end   # up (bumps ns_gen if fresh)
+    wk = _worker_key(nb.kernel)
+    lock(_MAIN_GEN_LOCK) do; get(_MAIN_GEN, nb.id, UInt(0)); end == wk && return nothing   # reattach → unchanged
+    binds = lock(nb.lock) do
+        bs = Tuple{Symbol,Any}[(b.name, b.value) for c in nb.report.cells for b in c.binds]
+        for c in nb.report.cells                       # a blank namespace ⇒ every global is gone: re-run/restore all
+            c.kind == ReportEngine.CODE && (c.state = ReportEngine.STALE)
+        end
+        bs
+    end
+    for (name, value) in binds                         # seed the fresh registry with the host's current values
+        try; ReportEngine.assign_bind!(nb.kernel, nb.report, name, value)
+        catch e; @debug "slate: bind re-seed failed on fresh namespace" name exception = e; end
+    end
+    lock(_MAIN_GEN_LOCK) do; _MAIN_GEN[nb.id] = wk; end
+    return nothing
+end
+
 function _run_loop!(nb::LiveNotebook)
     try
+        _reestablish_fresh_namespace!(nb)   # a swapped/fresh worker → seed binds from host + re-stale (before draining)
         # Resolve bare-`using` exports BEFORE the first eval of a session, so the dependency graph —
         # and every memo key derived from it — is precise from the FIRST run. Otherwise the post-drain
         # barrier→precise flip (refine_usings!) changed downstream cells' memo keys between the first

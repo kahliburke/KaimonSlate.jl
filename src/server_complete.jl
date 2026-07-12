@@ -1445,6 +1445,7 @@ function _make_router(h::Hub)
 end
 
 const _EVENTS_RE = r"^/api/([^/]+)/events$"
+const _WS_RE = r"^/api/([^/]+)/ws$"           # per-page WebSocket for JS→Julia calls (window.slateCall)
 const _PUBLISH_RE = r"^/api/([^/]+)/publish-run\b"
 const _SITE_PUBLISH_RE = r"^/api/([^/]+)/site-publish\b"
 const _SITE_SYNC_RE = r"^/api/publish/site-sync\b"
@@ -1500,6 +1501,136 @@ end
 Start the single notebook server with an empty registry. Add notebooks with
 [`open_notebook!`](@ref). Non-blocking.
 """
+# `JSON.parse` yields library types (`JSON.Object`, lazy strings) that a worker whose env lacks JSON.jl
+# can't `deserialize` over the gate → "malformed request". Rebuild the call args as plain Base types
+# (Dict/Vector/scalars) so a call is env-INDEPENDENT — no worker needs JSON to receive one.
+_plainify(x::AbstractDict) = Dict{String,Any}(String(k) => _plainify(v) for (k, v) in x)
+_plainify(x::AbstractVector) = Any[_plainify(v) for v in x]
+_plainify(x::AbstractString) = String(x)
+_plainify(x) = x
+
+# Invoke a cell-registered `slate_on` handler on the notebook's kernel and normalize the outcome to a
+# JSON-able reply Dict (`ok`/`value` or `ok=false`/`error`). Never throws — a dead kernel / missing
+# channel / throwing handler all come back as a clean `error` so the browser Promise rejects cleanly.
+function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args)
+    k = nb.kernel
+    args = _plainify(args)   # strip JSON.jl types so ANY worker env can deserialize the request payload
+    try
+        if k isa ReportEngine.GateKernel
+            r = ReportEngine._tool(k, "__slate_call",
+                    Dict{String,Any}("channel" => String(channel), "args" => args); timeout = 30.0)
+            return _gf(r, :ok, false) === true ?
+                Dict{String,Any}("ok" => true, "value" => _gf(r, :value, nothing)) :
+                Dict{String,Any}("ok" => false, "error" => string(_gf(r, :error, "call failed")))
+        end
+        # In-process kernel: invoke the handler directly in the report's namespace module.
+        m = ReportEngine.report_module(nb.report)
+        hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
+        (hs isa AbstractDict) || return Dict{String,Any}("ok" => false, "error" => "call handlers unavailable")
+        f = get(hs, String(channel), nothing)
+        f === nothing && return Dict{String,Any}("ok" => false, "error" => "no slate_on handler for '$channel'")
+        return Dict{String,Any}("ok" => true, "value" => Base.invokelatest(f, args))
+    catch e
+        return Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300))
+    end
+end
+
+# ── Per-page WebSocket: JS→Julia CALLS + server→browser STREAM (slate_emit) ──────────────────────
+# The whole reverse-direction channel. Calls ride it (`{id,channel,args}` → `{t:"reply",id,ok,value}`),
+# AND `slate_emit` now pushes here (`{t:"emit",channel,data}`) instead of SSE — SSE coalesces under
+# backpressure (correct for idempotent cell patches, but LOSSY for a stream where each frame matters:
+# it silently dropped ~93% of a 1k burst). Each connection owns a bounded outbound queue drained by its
+# own task, so a slow client never blocks the poller/reactivity; on overflow we drop + emit an explicit
+# `{t:"dropped",n}` marker rather than silently coalescing. (SSE keeps the idempotent cell patches.)
+mutable struct _WSConn
+    out::Channel{String}
+    dropped::Threads.Atomic{Int}
+end
+_wsconn(cap::Int) = _WSConn(Channel{String}(cap), Threads.Atomic{Int}(0))
+
+const _WS_CONNS = Dict{String,Vector{_WSConn}}()   # nb id → live page sockets (slate_emit push targets)
+const _WS_LOCK = ReentrantLock()
+_ws_register!(nb::LiveNotebook, c::_WSConn) = lock(_WS_LOCK) do; push!(get!(_WS_CONNS, nb.id, _WSConn[]), c); end
+_ws_unregister!(nb::LiveNotebook, c::_WSConn) = lock(_WS_LOCK) do
+    v = get(_WS_CONNS, nb.id, nothing); v === nothing || filter!(!==(c), v)
+end
+
+# Enqueue one frame to a connection, NON-blocking. Full queue ⇒ drop + count; the next successful
+# enqueue is preceded by a `{t:"dropped",n}` marker so the client knows it fell behind. Thread-safe:
+# emits arrive on the poller task, replies on per-call tasks — `put!` is safe, the count is atomic.
+function _ws_send!(c::_WSConn, msg::AbstractString)
+    isopen(c.out) || return nothing
+    if Base.n_avail(c.out) >= c.out.sz_max
+        Threads.atomic_add!(c.dropped, 1); return nothing
+    end
+    d = Threads.atomic_xchg!(c.dropped, 0)
+    d > 0 && (try; put!(c.out, "{\"t\":\"dropped\",\"n\":$d}"); catch; end)
+    try; put!(c.out, String(msg)); catch; end
+    return nothing
+end
+
+# Send a pre-built JSON frame to every live page socket of a notebook (no-op when none are connected).
+function _ws_broadcast!(nb::LiveNotebook, frame::AbstractString)
+    conns = lock(_WS_LOCK) do; v = get(_WS_CONNS, nb.id, nothing); v === nothing ? _WSConn[] : copy(v); end
+    for c in conns; _ws_send!(c, frame); end
+    return nothing
+end
+
+# slate_emit → push `{t:"emit",channel,data}` to every live page socket. `value` is a Julia value (the
+# slate_emit unification); JSON-encoded once here on the hub.
+function _ws_emit!(nb::LiveNotebook, channel, value)
+    frame = try
+        string("{\"t\":\"emit\",\"channel\":", JSON.json(String(channel)), ",\"data\":", JSON.json(value), "}")
+    catch
+        return nothing
+    end
+    _ws_broadcast!(nb, frame)
+end
+
+# Watchdog health → push over the WS (`{t:"health",data}`), replacing the browser's periodic
+# GET /api/health poll (which showed as constant network-tab traffic). Sent on each watchdog scan and
+# once per socket on connect. The GET endpoint stays for a fresh page / non-WS clients.
+_ws_health!(nb::LiveNotebook) = (try
+    _ws_broadcast!(nb, string("{\"t\":\"health\",\"data\":", JSON.json(_health_json(nb)), "}"))
+catch; end; nothing)
+
+function _ws_calls(stream, nb::LiveNotebook)
+    if !HTTP.WebSockets.isupgrade(stream.message)
+        HTTP.setstatus(stream, 426); HTTP.startwrite(stream); return nothing
+    end
+    HTTP.WebSockets.upgrade(stream) do ws
+        c = _wsconn(1024)
+        _ws_register!(nb, c)
+        writer = @async try                      # single writer per socket (a WS can't interleave concurrent sends)
+            for msg in c.out; HTTP.WebSockets.send(ws, msg); end
+        catch; end
+        try; _ws_send!(c, string("{\"t\":\"health\",\"data\":", JSON.json(_health_json(nb)), "}")); catch; end   # initial health snapshot
+        try
+            for raw in ws
+                req = try; JSON.parse(raw isa String ? raw : String(raw)); catch; nothing; end
+                (req isa AbstractDict) || continue
+                cid = get(req, "id", nothing)
+                cid === nothing && continue      # no id ⇒ not a call (a one-way send is reserved for later)
+                ch = string(get(req, "channel", "")); args = get(req, "args", nothing)
+                @async begin
+                    reply = _do_slate_call(nb, ch, args); reply["id"] = cid; reply["t"] = "reply"
+                    payload = try
+                        JSON.json(reply)
+                    catch e    # non-JSON-serializable handler result → a clean error, not a client-side timeout
+                        JSON.json(Dict{String,Any}("t" => "reply", "id" => cid, "ok" => false,
+                            "error" => "result not JSON-serializable: " * first(sprint(showerror, e), 160)))
+                    end
+                    _ws_send!(c, payload)
+                end
+            end
+        finally
+            _ws_unregister!(nb, c)
+            close(c.out)                         # ends the writer task
+        end
+    end
+    return nothing
+end
+
 function start_hub(; host = "127.0.0.1", port = 8765)
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
@@ -1520,6 +1651,10 @@ function start_hub(; host = "127.0.0.1", port = 8765)
             nb = lock(h.lock) do; get(h.notebooks, m.captures[1], nothing); end
             nb === nothing && (nb = _reopen_persisted!(h, m.captures[1]))   # re-register after a restart
             nb === nothing ? (HTTP.setstatus(stream, 404); HTTP.startwrite(stream)) : _sse(stream, nb)
+        elseif (mw = match(_WS_RE, target)) !== nothing        # per-page WebSocket — JS→Julia calls
+            nb = lock(h.lock) do; get(h.notebooks, mw.captures[1], nothing); end
+            nb === nothing && (nb = _reopen_persisted!(h, mw.captures[1]))
+            nb === nothing ? (HTTP.setstatus(stream, 404); HTTP.startwrite(stream)) : _ws_calls(stream, nb)
         elseif startswith(target, "/api/import-standalone")   # long-lived SSE; raw Stream, not router
             _sse_import(stream, h)
         elseif startswith(target, "/api/preflight-stream")     # streamed remote preflight (step-by-step)

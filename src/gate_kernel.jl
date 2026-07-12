@@ -288,6 +288,7 @@ function _ensure_poller!()
                 srcnames = Dict{String,Set{String}}()   # parent /src edits → changed def-names
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
+                emits = Tuple{String,String,Any}[]   # ordered slate_emit pushes (rid, channel, deserialized VALUE) — NOT coalesced; each event matters
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
                 # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
@@ -319,6 +320,12 @@ function _ensure_poller!()
                             prog[(rid, String(parts[1]))] =
                                 (something(tryparse(Float64, parts[2]), 0.0), String(parts[4]), parts[3] == "1")
                         end
+                    elseif m.channel == "slate_emit"          # "channel\x1fb64" — base64(Serialization-serialized VALUE)
+                        parts = split(String(m.data), '\x1f'; limit = 2)
+                        if length(parts) == 2
+                            val = try; Serialization.deserialize(IOBuffer(Base64.base64decode(String(parts[2])))); catch; nothing; end
+                            push!(emits, (rid, String(parts[1]), val))
+                        end
                     elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring
                         _record_telemetry!(m.conn_name, String(m.data))
                     end
@@ -334,6 +341,9 @@ function _ensure_poller!()
                 end
                 for ((rid, bid), (frac, msg, done)) in prog
                     _do_userprog(rid, frac, msg, bid, done)
+                end
+                for (rid, ch, d) in emits
+                    _do_emit(rid, ch, d)
                 end
             catch e
                 # Surface a persistent failure (this class of bug — a missing/renamed Kaimon
@@ -375,6 +385,10 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
 end
 
 function _spawn_worker!(k::GateKernel)
+    k.ns_gen += 1   # a fresh LOCAL process ⇒ blank namespace (mirrors spawn_and_connect_remote!): the
+                    # ns_gen-keyed re-establish re-primes it — main-kernel @bind registrations here, and
+                    # region prime/resource/sync in the region layer. Without this a mid-session respawn
+                    # (worker crash → prepare! replaces it) left a fresh namespace looking unchanged.
     port, stream_port = _next_ports()
     k.port = port; k.stream_port = stream_port
     logdir = joinpath(tempdir(), "kaimonslate"); mkpath(logdir)
