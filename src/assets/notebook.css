@@ -125,12 +125,16 @@ button, a.btnlink { background:var(--bg3); color:var(--text); border:1px solid v
          border-radius:6px; padding:4px 12px; cursor:pointer; font-size:.82rem;
          text-decoration:none; display:inline-block; }
 button:hover, a.btnlink:hover { border-color:var(--accent); color:var(--accent); }
-.page { max-width:var(--page-max, 980px); margin:0 auto; padding:var(--page-pad) var(--page-pad) 160px; transition:margin-right .18s ease; }
+.page { max-width:var(--page-max, 980px); margin:0 auto; padding:var(--page-pad) var(--page-pad) 160px; transition:margin-right .18s ease, margin-left .18s ease; }
 body.fullwidth .page { max-width:none; }   /* Full page width overrides the column-width slider */
 /* When the agent chat is open, slide the notebook column left of the panel so cells
    and the chat never overlap (the panel is a fixed 380px drawer on the right). */
 body.agent-open .page { margin-right:392px; }
 @media (max-width:900px) { body.agent-open .page { margin-right:0; } }
+/* The TOC drawer mirrors the agent panel but on the LEFT: shift the notebook column right so the
+   outline and the cells never overlap (fixed 300px drawer). Falls back to overlay when narrow. */
+body.toc-open .page { margin-left:312px; }
+@media (max-width:900px) { body.toc-open .page { margin-left:0; } }
 /* Banner while a self-contained notebook's env reconstructs in the background; the cells below
    show the embedded frozen render until live cells are pushed in. */
 .hydbanner { position:sticky; top:var(--topbar-h,49px); z-index:9; display:flex; align-items:center; gap:10px;
