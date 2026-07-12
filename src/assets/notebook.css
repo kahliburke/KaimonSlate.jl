@@ -141,7 +141,6 @@ body.toc-open .page { margin-left:312px; }
   padding:8px 18px; font-size:.84rem; color:var(--accent); background:linear-gradient(90deg,var(--bg2),var(--bg)); border-bottom:1px solid var(--border); }
 .hydbanner.err { color:var(--red); }
 .hydbanner .hydspin { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--bg3); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
-.hydbanner .hydelapsed { opacity:.65; font-family:Menlo,monospace; font-size:.9em; }
 body.hydrating #nb { opacity:.9; pointer-events:none; }   /* frozen preview — not interactive yet */
 body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-events:none; }
 /* Dependency-cone highlight (the 🔗 button on a cell): the focused cell + its
