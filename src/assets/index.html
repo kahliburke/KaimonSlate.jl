@@ -187,10 +187,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 /* Fixed grid: the label block (host + badge) has a FIXED width, so every meter starts at the exact
    same x and the meters read as one clean aligned stack down the panel. The status column soaks up
    the rest. Columns: label | cpu-meter | cpu% | rss | status(fills rest). */
-.actrow{display:grid;grid-template-columns:206px 108px 44px 58px minmax(0,1fr);
-  align-items:center;column-gap:12px;padding:5px 1px;border-top:1px solid rgba(42,46,64,.5);}
+.actrow{display:grid;grid-template-columns:fit-content(160px) 64px 34px 52px minmax(0,1fr);
+  align-items:center;column-gap:10px;padding:5px 1px;border-top:1px solid rgba(42,46,64,.5);}
 .actrow.first{border-top:none;}
-.actlabel{display:flex;align-items:center;gap:7px;min-width:0;}          /* host + badge, one cell */
+.actlabel{display:flex;align-items:center;gap:6px;min-width:0;}          /* port + badge, one cell (host is in the group header) */
 .actwho{color:#d4d8e8;font-family:Menlo,monospace;font-size:.76rem;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;}
 .actbadge{flex:0 0 auto;font-size:.64rem;padding:1px 6px;border-radius:8px;white-space:nowrap;}
@@ -209,7 +209,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
    (green idle → amber busy → red hot), set inline by JS — a pegged/runaway worker reads red at a
    glance. The track is always visible (lighter fill + inset ring) so an idle meter still reads as a
    defined bar, and a nonzero load always paints at least a small coloured nub. */
-.actbar{width:108px;height:9px;background:#232842;border-radius:5px;overflow:hidden;
+.actbar{width:100%;height:9px;background:#232842;border-radius:5px;overflow:hidden;
   box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
 /* MUST be display:block — an inline <span> ignores width/height, collapsing the fill to nothing
    (the % text still shows, but the coloured bar vanishes). */
@@ -1586,9 +1586,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var running=Array.isArray(st.running)?st.running:[];
     var warm=st.warm||'', warming=warm.indexOf('warming')===0;
     var busy=alive&&(running.length>0||(st.evals||0)>0||warming);
+    // Notebook served, shortened: drop the `#region` suffix (region is the group header) and `.jl`.
+    var nb=(state==='attached'&&mf.notebook)?String(mf.notebook).replace(/#[^#]*$/,'').replace(/\.jl$/,''):'';
     var runTxt=!alive?'dead':running.length?('▶ '+running.join(', ')):
-      warming?('⏳ '+warm):warm.indexOf('ready')===0?('✓ '+warm):
-      (state==='attached'&&mf.notebook?mf.notebook:'idle');
+      warming?('⏳ '+warm):warm.indexOf('ready')===0?('✓ '+warm):(nb||'idle');
     // Fill: width = cpu%, colour by load (green idle → amber busy → red hot); a tiny-but-nonzero load
     // still shows a nub so "barely working" ≠ "idle". No telemetry (cpu==null) → empty track.
     var cpuPct=cpu==null?0:(cpu<=0?0:Math.max(5,Math.min(100,cpu)));
