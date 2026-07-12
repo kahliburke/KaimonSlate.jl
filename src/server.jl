@@ -144,11 +144,14 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
         end
         proj = Base.current_project(dirname(abspath(path)))
         parent = proj === nothing ? "" : dirname(proj)
-        # Base dir for `@asset "rel/path"` resolution + memo hashing — the notebook's project dir,
-        # matching the worker's PARENT_PROJECT. Runtime-derived (absolute, machine-specific), so it
-        # lives in meta (never the `.jl` footer, which only persists _CONFIG_KEYS).
-        report.meta["assetbase"] = parent
         envdir = ReportEngine.notebook_env_dir(path)
+        # Base dir for `@asset "rel/path"` resolution + memo hashing AND the notebook's data root
+        # (`datadir()`/`@sfile` → `<assetbase>/data`, matching the worker's PARENT_PROJECT). A DETACHED
+        # notebook (no enclosing project) has no parent dir; anchor it to the per-notebook fork-env dir
+        # — a stable location that resolves identically on the hub and every region worker, so `@sfile`
+        # files content-sync to a remote region instead of silently living at a `pwd()/data` the datadir
+        # sync never sees. Runtime-derived (absolute, machine-specific) → meta, never the `.jl` footer.
+        report.meta["assetbase"] = isempty(parent) ? envdir : parent
         env_exists = isfile(joinpath(envdir, "Project.toml"))   # the fork is materialised on first add
         delta = get(report.meta, "env", Dict{String,Any}[])     # footer-recorded notebook packages
         # Per-notebook worker-thread override: explicit `threads` arg wins, else a persisted
