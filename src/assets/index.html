@@ -497,12 +497,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var all=_allRemoteHosts();
     if(!all.length){rtHostsEl.innerHTML='<div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div>';return;}
     rtHostsEl.innerHTML='<div class="rthhead">Known remotes</div>'+all.map(function(h){
-      var isDef=(h===_sshGlobal), isCustom=(_sshHosts.indexOf(h)<0), hasPool=_rtHasPool(h);
+      var isDef=(h===_sshGlobal), isCustom=(_sshHosts.indexOf(h)<0), nreg=_rtRegionsOn(h).length;
       return '<div class="rthrow'+(isDef?' isdef':'')+'">'+
         '<span class="rthname" data-h="'+esc(h)+'" role="button" title="use this remote">'+(isDef?'★':'🖧')+' '+esc(h)+
-        (isDef?' <em>(default)</em>':'')+(isCustom?' <em>(custom)</em>':'')+(hasPool?' <em>(pool)</em>':'')+'</span>'+
+        (isDef?' <em>(default)</em>':'')+(isCustom?' <em>(custom)</em>':'')+(nreg?' <em>('+nreg+' region'+(nreg>1?'s':'')+')</em>':'')+'</span>'+
         '<span class="rthbtns">'+
-        '<button class="rthexp" data-h="'+esc(h)+'" title="warm pool &amp; live workers on this host">Pool ›</button>'+
+        '<button class="rthexp" data-h="'+esc(h)+'" title="regions &amp; live workers on this host">Regions ›</button>'+
         (isDef?'<button data-h="" class="rthdef" title="stop using this as the default → new notebooks run local">★ Unset</button>'
               :'<button data-h="'+esc(h)+'" class="rthdef" title="make this the default for new notebooks">★ Default</button>')+
         (isCustom?'<button data-h="'+esc(h)+'" class="rthforget" title="forget this custom host">✕</button>':'')+'</span></div>';
@@ -514,54 +514,62 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       _knownRemotes().filter(function(s){return s.split(',')[0]===b.dataset.h;}).forEach(_forgetRemote);
       _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();};});
   }
-  // ── Warm pools + live workers — a focused per-host view inside the Remotes modal ────────
-  var _rtPools={pools:[],parked:[]}, _rtRoster={}, _rtMsg={}, _rtFocus='';
-  function _rtPoolCfg(h){ return (_rtPools.pools||[]).filter(function(p){return p.host===h;})[0]||null; }
-  function _rtHasPool(h){ return !!_rtPoolCfg(h); }
-  function _rtParkedFor(h){ return (_rtPools.parked||[]).filter(function(p){return p.host===h;}); }
+  // ── Regions + live workers — a focused per-host view inside the Remotes modal ────────
+  // Regions are GLOBAL named compute defs (registry); a host can carry several. This panel lists the
+  // regions on the focused host, edits/creates one, and shows the host's live worker roster.
+  var _rtRegions=[], _rtParked=[], _rtRoster={}, _rtMsg={}, _rtFocus='', _rtEdit=null;
+  function _rtRegionsOn(h){ return _rtRegions.filter(function(r){return r.host===h;}); }
+  function _rtHasRegion(h){ return _rtRegionsOn(h).length>0; }
+  function _rtParkedFor(h){ return _rtParked.filter(function(p){return p.host===h;}); }
   function _rtModal(){ return document.querySelector('#remotesbg .remotesmodal'); }
-  // Transport for this host's pool: the configured pool's, else inferred from a remembered ,direct spec.
-  function _rtHostTr(h){ var c=_rtPoolCfg(h); if(c) return c.transport;
-    var spec=(_knownRemotes().filter(function(s){return s.split(',')[0]===h;})[0])||'';
+  // Default transport for a NEW region on this host: inferred from a remembered ,direct spec.
+  function _rtHostTr(h){ var spec=(_knownRemotes().filter(function(s){return s.split(',')[0]===h;})[0])||'';
     return spec.indexOf('direct')>=0?'direct':'tunnel'; }
-  function _rtLoadPools(){ return fetch('/api/pools').then(function(r){return r.json();})
-    .then(function(d){_rtPools=d||{pools:[],parked:[]};}).catch(function(){}); }
+  function _rtLoadRegions(){ return fetch('/api/regions').then(function(r){return r.json();})
+    .then(function(d){_rtRegions=(d&&d.regions)||[];_rtParked=(d&&d.parked)||[];}).catch(function(){}); }
   function _rtFmtBytes(b){ b=+b||0; if(b<1024) return b+'B'; if(b<1048576) return Math.round(b/1024)+'KB';
     if(b<1073741824) return Math.round(b/1048576)+'MB'; return (b/1073741824).toFixed(1)+'GB'; }
-  function rtFocusHost(h){ _rtFocus=h; _rtModal().classList.add('focusmode'); rtRenderFocus(); rtFetchRoster(h); }
-  function rtUnfocus(){ _rtFocus=''; var m=_rtModal(); if(m)m.classList.remove('focusmode'); document.getElementById('rtfocus').innerHTML=''; }
-  // Build the focus shell (header + pool-config row + status + empty worker/parked containers). The
-  // worker list refreshes independently via rtRenderWorkers so a roster poll never clobbers a field
-  // the user is mid-edit. Config inputs are plain text (inputmode numeric) — no fiddly spinner arrows.
+  function rtFocusHost(h){ _rtFocus=h; _rtEdit=null; _rtModal().classList.add('focusmode'); rtRenderFocus(); rtFetchRoster(h); }
+  function rtUnfocus(){ _rtFocus=''; _rtEdit=null; var m=_rtModal(); if(m)m.classList.remove('focusmode'); document.getElementById('rtfocus').innerHTML=''; }
+  // Build the focus shell: header + the host's regions list + a region editor form + live workers +
+  // parked. The worker list refreshes independently (rtRenderWorkers) so a roster poll never clobbers a
+  // field the user is mid-edit. `_rtEdit` = the region being edited (null = the "new region" form).
   function rtRenderFocus(){
     var h=_rtFocus; if(!h) return; var box=document.getElementById('rtfocus');
-    var cfg=_rtPoolCfg(h), tr=_rtHostTr(h), m=_rtMsg[h];
+    var m=_rtMsg[h], regs=_rtRegionsOn(h);
     var head='<div class="rtfhead"><strong><span class="rtfcrumb" title="back to Remotes">Remotes</span> › 🖧 '+esc(h)+
-      '</strong><span class="rtfsub">— warm pool &amp; live workers</span><button class="rtfref" title="refresh roster">↻</button></div>';
-    var cfgHtml='<div class="rppcfg">'+
-      '<div class="rpprow"><label>Workers</label>'+
-      '<input class="rppn" type="text" inputmode="numeric" autocomplete="off" value="'+(cfg?cfg.n:1)+'" title="how many warm workers to keep ready for instant adoption">'+
-      '<span class="pddim" style="font-size:.76rem">kept warm for instant adoption</span></div>'+
-      '<div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (the folder with Project.toml)" value="'+esc(cfg?cfg.preload:'')+'" title="A LOCAL project directory (one containing a Project.toml — usually the project your notebooks live in). Its environment is replicated to the host and its packages are pre-imported (loaded AND precompiled) on each idle worker, so a notebook from that project adopts a ready worker instead of a ~90s cold boot. Blank = bare workers (nothing warmed)."></div>'+
-      '<div class="rpprow"><label></label><span class="pddim" style="font-size:.73rem;line-height:1.35">A <b>local</b> project folder (has a <code>Project.toml</code>) — its packages are replicated &amp; <b>precompiled</b> on idle workers so matching notebooks adopt instantly. Blank = bare workers. Progress shows below &amp; in <b>Remote activity</b>.</span></div>'+
-      '<div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch/flights  (a path ON THE HOST)" value="'+esc(cfg&&cfg.root?cfg.root:'')+'" title="Where datadir() / @sfile resolve for workers on this host — a REMOTE absolute path (a fast scratch disk, or a shared mount that already holds your data). A region enabled from this pool inherits it, so a cell tagged there reads/writes under this root. Blank = the worker\'s provisioned project data dir on this host (~/.cache/kaimonslate/remote/…/data) — fine for synced files, but not a place for large or shared data."></div>'+
-      '<div class="rpprow"><label></label><span class="pddim" style="font-size:.73rem;line-height:1.35">A <b>remote</b> path on '+esc(h)+' for <code>datadir()</code>/<code>@sfile</code> (scratch disk or shared mount). Regions enabled from this pool inherit it. Blank = the worker\'s provisioned project dir (<code>~/.cache/kaimonslate/remote/…/data</code>).</span></div>'+
+      '</strong><span class="rtfsub">— regions &amp; live workers</span><button class="rtfref" title="refresh roster">↻</button></div>';
+    var list=regs.length?('<div class="rppreglist">'+regs.map(function(r){
+        var st=r.status, stTxt=st&&!st.ok?('⚠ '+esc(st.msg)):'';
+        return '<div class="rppregrow'+(_rtEdit&&_rtEdit.name===r.name?' sel':'')+'" data-n="'+esc(r.name)+'">'+
+          '<span class="rppregname">🖧 '+esc(r.name)+'</span>'+
+          '<span class="rppregmeta">warm '+(+r.warm||0)+' · '+esc(r.transport||'tunnel')+(r.data_root?' · root '+esc(r.data_root):'')+'</span>'+
+          (stTxt?'<span class="rppregst err">'+stTxt+'</span>':'')+
+          '<button class="rppregdel" data-n="'+esc(r.name)+'" title="delete this region (reaps its warm workers)">✕</button></div>';
+      }).join('')+'</div>'):'<div class="pddim" style="margin:6px 0 2px">No regions on this host yet — add one below. Cells tag <code>region=&lt;name&gt;</code>.</div>';
+    var e=_rtEdit||{name:'',host:h,transport:_rtHostTr(h),base_port:0,preload:'',data_root:'',warm:0}, editing=!!(_rtEdit&&_rtEdit.name), tr=e.transport||'tunnel';
+    var form='<div class="rppcfg"><div class="rppformhead">'+(editing?('Edit region “'+esc(e.name)+'”'):'New region on '+esc(h))+'</div>'+
+      '<div class="rpprow"><label>Name</label><input class="rppname" autocomplete="off" placeholder="e.g. gpu, bigmem" value="'+esc(e.name)+'"'+(editing?' readonly':'')+' title="the region\'s global name — cells run there when tagged region=&lt;name&gt;"></div>'+
+      '<div class="rpprow"><label>Warm</label><input class="rppn" type="text" inputmode="numeric" autocomplete="off" value="'+(+e.warm||0)+'" title="how many workers to keep booted and ready to adopt (0 = cold spin on demand)"><span class="pddim" style="font-size:.76rem">workers kept ready to adopt</span></div>'+
+      '<div class="rpprow"><label>Preload</label><input class="rpppre" autocomplete="off" placeholder="/path/to/project  (folder with Project.toml)" value="'+esc(e.preload||'')+'" title="A LOCAL project dir; its env is replicated + precompiled on idle workers so a matching notebook adopts instantly. Blank = bare workers."></div>'+
+      '<div class="rpprow"><label>Data root</label><input class="rpproot" autocomplete="off" placeholder="/scratch  (a path ON THE HOST)" value="'+esc(e.data_root||e.root||'')+'" title="Where datadir()/@sfile resolve for this region\'s workers — a REMOTE absolute path on the host. Blank = the worker\'s provisioned project data dir."></div>'+
       '<div class="rpprow"><label>Transport</label>'+
-      '<select class="rpptr" title="transport for pool workers"><option value="tunnel"'+(tr==='tunnel'?' selected':'')+'>tunnel</option><option value="direct"'+(tr==='direct'?' selected':'')+'>direct</option></select>'+
-      '<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" title="first port for :direct workers — worker i binds base+3i..+3i+2 (main/stream/data). Open base..base+3n-1 in the firewall. Blank = auto (9100+)." value="'+((cfg&&cfg.base_port>0)?cfg.base_port:'')+'"'+(tr==='direct'?'':' style="display:none"')+'></div>'+
-      '<div class="rppact"><button class="rppwarm" title="save this config AND launch/keep warm workers ready for adoption">Warm</button>'+
-        '<button class="rppsave" title="save this config (data root, preload, transport, ports, worker count) WITHOUT booting any workers — regions enabled from this pool inherit the root; a later Warm launches them">Save</button>'+
-        ((cfg&&cfg.n>0)?'<button class="rppdrain">Drain</button>':'')+'</div>'+
-      '</div>'+
-      '<div class="rppmsg'+(m&&m.err?' err':'')+'">'+(m?esc(m.text):'')+'</div>';
-    box.innerHTML=head+cfgHtml+'<div class="rtfworkers"></div><div class="rtfpark"></div>';
+      '<select class="rpptr" title="transport for this region\'s workers"><option value="tunnel"'+(tr==='tunnel'?' selected':'')+'>tunnel</option><option value="direct"'+(tr==='direct'?' selected':'')+'>direct</option></select>'+
+      '<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" title="first port for :direct workers — worker i binds base+3i..+3i+2. Open base..base+3·warm-1 in the firewall. Blank = auto (9100+)." value="'+((e.base_port>0)?e.base_port:'')+'"'+(tr==='direct'?'':' style="display:none"')+'></div>'+
+      '<div class="rppact"><button class="rppsavereg" title="save this region and reconcile toward its warm count">'+(editing?'Save':'Create')+'</button>'+
+        (editing?'<button class="rppnewreg" title="start a new region on this host">+ New</button>':'')+'</div>'+
+      '</div><div class="rppmsg'+(m&&m.err?' err':'')+'">'+(m?esc(m.text):'')+'</div>';
+    box.innerHTML=head+list+form+'<div class="rtfworkers"></div><div class="rtfpark"></div>';
     box.querySelector('.rtfcrumb').onclick=rtUnfocus;
     box.querySelector('.rtfref').onclick=function(){ rtFetchRoster(h); };
+    Array.prototype.forEach.call(box.querySelectorAll('.rppregrow'),function(row){ row.onclick=function(ev){
+      if(ev.target.classList.contains('rppregdel')) return;
+      _rtEdit=_rtRegionsOn(h).filter(function(x){return x.name===row.dataset.n;})[0]||null; rtRenderFocus(); }; });
+    Array.prototype.forEach.call(box.querySelectorAll('.rppregdel'),function(b){ b.onclick=function(ev){ ev.stopPropagation(); rtDeleteRegion(h,b.dataset.n); }; });
     var trSel=box.querySelector('.rpptr'), portIn=box.querySelector('.rppport');
     trSel.onchange=function(){ portIn.style.display=(trSel.value==='direct')?'':'none'; };
-    box.querySelector('.rppwarm').onclick=function(){ rtWarmPool(false); };
-    var sv=box.querySelector('.rppsave'); if(sv) sv.onclick=function(){ rtWarmPool(false,false); };
-    var dr=box.querySelector('.rppdrain'); if(dr) dr.onclick=function(){ rtWarmPool(true); };
+    box.querySelector('.rppsavereg').onclick=function(){ rtSaveRegion(h); };
+    var nb=box.querySelector('.rppnewreg'); if(nb) nb.onclick=function(){ _rtEdit=null; rtRenderFocus(); };
     rtRenderWorkers(h);
   }
   // Fill only the worker list + parked rows from the cached roster — leaves the config inputs alone.
@@ -575,7 +583,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         var st={}; try{st=JSON.parse(w.stats||'{}');}catch(_){}
         var badges='';
         if(w.state) badges+='<span class="rppbadge '+(w.state==='attached'?'attached':'idle')+'">'+esc(w.state)+'</span>';
-        if(mf.pool==='1') badges+='<span class="rppbadge pool">pool</span>';
+        if(mf.region) badges+='<span class="rppbadge pool">'+esc(mf.region)+'</span>';
         var nb=(w.state==='attached'&&mf.notebook)?'<span class="rppwnb">'+esc(mf.notebook)+'</span>':'';
         var tel=[];
         if(st.cpu!==undefined&&st.cpu>=0) tel.push('cpu '+st.cpu+'%');
@@ -599,31 +607,39 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       .then(function(d){ _rtRoster[h]=(d&&d.workers)||[]; if(_rtFocus===h) rtRenderWorkers(h); })
       .catch(function(){ _rtRoster[h]=[]; if(_rtFocus===h) rtRenderWorkers(h); });
   }
-  // Apply a warm-pool config (or drain to 0). The server persists synchronously; when reconcile is
-  // true it also launches workers toward n in the background. reconcile=false is "Save settings" —
-  // persist the config (root/preload/transport/ports/n) and touch NO workers. We set the status line
-  // IN PLACE (so typed inputs survive the request), then reload the canonical config; a warm/drain
-  // also polls the roster as workers appear, a save doesn't (nothing changes on the host).
-  function rtWarmPool(drain,reconcile){
-    if(reconcile===undefined) reconcile=true;
-    var h=_rtFocus, box=document.getElementById('rtfocus');
-    var n=drain?0:Math.max(0,parseInt(box.querySelector('.rppn').value,10)||0);
+  // Create/update a region (full-record upsert) + reconcile toward its warm count. The server persists
+  // synchronously; a warm>0 also launches workers in the background. We set the status line IN PLACE (so
+  // typed inputs survive the request), reload the registry, and poll the roster as workers appear.
+  function rtSaveRegion(h){
+    var box=document.getElementById('rtfocus'), msg=box.querySelector('.rppmsg'); msg.className='rppmsg';
+    var name=box.querySelector('.rppname').value.trim();
+    if(!name){ msg.className='rppmsg err'; msg.textContent='give the region a name'; return; }
+    var warm=Math.max(0,parseInt(box.querySelector('.rppn').value,10)||0);
     var preload=box.querySelector('.rpppre').value.trim(), transport=box.querySelector('.rpptr').value;
     var base_port=(transport==='direct')?(parseInt(box.querySelector('.rppport').value,10)||0):0;
-    var rootIn=box.querySelector('.rpproot'); var root=rootIn?rootIn.value.trim():'';
-    var msg=box.querySelector('.rppmsg'); msg.className='rppmsg'; msg.textContent=drain?'Draining…':reconcile?'Warming…':'Saving…';
-    fetch('/api/warm-pool',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({host:h,n:n,preload:preload,transport:transport,base_port:base_port,root:root,reconcile:reconcile})})
+    var data_root=box.querySelector('.rpproot').value.trim();
+    msg.textContent=warm>0?'Saving + warming…':'Saving…';
+    fetch('/api/regions',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:name,host:h,warm:warm,preload:preload,transport:transport,base_port:base_port,data_root:data_root})})
       .then(function(r){return r.json();}).then(function(d){
         if(!d||!d.ok){ msg.className='rppmsg err'; msg.textContent=(d&&d.error)||'failed'; return; }
-        var ports=(base_port&&n>0)?(' · ports '+base_port+'–'+(base_port+3*n-1)):'';
-        var rootS=root?(' · root '+root):'';
-        _rtMsg[h]={text:drain?'Draining pool → 0 (idle workers reaped)'
-          :reconcile?('Pool set → '+n+' warm · '+transport+ports+rootS+' — workers booting…')
-          :('Settings saved → n='+n+' · '+transport+ports+rootS+' (no workers launched)')};
-        _rtLoadPools().then(function(){ if(_rtFocus===h) rtRenderFocus(); rtRenderHosts(); });   // canonical config → (pool) tag + Drain button + saved n
-        if(reconcile){ var polls=0; (function poll(){ if(_rtFocus!==h) return; rtFetchRoster(h); if(++polls<6) setTimeout(poll,2500); })(); }
+        var ports=(base_port&&warm>0)?(' · ports '+base_port+'–'+(base_port+3*warm-1)):'';
+        var rootS=data_root?(' · root '+data_root):'';
+        _rtMsg[h]={text:'Region “'+name+'” saved'+(warm>0?(' → '+warm+' warm · '+transport+ports+rootS+' — workers booting…'):(' · '+transport+rootS))};
+        _rtEdit=null;
+        _rtLoadRegions().then(function(){ if(_rtFocus===h) rtRenderFocus(); rtRenderHosts(); });
+        if(warm>0){ var polls=0; (function poll(){ if(_rtFocus!==h) return; rtFetchRoster(h); if(++polls<6) setTimeout(poll,2500); })(); }
       }).catch(function(){ msg.className='rppmsg err'; msg.textContent='request failed'; });
+  }
+  function rtDeleteRegion(h,name){
+    confirmDark('Delete region “'+name+'”?\nIts warm workers are reaped (attached ones keep running).','Delete','danger').then(function(ok){
+      if(!ok) return;
+      fetch('/api/regions/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})})
+        .then(function(r){return r.json();}).then(function(){
+          if(_rtEdit&&_rtEdit.name===name) _rtEdit=null;
+          _rtLoadRegions().then(function(){ if(_rtFocus===h) rtRenderFocus(); rtRenderHosts(); }); rtFetchRoster(h);
+        }).catch(function(){});
+    });
   }
   function rtReapWorker(h,port){
     confirmDark('Reap worker :'+port+' on '+h+'?\nThis kills it and removes its files — any un-fetched results are lost.','Reap','danger').then(function(ok){
@@ -654,7 +670,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function openRemotes(){_rtLastOK='';rtSteps.innerHTML='';
     rtHost.value='';var pp=document.getElementById('rtport'),ps=document.getElementById('rtstream');if(pp)pp.value='';if(ps)ps.value='';
     rtUnfocus();_rtRoster={};_rtMsg={};   // start on the list; rosters refetch when a host is focused
-    _rtSyncPorts();rtRenderHosts();_xferLoad();_rtLoadPools().then(function(){rtRenderHosts();});
+    _rtSyncPorts();rtRenderHosts();_xferLoad();_rtLoadRegions().then(function(){rtRenderHosts();});
     remotesBg.classList.add('show');rtHost.focus();}
   function closeRemotes(){if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}rtUnfocus();remotesBg.classList.remove('show');}
   function rtTest(){
@@ -1579,7 +1595,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         '<span class="actbarf" style="width:'+cpuPct+'%;background-color:'+barCol+'"></span>';
       rows.push('<div class="actrow'+(rows.length===0?' first':'')+'">'+
         '<span class="actlabel"><span class="actwho">'+esc((hd.host||'').split('.')[0])+' :'+w.port+'</span>'+
-        '<span class="actbadge '+state+'">'+state+(mf.pool==='1'?'·pool':'')+'</span></span>'+
+        '<span class="actbadge '+state+'">'+state+(mf.region?('·'+esc(mf.region)):'')+'</span></span>'+
         '<span class="actbar">'+fill+'</span>'+
         '<span class="actcpun">'+(cpu==null?'—':cpu+'%')+'</span>'+
         '<span class="actrss">'+(rss?_actFmtBytes(rss):'—')+'</span>'+

@@ -1,5 +1,5 @@
-# Unit tests for the Phase-B remote bookkeeping (src/remote.jl + gate_kernel.jl): the port
-# allocator (3-port stride, roster floor), warm-pool desired state + adoption matching, the
+# Unit tests for the remote bookkeeping (src/remote.jl + gate_kernel.jl): the port allocator
+# (3-port stride, roster floor), the global region registry + warm-worker adoption matching, the
 # claim set, parked-connection bookkeeping, and manifest parsing. Pure/local — no ssh, no
 # workers; roster entries are hand-built Dicts shaped like `list_remote_workers` output.
 using ReTest
@@ -8,13 +8,13 @@ include(joinpath(@__DIR__, "..", "src", "engine.jl"))
 using .ReportEngine
 const RE = ReportEngine
 
-# A roster entry as `list_remote_workers` returns it. Pool/hub default to an adoptable-by-us shape.
-mkworker(port; alive = true, state = "idle", pool = "1", hub = gethostname(),
+# A roster entry as `list_remote_workers` returns it. Region/hub default to an adoptable-by-us shape.
+mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostname(),
          transport = "tunnel", project = "~/.cache/kaimonslate/remote/examples",
          stream_port = port + 1) = Dict{String,Any}(
     "port" => port, "alive" => alive, "state" => state, "lastActivity" => 0, "logBytes" => 0,
     "stateSince" => 0, "stats" => "",
-    "manifest" => "{\"notebook\":\"\",\"pool\":\"$pool\",\"hub\":\"$hub\",\"transport\":\"$transport\"," *
+    "manifest" => "{\"notebook\":\"\",\"region\":\"$region\",\"hub\":\"$hub\",\"transport\":\"$transport\"," *
                   "\"project\":\"$project\",\"stream_port\":\"$stream_port\"}")
 
 @testset "remote pool + park bookkeeping" begin
@@ -36,53 +36,48 @@ mkworker(port; alive = true, state = "idle", pool = "1", hub = gethostname(),
         @test RE._port_floor("h"; workers = ws) == 9103 + 2 + 1   # 9106 is dead → its block is free
     end
 
-    @testset "pool config: round-trip, listing, target keyed by preload basename" begin
-        host = "__pooltest-$(getpid())__"
-        try
-            RE._pool_config!(host; n = 2, preload = "/tmp/My Proj", transport = :direct,
-                             base_port = 9200, root = "/scratch/flights")
-            cfg = RE._pool_config(host)
-            @test cfg == (n = 2, preload = "/tmp/My Proj", transport = :direct,
-                          base_port = 9200, root = "/scratch/flights")
-            t = RE._pool_target(host, cfg)
-            @test t.project == "~/.cache/kaimonslate/remote/My Proj"   # same formula as _select_kernel
+    @testset "region registry: round-trip, listing, target keyed by preload basename" begin
+        name = "__regtest-$(getpid())__"
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do   # isolate regions.json from the real one
+            RE.region_set!(name; host = "h1", transport = :direct, base_port = 9200,
+                           preload = "/tmp/My Proj", data_root = "/scratch/flights", warm = 2, threads = "8,1")
+            r = RE.region_get(name)
+            @test r.host == "h1" && r.warm == 2 && r.transport === :direct && r.base_port == 9200
+            @test r.preload == "/tmp/My Proj" && r.data_root == "/scratch/flights" && r.threads == "8,1"
+            t = RE._region_target(r)
+            @test t.project == "~/.cache/kaimonslate/remote/My Proj"   # env dir keyed by preload basename
             @test t.transport === :direct && t.origin_env == "/tmp/My Proj"
-            @test t.datadir == "/scratch/flights"                      # pool workers boot with the data root
-            @test any(c -> c.host == host && c.n == 2 && c.root == "/scratch/flights", RE.pool_configs())
-            RE._pool_config!(host; n = 0, preload = "", transport = :tunnel)   # root omitted ⇒ ""
-            @test RE._pool_config(host).preload == ""
-            @test RE._pool_config(host).root == ""
-            @test RE._pool_target(host, RE._pool_config(host)).project ==
-                  "~/.cache/kaimonslate/remote/detached"
-            @test RE._pool_target(host, RE._pool_config(host)).datadir == ""
-            @test RE._pool_config("__no-such-host__") === nothing
-        finally
-            rm(RE._pool_path(host); force = true)
+            @test t.datadir == "/scratch/flights" && t.region == name  # worker is tagged with its region
+            @test any(x -> x.name == name && x.warm == 2 && x.data_root == "/scratch/flights", RE.regions())
+            RE.region_set!(name; host = "h1")                          # full-record upsert clears the rest
+            @test RE.region_get(name).preload == "" && RE.region_get(name).data_root == ""
+            @test RE._region_target(RE.region_get(name)).project == "~/.cache/kaimonslate/remote/detached"
+            @test RE._region_target(RE.region_get(name)).datadir == ""
+            @test RE.region_get("__no-such-region__") === nothing
+            RE.region_delete!(name)
+            @test RE.region_get(name) === nothing
         end
     end
 
-    @testset "adoption predicates: candidate gate + env/transport fit" begin
-        w = mkworker(9100)
-        @test RE._pool_candidate(w)
-        @test RE._adoptable(w, "~/.cache/kaimonslate/remote/examples", :tunnel)
-        @test !RE._adoptable(w, "~/.cache/kaimonslate/remote/other", :tunnel)    # env mismatch
-        @test !RE._adoptable(w, "~/.cache/kaimonslate/remote/examples", :direct) # transport mismatch
-        @test !RE._pool_candidate(mkworker(9100; alive = false))                 # dead
-        @test !RE._pool_candidate(mkworker(9100; state = "attached"))            # in use
-        @test !RE._pool_candidate(mkworker(9100; pool = ""))                     # not a pool member
-        @test !RE._pool_candidate(mkworker(9100; hub = "someone-else"))          # another hub's
+    @testset "warm-worker matching: region tag + idle + ours" begin
+        @test RE._region_warm_worker(mkworker(9100; region = "gpu"), "gpu")
+        @test !RE._region_warm_worker(mkworker(9100; region = "gpu"), "other")            # different region
+        @test !RE._region_warm_worker(mkworker(9100; region = "", ), "gpu")               # untagged ≠ region gpu
+        @test !RE._region_warm_worker(mkworker(9100; region = "gpu", alive = false), "gpu")   # dead
+        @test !RE._region_warm_worker(mkworker(9100; region = "gpu", state = "attached"), "gpu") # in use
+        @test !RE._region_warm_worker(mkworker(9100; region = "gpu", hub = "someone-else"), "gpu") # another hub's
     end
 
     @testset "claim set: exclusive, idempotent release" begin
         h = "__claimtest__"
-        RE._release_pool_claim!(h, 9100)                    # clean slate (idempotent on absent)
-        @test !RE._pool_claimed(h, 9100)
-        lock(RE._POOL_CLAIM_LOCK) do; push!(RE._POOL_CLAIMS, (h, 9100)); end
-        @test RE._pool_claimed(h, 9100)
-        @test !RE._pool_claimed(h, 9103)                    # per-port
-        @test !RE._pool_claimed("other-host", 9100)         # per-host
-        RE._release_pool_claim!(h, 9100)
-        @test !RE._pool_claimed(h, 9100)
+        RE._release_region_claim!(h, 9100)                  # clean slate (idempotent on absent)
+        @test !RE._region_claimed(h, 9100)
+        lock(RE._REGION_CLAIM_LOCK) do; push!(RE._REGION_CLAIMS, (h, 9100)); end
+        @test RE._region_claimed(h, 9100)
+        @test !RE._region_claimed(h, 9103)                  # per-port
+        @test !RE._region_claimed("other-host", 9100)       # per-host
+        RE._release_region_claim!(h, 9100)
+        @test !RE._region_claimed(h, 9100)
     end
 
     @testset "parked wires: park on detach, unpark once, evict by port/label" begin
