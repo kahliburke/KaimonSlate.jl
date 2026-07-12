@@ -7,12 +7,11 @@
 // All best-effort and self-contained: if an element is missing it no-ops.
 (function () {
   const running = new Map();     // cellId -> start time (performance.now)
-  let total = 0, done = 0, errs = 0, restored = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone; `restored` = cache hits this streak)
+  let total = 0, done = 0, restored = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone; `restored` = cache hits this streak)
   let tick = null, idleTimer = null, _convergeT = null;
   const bars = new Map();              // bar id -> {frac,msg}  (one per @withprogress scope / slate_progress id)
   let prog = { frac: 0, msg: '' };     // the latest update (drives the chip + badge %)
-  const erroredIds = [];               // cells that errored this streak (for the pill to jump through)
-  let errCursor = 0;
+  let errCursor = 0;                   // jump-through index for the error pill (mod the LIVE errored set)
   // Reveal delay (PER CELL): don't show run-status until SOME cell has been running > REVEAL_MS. Each
   // cell schedules its own timer on start and cancels it on finish — so a fast cell never flashes, and
   // SUSTAINED fast churn (a playhead bind driving a cell at ~10 Hz) never accumulates into a reveal the
@@ -30,6 +29,13 @@
   const activeCell = () => { let last = null; for (const id of running.keys()) last = id; return last; };
   // Scroll to + select a cell (clicking a run-status indicator should take you there).
   const jumpTo = (id) => { try { window.selectCell && window.selectCell(id, true); } catch (_) {} };
+  // The notebook's CURRENT errored cells, read from the authoritative state model (`window.__slateState`,
+  // which `_publishState` sets and `patchCells` mutates in place — so it's correct SYNCHRONOUSLY, with no
+  // race against Preact's async re-render). Deriving the error pill from this — rather than a sticky
+  // streak counter that only reset on the next run — means the pill clears the moment the offending cell
+  // is fixed (state flips off `errored`) or removed (it leaves the list), which an accumulator never saw.
+  const liveErroredIds = () => (((window.__slateState || {}).cells) || [])
+    .filter((c) => c.state === 'errored').map((c) => c.id);
 
   const now = () => performance.now();
   const fmt = (ms) => ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
@@ -64,9 +70,9 @@
   }
 
   function renderPill() {
-    if (!revealed) return;
     const pill = document.getElementById('runpill'); if (!pill) return;
     if (active()) {
+      if (!revealed) return;              // mid-run but not yet revealed → leave the pill as-is
       let mx = 0; for (const t of running.values()) mx = Math.max(mx, now() - t);
       const n = Math.max(total, done + running.size);
       const k = Math.min(done + running.size, n);
@@ -79,13 +85,16 @@
       pill.className = 'runpill running';
       pill.innerHTML = `<span class="rring" style="--rp:${frac}"></span>Running ${k}/${n}${par}${rest} · ${fmt(mx)}`;
       pill.style.display = '';
-    } else if (errs) {
-      pill.className = 'runpill err'; pill.style.display = '';
-      pill.textContent = `⚠ ${errs} errored`;
     } else {
-      pill.style.display = 'none'; pill.textContent = '';
+      // At rest: reflect the notebook's CURRENT error state, DERIVED from live cell states — so the
+      // pill clears the instant the offending cell is fixed or removed. Runs even when not `revealed`
+      // (a delete/fix never revealed a run), so `window.renderRunPill` can refresh it on any edit.
+      const nerr = liveErroredIds().length;
+      if (nerr) { pill.className = 'runpill err'; pill.style.display = ''; pill.textContent = `⚠ ${nerr} errored`; }
+      else { pill.style.display = 'none'; pill.textContent = ''; }
     }
   }
+  window.renderRunPill = renderPill;   // topbar chrome calls this after a delete / state pull, so a resolved error clears
 
   function renderTimers() {
     if (!revealed) return;
@@ -169,7 +178,7 @@
   // the pill grows as cells are queued mid-run. Only a FRESH streak (none active) resets the counters.
   window.onRunBatch = function (n) {
     clearTimeout(idleTimer);
-    if (!active()) { done = 0; errs = 0; restored = 0; erroredIds.length = 0; errCursor = 0; }
+    if (!active()) { done = 0; restored = 0; errCursor = 0; }
     total = done + n;
     // A real batch (startup / run-all) shows from the FIRST cell so a fast restore/parallel burst is
     // visible instead of snapping to "done"; a lone reactive cell stays deferred (BATCH_REVEAL_MIN).
@@ -180,7 +189,8 @@
   // Pill click: while running, open the activity feed to watch; once a run has errored, step through
   // the errored cells (each click jumps to the next, scrolling it into view).
   window.onPillClick = function () {
-    if (!active() && erroredIds.length) { jumpTo(erroredIds[errCursor % erroredIds.length]); errCursor++; return; }
+    const eids = liveErroredIds();
+    if (!active() && eids.length) { jumpTo(eids[errCursor % eids.length]); errCursor++; return; }
     window.toggleAct && window.toggleAct();
   };
 
@@ -209,7 +219,7 @@
     bars.clear();
     clearCellBar(id);                     // remove the per-cell progress bar(s)
     const errored = cell.state === 'errored';
-    if (errored) { errs++; if (!erroredIds.includes(id)) erroredIds.push(id); if (!revealed) reveal(); }  // always surface errors
+    if (errored && !revealed) reveal();   // always surface errors (the pill's count is derived at render, not accumulated)
     if (revealed) {
       setLive(id, cell.state);            // clear the transient running → real state
       activity(errored ? 'err' : 'done', id, errored ? 'errored' : (wasRestored ? '♻ restored' : (t ? fmt(now() - t) : 'done')));
@@ -217,7 +227,8 @@
       renderPill(); renderChip();
     }
     // Batch drained → end the streak shortly (a small delay absorbs the gap between sequential cells
-    // and back-to-back batches, so the pill doesn't flicker). `errs` persists so the error pill stays.
+    // and back-to-back batches, so the pill doesn't flicker). The error pill is derived from live cell
+    // state at render, so it survives the streak end and clears itself once the errors are resolved.
     if (!active()) {
       clearTimeout(idleTimer);
       if (revealed) {

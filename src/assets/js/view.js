@@ -398,6 +398,7 @@ function patchCells(cells) {
     if (!_conflicted) { renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] }); }
   });
   window.onCellsPatched && window.onCellsPatched(cells);       // states/durations moved (DAG panel)
+  window.renderRunPill && window.renderRunPill();              // a cell just changed state → refresh the error pill
 }
 // `cellpre:` — an agent add/edit, shown BEFORE its eval finishes. Upsert by id: replace an
 // existing cell in place (edit → the new source renders now), or splice a new one at `index`
@@ -511,6 +512,7 @@ function updateChrome(state) {
               : 'in-process kernel';
   }
   window.renderRunLoc && window.renderRunLoc(state);   // toolbar run-location pill (session/notebook/global)
+  window.renderRunPill && window.renderRunPill();      // error pill reads live state → clears when a cell is fixed/removed
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const hb = document.getElementById('hydbanner');
   _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
