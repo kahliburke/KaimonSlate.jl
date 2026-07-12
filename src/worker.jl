@@ -14,6 +14,7 @@ import KaimonGate
 import Pkg                                   # project dep listing for eager docs auto-index
 import Serialization                         # slate_emit value → bytes (unconditional; memo re-imports under its guard)
 import Base64                                # …then base64 so an arbitrary Julia value rides the string stream
+import Logging, Dates                        # timestamped worker log (legible after a slow bring-up / eval)
 
 # The enclosing/parent project dir stacked behind this notebook env on LOAD_PATH (set by
 # the boot script; "" when the notebook is detached). Used to attribute package provenance
@@ -1844,6 +1845,15 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # all cell capture in this process MUST use DemuxCapture (RedirectCapture's restore can't redirect
     # back to the custom IO).
     try; install_demux!(); pushdisplay(_DemuxDisplay()); catch e; @warn "slate: demux install failed" exception = e; end
+    # Timestamp every worker log record (local file + remote tail) so a bring-up / eval is legible after
+    # the fact — the default logger emits none. Prepends `HH:MM:SS ` to the metadata prefix.
+    try
+        Base.global_logger(Logging.ConsoleLogger(stderr, Logging.Info;
+            meta_formatter = (lvl, m, g, id, f, l) -> begin
+                c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
+                (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
+            end))
+    catch e; @warn "slate: timestamp logger install failed" exception = e; end
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).

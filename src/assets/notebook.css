@@ -141,6 +141,10 @@ body.toc-open .page { margin-left:312px; }
   padding:8px 18px; font-size:.84rem; color:var(--accent); background:linear-gradient(90deg,var(--bg2),var(--bg)); border-bottom:1px solid var(--border); }
 .hydbanner.err { color:var(--red); }
 .hydbanner .hydspin { width:13px; height:13px; flex:0 0 auto; border:2px solid var(--bg3); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+/* Live remote bring-up detail (streamed instantiate/precompile line) — a dim monospace suffix that truncates. */
+.hydbanner .hydstep { margin-left:.5em; padding-left:.6em; border-left:1px solid var(--border); font-family:var(--mono,ui-monospace,monospace);
+  font-size:.92em; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
+.hydbanner .hydstep:empty { display:none; }
 body.hydrating #nb { opacity:.9; pointer-events:none; }   /* frozen preview — not interactive yet */
 body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-events:none; }
 /* Dependency-cone highlight (the 🔗 button on a cell): the focused cell + its
@@ -1145,6 +1149,30 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .runloc .runlocsrc { color:var(--dim); font-size:.72rem; }
 .runloc .runloccaret { color:var(--dim); font-size:.7rem; }
 .runlocmodal { max-width:520px; max-height:82vh; overflow-y:auto; }
+/* The ▾ caret is now its own click target (run-location picker) — make it feel clickable. */
+.runloc .runloccaret { cursor:pointer; padding:0 3px; border-radius:4px; }
+.runloc .runloccaret:hover { color:var(--text); background:color-mix(in srgb, var(--accent) 22%, transparent); }
+/* Region worker pills next to #runloc — same shape; click → the worker log/status popup. */
+#workerpills { display:inline-flex; align-items:center; gap:6px; margin-left:6px; }
+.wpill { display:inline-flex; align-items:center; gap:5px; flex:0 0 auto; cursor:pointer;
+  padding:2px 8px; border-radius:7px; font-size:.8rem; color:var(--text); white-space:nowrap; user-select:none;
+  border:1px solid color-mix(in srgb, var(--green) 55%, var(--border)); background:color-mix(in srgb, var(--green) 12%, var(--bg3)); }
+.wpill:hover { border-color:color-mix(in srgb, var(--accent) 55%, var(--border)); }
+/* Compact at-a-glance load on the pill face (cpu% · rss); full breakdown is in the popup. */
+.wstat { color:var(--dim); font-size:.72rem; font-family:var(--mono,ui-monospace,monospace); }
+.wstat:empty { display:none; }
+.wpill.reconnecting { color:#e8a13f; border-color:color-mix(in srgb, #e8a13f 55%, var(--border));
+  background:color-mix(in srgb, #e8a13f 12%, var(--bg3)); animation:btnpulse 1.1s ease-in-out infinite; }
+/* Worker / region status + live-log popup. */
+.workerpop { width:min(760px, 92vw); max-height:80vh; display:flex; flex-direction:column; padding:0; overflow:hidden; }
+.workerpop-head { display:flex; align-items:center; gap:12px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.86rem; }
+#workerpop-title { font-weight:600; color:var(--text); flex:0 0 auto; }
+.workerpop-stats { color:var(--dim); font-size:.78rem; font-family:var(--mono,ui-monospace,monospace); flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.workerpop-x { cursor:pointer; color:var(--dim); font-size:1.25rem; line-height:1; flex:0 0 auto; padding:0 4px; }
+.workerpop-x:hover { color:var(--text); }
+.workerpop-log { margin:0; padding:12px 14px; overflow:auto; flex:1 1 auto; min-height:200px;
+  font-family:var(--mono,ui-monospace,monospace); font-size:.76rem; line-height:1.5; color:var(--text);
+  white-space:pre-wrap; word-break:break-word; background:var(--bg); }
 .rlbadge { font-size:.68rem; font-weight:600; color:var(--dim); background:var(--bg3);
   border:1px solid var(--border); border-radius:20px; padding:1px 8px; }
 .rlhosts { margin-bottom:4px; }

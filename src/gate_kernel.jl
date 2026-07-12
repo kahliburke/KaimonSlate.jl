@@ -229,6 +229,11 @@ function _parse_telemetry(raw::AbstractString)
          running = String[String(x) for x in get(d, "running", Any[])],
          warm    = String(get(d, "warm", "")),
          memo    = Int(get(d, "memo_bytes", -1)),
+         # System-wide (the whole host) — carried through so the worker/region popup can show them.
+         sys_cpu = Float64(get(d, "sys_cpu", -1.0)),
+         load1   = Float64(get(d, "load1", -1.0)),
+         sys_mem_total = Int(get(d, "sys_mem_total", 0)),
+         sys_mem_free  = Int(get(d, "sys_mem_free", 0)),
          ts      = Float64(get(d, "ts", 0.0)),
          rcv     = time())
     catch

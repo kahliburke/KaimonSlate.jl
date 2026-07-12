@@ -488,6 +488,15 @@ function _publishState(state) {
   window.onNbState && window.onNbState(state);                // graph-shaped consumers (DAG panel)
   updateChrome(state);
 }
+// Live remote bring-up detail — the latest streamed instantiate/precompile line, shown under the
+// hydrating banner. updateChrome re-renders the banner from this; `onBringup` patches it live between
+// renders; it's cleared when hydration ends.
+let _bringupLine = '';
+window.onBringup = function (line) {
+  _bringupLine = String(line || '');
+  const step = document.getElementById('hydstep');   // banner already up → update in place, no full re-render
+  if (step) step.textContent = _bringupLine;
+};
 // Topbar/banner bits that live outside #nb (title, worker dot, vscode link, hydrating banner).
 function updateChrome(state) {
   document.getElementById('title').textContent = state.title || 'Notebook';
@@ -512,26 +521,29 @@ function updateChrome(state) {
               : 'in-process kernel';
   }
   window.renderRunLoc && window.renderRunLoc(state);   // toolbar run-location pill (session/notebook/global)
+  window.renderWorkers && window.renderWorkers(state); // per-region worker pills next to it (click → log/status popup)
   window.renderRunPill && window.renderRunPill();      // error pill reads live state → clears when a cell is fixed/removed
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const hb = document.getElementById('hydbanner');
   _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
   if (state.hydrating) {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
-    hb.innerHTML = '<span class="hydspin"></span>' + (
+    hb.innerHTML = '<span class="hydspin"></span><span class="hydmsg">' + (
       state.hydratingKind === 'remote'
         ? ('Starting the worker on <b>' + (state.hydratingHost || 'the remote host') + '</b> — provisioning &amp; connecting' +
            ' (a first run installs Julia deps and can take a few minutes)…')
       : state.hydratingKind === 'run'
-        ? 'Running the notebook — cells go live as they finish…'
-        : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…');
+        ? 'Running the notebook — cells appear as they finish; editing unlocks when the run completes…'
+        : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…')
+      // live detail: the remote worker's streamed instantiate/precompile line (fed by `bringup:` events)
+      + '</span><span id="hydstep" class="hydstep">' + (_bringupLine ? _esc(_bringupLine) : '') + '</span>';
     document.body.classList.add('hydrating');
   } else if (state.hydrateError) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
     hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)
-    document.body.classList.remove('hydrating');
+    document.body.classList.remove('hydrating'); _bringupLine = '';
   } else {
-    hb.style.display = 'none'; document.body.classList.remove('hydrating');
+    hb.style.display = 'none'; document.body.classList.remove('hydrating'); _bringupLine = '';
   }
   updateStaleBadge(state);
   // Agent chat needs Kaimon's agent service — a standalone hub (slate --own / serve_notebook)

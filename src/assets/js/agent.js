@@ -233,6 +233,11 @@ async function loadAgentLog() {
     _suppressAgentRender = true;
     try { for (const line of r.events) { try { agentEvent(JSON.parse(line)); } catch (_) {} } }
     finally { _suppressAgentRender = false; }
+    // A STOPPED turn leaves the transcript ending at `turn_started` with no `result` — replay would
+    // leave the "working…" indicator flashing forever. A stop reaps the crew, so if we replayed into a
+    // working state but there are NO live agents, the turn is over → clear the stale indicator. (A turn
+    // that's genuinely still running keeps its agents, so this doesn't touch a real in-flight reload.)
+    if (agentWorking && !Object.keys(r.agents || {}).length) setWorking(false);
     renderAgentMsgs();
   } catch (_) {}
 }

@@ -764,6 +764,14 @@ function _make_router(h::Hub)
         _html(_inject_imports(read(_ASSET, String), get(nb.report.meta, "imports", nothing)))
     end)
     HTTP.register!(router, "GET", "/api/{id}/state", req -> _withnb(h, req, nb -> (sync_from_file!(nb); _json(state_json(nb)))))
+    # A worker's log tail + status for the topbar worker/region status popup. `?side=` selects the
+    # worker (""=main, else a region); local reads the log file, remote ssh-tails it. Polled while open.
+    HTTP.register!(router, "GET", "/api/{id}/worker-log", req -> _withnb(h, req, nb -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        side = get(q, "side", "")
+        lines = clamp(something(tryparse(Int, get(q, "lines", "300")), 300), 1, 5000)
+        _json(_worker_log(nb, side, lines))
+    end))
     # Content-addressed output image (see server_history.jl `_externalize_blobs`): immutable, so the
     # browser caches it forever — a reload re-uses the cached image instead of re-downloading it.
     HTTP.register!(router, "GET", "/api/{id}/blob/{hash}", req -> begin
@@ -1653,6 +1661,20 @@ function _ws_calls(stream, nb::LiveNotebook)
     return nothing
 end
 
+# Push one remote bring-up line to every HYDRATING notebook's browser (as a `bringup:` SSE the banner
+# renders as its live detail). Runs on the provisioner's thread, so it stays cheap and swallows errors —
+# losing a progress line is never worth disrupting a bring-up.
+function _bringup_broadcast(h, line::AbstractString)
+    s = strip(String(line)); isempty(s) && return nothing
+    msg = "bringup:" * first(s, 200)
+    nbs = try; lock(h.lock) do; collect(values(h.notebooks)); end; catch; return nothing; end
+    for nb in nbs
+        get(nb.report.meta, "hydrating", false) === true || continue
+        try; _broadcast(nb, msg); catch; end
+    end
+    return nothing
+end
+
 function start_hub(; host = "127.0.0.1", port = 8765)
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
@@ -1661,6 +1683,9 @@ function start_hub(; host = "127.0.0.1", port = 8765)
         @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
     end
     h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock())
+    # Surface a remote worker's live bring-up output (streamed instantiate/precompile) in the browser
+    # hydrating banner, not just remote.log — the provisioner narrates each line through this sink hook.
+    try; ReportEngine._BRINGUP_SINK[] = line -> _bringup_broadcast(h, line); catch; end
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
         # Reject cross-origin / rebinding requests before ANY handler (router or SSE) runs.

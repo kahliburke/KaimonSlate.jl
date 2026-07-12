@@ -435,6 +435,7 @@ function connectLive() {
     if (e.data.startsWith('cellstream:')) { try { const p = JSON.parse(e.data.slice(11)); window.onCellStream && window.onCellStream(p.channel, p.data); } catch (_) {} return; }   // slate_emit(channel,data) → a cell's custom JS renderer
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
     if (e.data.startsWith('js:')) { try { const r = JSON.parse(e.data.slice(3)); window._slateEvalJs && window._slateEvalJs(r.reqid, r.code); } catch (_) {} return; }   // slate.eval_js: run agent JS in this tab
+    if (e.data.startsWith('bringup:')) { window.onBringup && window.onBringup(e.data.slice(8)); return; }               // remote worker bring-up: live instantiate/precompile line → banner detail
     if (e.data.startsWith('scratchclear:')) { window.onScratchClear && window.onScratchClear(); return; }               // scratchpad emptied
     if (e.data.startsWith('scratch:')) { try { window.onScratchCell && window.onScratchCell(JSON.parse(e.data.slice(8))); } catch (_) {} return; }   // a slate.eval scratch cell (running/done)
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // (fallback) full pull

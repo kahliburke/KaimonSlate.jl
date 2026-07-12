@@ -667,6 +667,53 @@ end
 _kernel_status(k::GateKernel) = Dict{String,Any}("kind" => "gate", "port" => k.port, "connected" => (k.conn !== nothing))
 _kernel_status(::Kernel) = Dict{String,Any}("kind" => "inproc", "port" => 0, "connected" => true)
 
+# One worker entry (side/host/status + latest telemetry) for the topbar pills. `side==""` is the main
+# kernel; a region side is its own worker. `host` is the remote host or "" (local/in-process).
+function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
+    st = _kernel_status(k)
+    host = try; (k isa ReportEngine.GateKernel && k.target isa ReportEngine.RemoteTarget) ?
+                String(k.target.ssh_host) : ""; catch; ""; end
+    d = Dict{String,Any}("side" => String(side), "host" => host,
+                         "kind" => st["kind"], "port" => st["port"], "connected" => st["connected"])
+    # Latest telemetry (cpu/rss/host cpu/mem) → a JSON string the pill popup parses. Fully guarded: a
+    # telemetry hiccup must NEVER throw here, or it takes the whole `state_json` (the notebook) down.
+    if k isa ReportEngine.GateKernel
+        try
+            cn = k.conn === nothing ? "" : k.conn.name
+            s = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)   # (latest::NamedTuple, history)
+            s === nothing || (d["stats"] = JSON.json(s.latest))
+        catch
+        end
+    end
+    return d
+end
+
+# The notebook's ACTIVE workers: the main kernel plus every region kernel currently spawned for it.
+function _workers_json(nb::LiveNotebook)
+    out = Any[_worker_entry(nb, "", nb.kernel)]
+    regs = lock(_REGION_LOCK) do
+        [(String(side), k) for ((id, side), k) in _REGION_KERNELS if id == nb.id]
+    end
+    for (side, k) in sort(regs; by = first)
+        push!(out, _worker_entry(nb, side, k))
+    end
+    return out
+end
+
+# The active region kernel for `side` WITHOUT spawning one (unlike `_side_kernel!`); `nothing` if none.
+_region_kernel_if_active(nb::LiveNotebook, side::AbstractString) =
+    lock(_REGION_LOCK) do; get(_REGION_KERNELS, (nb.id, String(side)), nothing); end
+
+# The tail of a worker's log (+ latest telemetry) for the worker/region status popup. `side==""` = main.
+function _worker_log(nb::LiveNotebook, side::AbstractString, lines::Int)
+    k = isempty(side) ? nb.kernel : _region_kernel_if_active(nb, side)
+    k === nothing && return Dict{String,Any}("side" => side, "log" => "", "connected" => false,
+                                             "note" => "no active worker for this region")
+    log = try; ReportEngine.worker_log_tail(k; lines = lines)
+          catch e; "log unavailable: " * first(sprint(showerror, e), 160); end
+    return merge(_worker_entry(nb, side, k), Dict{String,Any}("log" => log))
+end
+
 function state_json(nb::LiveNotebook)
     meta = Dict{String,Any}(
         "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
@@ -702,6 +749,7 @@ function state_json(nb::LiveNotebook)
     meta["runLocationGlobal"] = RUNON_DEFAULT[]                              # the machine global default ("" = local)
     meta["regions"] = _regions_json(nb)                                     # declared per-cell destinations (regionon footer) → tag editor + DAG zones
     meta["health"] = _health_json(nb)                                       # watchdog status + alerts (stall/runaway) → health panel
+    meta["workers"] = _workers_json(nb)                                     # ACTIVE workers (main + each region) → topbar pills + log/status popup
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
     if get(nb.report.meta, "hydrating", false) === true

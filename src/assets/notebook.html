@@ -43,8 +43,8 @@
   <a class="brand" href="/" title="all notebooks"><span class="brandmark">S</span>Slate</a>
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title" onclick="toggleFiles()" title="open Files — edit this notebook's package source" style="cursor:pointer">Notebook</h1>
-  <span id="runloc" class="runloc" onclick="toggleRunLoc(event)" title="where this notebook's worker runs">
-    <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span class="runloccaret">▾</span></span>
+  <span id="runloc" class="runloc" onclick="openWorkerPop('', event)" title="worker — click for its live log &amp; status">
+    <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span id="runlocstat" class="wstat"></span> <span class="runloccaret" onclick="toggleRunLoc(event)" title="change where this notebook runs">▾</span></span><span id="workerpills"></span>
   <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span>
   <span id="healthbadge" class="healthbadge" style="display:none" onclick="window.__healthToggle && window.__healthToggle()" title="watchdog health — stalls &amp; runaway workers; click for details + recovery"></span>
   <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
@@ -83,6 +83,14 @@
     </div>
   </div>
 </div>
+<div class="modal-bg" id="workerpopbg"><div class="modal workerpop">
+  <div class="workerpop-head">
+    <span id="workerpop-title">Worker</span>
+    <span id="workerpop-stats" class="workerpop-stats"></span>
+    <span class="workerpop-x" onclick="closeWorkerPop()" title="close">×</span>
+  </div>
+  <pre id="workerpop-log" class="workerpop-log">loading…</pre>
+</div></div>
 <div class="modal-bg" id="runlocbg"><div class="modal runlocmodal">
   <div class="msg"><strong>Run location</strong> <span id="rlsourcebadge" class="rlbadge"></span>
     <span style="color:var(--dim);font-weight:400"> — where this notebook's worker runs.</span></div>
@@ -517,6 +525,7 @@
 <!-- health.js migrated to a Preact/ESM island — imported by app.js, not a classic script -->
 <script src="/assets/js/dag.js"></script>
 <script src="/assets/js/runloc.js"></script>
+<script src="/assets/js/workers.js"></script>
 <script src="/assets/js/regions.js"></script>
 <script src="/assets/js/inspect.js"></script>
 <script src="/assets/js/dragdrop.js"></script>

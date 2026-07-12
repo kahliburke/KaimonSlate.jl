@@ -145,6 +145,10 @@ _base() = "http://127.0.0.1:$_PORT"
 function _hub()
     lock(_LOCK) do
         _HUB[] === nothing && (_HUB[] = start_hub(; port = _PORT))
+        # (Re)register the remote bring-up → browser-banner sink HERE too, not only in `start_hub`: this
+        # runs on every hub access, so a Revise reload of the server picks it up WITHOUT a full restart
+        # (start_hub only runs once, at boot). The closure reads `_HUB[]` at call time → always the live hub.
+        try; ReportEngine._BRINGUP_SINK[] = line -> NotebookServer._bringup_broadcast(_HUB[], line); catch; end
         return _HUB[]::Hub
     end
 end

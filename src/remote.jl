@@ -698,6 +698,25 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     return nothing
 end
 
+# The tail of a worker's LOG — local (read the file the spawn pump writes) or remote (ssh `tail` the
+# worker log on its host). For the worker/region status popups. Best-effort: "" on any miss.
+function worker_log_tail(k::GateKernel; lines::Int = 300)
+    lines = clamp(lines, 1, 5000)
+    if k.target isa RemoteTarget
+        host = k.target.ssh_host
+        rlog = "$_REMOTE_WORKER/worker-$(k.port).log"
+        ok, out = try; _ssh_capture(host, `tail -n $lines $rlog`); catch; (false, ""); end
+        return ok ? out : ""
+    end
+    p = try; k.logpath; catch; ""; end
+    (isempty(p) || !isfile(p)) && return ""
+    return try
+        ls = readlines(p)
+        join(@view(ls[max(1, length(ls) - lines + 1):end]), "\n")
+    catch; ""; end
+end
+worker_log_tail(::Kernel; lines::Int = 300) = ""   # in-process kernel has no worker log
+
 # Read a field off an `__slate_env_info` result — a Dict{String,Any} locally, a JSON3.Object (Symbol
 # props) once it has ridden back over the gate. Returns `dv` on any miss.
 _infofield(o, k::String, dv) = try
