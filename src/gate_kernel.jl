@@ -16,10 +16,12 @@ const WORKER_THREADS = Ref{String}("")
 # (a quarter of free disk, clamped 2–20 GB — see worker.jl `_memo_cap`).
 const MEMO_CAP_GB = Ref{Float64}(0.0)
 
-# The machine-adaptive default thread spec: min(cores, 8) compute + 1 interactive (idle threads park;
-# the cap avoids oversubscription across several open notebooks). Used both at spawn and to report the
-# effective count in state_json.
-default_worker_threads() = string(min(Sys.CPU_THREADS, 8), ",1")
+# The machine-adaptive default thread spec: min(cores, 8) compute + 2 interactive (idle threads park;
+# the cap avoids oversubscription across several open notebooks). Two interactive threads keep the gate
+# loop (heartbeats/cancels) + reactive handling responsive even while a data transfer (blob push/pull,
+# the worker→worker mesh) or a compute batch is in flight — with one, a heavy transfer could starve the
+# heartbeat and time out the hub's watchdog. Used both at spawn and to report the effective count.
+default_worker_threads() = string(min(Sys.CPU_THREADS, 8), ",2")
 
 # The thread spec a worker would actually spawn with, given a per-kernel override `kthreads`:
 # per-kernel override → global setting → adaptive default.
@@ -430,14 +432,14 @@ function _spawn_worker!(k::GateKernel)
     # clock against a park timeout) — for an interactive notebook firing many tiny BLAS ops they
     # never reach the timeout and peg the cores doing no work. Cap the BLAS pool to 1 by default
     # (small ops are faster single-threaded anyway; bump KAIMONSLATE_BLAS_THREADS for big dense
-    # linear algebra). Julia's own task threads (default "1,1" = 1 compute + 1 interactive) PARK
-    # when idle — no spin; the interactive thread is reserved for keeping reactive handling snappy.
+    # linear algebra). Julia's task threads PARK when idle — no spin; the interactive threads are
+    # reserved for keeping the gate loop (heartbeats/cancels) + reactive handling snappy under load.
     blas = get(ENV, "KAIMONSLATE_BLAS_THREADS", "1")
     # Worker Julia threads ("<compute>,<interactive>"). Configurable via the Kaimon extension TUI panel
-    # (NotebookServer sets WORKER_THREADS[]); env overrides; default "1,1". More compute threads enable
+    # (NotebookServer sets WORKER_THREADS[]); env overrides; adaptive default below. More compute threads enable
     # true multi-core CPU parallelism for independent cells — note Julia 1.12's strict world-age for
     # global bindings is the correctness frontier to validate when raising this above 1.
-    # Default compute-thread count adapts to the machine but stays bounded: min(cores, 8) + 1 interactive.
+    # Default compute-thread count adapts to the machine but stays bounded: min(cores, 8) compute + 2 interactive.
     # (`auto` would grab ALL cores per worker → oversubscription with several open notebooks; idle Julia
     # threads park, so the cost is memory not spin, but a cap is tidier. Over-estimating cores is safe —
     # Julia just timeslices.) Order: explicit config (panel) wins, then env, then this adaptive default.
