@@ -871,8 +871,15 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         start_sync!(t, parent_project)
         # Remote ports (loopback for :tunnel, 0.0.0.0 for :direct). Pinned when the target names them
         # (needed for :direct behind a firewall); else auto from _next_ports (9100+), floored above the roster.
-        port, stream_port = t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
-                            _next_ports(floor = try; _port_floor(host); catch; 0; end)
+        port, stream_port =
+            (t.transport === :direct && t.port != 0) ?
+                # :direct region: t.port is the base_port HINT — take a FREE slot in its stride (roster-aware)
+                # so we land in the firewall-opened range, never colliding with warm workers / another notebook.
+                (let sl = _direct_port_slots(t.port, 1; roster = (try; list_remote_workers(host); catch; Any[]; end), label = "region cold-spawn on $host")
+                     isempty(sl) ? _next_ports(floor = try; _port_floor(host); catch; 0; end) : sl[1]
+                 end) :
+            t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
+                          _next_ports(floor = try; _port_floor(host); catch; 0; end)
         k.port = port; k.stream_port = stream_port
         _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, region = t.region)
         r = dial(port, stream_port; deadline = 120.0)   # deadline covers remote Julia boot + KaimonGate load (~90s)
@@ -1904,10 +1911,37 @@ function parked_wires()
     end
 end
 
+# Free (main, stream) port slots inside a :direct region's base_port stride (worker i → base+3i..+2),
+# skipping any 3-port block a live worker already holds. Returns up to `n` tuples; fewer (with a log)
+# when the open range is too narrow. Shared by the warm reconcile AND a region kernel's own cold spawn
+# so both land inside the base range you opened in the firewall — never the monotonic auto counter,
+# which marches past the range and never rewinds.
+function _direct_port_slots(base_port::Int, n::Int; roster, label::AbstractString = "")
+    occupied = Set{Int}()
+    for w in roster
+        w["alive"] === true || continue
+        p = w["port"]; push!(occupied, p, p + 1, p + 2)
+    end
+    ports = Tuple{Int,Int}[]
+    k = 0
+    while length(ports) < n && k < 256
+        p = base_port + 3k; k += 1
+        (p + 2) <= 65535 || break
+        (p in occupied || (p + 1) in occupied || (p + 2) in occupied) && continue
+        push!(ports, (p, p + 1))
+    end
+    length(ports) < n &&
+        _rlog("$(isempty(label) ? "" : label * ": ")only $(length(ports)) free :direct slot(s) from base $base_port — open a wider range for $n worker(s)")
+    return ports
+end
+
 # A region's RemoteTarget. Env dir keyed by the preload basename (the same formula a notebook's parent
-# uses → --project parity); `region` tags the worker so its OWN region reclaims it on adoption.
+# uses → --project parity); `region` tags the worker so its OWN region reclaims it on adoption. For a
+# :direct region, `port` carries base_port as the range HINT — fresh_spawn allocates a free slot from it
+# (see _direct_port_slots) so the kernel lands in the firewall-opened range, not the growing auto counter.
 _region_target(r::Region) = RemoteTarget(r.host; transport = r.transport,
     project = "~/.cache/kaimonslate/remote/" * (isempty(r.preload) ? "detached" : basename(rstrip(r.preload, '/'))),
+    port = (r.transport === :direct ? r.base_port : 0),
     origin_env = r.preload, datadir = r.data_root, cache_root = r.cache_root, region = r.name)
 
 # In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
@@ -2001,28 +2035,12 @@ function _region_reconcile_impl!(r::Region)
         # Ports for the new workers. A :direct region with a pinned base marches up from it in strides of
         # 3 (each worker owns port..port+2) so you know exactly which range to open in the firewall.
         # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster.
-        ports = Tuple{Int,Int}[]
-        if r.transport === :direct && r.base_port > 0
-            occupied = Set{Int}()
-            for w in roster
-                w["alive"] === true || continue
-                p = w["port"]; push!(occupied, p, p + 1, p + 2)
+        ports = (r.transport === :direct && r.base_port > 0) ?
+            _direct_port_slots(r.base_port, deficit; roster = roster, label = "region[$(r.name)]") :
+            begin
+                floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
+                [_next_ports(; floor) for _ in 1:deficit]
             end
-            k = 0
-            while length(ports) < deficit && k < 256
-                p = r.base_port + 3k; k += 1
-                (p + 2) <= 65535 || break
-                (p in occupied || (p + 1) in occupied || (p + 2) in occupied) && continue
-                push!(ports, (p, p + 1))
-            end
-            length(ports) < deficit &&
-                _rlog("region[$(r.name)]: only $(length(ports)) free port slot(s) from base $(r.base_port) — open a wider range for $deficit workers")
-        else
-            floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
-            for _ in 1:deficit
-                push!(ports, _next_ports(; floor))
-            end
-        end
         for (port, sp) in ports
             _launch_worker!(t, port, sp; label = "", parent = "", threads = r.threads,
                             warm = true, region = r.name, warm_deps = !isempty(r.preload))

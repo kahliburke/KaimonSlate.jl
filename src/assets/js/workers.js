@@ -188,10 +188,11 @@ function closeWorkerPop() {
   const bg = document.getElementById('workerpopbg'); if (bg) bg.classList.remove('show');
 }
 async function _wpRefresh() {
-  if (_wpSide === null) return;
-  let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(_wpSide) + '&lines=500'); }
+  const side = _wpSide;                                          // capture: the popup can switch while we await
+  if (side === null) return;
+  let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(side) + '&lines=500'); }
   catch (_) { return; }
-  if (_wpSide === null) return;                                  // closed while fetching
+  if (_wpSide !== side) return;                                  // switched to another region (or closed) mid-fetch → stale response, drop it
   const dot = r.connected ? '🟢' : '🟡';
   document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
     ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
