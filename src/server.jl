@@ -573,7 +573,7 @@ function set_regionon!(nb::LiveNotebook, spec::AbstractString)
     h = strip(String(spec))
     lock(nb.lock) do
         isempty(h) ? delete!(nb.report.meta, "regionon") : (nb.report.meta["regionon"] = String(h))
-        _persist!(nb)
+        _persist!(nb; label = isempty(h) ? "cleared regions" : "regions · $h")
     end
     return _region_specs(nb)
 end
