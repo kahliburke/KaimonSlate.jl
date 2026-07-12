@@ -60,4 +60,4 @@ provenance chips — is in **[Regions](regions.md)**.
 - [Reactive Cells](reactivity.md) — the reactive model the graph drives, and the 🔗 upstream focus.
 - [Regions](regions.md) — running part of a notebook on a second kernel, steered from the DAG.
 - [Remotes & Pools](remotes.md) — hosts, transports, and warm pools.
-- [Cell Tags & Caching](cell-tags.md) — the `needs=`, `remote`, and `region=` tags in the header.
+- [Cell Tags & Caching](cell-tags.md) — the `needs=` and `region=` tags in the header.

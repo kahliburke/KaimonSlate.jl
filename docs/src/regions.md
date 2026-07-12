@@ -6,9 +6,9 @@ Boundary values cross automatically, so you can keep light cells local and push 
 GPU model, a big SQL query, a memory-hungry join) to a beefy remote, without splitting your work
 into separate files.
 
-Regions build on the remote-execution machinery — host setup, transports, and warm pools all live in
-[Remotes & Pools](remotes.md). This page is about assigning cells to a region and understanding how
-data crosses the boundary.
+Regions are **named compute definitions** managed globally — a host, a transport, a data root, and how
+many workers to keep warm. Host setup and transports live in [Remotes & Pools](remotes.md); this page is
+about defining a region, assigning cells to it, and how data crosses the boundary.
 
 !!! note "New and evolving (v1)"
     Regions are a recent addition and still stabilizing. The single-worker path — running a *whole*
@@ -22,7 +22,6 @@ A cell's region is a **cell tag**, so it travels in the `.jl`:
 | Tag | Runs on |
 | --- | --- |
 | *(none)* | the main kernel — local |
-| `remote` | the **`default`** region (sugar for `region=default`) |
 | `region=<name>` | the named region |
 
 You rarely type the tag by hand — three UI paths set it:
@@ -33,28 +32,32 @@ You rarely type the tag by hand — three UI paths set it:
 - **Drag a node into a region zone** — when regions exist, the DAG splits into columns (local + one
   per region); drop a cell into a column to run it there.
 
-## Declaring destinations
+## Defining a region
 
-A **destination** is a host (or [warm pool](remotes.md#warm-pools)) a region points at. Open the
-**Destinations** manager (＋ Add destination… in the tag editor). You don't re-type a host here — you
-**enable** one already set up on the front page's [🖧 Remotes](remotes.md#set-up-a-host)
-dialog (SSH hosts, remembered remotes, and configured pools all appear). The **first** destination is
-named `default`, so the bare `remote` tag works; later ones take the host's name.
+A **region** is a global, named compute definition — it lives in the **🖧 Remotes → Regions** manager on
+the front page, not in any one notebook. A region carries:
 
-!!! tip "Point a region at a warm pool"
-    A destination backed by a [warm pool](remotes.md#warm-pools) **adopts** a ready worker (~1 s)
-    instead of cold-booting (~90 s), because the region's remote project is keyed the same way the
-    pool is. Set the pool's `preload` to the notebook's project and the region drops straight in.
+- a **host** (an SSH host) reached over a **transport** (`tunnel` or `direct`),
+- an optional **preload** — a *local* project dir whose environment is replicated on the host and
+  precompiled on idle workers, so a notebook adopts a ready worker instead of cold-booting,
+- a **data root** — a *remote* path pinned as the workers' `datadir()` / `@sfile`,
+- a **warm** count — how many workers to keep booted and idle, ready to *adopt* (0 = cold spin on demand).
 
-Under the hood this writes a **`regionon`** entry into the notebook's config footer (so it travels
-with the file):
+Many regions can point at the **same host** with different config (e.g. `gpu` and `gpu_scratch` on one box
+with different data roots). Names are folded to identifiers (`slate-remote` → `slate_remote`) so they
+always match a `region=` tag.
 
-- **One default region** → the bare form `host[,transport[,port,stream]]` (e.g. `hetzner-a100,direct`).
-- **Several / named** → `name:spec;name2:spec2` (e.g. `gpu:hetzner-a100,direct;bigmem:slate-remote`).
-- Each spec may add `root=PATH` to pin the region worker's data directory (its `@sfile` / data root).
-  The path can't contain a comma.
+## Using a region in a notebook
 
-Clearing all destinations brings the whole notebook back to the local kernel.
+Open the **Destinations** manager (＋ Add destination… in the tag editor) and **enable** the regions this
+notebook uses — you pick from the regions already defined on the front page. This writes their names into
+the notebook's **`regions`** config footer (so the choice travels with the file); cells then tag
+`region=<name>`. Clearing all destinations brings the whole notebook back to the local kernel.
+
+!!! tip "Keep a region warm"
+    A region with **warm > 0** keeps that many workers booted and idle; running a tagged cell then
+    **adopts** a ready worker (~1 s) instead of cold-booting (~90 s). Set the region's `preload` to the
+    notebook's project so the adopted worker already has its packages loaded.
 
 ## How boundary values cross
 
@@ -111,12 +114,13 @@ is the conservative choice when you want everything elsewhere.
 
 ## From the agent
 
-Under [Kaimon](agent.md), `slate_region_on(notebook, host)` sets a notebook's region destination
-(the same `regionon` footer the Destinations manager writes).
+Under [Kaimon](agent.md), define a region with `slate_region(name; host, warm, preload, data_root, …)`,
+choose which regions a notebook uses with `slate_region_on(notebook, "name1,name2")`, and list the
+registry with `slate_regions()`.
 
 ## See also
 
 - [Remotes & Pools](remotes.md) — hosts, transports, warm pools, `sync_memo`, data-transfer settings.
 - [The Dependency Graph](dag.md) — the DAG pane, zones, and the region map.
 - [Memoization & Caching](memoization.md) — the content-addressed store the transfers ride on.
-- [Cell Tags & Caching](cell-tags.md) — the `region=`, `remote`, and `resource` tags.
+- [Cell Tags & Caching](cell-tags.md) — the `region=` and `resource` tags.
