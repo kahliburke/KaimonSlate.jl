@@ -1803,7 +1803,10 @@ end
 # Create or update a region by name (upsert). Returns the stored Region.
 function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
                      data_root = "", warm = 0, threads = "")
-    n = strip(String(name)); isempty(n) && error("region name required")
+    # Fold to a tag-safe identifier: a cell's `region=<name>` tag folds non-word chars to `_`, so the
+    # stored name must fold the same way or no cell could reference it ("slate-remote" → "slate_remote").
+    n = replace(strip(String(name)), r"[^A-Za-z0-9_]+" => "_")
+    isempty(n) && error("region name required")
     r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
                String(data_root), Int(warm), String(threads))
     lock(_REGIONS_LOCK) do

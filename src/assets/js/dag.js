@@ -300,15 +300,15 @@ function _dagCellRegion(c) {
 function _dagAssignedRegion(c) {
   const tags = (c && c.tags) || [];
   for (const t of tags) if (t.startsWith('region=')) return t.slice(7);
-  return tags.includes('remote') ? 'default' : '';
+  return '';
 }
 // Regions PRESENT in the graph (some cell is tagged/ran there).
 function _dagRegionNames() {
   const cs = _dagCtx ? Object.values(_dagCtx.m.byId) : [];
   return [...new Set(cs.map(_dagCellRegion).filter(Boolean))].sort();
 }
-// The notebook's DECLARED destinations (regionon footer) — may include regions with no cells yet,
-// which still get a zone (an empty drop target). nbState.regions is set by the server state.
+// The notebook's DECLARED destinations (the `regions` footer, resolved against the registry) — may
+// include regions with no cells yet, which still get a zone (an empty drop target). From server state.
 function _dagDeclaredRegions() { return (typeof nbState !== 'undefined' && nbState && nbState.regions) || []; }
 function _dagRegionHost(name) { const r = _dagDeclaredRegions().find(r => r.name === name); return r ? r.host : ''; }
 // All region names = declared ∪ present, sorted → stable hue/zone ordering that doesn't dance.
@@ -735,7 +735,6 @@ function _dagOption() {
           const x = tl[0], y = tl[1], wpx = br[0] - tl[0], hpx = br[1] - tl[1];
           const hh = Math.min(24, hpx);
           const label = zn.isLocal ? 'local · main kernel'
-            : zn.name === 'default' ? (zn.host || 'remote')            // default region → just the host (no "remote" ambiguity)
             : zn.name + (zn.host ? '  ·  ' + zn.host : '');
           const kids = [
             { type: 'rect', silent: true, shape: { x, y, width: wpx, height: hpx, r: 12 },
