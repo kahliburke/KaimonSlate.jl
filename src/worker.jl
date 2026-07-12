@@ -721,6 +721,7 @@ _cell_get(c, k, default) = c isa AbstractDict ? get(c, k, get(c, Symbol(k), defa
 const _CANCEL_LOCK = ReentrantLock()
 const _RUNNING_TASKS = Dict{String,Task}()
 const _WARM_STATUS = Ref{String}("")     # pool worker's preload/precompile progress → telemetry → pool UI
+const _LAST_HUB_REQ = Ref(time())        # wall time of the last hub heartbeat (__slate_running) — the spin-guard's orphan signal
 const _BATCH_CANCEL = Ref(false)          # set by __slate_cancel; checked by the batch evalfn
 
 # The wire-form of a cancelled cell — an error result so the UI marks it interrupted (not stuck).
@@ -1594,6 +1595,7 @@ end
 set the hub reconciles its run-registry against. A cell the hub still marks `running` that is absent
 here was orphaned (the worker bounced under it) and can be safely reset. Cheap: a snapshot under the lock."
 function __slate_running()
+    _LAST_HUB_REQ[] = time()   # the supervisor's heartbeat — proof the hub is still driving us; the spin-guard treats staleness as "orphaned"
     ids = lock(_CANCEL_LOCK) do; String[String(k) for k in keys(_RUNNING_TASKS)]; end
     return (; running = ids, ts = time())
 end
@@ -1761,7 +1763,7 @@ function _telemetry_loop!(stats_path::String)
     else
         (-1, -1)
     end
-    lastc = cputime(); lastw = time(); memo = -1; tick = 0
+    lastc = cputime(); lastw = time(); memo = -1; tick = 0; spin = 0
     lastsb, lastst = sysstat()
     while true
         sleep(2.0)
@@ -1774,6 +1776,19 @@ function _telemetry_loop!(stats_path::String)
         # thinks is running but that's absent here is orphaned). Cheap: just the keys under the lock.
         runids = lock(_CANCEL_LOCK) do; collect(keys(_RUNNING_TASKS)); end
         evals = length(runids)
+        # Spin-guard: an orphaned worker (hub restarted / connection died) can wedge a thread at ~one full
+        # core forever — a userspace busy-loop that hogs the host while doing nothing useful. Detect the
+        # wedge from three independent signals and self-terminate: HOT cpu, an EMPTY run set (no cell is
+        # actually computing), and NO hub heartbeat for minutes (an attached kernel is pinged every few
+        # seconds via __slate_running; silence ⇒ the hub has forgotten us). Warming/precompiling is exempt,
+        # and a healthy idle worker sits near 0% cpu so it never trips. Require a sustained streak on top
+        # of the heartbeat gap so a GC burst can't fire it.
+        spin = (cpu > 70.0 && evals == 0 && (time() - _LAST_HUB_REQ[]) > 300 &&
+                !startswith(_WARM_STATUS[], "warming")) ? spin + 1 : 0
+        if spin >= 15                                       # ~30s of hot-idle after ~5min of no hub contact ⇒ wedged orphan
+            @error "slate worker: wedged orphan — a core pinned with no running eval and no hub heartbeat for minutes; exiting to free the host" cpu = cpu pid = getpid()
+            flush(stdout); flush(stderr); exit(2)
+        end
         running = "[" * join(("\"" * replace(String(id), "\\" => "\\\\", "\"" => "\\\"") * "\"" for id in runids), ",") * "]"
         gcms = round(Int, Base.gc_num().total_time / 1e6)
         warm = replace(_WARM_STATUS[], "\\" => "\\\\", "\"" => "\\\"")   # preload/precompile progress
