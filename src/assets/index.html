@@ -197,6 +197,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .actbadge.idle{color:#8a90a8;background:rgba(138,144,168,.14);}
 .actbadge.attached{color:#56d364;background:rgba(86,211,100,.12);}
 .actbadge.dead{color:#e57575;background:rgba(229,117,117,.12);}
+/* Region group header — the activity monitor is grouped by region (name · host · warm target). */
+.actgrouphd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:9px 2px 3px;
+  font-size:.78rem;font-weight:600;color:#d4d8e8;border-top:1px solid rgba(42,46,64,.9);}
+.actgrouphd.err{color:#e8a1a1;}
+.actgrouphost{font-weight:400;font-size:.72rem;color:#8a90a8;font-family:Menlo,monospace;}
+.actgroupwarm{font-weight:400;font-size:.64rem;color:#8a90a8;background:rgba(138,144,168,.14);padding:1px 6px;border-radius:8px;}
+.actgrouperr{font-weight:400;font-size:.68rem;color:#e57575;}
+.actgrouphd + .actrow{border-top:none;}
 /* The meter is a fixed-width track; the fill's WIDTH is cpu% and its COLOUR encodes load
    (green idle → amber busy → red hot), set inline by JS — a pegged/runaway worker reads red at a
    glance. The track is always visible (lighter fill + inset ring) so an idle meter still reads as a
@@ -1550,69 +1558,85 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function _actLoading(){ var el=document.getElementById('actmon'); if(!el||el.dataset.loaded) return;
     el.innerHTML=_actShell('<div class="actloading"><span class="actspin"></span>checking hosts…</div>'); }
   function _actStart(){ if(_actTimer) return; _actLoading(); _actTick(); _actTimer=setInterval(function(){ if(!document.hidden) _actTick(); }, 3000); }
-  // Poll /api/pools for the configured/parked hosts, then each host's live roster (stats carry
+  // Poll /api/regions for the configured/parked hosts, then each host's live roster (stats carry
   // cpu/rss/running from the telemetry sampler). Overlap-guarded so a slow ssh probe can't stack.
   function _actTick(){
     if(_actInflight) return; _actInflight=true;
     var done=function(){ _actInflight=false; };
-    fetch('/api/pools').then(function(r){return r.json();}).then(function(d){
-      var pools=d.pools||[];
-      var hs={}; pools.forEach(function(p){hs[p.host]=1;}); (d.parked||[]).forEach(function(p){hs[p.host]=1;});
+    fetch('/api/regions').then(function(r){return r.json();}).then(function(d){
+      var regions=d.regions||[];
+      var hs={}; regions.forEach(function(p){if(p.host)hs[p.host]=1;}); (d.parked||[]).forEach(function(p){hs[p.host]=1;});
       var hosts=Object.keys(hs);
-      if(!hosts.length){ _actRender([], pools); done(); return; }
+      if(!hosts.length){ _actRender([], regions); done(); return; }
       Promise.all(hosts.map(function(h){ return fetch('/api/remote-workers?host='+encodeURIComponent(h))
         .then(function(r){return r.json();}).then(function(d){return {host:h,workers:(d.workers||[])};})
         .catch(function(){return {host:h,workers:[]};}); }))
-        .then(function(hd){ _actRender(hd, pools); done(); }).catch(done);
+        .then(function(hd){ _actRender(hd, regions); done(); }).catch(done);
     }).catch(done);
   }
-  function _actRender(hostData, pools){
-    var el=document.getElementById('actmon'); if(!el) return;
-    var rows=[], nW=0, totRss=0, busy=0;
-    hostData.forEach(function(hd){ (hd.workers||[]).forEach(function(w){
-      var st={}; try{st=JSON.parse(w.stats||'{}');}catch(_){}
-      var mf={}; try{mf=JSON.parse(w.manifest||'{}');}catch(_){}
-      nW++;
-      var alive=w.alive!==false;
-      var state=!alive?'dead':(w.state==='attached'?'attached':'idle');
-      var cpu=(st.cpu!==undefined&&st.cpu>=0)?st.cpu:null;
-      var rss=st.rss||0; totRss+=rss;
-      var running=Array.isArray(st.running)?st.running:[];
-      var warm=st.warm||'';
-      var warming=warm.indexOf('warming')===0;
-      var isBusy=alive&&(running.length>0||(st.evals||0)>0||warming);
-      if(isBusy) busy++;
-      var runTxt=!alive?'dead':running.length?('▶ '+running.join(', ')):
-        warming?('⏳ '+warm):
-        warm.indexOf('ready')===0?('✓ '+warm):
-        (state==='attached'&&mf.notebook?mf.notebook:'idle');
-      // Fill: width = cpu%, colour by LOAD (green idle → amber busy → red hot). A nonzero-but-tiny
-      // load still shows a visible coloured nub so "barely working" ≠ "idle". No telemetry
-      // (cpu==null) → empty track, no fill.
-      var cpuPct=cpu==null?0:(cpu<=0?0:Math.max(5,Math.min(100,cpu)));
-      var barCol=cpu>=85?'#e5636e':cpu>=50?'#e8a13f':'#3fb96e';
-      var fill=cpu==null||cpuPct<=0?'' :
-        '<span class="actbarf" style="width:'+cpuPct+'%;background-color:'+barCol+'"></span>';
-      rows.push('<div class="actrow'+(rows.length===0?' first':'')+'">'+
-        '<span class="actlabel"><span class="actwho">'+esc((hd.host||'').split('.')[0])+' :'+w.port+'</span>'+
-        '<span class="actbadge '+state+'">'+state+(mf.region?('·'+esc(mf.region)):'')+'</span></span>'+
+  // One worker's row → {rss, busy, alive, html}. The host lives in the group header, so the row shows
+  // just the port + state + telemetry (cpu bar / rss / current activity).
+  function _actWorkerRow(w){
+    var st={}; try{st=JSON.parse(w.stats||'{}');}catch(_){}
+    var mf={}; try{mf=JSON.parse(w.manifest||'{}');}catch(_){}
+    var alive=w.alive!==false;
+    var state=!alive?'dead':(w.state==='attached'?'attached':'idle');
+    var cpu=(st.cpu!==undefined&&st.cpu>=0)?st.cpu:null;
+    var rss=st.rss||0;
+    var running=Array.isArray(st.running)?st.running:[];
+    var warm=st.warm||'', warming=warm.indexOf('warming')===0;
+    var busy=alive&&(running.length>0||(st.evals||0)>0||warming);
+    var runTxt=!alive?'dead':running.length?('▶ '+running.join(', ')):
+      warming?('⏳ '+warm):warm.indexOf('ready')===0?('✓ '+warm):
+      (state==='attached'&&mf.notebook?mf.notebook:'idle');
+    // Fill: width = cpu%, colour by load (green idle → amber busy → red hot); a tiny-but-nonzero load
+    // still shows a nub so "barely working" ≠ "idle". No telemetry (cpu==null) → empty track.
+    var cpuPct=cpu==null?0:(cpu<=0?0:Math.max(5,Math.min(100,cpu)));
+    var barCol=cpu>=85?'#e5636e':cpu>=50?'#e8a13f':'#3fb96e';
+    var fill=cpu==null||cpuPct<=0?'':'<span class="actbarf" style="width:'+cpuPct+'%;background-color:'+barCol+'"></span>';
+    return { rss:rss, busy:busy, alive:alive, html:
+      '<div class="actrow">'+
+        '<span class="actlabel"><span class="actwho">'+(alive?'🟢':'⚪')+' :'+w.port+'</span>'+
+        '<span class="actbadge '+state+'">'+state+'</span></span>'+
         '<span class="actbar">'+fill+'</span>'+
         '<span class="actcpun">'+(cpu==null?'—':cpu+'%')+'</span>'+
         '<span class="actrss">'+(rss?_actFmtBytes(rss):'—')+'</span>'+
-        '<span class="actrun'+(runTxt==='idle'?' idle':'')+'" title="'+esc(runTxt)+'">'+esc(runTxt)+'</span></div>');
-    }); });
+        '<span class="actrun'+(runTxt==='idle'?' idle':'')+'" title="'+esc(runTxt)+'">'+esc(runTxt)+'</span></div>' };
+  }
+  // Grouped by REGION (manifest region= tag). Defined regions first (with their host/warm/reconcile
+  // status in the header, so a warm-but-workerless or failed region still shows); then tags with no
+  // matching def; then untagged workers (a notebook's own remote main kernel, or strays).
+  function _actRender(hostData, regions){
+    var el=document.getElementById('actmon'); if(!el) return;
     el.dataset.loaded='1';
-    // A pool whose last warm/reconcile FAILED shows a red row here (it has no workers, so it'd be
-    // invisible otherwise) — turning a silent background spawn failure into something you can see.
-    var poolErr=(pools||[]).filter(function(p){return p.status&&p.status.ok===false;}).map(function(p){
-      var age=(p.status.age!=null)?(' <span class="acterrage">('+(p.status.age<60?p.status.age+'s':Math.round(p.status.age/60)+'m')+' ago)</span>'):'';
-      return '<div class="acterr" title="'+esc(p.status.msg)+'">⚠ <b>'+esc(p.host)+'</b> — '+esc(p.status.msg)+age+'</div>';
-    }).join('');
-    if(!hostData.length && !poolErr){ el.innerHTML=''; return; }   // nothing at all → collapse (:empty hides it)
-    if(!nW && !poolErr){ el.innerHTML=_actShell('<div class="actempty">No workers running</div>'); return; }
-    var agg=nW?('<div class="actagg">'+nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+
-      ' busy <span class="actlive">●</span></div>'):'';
-    el.innerHTML=_actShell(poolErr+agg+rows.join(''));
+    var all=[]; hostData.forEach(function(hd){ (hd.workers||[]).forEach(function(w){
+      var mf={}; try{mf=JSON.parse(w.manifest||'{}');}catch(_){}
+      all.push({w:w, host:hd.host, region:mf.region||''}); }); });
+    var byRegion={}; all.forEach(function(x){ (byRegion[x.region]=byRegion[x.region]||[]).push(x); });
+    var nW=all.length, totRss=0, busy=0, sections=[], shown={};
+    var emit=function(headHtml, xs){
+      var body=(xs||[]).map(function(x){ var r=_actWorkerRow(x.w); totRss+=r.rss; if(r.busy)busy++; return r.html; }).join('');
+      sections.push(headHtml+(body||'<div class="actempty">no workers</div>'));
+    };
+    (regions||[]).slice().sort(function(a,b){return (a.name||'').localeCompare(b.name||'');}).forEach(function(rg){
+      shown[rg.name]=1;
+      var xs=byRegion[rg.name]||[], err=rg.status&&rg.status.ok===false;
+      if(!xs.length && !(rg.warm>0) && !err) return;   // a bare def with nothing live/warm/failed → skip
+      var head='<div class="actgrouphd'+(err?' err':'')+'">🖧 '+esc(rg.name)+
+        ' <span class="actgrouphost">'+esc(rg.host||'(no host)')+'</span>'+
+        (rg.warm>0?' <span class="actgroupwarm">warm '+rg.warm+'</span>':'')+
+        (err?' <span class="actgrouperr" title="'+esc(rg.status.msg)+'">⚠ reconcile failed</span>':'')+'</div>';
+      emit(head, xs);
+    });
+    Object.keys(byRegion).sort().forEach(function(name){
+      if(name==='' || shown[name]) return;   // a region tag with no registry def (stray/renamed)
+      emit('<div class="actgrouphd">🖧 '+esc(name)+' <span class="actgrouphost">'+esc((byRegion[name][0]||{}).host||'')+' · not in registry</span></div>', byRegion[name]);
+    });
+    if(byRegion['']&&byRegion[''].length) emit('<div class="actgrouphd">💻 other workers</div>', byRegion['']);
+    if(!sections.length){ el.innerHTML=''; return; }   // nothing at all → collapse (:empty hides it)
+    var agg='<div class="actagg">'+nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+
+      ' busy <span class="actlive">●</span></div>';
+    el.innerHTML=_actShell(agg+sections.join(''));
   }
   loadSessions(); loadPublished(); _actStart();
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close

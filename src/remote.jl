@@ -133,6 +133,29 @@ function _free_local_port()
     return p
 end
 
+# Bounded TCP reachability probe for a :direct dial. Returns :open (something is listening), :refused
+# (host up but nothing on that port yet — e.g. a worker still booting), or :unreachable (no response
+# within `timeout` — a closed/firewalled port that DROPS the SYN, the case that would otherwise block
+# connect() for the full ~75 s OS TCP timeout and stall the whole run). Non-blocking: a probe that times
+# out abandons its connect task (it errors out on its own); we never sit on the OS timeout.
+function _probe_tcp(host::AbstractString, port::Integer; timeout::Float64 = 4.0)
+    result = Threads.Atomic{Int}(0)     # 0 pending · 1 open · 2 refused · 3 unreachable
+    Threads.@spawn begin
+        r = try
+            s = Sockets.connect(String(host), Int(port)); close(s); 1
+        catch e
+            occursin("refused", lowercase(sprint(showerror, e))) ? 2 : 3
+        end
+        Threads.atomic_cas!(result, 0, r)
+    end
+    t0 = time()
+    while result[] == 0 && time() - t0 < timeout
+        sleep(0.05)
+    end
+    v = result[]
+    return v == 1 ? :open : v == 2 ? :refused : :unreachable
+end
+
 """
     Tunnel — a supervised `ssh -L` forward set. Respawns the SSH process if it drops
     (autossh-lite), so the ZMQ client's reconnect survives a network blip.
@@ -790,8 +813,28 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         end
         _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
         t0 = time(); last = ""; conn = nothing; tries = 0
+        firewall_since = 0.0   # :direct — first time the port looked firewalled (SYN dropped) with no refuse/open since
         while time() - t0 < deadline
             tries += 1
+            # :direct dials the worker's RAW ip:port. A closed/firewalled port DROPS the SYN, so a bare
+            # connect_tcp! blocks ~75 s (the OS TCP timeout) — long enough to look like a hang and blow past
+            # `deadline`. Probe first (bounded): dial only when the port is actually open; a booting worker
+            # (refused) just retries; a port that stays unreachable is a firewall → fail fast with a clear
+            # message instead of waiting out the whole deadline.
+            if t.transport === :direct
+                pr = _probe_tcp(connect_host, connect_port; timeout = 4.0)
+                if pr === :unreachable
+                    firewall_since == 0.0 && (firewall_since = time())
+                    last = "port $connect_port on $host is not reachable — open $connect_port–$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
+                    (time() - firewall_since > 10.0) && break        # sustained DROP ⇒ firewall, not a slow boot — stop early
+                    sleep(0.5); continue
+                end
+                firewall_since = 0.0                                  # refused/open ⇒ host reachable; normal boot/ready path
+                if pr === :refused
+                    last = "worker not listening on $connect_port yet (booting)"
+                    sleep(0.5); continue
+                end
+            end
             try
                 conn = K.connect_tcp!(_manager(), connect_host, connect_port;
                                       name = "slate-$(host)-$(port)", stream_port = connect_stream,
