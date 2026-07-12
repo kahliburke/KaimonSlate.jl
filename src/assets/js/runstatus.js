@@ -7,7 +7,7 @@
 // All best-effort and self-contained: if an element is missing it no-ops.
 (function () {
   const running = new Map();     // cellId -> start time (performance.now)
-  let total = 0, done = 0, errs = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone)
+  let total = 0, done = 0, errs = 0, restored = 0;   // the CURRENT run batch (set by runbatch:, counts up via celldone; `restored` = cache hits this streak)
   let tick = null, idleTimer = null, _convergeT = null;
   const bars = new Map();              // bar id -> {frac,msg}  (one per @withprogress scope / slate_progress id)
   let prog = { frac: 0, msg: '' };     // the latest update (drives the chip + badge %)
@@ -20,6 +20,11 @@
   let revealed = false;
   const cellReveal = new Map();        // cellId → pending reveal timer
   const REVEAL_MS = 140;
+  // A multi-cell batch (startup / run-all) reveals the run-status IMMEDIATELY. A burst of fast
+  // memo-restores would otherwise finish before any per-cell reveal timer trips, so the pill snaps
+  // straight to "done" and you never see the restore/parallel work happening. A lone reactive cell
+  // (a @bind at ~10 Hz) stays deferred so it never flashes — hence a threshold, not 1.
+  const BATCH_REVEAL_MIN = 3;
 
   // The cell currently executing (the most recently started) — runs are sequential.
   const activeCell = () => { let last = null; for (const id of running.keys()) last = id; return last; };
@@ -66,8 +71,13 @@
       const n = Math.max(total, done + running.size);
       const k = Math.min(done + running.size, n);
       const frac = n ? Math.round((done / n) * 100) : 0;
+      // Surface the two things a plain "k/N" hides: how many cells run AT ONCE (parallel batch) and how
+      // many landed straight from the durable cache (restore vs recompute) — so a fast, cache-heavy
+      // startup reads as "120 restored", not a glitch to "done".
+      const par = running.size > 1 ? ` · ⇉ ${running.size} parallel` : '';
+      const rest = restored > 0 ? ` · ♻ ${restored} restored` : '';
       pill.className = 'runpill running';
-      pill.innerHTML = `<span class="rring" style="--rp:${frac}"></span>Running ${k}/${n} · ${fmt(mx)}`;
+      pill.innerHTML = `<span class="rring" style="--rp:${frac}"></span>Running ${k}/${n}${par}${rest} · ${fmt(mx)}`;
       pill.style.display = '';
     } else if (errs) {
       pill.className = 'runpill err'; pill.style.display = '';
@@ -97,7 +107,12 @@
     // chip clicked fine because those elements are stable).
     const idEl = document.getElementById('runchipid'), meta = document.getElementById('runchipmeta'),
       fill = document.getElementById('runchipfill');
-    if (idEl && idEl.textContent !== id) idEl.textContent = id;
+    // The chip focuses the most-recently-started cell, but during a parallel batch several run at once
+    // (each also gets its own pulsing border + timer). Note the siblings so the chip doesn't read as
+    // "one cell running" when it's really N.
+    const extra = running.size - 1;
+    const idText = extra > 0 ? `${id}  +${extra} more` : id;
+    if (idEl && idEl.textContent !== idText) idEl.textContent = idText;
     if (meta) meta.textContent = ` · ${el}` + (prog.msg ? ` · ${prog.msg}` : '');
     if (fill) { fill.style.width = (prog.frac > 0 ? Math.round(prog.frac * 100) : 0) + '%'; fill.style.opacity = prog.frac > 0 ? '1' : '0'; }
     chip.style.display = 'flex';
@@ -154,9 +169,12 @@
   // the pill grows as cells are queued mid-run. Only a FRESH streak (none active) resets the counters.
   window.onRunBatch = function (n) {
     clearTimeout(idleTimer);
-    if (!active()) { done = 0; errs = 0; erroredIds.length = 0; errCursor = 0; }
+    if (!active()) { done = 0; errs = 0; restored = 0; erroredIds.length = 0; errCursor = 0; }
     total = done + n;
-    if (revealed) renderPill();           // reveal is per-cell now (onCellRun); just refresh the count
+    // A real batch (startup / run-all) shows from the FIRST cell so a fast restore/parallel burst is
+    // visible instead of snapping to "done"; a lone reactive cell stays deferred (BATCH_REVEAL_MIN).
+    if (n >= BATCH_REVEAL_MIN) reveal();
+    if (revealed) renderPill();           // refresh k/N (reveal() renders too; a mid-run re-emit lands here)
   };
 
   // Pill click: while running, open the activity feed to watch; once a run has errored, step through
@@ -186,13 +204,15 @@
     running.delete(id);
     clearCellReveal(id);                  // a finished cell cancels its own pending reveal (fast → no flash)
     done++;
+    const wasRestored = cell.memo === 'restored';   // came straight from the durable cache (no recompute)
+    if (wasRestored) restored++;
     bars.clear();
     clearCellBar(id);                     // remove the per-cell progress bar(s)
     const errored = cell.state === 'errored';
     if (errored) { errs++; if (!erroredIds.includes(id)) erroredIds.push(id); if (!revealed) reveal(); }  // always surface errors
     if (revealed) {
       setLive(id, cell.state);            // clear the transient running → real state
-      activity(errored ? 'err' : 'done', id, errored ? 'errored' : (t ? fmt(now() - t) : 'done'));
+      activity(errored ? 'err' : 'done', id, errored ? 'errored' : (wasRestored ? '♻ restored' : (t ? fmt(now() - t) : 'done')));
       prog = { frac: 0, msg: '' };
       renderPill(); renderChip();
     }
@@ -201,7 +221,7 @@
     if (!active()) {
       clearTimeout(idleTimer);
       if (revealed) {
-        idleTimer = setTimeout(() => { total = 0; done = 0; revealed = false; renderPill(); }, 600);
+        idleTimer = setTimeout(() => { total = 0; done = 0; restored = 0; revealed = false; renderPill(); }, 600);
         // Converge the topbar after a VISIBLE run: `celldone` patches update each cell, but the worker
         // dot and the "Run stale" count only recompute on a full state pull — and a parallel/initial
         // run's final pull can be raced. One pull here settles the dot, the stale count, and any state
@@ -210,7 +230,7 @@
         _convergeT = setTimeout(() => {
           try { window.updateStates && api('GET', '/api/state').then(function (s) { updateStates(s); }).catch(function () {}); } catch (_) {}
         }, 250);
-      } else { clearAllReveals(); total = 0; done = 0; }   // nothing was ever shown → reset silently
+      } else { clearAllReveals(); total = 0; done = 0; restored = 0; }   // nothing was ever shown → reset silently
     }
   };
 

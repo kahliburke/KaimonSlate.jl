@@ -520,6 +520,11 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
         "defs"    => c.kind == CODE ? sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
+    # Durable-cache verdict for THIS run ("restored" = came back from the memo cache without recompute,
+    # "stored" = computed then persisted, "handle" = a live handle that can't be cached). Drives the
+    # run-status restore badge + "N restored" counter (a fast restore burst otherwise reads as a glitch),
+    # and mirrors the DAG's cache indicator. Only a code cell that actually ran carries a verdict.
+    (c.kind == CODE && c.output !== nothing && !isempty(c.output.memo)) && (d["memo"] = c.output.memo)
     if !isempty(c.controls)
         # resolve each column's names to (defining cell, spec); drop unknown names + empty columns
         cols = [[_control_spec(bindref[n]...) for n in col if haskey(bindref, n)] for col in c.controls]

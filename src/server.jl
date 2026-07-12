@@ -1344,12 +1344,25 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # presync below won't ship them). Bring the kernel up and prime it (idempotent, once per kernel)
     # so the package's functions, the theme, … all resolve instead of an UndefVarError on the far side.
     if !isempty(side)
+        # Bringing up a region worker can be SLOW — a COLD remote spawn boots Julia + KaimonGate on the
+        # host (~90s). The cell can't be marked RUNNING yet (it hasn't started), so without a signal the
+        # run pill just sits at a frozen "0ms" with nothing visibly happening. Mark it RUNNING now and
+        # post a status bar naming WHAT the wait is (the worker coming up on <host>) with a ticking timer,
+        # then clear that bar once the kernel is ready. A warm reattach clears it instantly (no flicker).
+        host = _side_label(nb, side)
+        lock(nb.lock) do
+            cell.state = RUNNING
+            _broadcast_progress(nb, cell)
+        end
+        ReportEngine._do_userprog(nb.report.id, 0.0, "⌛ bringing up worker on $host…", "spawn-" * cell.id, false)
         try
             ReportEngine.prepare!(kernel, nb.report)
             _prime_namespace!(nb, kernel, side)
         catch e
-            ReportEngine._rlog("region: prime before $(cell.id) on $(_side_label(nb, side)) failed: " *
+            ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
                                first(sprint(showerror, e), 160))
+        finally
+            ReportEngine._do_userprog(nb.report.id, 1.0, "", "spawn-" * cell.id, true)   # drop the status bar
         end
     end
     # Provenance for the DAG/stats: which kernel this run executes on (only meaningful — and
