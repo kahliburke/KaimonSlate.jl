@@ -115,6 +115,7 @@ export default withMermaid(defineConfig({
         items: [
           { text: 'Notebook Basics', link: '/notebook-basics' },
           { text: 'Cell Tags & Caching', link: '/cell-tags' },
+          { text: 'Memoization & Caching', link: '/memoization' },
           { text: 'Command Palette & Help', link: '/palette-and-help' },
           { text: 'Reactive Cells', link: '/reactivity' },
           { text: 'The Dependency Graph', link: '/dag' },
@@ -132,6 +133,7 @@ export default withMermaid(defineConfig({
           { text: 'Packages', link: '/packages' },
           { text: 'Configuration', link: '/configuration' },
           { text: 'Remotes & Pools', link: '/remotes' },
+          { text: 'Regions', link: '/regions' },
         ],
       },
       {

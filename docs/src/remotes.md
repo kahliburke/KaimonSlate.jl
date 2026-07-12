@@ -14,7 +14,7 @@ A remote is any **SSH host you already reach with key auth** — a `Host` entry 
 (or a `user@host` you can `ssh` to without a password prompt). KaimonSlate provisions the rest:
 it checks the host, ensures a Julia + environment is present, and starts the worker for you.
 
-## Set up a host — 🖧 Remotes
+## Set up a host
 
 On the hub's [front page](getting-started.md#the-front-page), click **🖧 Remotes** to add and test a
 host:
@@ -77,7 +77,7 @@ a matching notebook **adopts** one in about a second.
 
 ## Your cache follows you
 
-KaimonSlate's [durable cache](cell-tags.md#caching) can move to the remote so it **restores** cached
+KaimonSlate's [durable cache](memoization.md) can move to the remote so it **restores** cached
 results there instead of recomputing them — "your session follows you."
 
 - **On attach**, cached results are carried over automatically **when moving them beats recomputing**
@@ -94,6 +94,40 @@ Tune the transfer under **🖧 Remotes → Data transfer** (applies to all noteb
 | **Transfer chunk size** | MB moved per round-trip. Transfers ride their own channel, so this never delays cell results — smaller chunks bound per-chunk timeouts and let an abort land sooner on a slow uplink; bigger ones move data faster on a good link. |
 | **Carry-time budget** | On attach, an entry is only carried if moving it is worth it and it fits in this budget; otherwise the cell recomputes. (`sync_memo` ignores this — it always pushes everything.) |
 | **Confirm transfers over** | When a cell needs a value that must cross the network, it pauses with an exact size + estimated-time preview if the transfer would take longer than this; run the cell again to proceed. `0` never asks. |
+
+## Diagnostics
+
+When a notebook runs remotely — or across [regions](regions.md) — several surfaces show what's
+happening and where.
+
+**Where a notebook runs** (agent tools; also usable from any REPL):
+
+- **`whereis(notebook)`** — this notebook's live placement: local (pid/port) or remote host, the
+  transport, ports (main / stream / data), connection state, and, for a remote, whether it **adopted
+  a pool worker** — plus its latest telemetry.
+- **`remote_workers(host)`** — a host's full roster: each worker's lifecycle badge (⚪ stopped ·
+  🔵 pool · 🟡 idle · 🟢 attached/running), the notebook it serves, last-activity age, and telemetry
+  (cpu %, RSS, cache size, running count) alongside host-wide cpu / load / memory.
+- **`pools()`** — the hub view: configured pools (desired state) and parked wires.
+
+**The Remote activity strip** — on the hub's front page, a live "top" for your remote and pool
+workers: one row per worker with a CPU meter, RSS, and *what it's doing* (▶ running-cell ids ·
+⏳ warming · ✓ ready · idle), refreshed every few seconds. It hides itself when you have no pools or
+remote hosts.
+
+**Inside the notebook:**
+
+- **🪵 Worker log** (**☰ → Worker log**, or the command palette) — a live tail of the worker's log,
+  following the bottom as it grows. For a remote worker it interleaves the local orchestration log and
+  the remote worker's own log.
+- The [DAG pane](dag.md)'s **🖧 region map** and per-cell provenance chips show where each cell last
+  ran and how much data crossed the boundary — see [Regions → Seeing where cells run](regions.md#seeing-where-cells-run).
+- **📋 Activity log** — a per-cell run feed (distinct from the worker-level activity strip above).
+
+!!! note "`slate_diag` is browser diagnostics, not worker state"
+    Despite the name, `slate_diag` reports the **browser tab's console** (JS errors, failed asset
+    loads) — useful for a broken widget or a 404, not for where a notebook runs. For execution and
+    worker state use `whereis` / `remote_workers` / `pools` and the 🪵 worker log.
 
 ## From the agent
 
@@ -113,6 +147,7 @@ has the full parameters (`slate_api("remote")` lists them):
 
 ## See also
 
+- [Regions](regions.md) — run *part* of one notebook on a remote kernel while the rest stays local.
+- [Memoization & Caching](memoization.md) — the durable cache that `sync_memo` moves.
 - [Configuration](configuration.md) — hub port, kernel selection, environment variables.
-- [Cell Tags & Caching](cell-tags.md) — the durable cache that `sync_memo` moves.
 - [Packages](packages.md) — a notebook's per-project environment (what `preload` replicates).

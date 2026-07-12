@@ -42,33 +42,22 @@ Manual edges are first-class: they drive staleness, run order, and cache keys ex
 ones. A `needs=` that names no earlier code cell (deleted, moved below, or a markdown cell) is inert
 and flagged with a **🔗⚠** badge on the cell.
 
-## Regions
+## Regions — run cells on another kernel
 
-A **region** (destination) is a *second kernel* — usually on another machine — where **some** of a
-notebook's cells run, while the rest stay on the main kernel. It lets you keep light cells local and
-push the heavy ones (a GPU model, a large query) to a beefy host, all in **one** notebook.
+When a notebook is split into **regions**, some cells run on a second kernel (usually on another
+host) while the rest stay local. The DAG pane is how you *see and steer* that split:
 
-- Tag a cell **`region=<name>`** — or the bare **`remote`** tag, which is sugar for the `default`
-  region — and it executes on that region's kernel. **Boundary values cross automatically** as
-  content-addressed blobs; you don't move data by hand.
-- Declare destinations in the **Destinations manager** (the per-cell *Run on* picker in the 🏷 tag
-  editor, and a notebook-level declare/remove). Point a region at a [warm pool](remotes.md#warm-pools)
-  so it **adopts** a ready worker instead of paying a cold boot.
-- The DAG pane's **🖧 region map** colors cells by where they run, with a legend naming the hosts, and
-  a cell wears a **🖧** badge when its last run executed on a region kernel.
+- it lays out **side-by-side zones** — `💻 local` and one per region — and you **drag a cell into a
+  zone** to run it there;
+- the **🖧 region map** toggle colors each node by where it runs (a legend names the hosts), and a
+  node wears a **🖧** badge when its last run executed on a region kernel.
 
-Regions build directly on the remote-execution machinery — host setup, transports, and the
-data-transfer settings that govern how boundary values cross the wire all live in
-[Remotes & Pools](remotes.md).
-
-!!! note "Regions are new and evolving"
-    Named regions and the DAG region map are a recent addition — the surface may still shift. The
-    single-worker path (a whole notebook [placed on one host](remotes.md#run-a-notebook-on-a-remote))
-    is the stable option when you want the entire notebook elsewhere.
+The full story — assigning cells, declaring destinations, how boundary values cross, and the
+provenance chips — is in **[Regions](regions.md)**.
 
 ## See also
 
 - [Reactive Cells](reactivity.md) — the reactive model the graph drives, and the 🔗 upstream focus.
-- [Remotes & Pools](remotes.md) — hosts, transports, warm pools, and the data-transfer settings
-  regions rely on.
+- [Regions](regions.md) — running part of a notebook on a second kernel, steered from the DAG.
+- [Remotes & Pools](remotes.md) — hosts, transports, and warm pools.
 - [Cell Tags & Caching](cell-tags.md) — the `needs=`, `remote`, and `region=` tags in the header.

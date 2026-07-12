@@ -57,6 +57,7 @@ makedocs(;
         "Guide" => [
             "Notebook Basics" => "notebook-basics.md",
             "Cell Tags & Caching" => "cell-tags.md",
+            "Memoization & Caching" => "memoization.md",
             "Command Palette & Help" => "palette-and-help.md",
             "Architecture" => "architecture.md",
             "Reactive Cells" => "reactivity.md",
@@ -75,6 +76,7 @@ makedocs(;
             "Packages" => "packages.md",
             "Configuration" => "configuration.md",
             "Remotes & Pools" => "remotes.md",
+            "Regions" => "regions.md",
         ],
         "API Reference" => "api.md",
     ],

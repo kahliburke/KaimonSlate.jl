@@ -53,17 +53,20 @@ without scattering `@show`. You can also write `@trace begin … end` by hand ar
 
 ## Caching
 
-KaimonSlate durably **memoizes** cell results. Any cell that takes **≥ 400 ms** is automatically
-cached to disk, keyed by its source and inputs (including [`@asset`](live-updates.md#reacting-to-files-asset)
-file hashes). After a worker restart — or reopening the notebook — a cached cell is **restored**
-from disk instead of recomputing, so an expensive notebook comes back instantly.
+KaimonSlate durably **memoizes** cell results to disk: a cell that takes more than a moment (about
+150 ms) is cached automatically, keyed by its source and inputs, and **restored** instead of
+recomputed after a worker restart or when you reopen the notebook. Two tags tune it:
 
-- Caching is content-addressed: change the cell's source or an input and it recomputes; revert
-  and the old result is still there.
-- Tag a cell **`nocache`** to opt out — necessary for impure cells (randomness you want fresh,
-  network calls, side effects) where a restored value would be wrong.
+- **`cache`** — force a cell's result to persist regardless of runtime, for a deterministic pipeline
+  stage whose inputs rarely change.
+- **`nocache`** — opt out, for impure or side-effecting cells (randomness you want fresh, network
+  calls) where a restored value would be wrong. It also stops everything downstream from being
+  restored, since they depend on a value that must re-run.
 
 !!! tip "Structure for the cache"
     Put an expensive computation (a simulation, a large read, a fit) in its **own** cell so its
     result is cached independently of the cheap cells that render it. The reactive engine already
     recomputes only what changed; the cache makes that survive restarts.
+
+See **[Memoization & Caching](memoization.md)** for the full model — the content-addressed store,
+cache keys, restore, display-object elision, and the Arrow/typed codecs.
