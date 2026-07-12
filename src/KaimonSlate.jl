@@ -612,7 +612,7 @@ function create_tools(GateTool::Type)
     end
 
     """
-        region(name::String; host="", transport="tunnel", base_port=0, preload="", data_root="", warm=0, threads="") -> String
+        region(name::String; host="", transport="tunnel", base_port=0, preload="", data_root="", cache_root="", warm=0, threads="") -> String
 
     Define (or update) a named region — a global compute target: a `host` reached over `transport`
     (`tunnel`|`direct`), an optional `preload` (a LOCAL project dir replicated on the host so its
@@ -621,19 +621,24 @@ function create_tools(GateTool::Type)
     regions may point at the same host with different config. Full-record upsert; reconciles toward
     `warm` in the background. Notebooks reference a region by NAME via `region_on` + `region=<name>`
     cell tags. `base_port` pins the port range for a `:direct` region (worker *i* → base_port+3i..+2).
+    `cache_root` (a REMOTE absolute path) pins the workers' `KAIMONSLATE_CACHE_HOME` — a SEPARATE
+    content-addressed store per region, so co-located region workers don't share `~/.cache/kaimonslate/memo`
+    (they otherwise dedup a cross-region blob to 0 bytes instead of moving it over the peer channel).
     """
     function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
-                    preload::String = "", data_root::String = "", warm::Int = 0, threads::String = "")::String
+                    preload::String = "", data_root::String = "", cache_root::String = "", warm::Int = 0, threads::String = "")::String
         nm = strip(name); isempty(nm) && return "Give a region name."
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
         pl = strip(preload); (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"
         r = ReportEngine.region_set!(nm; host = String(strip(host)), transport = tr, base_port = base_port,
                                      preload = isempty(pl) ? "" : abspath(expanduser(pl)),
-                                     data_root = String(strip(data_root)), warm = max(0, warm), threads = String(strip(threads)))
+                                     data_root = String(strip(data_root)), cache_root = String(strip(cache_root)),
+                                     warm = max(0, warm), threads = String(strip(threads)))
         r.warm > 0 && Threads.@spawn try; ReportEngine.region_reconcile!(r.name); catch; end
         return "✅ region '$(r.name)' → $(isempty(r.host) ? "(no host)" : r.host) ($(r.transport))" *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
-               (isempty(r.data_root) ? "" : ", data_root=$(r.data_root)")
+               (isempty(r.data_root) ? "" : ", data_root=$(r.data_root)") *
+               (isempty(r.cache_root) ? "" : ", cache_root=$(r.cache_root)")
     end
 
     """

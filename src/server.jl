@@ -603,7 +603,8 @@ function _regions_json(nb::LiveNotebook)
                              "transport" => "tunnel", "root" => "", "warm" => 0) :
             Dict{String,Any}("name" => r.name, "defined" => true, "host" => r.host,
                              "transport" => String(r.transport), "base_port" => r.base_port,
-                             "root" => r.data_root, "warm" => r.warm, "preload" => r.preload))
+                             "root" => r.data_root, "cache_root" => r.cache_root,
+                             "warm" => r.warm, "preload" => r.preload))
     end
     return out
 end

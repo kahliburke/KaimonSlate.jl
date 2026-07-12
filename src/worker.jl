@@ -122,8 +122,18 @@ _memo_cap() = (_MEMO_CAP[] > 0 ? _MEMO_CAP[] : (_MEMO_CAP[] =
         round(Int, v * 1024^3) : _default_memo_cap())))
 function _memo_dir()
     if _MEMO_DIR[] == ""
-        # Respect XDG_CACHE_HOME (append "kaimonslate" under it — same rationale as Kaimon's cache_dir)
-        d = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate", "memo")
+        # Resolve the cache HOME with the SAME precedence as SlateHome.cache_home() — a dedicated
+        # `KAIMONSLATE_CACHE_HOME` (or the `KAIMONSLATE_HOME` shortcut) lets a worker pin its OWN
+        # content store (e.g. a region isolating its CAS from co-located workers, which otherwise
+        # share `~/.cache/kaimonslate/memo`) WITHOUT hijacking XDG_CACHE_HOME — that would relocate
+        # every other tool's cache too. Falls back to XDG_CACHE_HOME, then ~/.cache. (SlateHome isn't
+        # loaded in the worker, so its tiny resolver is inlined here.)
+        cache = get(ENV, "KAIMONSLATE_CACHE_HOME", "")
+        home  = get(ENV, "KAIMONSLATE_HOME", "")
+        base = !isempty(cache) ? abspath(expanduser(cache)) :
+               !isempty(home)  ? joinpath(abspath(expanduser(home)), "cache") :
+               joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(get(ENV, "HOME", tempdir()), ".cache")), "kaimonslate")
+        d = joinpath(base, "memo")
         try; mkpath(d); catch; d = joinpath(tempdir(), "kaimonslate-memo"); mkpath(d); end
         _MEMO_DIR[] = d
     end
