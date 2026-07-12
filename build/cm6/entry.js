@@ -3,9 +3,9 @@
 // LanguageSupport whose highlighting comes from @plutojl/lezer-julia's parser + a styleTags map.
 import { EditorView, keymap, drawSelection, highlightActiveLine, highlightSpecialChars,
          crosshairCursor, Decoration, ViewPlugin } from "@codemirror/view";
-import { EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder } from "@codemirror/state";
+import { EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess,
-         toggleComment } from "@codemirror/commands";
+         toggleComment, undoDepth, redoDepth } from "@codemirror/commands";
 import { LRLanguage, LanguageSupport, syntaxHighlighting, HighlightStyle, indentNodeProp,
          foldNodeProp, foldInside, indentUnit, bracketMatching, indentOnInput, syntaxTree } from "@codemirror/language";
 import { styleTags, tags as t } from "@lezer/highlight";
@@ -161,9 +161,10 @@ const juliaThemes = Object.fromEntries(Object.entries(slateThemes).map(([k, v]) 
 const juliaHighlightStyle = juliaThemes["dark-plus"];   // default / back-compat export
 
 export {
-  EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder,
+  EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction,
   keymap, drawSelection, highlightActiveLine, highlightSpecialChars, crosshairCursor, Decoration, ViewPlugin,
   defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess, toggleComment,
+  undoDepth, redoDepth,
   indentUnit, bracketMatching, indentOnInput, syntaxTree,
   syntaxHighlighting, julia, juliaLanguage, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,

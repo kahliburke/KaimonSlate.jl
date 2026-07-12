@@ -378,21 +378,21 @@ function _ago(ts)
 end
 
 # Per-cell edit history from the time machine: each recorded version where THIS cell's source
-# changed, newest first (version / age / origin / diff-label). Cheap — uses the per-cell digest
-# already in each entry, no full-source retrieval. `[]` if history is unavailable.
+# changed, newest first (version / age / origin / diff-label). Cheap — the per-entry delta IS
+# the per-cell change index (an entry lists the cell only when it changed), so no full-source
+# retrieval. `[]` if history is unavailable.
 function _cell_history(path::AbstractString, cellid::AbstractString; limit::Int = 12)
     es = try; SlateHistory.entries(path); catch; return String[]; end
-    out = String[]; prev = :none
+    out = String[]; present = false
     for e in es
-        cc = nothing
-        for cd in get(e, "cells", Any[]); string(get(cd, "id", "")) == cellid && (cc = cd; break); end
-        h = cc === nothing ? nothing : string(get(cc, "hash", ""))
-        h == prev && continue
-        status = cc === nothing ? "absent" : (prev === :none || prev === nothing ? "created" : "edited")
+        touched = any(cd -> string(get(cd, "id", "")) == cellid, get(e, "chg", Any[]))
+        gone = !touched && any(id -> string(id) == cellid, get(e, "del", Any[]))
+        (touched || gone) || continue
+        status = gone ? "absent" : (present ? "edited" : "created")
         lbl = string(get(e, "label", "")); src = string(get(e, "source", ""))
         push!(out, string("v", get(e, "seq", "?"), "  ", _ago(get(e, "ts", time())), "  ", status,
                           isempty(src) ? "" : "  [$src]", isempty(lbl) ? "" : "  ($lbl)"))
-        prev = h
+        present = !gone
     end
     return first(reverse(out), limit)
 end

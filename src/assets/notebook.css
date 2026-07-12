@@ -252,6 +252,29 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
 .cell.state-running .badge { color:var(--accent); }
 .cell.state-errored .badge { color:var(--red); }
 .cid { color:var(--dim); font-family:monospace; }
+/* Transient "restored to <age>" pill while ⌘Z steps a cell back through its snapshots. */
+.cellhead .histago {
+  font-family:monospace; font-size:.68rem; color:var(--accent);
+  background:color-mix(in srgb, var(--accent) 15%, transparent);
+  border:1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius:9px; padding:0 6px; line-height:1.5; white-space:nowrap;
+  animation:histago-in .18s ease-out;
+}
+@keyframes histago-in { from { opacity:0; transform:translateY(-1px); } to { opacity:1; transform:none; } }
+/* At the beginning of the cell's history — nothing older to step to. */
+.cellhead .histago.oldest {
+  color:var(--dim);
+  background:color-mix(in srgb, var(--dim) 15%, transparent);
+  border-color:color-mix(in srgb, var(--dim) 35%, transparent);
+}
+/* Back at the live version (transient, after redoing all the way forward). */
+.cellhead .histago.now {
+  color:#3fb950;
+  background:color-mix(in srgb, #3fb950 15%, transparent);
+  border-color:color-mix(in srgb, #3fb950 40%, transparent);
+}
+.cellhead .histago.pulse { animation:histago-pulse .32s ease-out; }
+@keyframes histago-pulse { 0% { transform:none; } 35% { transform:scale(1.12); } 100% { transform:none; } }
 .cm-editor { font-size:.86rem; font-family:'Cascadia Code','Fira Code',monospace; }
 /* Static stand-in shown until a cell's CodeMirror is lazily mounted (big-notebook fast load).
    Matches the editor's metrics so the swap is visually seamless. */

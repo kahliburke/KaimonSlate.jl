@@ -5,8 +5,8 @@
 (function () {
   const CM = window.CM6;
   if (!CM) { console.error('CM6 bundle missing'); return; }
-  const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration,
-          keymap, defaultKeymap, history, historyKeymap, indentWithTab, toggleComment,
+  const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration, Transaction,
+          keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
@@ -347,6 +347,115 @@
   addEventListener('keyup',   e => { if (e.key === 'Meta') document.body.classList.remove('modkey'); });
   addEventListener('blur',    () => document.body.classList.remove('modkey'));
 
+  // ── Undo through history ─────────────────────────────────────────────────────────
+  // Once a cell editor's OWN undo stack is exhausted, ⌘Z keeps going — stepping back
+  // through the durable snapshots of THIS cell's source (from the time machine), never
+  // touching any other cell. ⌘⇧Z steps forward. The cell header flashes the age of the
+  // version you land on. Typing anything commits to that version and leaves the mode (the
+  // typed text becomes a fresh branch point, exactly like normal editing). Per-cell state:
+  //   cellId → { versions:[{seq,ts,label,source}] (newest-first), idx, loading, applying }
+  // idx 0 == the live/committed source (no badge); larger idx == older snapshots.
+  const _hu = {};
+  function _huBadge(cellId, ts, label, atOldest) {
+    const cell = document.getElementById('cell-' + cellId); if (!cell) return null;
+    const head = cell.querySelector('.cellhead'); if (!head) return null;
+    let b = head.querySelector('.histago');
+    if (!b) {
+      b = document.createElement('span'); b.className = 'histago';
+      const cid = head.querySelector('.cid');
+      cid ? cid.insertAdjacentElement('afterend', b) : head.appendChild(b);
+    }
+    const st = _hu[cellId]; if (st && st._nowTimer) { clearTimeout(st._nowTimer); st._nowTimer = null; }
+    b.className = 'histago' + (atOldest ? ' oldest' : '');
+    b.textContent = '↶ ' + (window._reltime ? window._reltime(ts) : '') + (atOldest ? ' · oldest' : '');
+    b.title = atOldest ? 'beginning of this cell’s history — nothing older'
+                       : (label ? ('restored to: ' + label) : '');
+    return b;
+  }
+  // Redone all the way forward → briefly confirm we're back on the live version, then clear.
+  function _huNowFlash(cellId) {
+    const st = _hu[cellId]; if (st && st._nowTimer) { clearTimeout(st._nowTimer); st._nowTimer = null; }
+    const cell = document.getElementById('cell-' + cellId); if (!cell) return;
+    const head = cell.querySelector('.cellhead'); if (!head) return;
+    let b = head.querySelector('.histago');
+    if (!b) {
+      b = document.createElement('span'); b.className = 'histago';
+      const cid = head.querySelector('.cid');
+      cid ? cid.insertAdjacentElement('afterend', b) : head.appendChild(b);
+    }
+    b.className = 'histago now pulse';
+    b.textContent = '⭢ now · current';
+    b.title = 'back to the current version';
+    if (st) st._nowTimer = setTimeout(() => _huClearBadge(cellId), 1100);
+  }
+  // Already at the oldest snapshot and ⌘Z again → re-pulse the pill so it's clear there's no more.
+  function _huPulseOldest(cellId) {
+    const st = _hu[cellId]; if (!st || !st.versions || !st.versions.length) return;
+    const v = st.versions[st.versions.length - 1];
+    const b = _huBadge(cellId, v.ts, v.label, true); if (!b) return;
+    b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse');   // restart the animation
+  }
+  function _huClearBadge(cellId) {
+    const cell = document.getElementById('cell-' + cellId); if (!cell) return;
+    const b = cell.querySelector('.cellhead .histago'); if (b) b.remove();
+  }
+  function _huApply(view, cellId, idx) {
+    const st = _hu[cellId]; if (!st || !st.versions || !st.versions.length) return false;
+    idx = Math.max(0, Math.min(idx, st.versions.length - 1));
+    if (idx === st.idx && idx !== 0) return true;    // already at the oldest — consume, no fall-through
+    st.idx = idx;
+    const v = st.versions[idx];
+    st.applying = true;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: v.source },
+      selection: { anchor: Math.min(view.state.selection.main.anchor, v.source.length) },
+      scrollIntoView: true,
+      // Keep the step OUT of CodeMirror's own undo history — otherwise it re-arms undoDepth and the
+      // next ⌘Z would undo this replacement (a "redo") instead of stepping to an older snapshot.
+      annotations: Transaction.addToHistory.of(false),
+    });
+    st.applying = false;
+    idx === 0 ? _huNowFlash(cellId) : _huBadge(cellId, v.ts, v.label, idx === st.versions.length - 1);
+    return true;
+  }
+  // ⌘Z when the editor's own undo is spent → one snapshot older. true = consumed.
+  function huUndo(view, cellId) {
+    if (!cellId) return false;
+    let st = _hu[cellId];
+    if (!st) {                                       // first step: fetch this cell's timeline, then apply
+      st = _hu[cellId] = { versions: null, idx: 0, loading: true, applying: false };
+      (async () => {
+        let vs = [];
+        try { const r = await window.api('GET', '/api/cell-history/' + encodeURIComponent(cellId)); vs = (r && r.versions) || []; } catch (e) {}
+        st.versions = vs; st.loading = false;
+        if (vs.length > 1) _huApply(view, cellId, 1);
+      })();
+      return true;
+    }
+    if (st.loading) return true;
+    if (!st.versions || st.versions.length <= 1) return false;
+    const next = Math.min(st.idx + 1, st.versions.length - 1);
+    if (next === st.idx) { _huPulseOldest(cellId); return true; }   // already at the beginning of history
+    return _huApply(view, cellId, next);
+  }
+  // ⌘⇧Z while stepped into history → one snapshot newer; at the live version, fall through
+  // to the editor's normal redo.
+  function huRedo(view, cellId) {
+    const st = _hu[cellId];
+    if (!st || !st.versions) return false;
+    if (st.idx <= 0) { _huNowFlash(cellId); return true; }   // already at the current version
+    return _huApply(view, cellId, st.idx - 1);
+  }
+  // A user edit (not one of our applies) branches off the shown version: leave history mode
+  // and drop the cached timeline so the next ⌘Z re-fetches (this edit becomes a new version
+  // once saved).
+  function huUserEdit(cellId) {
+    const st = _hu[cellId]; if (!st || st.applying) return;
+    if (st._nowTimer) clearTimeout(st._nowTimer);
+    if (st.idx !== 0 || st.versions) { _huClearBadge(cellId); }
+    delete _hu[cellId];
+  }
+
   // ── editor factory ─────────────────────────────────────────────────────────────
   function mkEditor(parent, opts) {
     opts = opts || {};
@@ -387,6 +496,11 @@
           // less. (macOS eats Ctrl-Space, so Alt-Space is the reliable manual trigger.)
           { key: 'Tab', run: tabComplete }, { key: 'Shift-Tab', run: shiftTabComplete },
           { key: 'Ctrl-Space', run: startCompletion }, { key: 'Alt-Space', run: startCompletion },
+          // ⌘Z / ⌘⇧Z: while the editor's own undo stack has depth, use it; once it's spent,
+          // keep undoing back through THIS cell's durable snapshots (returns false only when
+          // there's local history to spend, so CM's own undo then runs).
+          { key: 'Mod-z', run: (v) => (undoDepth(v.state) > 0 ? false : huUndo(v, opts.cellId)) },
+          { key: 'Mod-Shift-z', run: (v) => (redoDepth(v.state) > 0 ? false : huRedo(v, opts.cellId)) },
           indentWithTab, ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap,
         ]),
         EditorView.domEventHandlers({
@@ -405,7 +519,11 @@
           },
         }),
         EditorView.updateListener.of(u => {
-          if (u.docChanged && opts.onDoc) opts.onDoc(u.state.doc.toString());
+          // A history-undo STEP is provisional + editor-local: don't branch-reset it and don't
+          // autosave it. Only a genuine user edit branches off the stepped-to snapshot and saves.
+          const _stepping = opts.cellId && _hu[opts.cellId] && _hu[opts.cellId].applying;
+          if (u.docChanged && opts.cellId && !_stepping) huUserEdit(opts.cellId);
+          if (u.docChanged && !_stepping && opts.onDoc) opts.onDoc(u.state.doc.toString());
           if (u.focusChanged && opts.onFocus && u.view.hasFocus) opts.onFocus();
           if (u.focusChanged && opts.onBlur && !u.view.hasFocus) opts.onBlur();
         }),

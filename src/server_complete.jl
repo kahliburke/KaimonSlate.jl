@@ -1403,8 +1403,29 @@ function _make_router(h::Hub)
     # ── Time machine: durable edit history ───────────────────────────────────
     # List checkpoints (newest data is appended last); `current` marks the live state.
     HTTP.register!(router, "GET", "/api/{id}/history", req -> _withnb(h, req, nb ->
-        _json(Dict("entries" => SlateHistory.entries(nb.path),
+        _json(Dict("entries" => SlateHistory.entries(nb.path),   # the log is a compact delta — cheap to read whole
                    "current" => SlateHistory.latest_hash(nb.path)))))
+    # Per-cell version timeline (newest first) for the editor's undo-through-history: the
+    # distinct past SOURCES of one cell, each with its age + diff-label. Sources are pulled
+    # from the snapshot objects (parsed once per snapshot, memoized across the list).
+    HTTP.register!(router, "GET", "/api/{id}/cell-history/{cid}", req -> _withnb(h, req, nb -> begin
+        cid = HTTP.getparam(req, "cid")
+        reports = Dict{String,Any}()
+        out = Dict{String,Any}[]
+        for v in SlateHistory.cell_versions(nb.path, cid)
+            hash = String(v["hash"])
+            rep = get!(reports, hash) do
+                src = SlateHistory.content(nb.path, hash)
+                src === nothing ? nothing : (try; parse_report(src); catch; nothing; end)
+            end
+            rep === nothing && continue
+            idx = findfirst(c -> c.id == cid, rep.cells)
+            idx === nothing && continue
+            push!(out, Dict("seq" => v["seq"], "ts" => v["ts"],
+                            "label" => v["label"], "source" => rep.cells[idx].source))
+        end
+        _json(Dict("cell" => cid, "versions" => out))
+    end))
     # Full serialized source of one recorded state (for preview / diff / replay).
     HTTP.register!(router, "GET", "/api/{id}/history/{hash}", req -> _withnb(h, req, nb -> begin
         hash = HTTP.getparam(req, "hash")
@@ -1482,6 +1503,9 @@ function start_hub(; host = "127.0.0.1", port = 8765)
     # Stamp the payload SHA the running hub code was loaded from — `_hub_src_stale()` compares the live
     # on-disk SHA to this to flag "Slate src changed since this server started; restart to apply".
     _HUB_START_SHA[] = try; ReportEngine._payload_sha(); catch; ""; end
+    try; SlateHistory.migrate_once!(); catch e   # one-time: compact legacy history logs + compress objects
+        @warn "KaimonSlate: history migration failed" exception = (e, catch_backtrace())
+    end
     h = Hub(Dict{String,LiveNotebook}(), nothing, host, port, ReentrantLock())
     handle = HTTP.streamhandler(_make_router(h))
     server = HTTP.listen!(host, port) do stream::HTTP.Stream
