@@ -106,14 +106,15 @@ struct RemoteTarget <: RunTarget
     stream_port::Int             # pinned remote stream/PUB port (0 ⇒ port+1)
     origin_env::String           # LOCAL project dir whose exact env to replicate on the remote ("" ⇒ none)
     datadir::String              # region-declared data root on the remote → the worker's KAIMONSLATE_DATADIR ("" ⇒ <project>/data)
+    cache_root::String           # region-declared cache home on the remote → the worker's KAIMONSLATE_CACHE_HOME ("" ⇒ shared ~/.cache/kaimonslate)
     region::String               # the named region this worker serves — the adoption key ("" ⇒ a notebook's own remote main kernel)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
              project::AbstractString = "~/.cache/kaimonslate/remote",
              port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "",
-             datadir::AbstractString = "", region::AbstractString = "") =
+             datadir::AbstractString = "", cache_root::AbstractString = "", region::AbstractString = "") =
     RemoteTarget(String(ssh_host), transport, String(project), port, stream_port,
-                 String(origin_env), String(datadir), String(region))
+                 String(origin_env), String(datadir), String(cache_root), String(region))
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -649,8 +650,13 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     # `datadir()` resolves it from t=0 (a cold-spawned region worker is correct from birth; an
     # ADOPTED pool worker gets the same via `__slate_adopt`). Empty ⇒ the worker's own <project>/data.
     dd = isempty(t.datadir) ? "" : "ENV[\"KAIMONSLATE_DATADIR\"] = expanduser(raw\"$(t.datadir)\")\n    "
+    # Likewise a region can PIN this worker's CACHE home (its content-addressed store) so co-located
+    # region workers get SEPARATE CAS instead of sharing `~/.cache/kaimonslate/memo` — the store split
+    # that makes a cross-region blob actually move over the peer channel instead of dedup'ing to 0.
+    # Set before start so `_memo_dir()` resolves it from t=0. Empty ⇒ the shared default.
+    cr = isempty(t.cache_root) ? "" : "ENV[\"KAIMONSLATE_CACHE_HOME\"] = expanduser(raw\"$(t.cache_root)\")\n    "
     return """
-    $(dd)_wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
+    $(dd)$(cr)_wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
     import KaimonGate
     try; @eval using Revise; catch; end
     include(_wk)
@@ -825,7 +831,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                 pr = _probe_tcp(connect_host, connect_port; timeout = 4.0)
                 if pr === :unreachable
                     firewall_since == 0.0 && (firewall_since = time())
-                    last = "port $connect_port on $host is not reachable — open $connect_port–$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
+                    last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
                     (time() - firewall_since > 10.0) && break        # sustained DROP ⇒ firewall, not a slow boot — stop early
                     sleep(0.5); continue
                 end
@@ -1804,6 +1810,7 @@ struct Region
     base_port::Int      # :direct port pinning (0 = auto)
     preload::String     # LOCAL project dir replicated for env/warm-deps parity ("" = none)
     data_root::String   # REMOTE KAIMONSLATE_DATADIR ("" = worker default)
+    cache_root::String  # REMOTE KAIMONSLATE_CACHE_HOME — a separate CAS per region ("" = shared ~/.cache)
     warm::Int           # warm workers kept ready (0 = cold spin on demand)
     threads::String     # worker "<compute>,<interactive>" ("" = global default)
 end
@@ -1814,10 +1821,10 @@ _region_from_dict(d::AbstractDict) = Region(
     String(get(d, "name", "")), String(get(d, "host", "")),
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
     _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
-    _asint(get(d, "warm", 0)), String(get(d, "threads", "")))
+    String(get(d, "cache_root", "")), _asint(get(d, "warm", 0)), String(get(d, "threads", "")))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
-    "warm" => r.warm, "threads" => r.threads)
+    "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads)
 
 # Every configured region (sorted by name). Lock-free: a concurrent writer swaps the file atomically, so a
 # reader sees either the old or the new complete file, never a torn one.
@@ -1845,13 +1852,13 @@ end
 
 # Create or update a region by name (upsert). Returns the stored Region.
 function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
-                     data_root = "", warm = 0, threads = "")
+                     data_root = "", cache_root = "", warm = 0, threads = "")
     # Fold to a tag-safe identifier: a cell's `region=<name>` tag folds non-word chars to `_`, so the
     # stored name must fold the same way or no cell could reference it ("slate-remote" → "slate_remote").
     n = replace(strip(String(name)), r"[^A-Za-z0-9_]+" => "_")
     isempty(n) && error("region name required")
     r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
-               String(data_root), Int(warm), String(threads))
+               String(data_root), String(cache_root), Int(warm), String(threads))
     lock(_REGIONS_LOCK) do
         list = regions()
         i = findfirst(x -> x.name == r.name, list)
@@ -1901,7 +1908,7 @@ end
 # uses → --project parity); `region` tags the worker so its OWN region reclaims it on adoption.
 _region_target(r::Region) = RemoteTarget(r.host; transport = r.transport,
     project = "~/.cache/kaimonslate/remote/" * (isempty(r.preload) ? "detached" : basename(rstrip(r.preload, '/'))),
-    origin_env = r.preload, datadir = r.data_root, region = r.name)
+    origin_env = r.preload, datadir = r.data_root, cache_root = r.cache_root, region = r.name)
 
 # In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
 # the roster, see the same idle worker, and both adopt it.
