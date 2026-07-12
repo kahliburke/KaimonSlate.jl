@@ -242,7 +242,8 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
         end
         return false
     end
-    scope === :session || _persist!(nb)     # notebook/clear change the durable footer → write the .jl
+    scope === :session ||     # notebook/clear change the durable footer → write the .jl
+        _persist!(nb; label = (scope === :clear || isempty(strip(String(spec)))) ? "run local" : "run on · $(strip(String(spec)))")
     if unchanged
         try; _broadcast(nb, string(nb.version)); catch; end    # refresh state (source badge) — worker untouched
         return nb

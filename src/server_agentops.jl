@@ -913,21 +913,34 @@ _flag_code_only(flag::Symbol) = flag !== :collapsed
 # ⇒ every applicable cell; a list ⇒ just those (e.g. "all plot cells"). Persisted in the `.jl` header
 # token, so it travels with the notebook. Eval flags restale the cells they touch (the caller re-runs).
 # Returns whether anything changed — the write + history entry only happen when it did.
+# A human history label for a flag toggle — the source-diff can't derive it (flags aren't cell source):
+# "hid code · daily_fig", "showed code (all cells)", "collapsed · 3 cells", …
+function _flag_history_label(flag::Symbol, value::Bool, changed::Vector{String}, ids)
+    verb = flag === :hidecode  ? (value ? "hid code"  : "showed code") :
+           flag === :collapsed ? (value ? "collapsed" : "expanded")    :
+           flag === :trace     ? (value ? "trace on"  : "trace off")   :
+           string(value ? "set " : "cleared ", flag)
+    ids === nothing      ? string(verb, " (all cells)") :
+    length(changed) == 1 ? string(verb, " · ", changed[1]) :
+                           string(verb, " · ", length(changed), " cells")
+end
+
 function set_cell_flag!(nb::LiveNotebook, flag::Symbol, value::Bool; ids::Union{Nothing,AbstractVector} = nothing)
     idset = ids === nothing ? nothing : Set(String(x) for x in ids)
     codeonly = _flag_code_only(flag); restale = flag_reruns(flag)
     return lock(nb.lock) do
-        changed = false
+        changed = String[]
         for c in nb.report.cells
             (idset === nothing || c.id in idset) || continue
             (codeonly && c.kind != CODE) && continue
             (flag in c.flags) == value && continue           # already in the wanted state → skip
             value ? push!(c.flags, flag) : delete!(c.flags, flag)
             restale && (c.state = STALE)
-            changed = true
+            push!(changed, c.id)
         end
-        changed && _persist!(nb)
-        changed
+        isempty(changed) && return false
+        _persist!(nb; label = _flag_history_label(flag, value, changed, ids))
+        return true
     end
 end
 
@@ -986,7 +999,7 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
             build_dependencies!(nb.report)
             c.state = STALE
         end
-        _persist!(nb)
+        _persist!(nb; label = "tags · $id")
     end
     return nb
 end

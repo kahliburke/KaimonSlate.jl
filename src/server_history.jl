@@ -7,10 +7,11 @@
 # sync, the periodic draft net). Per-cell digests let the UI attribute + recover
 # individual cells. Never throws into the caller.
 _cells_of(report) = [(c.id, c.kind == MARKDOWN ? "md" : "code", c.source) for c in report.cells]
-function _history!(nb::LiveNotebook; source::AbstractString = "browser", kind::AbstractString = "checkpoint")
+function _history!(nb::LiveNotebook; source::AbstractString = "browser", kind::AbstractString = "checkpoint",
+                   label::AbstractString = "")
     try
         SlateHistory.record!(nb.path, serialize_report(nb.report);
-                             source_label = source, kind = kind, cells = _cells_of(nb.report))
+                             source_label = source, kind = kind, cells = _cells_of(nb.report), label = label)
     catch e
         @warn "KaimonSlate: history capture failed" exception = (e, catch_backtrace())
     end
@@ -35,7 +36,7 @@ _is_server_write(report_id, h::UInt64) =
 
 # Persist the notebook to its `.jl` AND record a durable checkpoint. The single
 # write+capture chokepoint for in-app mutations (replaces bare `write(...)`).
-function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
+function _persist!(nb::LiveNotebook; source::AbstractString = "browser", label::AbstractString = "")
     s = serialize_report(nb.report)
     # Preserve a self-contained `.jl`'s env artifacts. `serialize_report` writes only the lightweight
     # env/config footers, so without this the FIRST edit-save silently strips the `Slate.bundle` (and
@@ -53,7 +54,7 @@ function _persist!(nb::LiveNotebook; source::AbstractString = "browser")
     _note_server_write!(nb.report.id, hash(s))   # register BEFORE writing: a watcher tick fired by
     write(nb.path, s)                             # this write must recognize it as OURS, not external
     nb.version += 1                               # every in-app commit advances the version (CAS basis)
-    _history!(nb; source = source)
+    _history!(nb; source = source, label = label)
     return nb
 end
 
