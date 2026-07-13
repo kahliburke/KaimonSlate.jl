@@ -656,16 +656,22 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     # Set before start so `_memo_dir()` resolves it from t=0. Empty ⇒ the shared default.
     cr = isempty(t.cache_root) ? "" : "ENV[\"KAIMONSLATE_CACHE_HOME\"] = expanduser(raw\"$(t.cache_root)\")\n    "
     return """
+    _t0 = time(); _bt(m) = try; println("[slate-boot] +" * string(round(time() - _t0; digits = 1)) * "s " * m); flush(stdout); catch; end
     $(dd)$(cr)_wk = joinpath(homedir(), raw"$_REMOTE_WORKER", "worker.jl")
+    _bt("script start (unix=" * string(round(Int, time())) * ")")   # correlate with the hub's launch time
     import KaimonGate
+    _bt("KaimonGate loaded")
     try; @eval using Revise; catch; end
+    _bt("Revise loaded")
     include(_wk)
+    _bt("worker payload loaded")
     SlateWorker.PARENT_PROJECT[] = expanduser(raw"$parent")   # `~/.cache/…` → absolute, so @asset/@sfile/datadir don't emit un-expandable tilde paths
     SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
                       warm_deps=$warm_deps,
                       stats_path=joinpath(homedir(), raw"$_REMOTE_WORKER", "worker-$port.stats"))
+    _bt("serving")   # phase breakdown: Julia-init = launch→script-start; then KaimonGate / Revise / payload / serve
     while true; sleep(3600); end   # serve() returns after starting its loop on a spawned thread; keep alive
     """
 end
