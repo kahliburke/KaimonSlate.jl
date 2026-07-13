@@ -178,6 +178,12 @@ function paletteCommands() {
 }
 let _cmd = [], _cmdSel = 0;
 const _escc = s => s.replace(/[&<>"]/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[x]));
+// Recently-used commands bubble to the top (persisted in localStorage) — the palette learns your habits.
+const _MRU_KEY = 'slate.palette.mru';
+function _mruLoad() { try { return JSON.parse(localStorage.getItem(_MRU_KEY) || '[]'); } catch (_) { return []; } }
+function _mruBump(label) {
+  try { let a = _mruLoad().filter(l => l !== label); a.unshift(label); localStorage.setItem(_MRU_KEY, JSON.stringify(a.slice(0, 12))); } catch (_) {}
+}
 function openPalette() {
   document.getElementById('cmdbg').classList.add('show');
   const inp = document.getElementById('cmdin'); inp.value = '';
@@ -187,7 +193,11 @@ function openPalette() {
 function closePalette() { document.getElementById('cmdbg').classList.remove('show'); }
 function renderPaletteList(filter) {
   const f = filter.trim().toLowerCase();
-  _cmd = paletteCommands().filter(c => c.label.toLowerCase().includes(f));
+  const mru = _mruLoad(), rank = c => { const i = mru.indexOf(c.label); return i < 0 ? Infinity : i; };
+  // Filter by substring, then STABLE-sort recently-used first (by MRU position); everything else keeps its
+  // declared order. Applies with or without a query, so a searched-for common command also ranks up.
+  _cmd = paletteCommands().filter(c => c.label.toLowerCase().includes(f))
+    .map((c, i) => [c, i]).sort((a, b) => (rank(a[0]) - rank(b[0])) || (a[1] - b[1])).map(x => x[0]);
   _cmdSel = 0;
   document.getElementById('cmdlist').innerHTML = _cmd.map((c, i) => {
     const right = (c.key ? `<span class="kb">${_escc(c.key)}</span>` : '') + (c.tag ? `<span class="k">${_escc(c.tag)}</span>` : '');
@@ -199,7 +209,7 @@ function _paintCmd() {
   [...ul.children].forEach((li, i) => li.classList.toggle('on', i === _cmdSel));
   const on = ul.children[_cmdSel]; if (on) on.scrollIntoView({ block: 'nearest' });
 }
-function _cmdRun(i) { const c = _cmd[i]; closePalette(); if (c) c.run(); }
+function _cmdRun(i) { const c = _cmd[i]; closePalette(); if (c) { _mruBump(c.label); c.run(); } }
 document.getElementById('cmdlist').addEventListener('mousedown', e => { const li = e.target.closest('li'); if (li) { e.preventDefault(); _cmdRun(+li.dataset.i); } });
 document.getElementById('cmdin').addEventListener('keydown', e => {
   if (e.key === 'ArrowDown') { e.preventDefault(); _cmdSel = Math.min(_cmdSel + 1, _cmd.length - 1); _paintCmd(); }
