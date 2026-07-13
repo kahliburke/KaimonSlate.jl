@@ -1470,18 +1470,16 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # presync below won't ship them). Bring the kernel up and prime it (idempotent, once per kernel)
     # so the package's functions, the theme, … all resolve instead of an UndefVarError on the far side.
     if !isempty(side)
-        # Bringing up a region worker can be SLOW — a COLD remote spawn boots Julia + KaimonGate on the
-        # host (~90s). The cell can't be marked RUNNING yet (it hasn't started), so without a signal the
-        # run pill just sits at a frozen "0ms" with nothing visibly happening. Mark it RUNNING now and
-        # post a status bar naming WHAT the wait is (the worker coming up on <host>) with a ticking timer,
-        # then clear that bar once the kernel is ready. A warm reattach clears it instantly (no flicker).
+        # Bringing up a region worker can be SLOW — a COLD remote spawn boots Julia + KaimonGate on the host
+        # (~90s). Mark the cell RUNNING now, and push the worker list so the region PILL appears immediately
+        # as a pulsing "starting" (its popup streams the boot log). The pill is the single bring-up indicator
+        # — no separate ⌛ status bar (it was redundant with the pill and duplicated the glyph).
         host = _side_label(nb, side)
         lock(nb.lock) do
             cell.state = RUNNING
             _broadcast_progress(nb, cell)
         end
-        ReportEngine._do_userprog(nb.report.id, 0.0, "⌛ bringing up worker on $host…", "spawn-" * cell.id, false)
-        try; _workers_push!(nb); catch; end   # the pill appears NOW (starting), not after the run completes
+        try; _workers_push!(nb); catch; end   # pill appears NOW as "starting", not after the run completes
         try
             ReportEngine.prepare!(kernel, nb.report)
             _prime_namespace!(nb, kernel, side)
@@ -1499,9 +1497,8 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
                 cell.state = ERRORED
                 _broadcast_progress(nb, cell)
             end
-            return nothing            # the finally still drops the status bar
-        finally
-            ReportEngine._do_userprog(nb.report.id, 1.0, "", "spawn-" * cell.id, true)   # drop the status bar
+            try; _workers_push!(nb); catch; end   # push the failure → pill goes amber/disconnected, not stuck "starting"
+            return nothing
         end
     end
     # Provenance for the DAG/stats: which kernel this run executes on (only meaningful — and

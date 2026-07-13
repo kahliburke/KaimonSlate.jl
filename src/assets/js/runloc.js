@@ -36,6 +36,9 @@ function renderRunLoc(state) {
   el.classList.toggle('reconnecting', busy);
   const srcTxt = src === 'session' ? 'session' : src === 'notebook' ? 'saved' : src === 'global' ? 'global' : '';
   const se = document.getElementById('runlocsrc'); se.textContent = busy ? '' : srcTxt; se.style.display = (!busy && srcTxt) ? '' : 'none';
+  // While starting/reconnecting, hide the cpu·rss stat too — showing "starting… 0% · 694MB" is
+  // self-contradictory (the numbers are meaningless mid-boot) and clutters the pill.
+  const rs = document.getElementById('runlocstat'); if (rs) rs.style.display = busy ? 'none' : '';
   el.title = busy ? ((host ? ('worker on ' + host) : 'local worker') + ' — ' +
                      (state.hydrating ? 'starting up (provisioning / connecting)…' : 'reconnecting…'))
            : host ? ('worker runs on ' + host + ' (' + (srcTxt || 'set') + ') — click to change')

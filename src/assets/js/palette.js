@@ -124,6 +124,8 @@ function paletteCommands() {
   const sel = selectedId;
   const cmds = [
     { label: 'Run stale cells', key: '⌘↵', run: runAll },
+    { label: 'Run all cells (whole notebook)', run: rerunAll },
+    { label: 'Run this cell and below', run: () => { if (sel) runCellAndBelow(sel); } },
     { label: 'Command palette', key: '⌘K', run: openPalette },
     { label: 'Search docs…', key: '⌘⇧K', run: openDocs },
     { label: 'Toggle agent panel', key: '⌘⇧A', run: toggleAgent },

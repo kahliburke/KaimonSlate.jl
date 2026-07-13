@@ -685,14 +685,16 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         catch
         end
     end
-    # Graduated health for the pill (green → muted-yellow "degraded" → amber "disconnected") + a note
-    # saying WHY — surfacing what the liveness supervisor already knows so an unwell pill isn't a mystery.
-    if k isa ReportEngine.GateKernel && (k.target isa ReportEngine.RemoteTarget || k.remote)
-        since = get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing)
+    # Graduated health for the pill (green → muted-yellow "degraded" → amber "connecting/disconnected") + a
+    # note saying WHY — surfacing what the liveness supervisor already knows so an unwell pill isn't a mystery.
+    # Applies to EVERY worker, main included (the main/local worker is treated like any other pill now).
+    if k isa ReportEngine.GateKernel
+        remote = k.target isa ReportEngine.RemoteTarget || k.remote
+        since = remote ? get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing) : nothing   # liveness clock is remote-only
         if k.conn === nothing
             d["status"] = k.redial_hold ? "disconnected" : "connecting"
             d["note"]   = k.redial_hold ?
-                "worker stopped responding — press ▶ or re-run to reconnect" : "reconnecting…"
+                "worker stopped responding — press ▶ or re-run to reconnect" : "starting up…"
         elseif since !== nothing
             el = round(Int, time() - something(since, time()))
             d["status"] = "degraded"
@@ -700,6 +702,8 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         else
             d["status"] = "ok"
         end
+    else
+        d["status"] = "ok"   # in-process kernel — always up
     end
     return d
 end

@@ -1171,13 +1171,45 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
   background:color-mix(in srgb, #c2b158 12%, var(--bg3)); }
 .wchip-warn { color:#c2b158; background:color-mix(in srgb, #c2b158 12%, var(--bg3));
   border-color:color-mix(in srgb, #c2b158 45%, var(--border)); }
+/* The bar is a SINGLE "top" pill (the most-salient worker) in a fixed slot: a reserved min-width so it doesn't
+   jump as the top worker changes, and the LABEL elides on overflow so a long region name can't blow out the
+   bar. It carries the ranked dropdown of ALL workers, anchored to it. */
+.wpill-top { position:relative; min-width:150px; max-width:300px; }
+.wpill-top .wtopicon, .wpill-top .wstat, .wpill-top .wpill-caret { flex:0 0 auto; }
+.wpill-top .wtoplabel { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.wpill-caret { color:var(--dim); font-size:.7rem; }
+.wpill-menu { position:absolute; top:calc(100% + 5px); left:0; z-index:60; min-width:230px; cursor:default;
+  display:flex; flex-direction:column; gap:2px; padding:4px; background:var(--bg2);
+  border:1px solid var(--border); border-radius:8px; box-shadow:0 8px 26px rgba(0,0,0,.4); }
+.wpill-menu[hidden] { display:none; }
+.wpill-menuitem { display:flex; align-items:center; gap:6px; padding:4px 9px; border-radius:6px;
+  font-size:.8rem; color:var(--text); white-space:nowrap; cursor:pointer; }
+.wpill-menuitem:hover { background:color-mix(in srgb, var(--accent) 20%, transparent); }
+.wpmi-face { color:var(--dim); font-size:.72rem; margin-left:auto; padding-left:12px; font-variant-numeric:tabular-nums; }
 /* Worker / region status + live-log popup. */
 .workerpop { width:min(760px, 92vw); max-height:80vh; display:flex; flex-direction:column; padding:0; overflow:hidden; }
+/* As a NON-covering side panel: docked top-right, below the topbar, so it coexists with the (top-left)
+   dropdown — you can keep hovering rows to switch which worker it shows. No backdrop, no dimming. */
+.workerpop-panel { position:fixed; top:calc(var(--topbar-h,49px) + 8px); right:14px; z-index:45;
+  width:380px; max-width:calc(100vw - 28px); max-height:72vh;
+  border:1px solid var(--border); border-radius:10px; background:var(--bg2);
+  box-shadow:0 12px 40px rgba(0,0,0,.5); display:none; }
+.workerpop-panel.show { display:flex; }
+/* Pin toggle: dim while the panel is a transient hover-preview, solid once pinned (click a row or the pin). */
+.workerpop-pin { cursor:pointer; font-size:.9rem; line-height:1; flex:0 0 auto; opacity:.32; filter:grayscale(1); }
+.workerpop-pin:hover { opacity:.7; }
+.workerpop-pin.pinned { opacity:1; filter:none; }
 .workerpop-head { display:flex; flex-direction:column; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.86rem; }
 .workerpop-headtop { display:flex; align-items:center; gap:12px; }
 #workerpop-title { font-weight:600; color:var(--text); flex:1 1 auto; min-width:0; }
 /* Full telemetry breakdown as wrapping chips (no ellipsis truncation — every metric stays visible). */
 .workerpop-stats { display:flex; flex-wrap:wrap; gap:5px 6px; align-items:center; }
+/* Run-location picker row (main worker only) — moved here from the old #runloc caret. */
+.workerpop-runloc { font-size:.82rem; color:var(--dim); display:flex; align-items:center; gap:8px; }
+.workerpop-runloc b { color:var(--text); font-weight:600; }
+.wrl-change { font-size:.76rem; padding:2px 8px; border-radius:6px; cursor:pointer;
+  background:var(--bg3); color:var(--text); border:1px solid var(--border); }
+.wrl-change:hover { border-color:color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .wchip { font-family:var(--mono,ui-monospace,monospace); font-size:.72rem; color:var(--text); font-variant-numeric:tabular-nums;
   background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:1px 7px; white-space:nowrap; }
 .wchip-k { color:var(--dim); margin-right:5px; }

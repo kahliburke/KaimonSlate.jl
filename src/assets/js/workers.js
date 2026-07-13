@@ -115,7 +115,7 @@ function _wpPillStat(statsJson) {
   // "warming n/total · Pkg" during preload, then "ready · …" (which falls through to cpu·rss below).
   if (s.warm && s.warm.indexOf('warming') === 0) return '⏳ ' + s.warm;
   const p = [];
-  if (s.cpu >= 0) p.push(Math.round(s.cpu) + '%');
+  if (s.cpu >= 1) p.push(Math.round(s.cpu) + '%');   // hide 0% on a resting worker — it's just noise (popup still shows it)
   if (s.rss > 0) p.push(_wpMB(s.rss));
   return p.join(' · ');
 }
@@ -126,33 +126,76 @@ function _wpLabel(side, host) {
   return side + (host ? ' · ' + host : '');
 }
 
-// Region pills + the main worker's compact stat on the #runloc pill. Called from updateChrome on every state.
+// Region pills + the main worker's compact stat on the #runloc pill. Called from updateChrome on every state
+// AND from the WS worker-list push. Two things keep the strip calm and scalable:
+//  • DEBOUNCE — the push races the full-state render (each may carry a slightly different list); coalescing
+//    to one paint per burst kills the flicker/pop the two used to cause.
+//  • SALIENT + overflow — only workers that need attention (running / starting / degraded / disconnected)
+//    stay inline; idle-healthy ones fold into a "+N ▾" menu, so the bar stays bounded for any number of regions.
+let _wpPendingWs = [], _wpPaintTimer = null;
 function renderWorkers(state) {
   const ws = (state && state.workers) || [];
-  // Drop live samples for workers no longer present (a reaped region), so a restarted one can't show a
-  // stale number for a frame; keep '' (main) and every current side.
+  // Cheap, non-jarring bits run NOW (never debounced): drop live samples for vanished workers, and the main
+  // worker's compact stat on the #runloc pill.
   const keep = new Set(['', ...ws.map(w => w.side || '')]);
   for (const k of Object.keys(_wpLive)) if (!keep.has(k)) delete _wpLive[k];
-  const rls = document.getElementById('runlocstat');            // main worker's stat rides the #runloc pill
-  if (rls) { const main = ws.find(w => !w.side); rls.textContent = _wpPillStat(_wpLive[''] || (main && main.stats)); }
-  const box = document.getElementById('workerpills'); if (!box) return;
-  box.innerHTML = ws.filter(w => w.side).map(w => {
-    const label = _wpLabel(w.side, w.host);
-    // Graduated health: green (ok) → muted-yellow (degraded: connected but missing liveness pings) → amber
-    // (connecting/disconnected). The class drives the colour; the face gives a one-glance reason.
-    const st = w.status || (w.connected ? 'ok' : 'connecting');
-    const cls = st === 'degraded' ? ' degraded' : (st === 'ok' ? '' : ' reconnecting');
-    let face = _wpPillStat(_wpLive[w.side] || w.stats);
-    if (st === 'degraded') face = '⚠ ' + _wpUnwellShort(w.note);
-    else if (st === 'disconnected') face = '✕ offline';
-    else if (st === 'connecting') face = face || '⏳ starting';
-    // No inline onclick — a side name with a quote would break the attribute; opened via data-side delegation.
-    const tipEnd = w.note ? _wpEsc(w.note) : 'click for its live log &amp; status';
-    return '<span class="wpill' + cls + '" data-side="' + _wpEsc(w.side) +
-      '" title="region ‘' + _wpEsc(label) + '’ — ' + tipEnd + '">🖧 ' + _wpEsc(label) +
-      (face ? ' <span class="wstat">' + _wpEsc(face) + '</span>' : '') + '</span>';
-  }).join('');
+  // The strip (main worker + regions) is debounced — one paint per burst, from the LATEST list.
+  _wpPendingWs = ws;
+  if (_wpPaintTimer) return;
+  _wpPaintTimer = setTimeout(() => { _wpPaintTimer = null; _wpPaintStrip(_wpPendingWs); }, 160);
 }
+
+// Severity rank — the most attention-worthy worker surfaces first; everything calmer folds away. The main is
+// ranked like any other (no special-casing): 4 disconnected · 3 degraded · 2 starting · 1 running · 0 idle-ok.
+function _wpSeverity(w) {
+  const st = w.status || (w.connected ? 'ok' : 'connecting');
+  if (st === 'disconnected') return 4;
+  if (st === 'degraded') return 3;
+  if (st === 'connecting') return 2;
+  let s = null; try { s = JSON.parse(_wpLive[w.side || ''] || w.stats || 'null'); } catch (_) {}
+  return (s && s.evals > 0) ? 1 : 0;
+}
+
+// The pill/row FACE — the compact status or stat, shared by the top pill and the dropdown rows.
+function _wpFace(w) {
+  const st = w.status || (w.connected ? 'ok' : 'connecting');
+  if (st === 'degraded') return '⚠ ' + _wpUnwellShort(w.note);
+  if (st === 'disconnected') return 'disconnected';
+  const stat = _wpPillStat(_wpLive[w.side || ''] || w.stats);
+  if (st === 'connecting') return stat || 'starting…';
+  return stat;
+}
+
+// The bar is ONE pill: the single most-salient worker (ranked disconnected > degraded > starting > running >
+// idle), with its health colour + live face + more info. It doubles as the dropdown trigger — click it to list
+// ALL workers ranked; lingering/hovering then reveals the detail popup (see the handlers below).
+function _wpPaintStrip(ws) {
+  const box = document.getElementById('workerpills'); if (!box) return;
+  if (!ws.length) { box.innerHTML = ''; return; }
+  const ranked = ws.slice().sort((a, b) => _wpSeverity(b) - _wpSeverity(a));
+  const top = ranked[0], side = top.side || '';
+  const icon = (!side && !top.host) ? '💻' : '🖧';
+  const st = top.status || (top.connected ? 'ok' : 'connecting');
+  const cls = st === 'degraded' ? ' degraded' : (st === 'ok' ? '' : ' reconnecting');
+  const face = _wpFace(top);
+  const rows = ranked.map(w => {
+    const f = _wpFace(w);
+    return '<div class="wpill-menuitem" data-side="' + _wpEsc(w.side || '') + '">' + _wpOverflowDot(w) + ' ' +
+      _wpEsc(_wpLabel(w.side || '', w.host)) + (f ? ' <span class="wpmi-face">' + _wpEsc(f) + '</span>' : '') + '</div>';
+  }).join('');
+  const caret = ranked.length > 1 ? '<span class="wpill-caret">▾</span>' : '';
+  // Fixed single slot: the pill reserves a min-width so it doesn't jump as the top worker changes, and the
+  // LABEL elides (CSS ellipsis) if a region name is long — icon/stat/caret stay put.
+  box.innerHTML = '<span class="wpill wpill-top' + cls + '" data-toplist data-side="' + _wpEsc(side) +
+    '" title="' + _wpEsc(_wpLabel(side, top.host) + (ranked.length > 1 ? ' — click for all ' + ranked.length + ' workers' : ' — click for details')) +
+    '"><span class="wtopicon">' + icon + '</span><span class="wtoplabel">' + _wpEsc(_wpLabel(side, top.host)) + '</span>' +
+    (face ? '<span class="wstat">' + _wpEsc(face) + '</span>' : '') + caret +
+    '<div class="wpill-menu" hidden>' + rows + '</div></span>';
+}
+
+// Health dot for a dropdown row: 🟢 ok · 🟡 degraded · 🟠 connecting/disconnected.
+function _wpOverflowDot(w) { const st = w.status || (w.connected ? 'ok' : 'connecting');
+  return st === 'degraded' ? '🟡' : (st === 'ok' ? '🟢' : '🟠'); }
 
 // Short reason for a degraded pill face — pull the "Ns" out of the note ("no liveness reply for 18s …").
 function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m ? m[1] + 's no reply' : 'unresponsive'; }
@@ -176,17 +219,15 @@ function onWorkersUpdate(ws) {
 function onWorkerTelemetry(side, statsJson) {
   side = side || '';
   _wpLive[side] = statsJson;
-  if (!side) {
-    const rls = document.getElementById('runlocstat'); if (rls) rls.textContent = _wpPillStat(statsJson);
-  } else {
-    const box = document.getElementById('workerpills');
-    const pill = box && box.querySelector('.wpill[data-side="' + (window.CSS && CSS.escape ? CSS.escape(side) : side) + '"]');
-    if (pill) {
-      const txt = _wpPillStat(statsJson);
-      let el = pill.querySelector('.wstat');
-      if (txt && !el) { el = document.createElement('span'); el.className = 'wstat'; pill.appendChild(document.createTextNode(' ')); pill.appendChild(el); }
-      if (el) el.textContent = txt;
-    }
+  const box = document.getElementById('workerpills');
+  const pill = box && box.querySelector('.wpill[data-side="' + (window.CSS && CSS.escape ? CSS.escape(side) : side) + '"]');
+  // Only patch the face when the pill is showing its normal stat — leave a degraded/reconnecting pill's status
+  // text alone (the debounced re-render owns that; a stray stale sample shouldn't overwrite "⚠ Ns no reply").
+  if (pill && !pill.classList.contains('degraded') && !pill.classList.contains('reconnecting')) {
+    const txt = _wpPillStat(statsJson);
+    let el = pill.querySelector('.wstat');
+    if (txt && !el) { el = document.createElement('span'); el.className = 'wstat'; pill.appendChild(document.createTextNode(' ')); pill.appendChild(el); }
+    if (el) el.textContent = txt;
   }
   if (_wpSide === side) {                                        // popup for this side is open — refresh its stat chips
     const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(statsJson);
@@ -214,8 +255,9 @@ function openWorkerPop(side, ev) {
   _wpRefresh();   // ONE snapshot for history + title/status; live stats & new log lines then arrive via the WS push
 }
 function closeWorkerPop() {
-  _wpSide = null;
+  _wpSide = null; _wpPinned = false;
   const bg = document.getElementById('workerpopbg'); if (bg) bg.classList.remove('show');
+  _wpUpdatePin();
 }
 async function _wpRefresh() {
   const side = _wpSide;                                          // capture: the popup can switch while we await
@@ -226,6 +268,14 @@ async function _wpRefresh() {
   const dot = !r.connected ? '🟠' : (r.status === 'degraded' ? '🟡' : '🟢');
   document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
     ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
+  // The run-location picker (formerly the #runloc caret) lives here now — only for the MAIN worker, since a
+  // region's host is fixed by its registry def. "change ▾" opens the existing picker modal.
+  const rl = document.getElementById('workerpop-runloc');
+  if (rl) {
+    if (!r.side) { rl.style.display = ''; rl.innerHTML = 'run location: <b>' + _wpEsc(r.host || 'local') +
+      '</b> <button class="wrl-change" onclick="closeWorkerPop(); toggleRunLoc(event)">change ▾</button>'; }
+    else { rl.style.display = 'none'; rl.innerHTML = ''; }
+  }
   document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, r.note);
   // Seed the chronological buffer from the snapshot; live lines then append via onWorkerLog. Parsed + rendered
   // newest-record-first so multi-line records stay right-way-up. Trailing blank line from the file is dropped.
@@ -238,16 +288,64 @@ window.openWorkerPop = openWorkerPop;
 window.closeWorkerPop = closeWorkerPop;
 window.onWorkerTelemetry = onWorkerTelemetry;
 window.onWorkerLog = onWorkerLog;
+window.onWorkersUpdate = onWorkersUpdate;
 
-// Region pills open their popup via delegation off the stable `data-side` attribute (no inline handler —
-// see renderWorkers). The main worker rides the #runloc pill's own onclick.
+// The bar's single pill IS the dropdown trigger. Click → toggle the ranked list of ALL workers. HOVERING a
+// row PREVIEWS that worker in the side panel — transient: it follows the mouse and hides when you leave.
+// CLICKING a row (or the panel's 📌) PINS the panel so it stays up while you work elsewhere; 📌/× to unpin.
+let _wpPinned = false, _wpShowT = null, _wpHideT = null;
+function _wpMenuOpen() { return !!document.querySelector('#workerpills .wpill-menu:not([hidden])'); }
+function _wpCloseMenu() { const m = document.querySelector('#workerpills .wpill-menu:not([hidden])'); if (m) m.hidden = true; if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; } }
+function _wpKeepPanel() { if (_wpHideT) { clearTimeout(_wpHideT); _wpHideT = null; } }   // over a row/panel → don't hide
+function _wpUpdatePin() { const p = document.getElementById('workerpop-pin'); if (p) { p.classList.toggle('pinned', _wpPinned); p.title = _wpPinned ? 'pinned — click to unpin' : 'click to pin this panel'; } }
+function _wpShowPanel(side, pin) {
+  if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; }
+  _wpKeepPanel();
+  if (pin) _wpPinned = true;
+  openWorkerPop(side);
+  _wpUpdatePin();
+}
+function _wpScheduleShow(side) {                 // hover → transient preview after a short delay
+  _wpKeepPanel();
+  if (_wpSide === side || _wpPinned) return;     // already shown / pinned elsewhere → leave it
+  if (_wpShowT) clearTimeout(_wpShowT);
+  _wpShowT = setTimeout(() => { _wpShowT = null; if (_wpMenuOpen()) _wpShowPanel(side, false); }, 320);
+}
+function _wpScheduleHide() {                      // left the whole area → hide an UNPINNED preview
+  if (_wpPinned || _wpSide === null) return;
+  if (_wpShowT) { clearTimeout(_wpShowT); _wpShowT = null; }
+  if (_wpHideT) clearTimeout(_wpHideT);
+  _wpHideT = setTimeout(() => { _wpHideT = null; if (!_wpPinned) closeWorkerPop(); }, 260);
+}
+function wpTogglePin() { _wpPinned = !_wpPinned; _wpUpdatePin(); if (!_wpPinned) _wpScheduleHide(); }
+window.wpTogglePin = wpTogglePin;
+
 document.addEventListener('click', e => {
-  const pill = e.target && e.target.closest ? e.target.closest('#workerpills .wpill[data-side]') : null;
-  if (pill) openWorkerPop(pill.getAttribute('data-side'), e);
+  if (!e.target || !e.target.closest) return;
+  const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
+  if (row) { _wpCloseMenu(); _wpShowPanel(row.getAttribute('data-side'), true); return; }   // click a row → PIN it
+  const top = e.target.closest('#workerpills .wpill-top');
+  if (top) { const menu = top.querySelector('.wpill-menu'); if (menu) menu.hidden ? (menu.hidden = false) : _wpCloseMenu(); e.stopPropagation(); return; }
+  if (e.target.closest('#workerpopbg')) return;                 // clicks inside the panel don't dismiss it
+  if (_wpMenuOpen()) _wpCloseMenu();                            // click-away closes the dropdown…
+  if (!_wpPinned && _wpSide !== null) closeWorkerPop();         // …and an UNPINNED preview; a pinned panel stays
 });
-// Backdrop click / Esc close (mirrors the run-location modal).
-document.addEventListener('mousedown', e => { if (e.target && e.target.id === 'workerpopbg') closeWorkerPop(); });
+// Hover a row → preview it; being over any row/the panel keeps the panel; leaving the whole area hides a preview.
+document.addEventListener('mouseover', e => {
+  if (!e.target || !e.target.closest) return;
+  const row = e.target.closest('#workerpills .wpill-menuitem[data-side]');
+  if (row || e.target.closest('#workerpopbg') || e.target.closest('#workerpills .wpill-top')) _wpKeepPanel();
+  if (row && _wpMenuOpen()) _wpScheduleShow(row.getAttribute('data-side'));
+});
+document.addEventListener('mouseout', e => {
+  const to = e.relatedTarget;
+  const stillIn = to && to.closest && (to.closest('#workerpills') || to.closest('#workerpopbg'));
+  if (!stillIn) _wpScheduleHide();
+});
+// Esc closes the panel + dropdown (no backdrop now — it's a non-covering side panel).
 document.addEventListener('keydown', e => {
   const bg = document.getElementById('workerpopbg');
-  if (e.key === 'Escape' && bg && bg.classList.contains('show')) { e.stopPropagation(); closeWorkerPop(); }
+  if (e.key === 'Escape' && ((bg && bg.classList.contains('show')) || _wpMenuOpen())) {
+    e.stopPropagation(); _wpCloseMenu(); closeWorkerPop();
+  }
 }, true);

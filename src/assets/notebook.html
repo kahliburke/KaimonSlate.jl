@@ -43,12 +43,11 @@
   <a class="brand" href="/" title="all notebooks"><span class="brandmark">S</span>Slate</a>
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title" onclick="toggleFiles()" title="open Files — edit this notebook's package source" style="cursor:pointer">Notebook</h1>
-  <span id="runloc" class="runloc" onclick="openWorkerPop('', event)" title="worker — click for its live log &amp; status">
-    <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span id="runlocstat" class="wstat"></span> <span class="runloccaret" onclick="toggleRunLoc(event)" title="change where this notebook runs">▾</span></span><span id="workerpills"></span>
-  <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span>
+  <span id="runloc" class="runloc" style="display:none" onclick="openWorkerPop('', event)" title="worker — click for its live log &amp; status">
+    <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span id="runlocstat" class="wstat"></span> <span class="runloccaret" onclick="toggleRunLoc(event)" title="change where this notebook runs">▾</span></span>
+  <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span><span id="workerpills"></span>
   <span id="healthbadge" class="healthbadge" style="display:none" onclick="window.__healthToggle && window.__healthToggle()" title="watchdog health — stalls &amp; runaway workers; click for details + recovery"></span>
   <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
-  <button id="runstale" onclick="runAll()" title="run all stale cells" style="display:none">▶ Run stale</button>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
   <button onclick="enterPresent()" title="present this notebook as a slide deck (⌘⇧P)">▶ Present</button>
@@ -83,16 +82,17 @@
     </div>
   </div>
 </div>
-<div class="modal-bg" id="workerpopbg"><div class="modal workerpop">
+<div id="workerpopbg" class="workerpop workerpop-panel">
   <div class="workerpop-head">
     <div class="workerpop-headtop">
       <span id="workerpop-title">Worker</span>
-      <span class="workerpop-x" onclick="closeWorkerPop()" title="close">×</span>
+      <span id="workerpop-pin" class="workerpop-pin" onclick="wpTogglePin()" title="click to pin this panel">📌</span>
     </div>
+    <div id="workerpop-runloc" class="workerpop-runloc" style="display:none"></div>
     <div id="workerpop-stats" class="workerpop-stats"></div>
   </div>
   <div id="workerpop-log" class="workerpop-log">loading…</div>
-</div></div>
+</div>
 <div class="modal-bg" id="runlocbg"><div class="modal runlocmodal">
   <div class="msg"><strong>Run location</strong> <span id="rlsourcebadge" class="rlbadge"></span>
     <span style="color:var(--dim);font-weight:400"> — where this notebook's worker runs.</span></div>
