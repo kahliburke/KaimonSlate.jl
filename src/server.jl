@@ -1432,75 +1432,84 @@ end
 # Evaluate ONE cell with the lock-release discipline. Markdown (fast interp) runs under the lock;
 # code marks RUNNING + announces under the lock, evals WITHOUT it, then merges under the lock iff the
 # cell still exists unchanged (src_hash match) — else the result is from a superseded run, discarded.
-function _eval_one!(nb::LiveNotebook, cell::Cell)
-    if cell.kind == MARKDOWN
-        # md `{{ }}` interpolations evaluate on the MAIN kernel — pull any remote-written names first
-        try; _region_presync!(nb, cell, nb.kernel); catch e; @warn "slate region: md presync failed" cell = cell.id exception = e; end
-        lock(nb.lock) do; ReportEngine.eval_cell!(nb.report, cell, nb.kernel); end
-        return nothing
-    end
-    # Region dispatch: tag decides, mutation auto-follows its data (see _region_route); the
-    # cell's cross-boundary inputs ship over first. A presync failure is the CELL's error —
-    # surfaced in place instead of a mystery UndefVarError on the other side.
-    kernel, side = _region_route(nb, cell)
+# Ensure `cell`'s region kernel is reachable + primed before it runs there. Applies the reconnect-hold
+# policy and the (possibly slow, cold) bring-up + namespace prime, surfacing any failure AS the cell's
+# error. Returns true to proceed, false when the cell was already resolved (held/errored) and the caller
+# should return. A no-op (returns true) for a main-kernel cell (`side == ""`). Shared by code + markdown.
+function _prepare_region_for_cell!(nb::LiveNotebook, cell::Cell, kernel, side::AbstractString)
+    isempty(side) && return true
     # Reconnect-hold policy (manual mode). A cell EXPLICITLY run (▶ force marker) reconnects a region that
     # was dropped as dead; a reactive cascade must not. Peek the force marker WITHOUT consuming it (the
-    # memo build below consumes it): a forced cell clears the hold on ALL the notebook's kernels, so an
+    # memo build later consumes it): a forced cell clears the hold on ALL the notebook's kernels, so an
     # explicit run of even a DOWNSTREAM cell reconnects the upstream region it needs. A non-forced cell
-    # whose OWN region is held errors here instead of silently cold-spawning a replacement worker. (A
-    # non-forced cell that merely PULLS from a held region is stopped one level down, in prepare!.)
-    if !isempty(side)
-        forced = lock(nb.lock) do
-            ids = get(_FORCE_RUN, nb.id, nothing); ids !== nothing && cell.id in ids
-        end
-        if forced
-            _clear_region_holds!(nb)
-        elseif _kernel_held(kernel)
-            lock(nb.lock) do
-                cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
-                    ReportEngine.BindSpec[], "", "region '$side' is disconnected — a previous worker went unresponsive; press ▶ (or re-run) to reconnect", nothing, 0.0)
-                cell.state = ERRORED
-                _broadcast_progress(nb, cell)
-            end
-            return nothing
-        end
+    # whose OWN region is held errors here instead of silently cold-spawning a replacement worker.
+    forced = lock(nb.lock) do
+        ids = get(_FORCE_RUN, nb.id, nothing); ids !== nothing && cell.id in ids
     end
-    # A cell running on a REGION needs the notebook's environment established there first — its own
-    # `using`/scaffold cells may live on the main kernel (they aren't cross-boundary READS, so the
-    # presync below won't ship them). Bring the kernel up and prime it (idempotent, once per kernel)
-    # so the package's functions, the theme, … all resolve instead of an UndefVarError on the far side.
-    if !isempty(side)
-        # Bringing up a region worker can be SLOW — a COLD remote spawn boots Julia + KaimonGate on the host
-        # (~90s). Mark the cell RUNNING now, and push the worker list so the region PILL appears immediately
-        # as a pulsing "starting" (its popup streams the boot log). The pill is the single bring-up indicator
-        # — no separate ⌛ status bar (it was redundant with the pill and duplicated the glyph).
-        host = _side_label(nb, side)
+    if forced
+        _clear_region_holds!(nb)
+    elseif _kernel_held(kernel)
         lock(nb.lock) do
-            cell.state = RUNNING
+            cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
+                ReportEngine.BindSpec[], "", "region '$side' is disconnected — a previous worker went unresponsive; press ▶ (or re-run) to reconnect", nothing, 0.0)
+            cell.state = ERRORED
             _broadcast_progress(nb, cell)
         end
-        try; _workers_push!(nb); catch; end   # pill appears NOW as "starting", not after the run completes
-        try
-            ReportEngine.prepare!(kernel, nb.report)
-            _prime_namespace!(nb, kernel, side)
-            try; _workers_push!(nb); catch; end   # connected → pill flips out of "starting"; telemetry takes over
-        catch e
-            ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
-                               first(sprint(showerror, e), 160))
-            # The region worker couldn't come up — surface it AS the cell's error and STOP. Running on the
-            # dead kernel just errors anyway, but leaving the cell unresolved let the runner re-arm and
-            # churn (relogging every pass → the hub spun + the log ballooned).
-            lock(nb.lock) do
-                cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
-                    ReportEngine.BindSpec[], "", "region worker on $host could not start: " *
-                    first(sprint(showerror, e), 160), nothing, 0.0)
-                cell.state = ERRORED
-                _broadcast_progress(nb, cell)
-            end
-            try; _workers_push!(nb); catch; end   # push the failure → pill goes amber/disconnected, not stuck "starting"
-            return nothing
-        end
+        return false
     end
+    # A cell running on a REGION needs the notebook's environment established there first — its own
+    # `using`/scaffold cells may live on the main kernel (they aren't cross-boundary READS, so a presync
+    # won't ship them). Bring the kernel up and prime it (idempotent, once per kernel) so the package's
+    # functions, the theme, … all resolve instead of an UndefVarError on the far side. Bringing up a
+    # region worker can be SLOW — a COLD remote spawn boots Julia + KaimonGate (~90s) — so mark the cell
+    # RUNNING now and push the worker list so the region PILL appears immediately as a pulsing "starting".
+    host = _side_label(nb, side)
+    lock(nb.lock) do
+        cell.state = RUNNING
+        _broadcast_progress(nb, cell)
+    end
+    try; _workers_push!(nb); catch; end   # pill appears NOW as "starting", not after the run completes
+    try
+        ReportEngine.prepare!(kernel, nb.report)
+        _prime_namespace!(nb, kernel, side)
+        try; _workers_push!(nb); catch; end   # connected → pill flips out of "starting"; telemetry takes over
+        return true
+    catch e
+        ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
+                           first(sprint(showerror, e), 160))
+        # The region worker couldn't come up — surface it AS the cell's error and STOP. Running on the
+        # dead kernel just errors anyway, but leaving the cell unresolved let the runner re-arm and churn.
+        lock(nb.lock) do
+            cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
+                ReportEngine.BindSpec[], "", "region worker on $host could not start: " *
+                first(sprint(showerror, e), 160), nothing, 0.0)
+            cell.state = ERRORED
+            _broadcast_progress(nb, cell)
+        end
+        try; _workers_push!(nb); catch; end   # push the failure → pill goes amber/disconnected, not stuck "starting"
+        return false
+    end
+end
+
+function _eval_one!(nb::LiveNotebook, cell::Cell)
+    # Region dispatch: the `region=` tag decides the kernel; a mutation auto-follows its data (see
+    # _region_route). Markdown honors its tag too — its `$(…)` interpolation runs on that region's worker.
+    kernel, side = _region_route(nb, cell)
+    if cell.kind == MARKDOWN
+        # Tagged markdown interpolates on its region (bring the kernel up first, like a code cell); an
+        # untagged md (side=="") stays on main. Presync pulls any cross-boundary names it interpolates.
+        _prepare_region_for_cell!(nb, cell, kernel, side) || return nothing
+        _region_active(nb) && !isempty(side) && _stats_ran_on!(nb, cell.id, _side_label(nb, side))
+        try; _region_presync!(nb, cell, kernel; dst_side = side); catch e; @warn "slate region: md presync failed" cell = cell.id exception = e; end
+        lock(nb.lock) do
+            ReportEngine.eval_cell!(nb.report, cell, kernel)
+            isempty(side) || _broadcast_progress(nb, cell)   # region md set RUNNING above → push the final state
+        end
+        return nothing
+    end
+    # The cell's cross-boundary inputs ship over after the kernel is primed. A presync failure is the
+    # CELL's error — surfaced in place instead of a mystery UndefVarError on the other side.
+    _prepare_region_for_cell!(nb, cell, kernel, side) || return nothing
     # Provenance for the DAG/stats: which kernel this run executes on (only meaningful — and
     # only recorded — while a region is active; users otherwise know where cells run).
     _region_active(nb) && _stats_ran_on!(nb, cell.id, _side_label(nb, side))

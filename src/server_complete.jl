@@ -700,7 +700,7 @@ function _make_router(h::Hub)
             st = ReportEngine.region_status(r.name)
             Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
                  "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
-                 "warm" => r.warm, "threads" => r.threads,
+                 "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
                  # Last reconcile outcome — so a silent background spawn failure is visible.
                  "status" => st === nothing ? nothing :
                              Dict("ok" => st.ok, "msg" => st.msg, "age" => round(Int, time() - st.ts)))
@@ -725,10 +725,11 @@ function _make_router(h::Hub)
             return _json(Dict("ok" => false, "error" => "preload project dir not found: $preload"))
         data_root = strip(String(get(b, "data_root", "")))   # workers' data dir ON THE HOST (remote path) — verbatim
         threads = strip(String(get(b, "threads", "")))
+        sysimage = string(get(b, "sysimage", "false")) in ("true", "1", "on", "yes")
         do_reconcile = string(get(b, "reconcile", "true")) != "false"
         r = ReportEngine.region_set!(name; host = host, transport = tr, base_port = base_port,
                                      preload = isempty(preload) ? "" : abspath(expanduser(preload)),
-                                     data_root = data_root, warm = warm, threads = threads)
+                                     data_root = data_root, warm = warm, threads = threads, sysimage = sysimage)
         do_reconcile && Threads.@spawn try
             ReportEngine.region_reconcile!(r.name)   # no-op when warm==0 except draining excess
         catch e
@@ -755,6 +756,24 @@ function _make_router(h::Hub)
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
         try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake any eval bound to this worker before it dies
         _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
+    end)
+    # Sysimage build state for a region's env — one ssh to the host: is it built (key/size/age), building
+    # now, is there a compiler. Feeds the Regions UI sysimage panel. Query {region}.
+    HTTP.register!(router, "GET", "/api/sysimage", req -> begin
+        name = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")))
+        isempty(name) && return _json(Dict("ok" => false, "error" => "need a region"))
+        st = ReportEngine.sysimage_status_for_region(name)
+        st === nothing && return _json(Dict("ok" => false, "error" => "no region '$name'"))
+        _json(merge(Dict("ok" => true), st))
+    end)
+    # Explicitly (re)build a region's worker sysimage — forced past the per-region opt-in. Provisions (idempotent)
+    # then launches the detached build; returns at once, the UI polls GET /api/sysimage. Body {region}.
+    HTTP.register!(router, "POST", "/api/sysimage/build", req -> begin
+        b = _body(req)
+        name = strip(String(get(b, "region", "")))
+        isempty(name) && return _json(Dict("ok" => false, "error" => "need a region"))
+        r = ReportEngine.sysimage_build_for_region!(name)
+        _json(Dict("ok" => r.ok, "error" => get(r, :error, nothing), "host" => get(r, :host, nothing)))
     end)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin
         id = HTTP.getparam(req, "id")

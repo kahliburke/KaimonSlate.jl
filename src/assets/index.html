@@ -130,10 +130,47 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rpprow>label{flex:0 0 88px;color:#8a90a8;font-size:.8rem;}
 .rppact{display:flex;gap:8px;padding-left:98px;}
 .rppn{width:56px;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 8px;font-size:.82rem;text-align:center;}
-.rpppre{flex:1 1 auto;min-width:0;background:#10131f;color:#cdd3e6;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-family:Menlo,monospace;font-size:.78rem;}
+.rppname{flex:1 1 auto;min-width:0;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-size:.82rem;}
+.rppname[readonly]{color:#9aa3c0;background:#0c0f19;border-style:dashed;}
+.rpppre,.rpproot{flex:1 1 auto;min-width:0;background:#10131f;color:#cdd3e6;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-family:Menlo,monospace;font-size:.78rem;}
 .rpptr{background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 8px;font-size:.8rem;}
-.rppport{width:110px;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-family:Menlo,monospace;font-size:.78rem;}
-.rppn:focus,.rpppre:focus,.rppport:focus,.rpptr:focus{outline:none;border-color:#569cd6;}
+.rppport{width:120px;flex:0 0 auto;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-family:Menlo,monospace;font-size:.78rem;}
+.rppname:focus,.rppn:focus,.rpppre:focus,.rpproot:focus,.rppport:focus,.rpptr:focus{outline:none;border-color:#569cd6;}
+.rpprow input::placeholder{color:#565c78;}
+/* region list (pills) — the host's configured regions, click to edit */
+.rppreglist{display:flex;flex-direction:column;gap:5px;margin:4px 0 15px;}
+.rppregrow{display:flex;align-items:center;gap:10px;padding:8px 11px;border:1px solid #21253a;border-radius:8px;background:#0d1120;cursor:pointer;transition:border-color .12s,background .12s;}
+.rppregrow:hover{border-color:#33395a;background:#101423;}
+.rppregrow.sel{border-color:#569cd6;background:rgba(86,156,214,.08);}
+.rppregname{color:#e6e9f5;font-weight:600;font-size:.86rem;flex:0 0 auto;}
+.rppregmeta{color:#6a7090;font-size:.75rem;flex:1 1 auto;font-family:Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.rppregst.err{color:#e0a03a;font-size:.73rem;flex:0 0 auto;}
+.modal .rppregdel{flex:0 0 auto;padding:2px 8px;font-size:.74rem;line-height:1.3;border-radius:6px;color:#8a90a8;border-color:transparent;background:transparent;opacity:.6;}
+.modal .rppregrow:hover .rppregdel{opacity:1;}
+.modal .rppregdel:hover{color:#e57575;border-color:#3a2030;background:rgba(229,117,117,.08);}
+/* region editor form */
+.rppformhead{color:#c8cde0;font-size:.9rem;font-weight:600;margin:2px 0 13px;}
+.rppchk{display:flex;align-items:baseline;gap:8px;color:#b8bed4;font-size:.8rem;cursor:pointer;flex:1 1 auto;min-width:0;line-height:1.45;}
+.rppchk>input{flex:0 0 auto;width:15px;height:15px;cursor:pointer;accent-color:#569cd6;position:relative;top:2px;}
+.rppchk>span{flex:1 1 auto;min-width:0;}
+.rppchk .pddim{font-size:.73rem;}
+.modal .rppsavereg{padding:6px 18px;font-size:.84rem;border-radius:6px;color:#a9d4ff;border-color:#2f5680;background:rgba(86,156,214,.12);}
+.modal .rppsavereg:hover{border-color:#569cd6;background:rgba(86,156,214,.2);}
+/* blank "+ New region" pill — dashed to read as an add-affordance, not a real region */
+.rppregnew{border-style:dashed;background:transparent;}
+.rppregnew .rppregname{color:#9aa3c0;font-weight:500;}
+.rppregnew.sel{border-style:solid;border-color:#569cd6;background:rgba(86,156,214,.06);}
+.rppregnew.sel .rppregname{color:#a9d4ff;}
+/* sysimage status + build panel (in the region editor) */
+.rppsysrow{margin-top:-3px;}
+.rppsysbox{flex:1 1 auto;min-width:0;font-size:.78rem;}
+.rppsysstat{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.rppsysok{color:#7fc8a0;}
+.rppsysok code,.rppsysbox code{font-family:Menlo,monospace;color:#cdd3e6;background:#10131f;border:1px solid #21253a;border-radius:4px;padding:1px 5px;font-size:.74rem;}
+.rppsysbuilding{color:#e0a03a;display:inline-flex;align-items:center;gap:7px;}
+.rppsyswarn{color:#e0a03a;font-size:.76rem;}
+.modal .rppsysbtn{padding:4px 12px;font-size:.78rem;border-radius:6px;color:#a9d4ff;border-color:#2f5680;background:rgba(86,156,214,.1);}
+.modal .rppsysbtn:hover{border-color:#569cd6;background:rgba(86,156,214,.18);}
 .modal .rppwarm{padding:4px 13px;font-size:.8rem;border-radius:6px;color:#7cc0ff;border-color:#22405e;}
 .modal .rppdrain{padding:4px 11px;font-size:.8rem;border-radius:6px;color:#c08a5a;border-color:#3a3020;}
 .rppmsg{color:#7cc0ff;font-size:.78rem;min-height:1em;margin:8px 0 2px;}
@@ -547,15 +584,20 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var m=_rtMsg[h], regs=_rtRegionsOn(h);
     var head='<div class="rtfhead"><strong><span class="rtfcrumb" title="back to Remotes">Remotes</span> › 🖧 '+esc(h)+
       '</strong><span class="rtfsub">— regions &amp; live workers</span><button class="rtfref" title="refresh roster">↻</button></div>';
-    var list=regs.length?('<div class="rppreglist">'+regs.map(function(r){
+    var newSel=!(_rtEdit&&_rtEdit.name);   // the "new region" form is the active one
+    var list='<div class="rppreglist">'+regs.map(function(r){
         var st=r.status, stTxt=st&&!st.ok?('⚠ '+esc(st.msg)):'';
         return '<div class="rppregrow'+(_rtEdit&&_rtEdit.name===r.name?' sel':'')+'" data-n="'+esc(r.name)+'">'+
           '<span class="rppregname">🖧 '+esc(r.name)+'</span>'+
-          '<span class="rppregmeta">warm '+(+r.warm||0)+' · '+esc(r.transport||'tunnel')+(r.data_root?' · root '+esc(r.data_root):'')+'</span>'+
+          '<span class="rppregmeta">warm '+(+r.warm||0)+' · '+esc(r.transport||'tunnel')+(r.sysimage?' · ⚙ sysimage':'')+(r.data_root?' · root '+esc(r.data_root):'')+'</span>'+
           (stTxt?'<span class="rppregst err">'+stTxt+'</span>':'')+
           '<button class="rppregdel" data-n="'+esc(r.name)+'" title="delete this region (reaps its warm workers)">✕</button></div>';
-      }).join('')+'</div>'):'<div class="pddim" style="margin:6px 0 2px">No regions on this host yet — add one below. Cells tag <code>region=&lt;name&gt;</code>.</div>';
-    var e=_rtEdit||{name:'',host:h,transport:_rtHostTr(h),base_port:0,preload:'',data_root:'',warm:0}, editing=!!(_rtEdit&&_rtEdit.name), tr=e.transport||'tunnel';
+      }).join('')+
+      '<div class="rppregrow rppregnew'+(newSel?' sel':'')+'" data-new="1" title="create a new region on this host">'+
+        '<span class="rppregname">＋ New region</span><span class="rppregmeta">a new compute def on '+esc(h)+'</span></div>'+
+      '</div>'+
+      (regs.length?'':'<div class="pddim" style="margin:2px 0 8px">No regions here yet — fill in the form below. Cells target one with a <code>region=&lt;name&gt;</code> tag.</div>');
+    var e=_rtEdit||{name:'',host:h,transport:_rtHostTr(h),base_port:0,preload:'',data_root:'',warm:0,sysimage:false}, editing=!!(_rtEdit&&_rtEdit.name), tr=e.transport||'tunnel';
     var form='<div class="rppcfg"><div class="rppformhead">'+(editing?('Edit region “'+esc(e.name)+'”'):'New region on '+esc(h))+'</div>'+
       '<div class="rpprow"><label>Name</label><input class="rppname" autocomplete="off" placeholder="e.g. gpu, bigmem" value="'+esc(e.name)+'"'+(editing?' readonly':'')+' title="the region\'s global name — cells run there when tagged region=&lt;name&gt;"></div>'+
       '<div class="rpprow"><label>Warm</label><input class="rppn" type="text" inputmode="numeric" autocomplete="off" value="'+(+e.warm||0)+'" title="how many workers to keep booted and ready to adopt (0 = cold spin on demand)"><span class="pddim" style="font-size:.76rem">workers kept ready to adopt</span></div>'+
@@ -564,8 +606,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<div class="rpprow"><label>Transport</label>'+
       '<select class="rpptr" title="transport for this region\'s workers"><option value="tunnel"'+(tr==='tunnel'?' selected':'')+'>tunnel</option><option value="direct"'+(tr==='direct'?' selected':'')+'>direct</option></select>'+
       '<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" title="first port for :direct workers — worker i binds base+3i..+3i+2. Open base..base+3·warm-1 in the firewall. Blank = auto (9100+)." value="'+((e.base_port>0)?e.base_port:'')+'"'+(tr==='direct'?'':' style="display:none"')+'></div>'+
-      '<div class="rppact"><button class="rppsavereg" title="save this region and reconcile toward its warm count">'+(editing?'Save':'Create')+'</button>'+
-        (editing?'<button class="rppnewreg" title="start a new region on this host">+ New</button>':'')+'</div>'+
+      '<div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" class="rppsys"'+(e.sysimage?' checked':'')+'><span>bake a worker sysimage for faster boot <span class="pddim">(opt-in; needs a C compiler + free RAM on the host)</span></span></label></div>'+
+      (editing?('<div class="rpprow rppsysrow"><label></label><div class="rppsysbox" data-region="'+esc(e.name)+'"><span class="pddim">checking build status…</span></div></div>'):'')+
+      '<div class="rppact"><button class="rppsavereg" title="save this region and reconcile toward its warm count">'+(editing?'Save':'Create')+'</button></div>'+
       '</div><div class="rppmsg'+(m&&m.err?' err':'')+'">'+(m?esc(m.text):'')+'</div>';
     box.innerHTML=head+list+form+'<div class="rtfworkers"></div><div class="rtfpark"></div>';
     box.querySelector('.rtfcrumb').onclick=rtUnfocus;
@@ -577,7 +620,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var trSel=box.querySelector('.rpptr'), portIn=box.querySelector('.rppport');
     trSel.onchange=function(){ portIn.style.display=(trSel.value==='direct')?'':'none'; };
     box.querySelector('.rppsavereg').onclick=function(){ rtSaveRegion(h); };
-    var nb=box.querySelector('.rppnewreg'); if(nb) nb.onclick=function(){ _rtEdit=null; rtRenderFocus(); };
+    if(editing) rtLoadSysimage(e.name);
     rtRenderWorkers(h);
   }
   // Fill only the worker list + parked rows from the cached roster — leaves the config inputs alone.
@@ -626,9 +669,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var preload=box.querySelector('.rpppre').value.trim(), transport=box.querySelector('.rpptr').value;
     var base_port=(transport==='direct')?(parseInt(box.querySelector('.rppport').value,10)||0):0;
     var data_root=box.querySelector('.rpproot').value.trim();
+    var sysimage=!!(box.querySelector('.rppsys')&&box.querySelector('.rppsys').checked);
     msg.textContent=warm>0?'Saving + warming…':'Saving…';
     fetch('/api/regions',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:name,host:h,warm:warm,preload:preload,transport:transport,base_port:base_port,data_root:data_root})})
+      body:JSON.stringify({name:name,host:h,warm:warm,preload:preload,transport:transport,base_port:base_port,data_root:data_root,sysimage:sysimage})})
       .then(function(r){return r.json();}).then(function(d){
         if(!d||!d.ok){ msg.className='rppmsg err'; msg.textContent=(d&&d.error)||'failed'; return; }
         var ports=(base_port&&warm>0)?(' · ports '+base_port+'–'+(base_port+3*warm-1)):'';
@@ -638,6 +682,39 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         _rtLoadRegions().then(function(){ if(_rtFocus===h) rtRenderFocus(); rtRenderHosts(); });
         if(warm>0){ var polls=0; (function poll(){ if(_rtFocus!==h) return; rtFetchRoster(h); if(++polls<6) setTimeout(poll,2500); })(); }
       }).catch(function(){ msg.className='rppmsg err'; msg.textContent='request failed'; });
+  }
+  // ── sysimage build status + trigger (per region) ─────────────────────────────────
+  function _rtAgo(unix){ var s=Math.max(0,Math.floor(Date.now()/1000-(+unix||0)));
+    if(s<90) return s+'s ago'; if(s<5400) return Math.round(s/60)+'m ago'; if(s<172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }
+  function _rtSysHtml(d){
+    if(!d||!d.ok) return '<span class="pddim">sysimage status unavailable</span>';
+    if(d.reachable===false) return '<span class="pddim">host unreachable — can’t read build state</span>';
+    if(d.compiler===false) return '<span class="rppsyswarn">⚠ no C compiler on '+esc(d.host||'')+' — install build tools (e.g. <code>apt install build-essential</code>) to enable sysimages</span>';
+    var body, btn='';
+    if(d.building){ body='<span class="rppsysbuilding"><span class="hydspin"></span> building…</span>'; }
+    else if(d.current){ body='<span class="rppsysok">✓ built · <code>'+esc(d.current)+'.so</code> · '+_rtFmtBytes(d.bytes)+(d.built?' · '+_rtAgo(d.built):'')+'</span>'; btn='<button class="rppsysbtn" title="rebuild the worker sysimage for this env">Rebuild</button>'; }
+    else { body='<span class="pddim">not built yet — boots plain until you build one</span>'; btn='<button class="rppsysbtn" title="build the worker sysimage for this env (detached on the host)">Build now</button>'; }
+    return '<div class="rppsysstat">'+body+btn+'</div>';
+  }
+  function rtLoadSysimage(name){
+    var box=document.getElementById('rtfocus'); if(!box) return;
+    var sb=box.querySelector('.rppsysbox'); if(!sb||sb.dataset.region!==name) return;
+    fetch('/api/sysimage?region='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
+      var b2=document.getElementById('rtfocus'), sb2=b2&&b2.querySelector('.rppsysbox');
+      if(!sb2||sb2.dataset.region!==name) return;   // editor moved on — drop this response
+      sb2.innerHTML=_rtSysHtml(d);
+      var btn=sb2.querySelector('.rppsysbtn'); if(btn) btn.onclick=function(){ rtBuildSysimage(name); };
+      if(d&&d.ok&&d.building) setTimeout(function(){ rtLoadSysimage(name); },4000);   // poll while building
+    }).catch(function(){});
+  }
+  function rtBuildSysimage(name){
+    var box=document.getElementById('rtfocus'), sb=box&&box.querySelector('.rppsysbox');
+    if(sb&&sb.dataset.region===name) sb.innerHTML='<div class="rppsysstat"><span class="rppsysbuilding"><span class="hydspin"></span> starting build…</span></div>';
+    fetch('/api/sysimage/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({region:name})})
+      .then(function(r){return r.json();}).then(function(d){
+        if(!d||!d.ok){ if(sb&&sb.dataset.region===name) sb.innerHTML='<span class="rppsyswarn">'+esc((d&&d.error)||'build failed to start')+'</span>'; return; }
+        setTimeout(function(){ rtLoadSysimage(name); },3000);
+      }).catch(function(){ if(sb&&sb.dataset.region===name) sb.innerHTML='<span class="rppsyswarn">request failed</span>'; });
   }
   function rtDeleteRegion(h,name){
     confirmDark('Delete region “'+name+'”?\nIts warm workers are reaped (attached ones keep running).','Delete','danger').then(function(ok){
