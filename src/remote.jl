@@ -109,14 +109,15 @@ struct RemoteTarget <: RunTarget
     cache_root::String           # region-declared cache home on the remote → the worker's KAIMONSLATE_CACHE_HOME ("" ⇒ shared ~/.cache/kaimonslate)
     region::String               # the named region this worker serves — the adoption key ("" ⇒ a notebook's own remote main kernel)
     sysimage::Bool               # opt-in: bake + boot a PackageCompiler worker sysimage for this env (default false)
+    curve::Bool                  # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
 end
 RemoteTarget(ssh_host::AbstractString; transport::Symbol = :tunnel,
              project::AbstractString = "~/.cache/kaimonslate/remote",
              port::Int = 0, stream_port::Int = 0, origin_env::AbstractString = "",
              datadir::AbstractString = "", cache_root::AbstractString = "", region::AbstractString = "",
-             sysimage::Bool = false) =
+             sysimage::Bool = false, curve::Bool = true) =
     RemoteTarget(String(ssh_host), transport, String(project), port, stream_port,
-                 String(origin_env), String(datadir), String(cache_root), String(region), sysimage)
+                 String(origin_env), String(datadir), String(cache_root), String(region), sysimage, curve)
 
 is_remote(::LocalTarget) = false
 is_remote(::RemoteTarget) = true
@@ -901,7 +902,7 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
-                      warm_deps=$warm_deps,
+                      warm_deps=$warm_deps, blob_curve=$(_blob_curve(t)),
                       stats_path=joinpath(homedir(), raw"$_REMOTE_WORKER", "worker-$port.stats"))
     _bt("serving")   # phase breakdown: Julia-init = launch→script-start; then KaimonGate / Revise / payload / serve
     while true; sleep(3600); end   # serve() returns after starting its loop on a spawned thread; keep alive
@@ -1833,24 +1834,72 @@ _carry_should_ship(bytes::Integer, ms::Real, bw_bps::Real, cap_s::Real) =
 const _DATA_TUNNELS = Dict{Tuple{String,Int},Tuple{Tunnel,Int}}()   # (host, data_port) → (tunnel, local_port)
 const _DATA_TUNNEL_LOCK = ReentrantLock()
 
+# Bench toggle: the blob channel is CURVE-encrypted by default; set KAIMONSLATE_BLOB_CURVE=0 to run it
+# PLAINTEXT on both ends for an encryption-cost A/B (PEER_TUNNEL_PLAN §7). Read on the HUB and baked
+# into each worker at spawn (boot script) so both ends agree — flip it, then COLD-RESPAWN workers to
+# take effect. Off exposes a plaintext blob port on :direct workers (0.0.0.0) — bench use only.
+_blob_curve_on() = get(ENV, "KAIMONSLATE_BLOB_CURVE", "1") != "0"
+
+# Effective per-region decision: CURVE unless the region opted out (its `curve=false` — the
+# worker-specific bench knob, set via `region(...; curve=false)`) OR the global kill-switch
+# (KAIMONSLATE_BLOB_CURVE=0) forces plaintext everywhere. Used at BOTH ends — the boot script (the
+# worker's blob server) and `_data_endpoint!` (whether the hub supplies a key) — so they always agree.
+_blob_curve(t::RemoteTarget) = t.curve && _blob_curve_on()
+
+# The blob channel is CURVE on EVERY worker by default (PEER_TUNNEL_PLAN §2), so a :tunnel worker's
+# data endpoint needs that worker's CURVE server public key to connect as a client. Learn it once over
+# the (already-authenticated) control gate via `__slate_server_key` and cache per (host, data_port);
+# evicted alongside the data tunnel on reap. (`:direct` workers get their key from the attach record
+# at spawn, so they never hit this path.)
+const _BLOB_SERVER_KEY = Dict{Tuple{String,Int},String}()
+const _BLOB_SERVER_KEY_LOCK = ReentrantLock()
+
+function _blob_server_key!(t::RemoteTarget, k, dport::Int)
+    ck = (t.ssh_host, dport)
+    hit = lock(_BLOB_SERVER_KEY_LOCK) do
+        get(_BLOB_SERVER_KEY, ck, nothing)
+    end
+    hit === nothing || return hit
+    key = try
+        r = _tool(k, "__slate_server_key", Dict{String,Any}(); timeout = 30.0)
+        e = try; getproperty(r, :error); catch; nothing; end
+        e === nothing ? String(r.key) : ""
+    catch
+        ""
+    end
+    if isempty(key)
+        _rlog("data channel: no CURVE server key from $(t.ssh_host) worker (data port $dport) — the worker " *
+              "may predate the always-CURVE blob channel; cold-respawn it (plaintext connect will fail).")
+    else
+        lock(_BLOB_SERVER_KEY_LOCK) do
+            _BLOB_SERVER_KEY[ck] = key
+        end
+    end
+    return key
+end
+
 function _data_endpoint!(t::RemoteTarget, k)
     dport = k.port + 2
     if t.transport === :direct
         rec = _attach_lookup(t.ssh_host, k.label)   # ip + CURVE key were learned at spawn — no ssh here
         ip = rec !== nothing && !isempty(rec.remote_ip) ? String(rec.remote_ip) : _remote_ip(t.ssh_host)
-        key = rec !== nothing ? String(rec.server_key) : ""
+        key = (_blob_curve(t) && rec !== nothing) ? String(rec.server_key) : ""   # "" when this region runs plaintext (bench)
         return (ip = ip, port = dport, server_key = key)
     end
-    lock(_DATA_TUNNEL_LOCK) do
+    # :tunnel — the blob channel is CURVE (encryption-only) behind the SSH forward, so pin the
+    # worker's server key. Fetch it OUTSIDE the tunnel lock so a control RPC never blocks other
+    # endpoint resolutions waiting on the lock. ("" under the plaintext bench toggle.)
+    key = _blob_curve(t) ? _blob_server_key!(t, k, dport) : ""
+    lport = lock(_DATA_TUNNEL_LOCK) do
         cached = get(_DATA_TUNNELS, (t.ssh_host, dport), nothing)
-        cached !== nothing && cached[1].running &&
-            return (ip = "127.0.0.1", port = cached[2], server_key = "")
-        lport = _free_local_port()
-        tun = open_tunnel(t.ssh_host, [(lport, dport)])
-        _DATA_TUNNELS[(t.ssh_host, dport)] = (tun, lport)
-        _rlog("data channel: opened dedicated tunnel $(t.ssh_host):$dport ← 127.0.0.1:$lport (own ssh proc)")
-        return (ip = "127.0.0.1", port = lport, server_key = "")
+        cached !== nothing && cached[1].running && return cached[2]
+        lp = _free_local_port()
+        tun = open_tunnel(t.ssh_host, [(lp, dport)])
+        _DATA_TUNNELS[(t.ssh_host, dport)] = (tun, lp)
+        _rlog("data channel: opened dedicated tunnel $(t.ssh_host):$dport ← 127.0.0.1:$lp (own ssh proc, CURVE)")
+        return lp
     end
+    return (ip = "127.0.0.1", port = lport, server_key = key)
 end
 
 # Close the cached data forward for `host` (a specific worker's data port, or all when port=0).
@@ -1861,6 +1910,13 @@ function _evict_data_tunnels!(host; port::Int = 0)
             (port == 0 || key[2] == port) || continue
             tun, _ = pop!(_DATA_TUNNELS, key)
             try; close_tunnel(tun); catch; end
+        end
+    end
+    lock(_BLOB_SERVER_KEY_LOCK) do
+        for ck in collect(keys(_BLOB_SERVER_KEY))
+            ck[1] == String(host) || continue
+            (port == 0 || ck[2] == port) || continue
+            delete!(_BLOB_SERVER_KEY, ck)
         end
     end
     return nothing
@@ -1913,6 +1969,15 @@ _direct_viable(src_k, dst_k) =
 # on any failure — the caller (`:auto`) decides whether to fall back to relay.
 function _pull_direct!(src_k, dst_k, name, h::String, meta)
     epA = _data_endpoint!(src_k.target, src_k)              # A's blob endpoint (routable ip+key on :direct)
+    # Co-located peers (same host) reach each other over LOOPBACK — skip the external-IP NAT hairpin.
+    # `_data_endpoint!` hands back A's routable/public IP, which round-trips out through the host's
+    # external interface even when B is on the same box; a :direct worker binds 0.0.0.0, so its blob
+    # port is reachable at 127.0.0.1 from a same-host peer. CURVE key unchanged (same server identity).
+    if src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget &&
+       src_k.target.ssh_host == dst_k.target.ssh_host && src_k.port > 0
+        _rlog("peer '$name': co-located → loopback 127.0.0.1:$(src_k.port + 2) (was $(epA.ip):$(epA.port))")
+        epA = (ip = "127.0.0.1", port = src_k.port + 2, server_key = epA.server_key)
+    end
     bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
     bkerr = try; getproperty(bk, :error); catch; nothing; end
     bkerr === nothing || error("direct: dest client key unavailable: $bkerr")
@@ -2090,6 +2155,7 @@ struct Region
     warm::Int           # warm workers kept ready (0 = cold spin on demand)
     threads::String     # worker "<compute>,<interactive>" ("" = global default)
     sysimage::Bool      # bake a PackageCompiler worker sysimage for this region's env (opt-in; default false)
+    curve::Bool         # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -2100,10 +2166,11 @@ _region_from_dict(d::AbstractDict) = Region(
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
     _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
     String(get(d, "cache_root", "")), _asint(get(d, "warm", 0)), String(get(d, "threads", "")),
-    _asbool(get(d, "sysimage", false)))
+    _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
-    "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage)
+    "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
+    "curve" => r.curve)
 
 # Every configured region (sorted by name). Lock-free: a concurrent writer swaps the file atomically, so a
 # reader sees either the old or the new complete file, never a torn one.
@@ -2131,13 +2198,15 @@ end
 
 # Create or update a region by name (upsert). Returns the stored Region.
 function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
-                     data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false)
+                     data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
+                     curve = true)
     # Fold to a tag-safe identifier: a cell's `region=<name>` tag folds non-word chars to `_`, so the
     # stored name must fold the same way or no cell could reference it ("slate-remote" → "slate_remote").
     n = replace(strip(String(name)), r"[^A-Za-z0-9_]+" => "_")
     isempty(n) && error("region name required")
     r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
-               String(data_root), String(cache_root), Int(warm), String(threads), _asbool(sysimage))
+               String(data_root), String(cache_root), Int(warm), String(threads), _asbool(sysimage),
+               _asbool(curve))
     lock(_REGIONS_LOCK) do
         list = regions()
         i = findfirst(x -> x.name == r.name, list)
@@ -2215,7 +2284,7 @@ _region_target(r::Region) = RemoteTarget(r.host; transport = r.transport,
     project = "~/.cache/kaimonslate/remote/" * (isempty(r.preload) ? "detached" : basename(rstrip(r.preload, '/'))),
     port = (r.transport === :direct ? r.base_port : 0),
     origin_env = r.preload, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
-    sysimage = r.sysimage)
+    sysimage = r.sysimage, curve = r.curve)
 
 # In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
 # the roster, see the same idle worker, and both adopt it.

@@ -927,6 +927,21 @@ function __slate_client_key()
     end
 end
 
+"This worker's blob-channel CURVE server PUBLIC key (Z85) — the hub reads it to connect as a CURVE client
+(pinning us as the server). The blob channel is ALWAYS CURVE (PEER_TUNNEL_PLAN §2); on a CURVE gate this
+is the gate's server key, and on a plaintext-gate (`:tunnel`) worker it's the persisted `server.key`'s
+public half (the same key the blob server binds with). Public key only; the secret never leaves the
+process. Symmetric with `__slate_client_key`."
+function __slate_server_key()
+    try
+        pub = try; KaimonGate._CURVE_SERVER_PUBLIC[]; catch; ""; end
+        isempty(pub) && ((pub, _) = KaimonGate._load_or_create_server_keypair())
+        return (; key = pub)
+    catch e
+        return (; error = "no server keypair: " * first(sprint(showerror, e), 120))
+    end
+end
+
 "Authorise `pubkey` (a peer worker's Z85 client public key) on THIS worker's CURVE allow-list so it may
 connect to this worker's blob server. Hub-brokered; takes effect on the peer's next handshake (the ZAP
 handler re-reads the list per handshake). Returns (; status) — \"added\"/\"already\"."
@@ -1651,6 +1666,7 @@ function tools()
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
         KaimonGate.GateTool("__slate_client_key", __slate_client_key),
+        KaimonGate.GateTool("__slate_server_key", __slate_server_key),
         KaimonGate.GateTool("__slate_authorize_client", __slate_authorize_client),
         KaimonGate.GateTool("__slate_revoke_client", __slate_revoke_client),
         KaimonGate.GateTool("__slate_pull_blob", __slate_pull_blob),
@@ -1682,16 +1698,26 @@ end
 # and shares the gate's ZAP domain, so the running ZAP handler (same context) applies the same
 # client allow-list here too; :tunnel stays plaintext on loopback (SSH encrypts the wire). Serves
 # THIS worker's CAS (`_memo_dir()`); runs for the worker's lifetime.
-function _blob_server!(host::String, port::Int; curve::Bool = false)
+# The blob data channel is CURVE-encrypted by default, decoupled from the gate's hub transport
+# (PEER_TUNNEL_PLAN §2): a `:direct` worker shares the gate's CURVE key + ZAP allow-list; a
+# `:tunnel` worker (plaintext gate, no ZAP handler) runs CURVE ENCRYPTION-ONLY behind its SSH
+# forward. The server keypair is the gate's persisted `server.key` (shared with `__slate_server_key`,
+# which the hub reads to pin us). `curve=false` runs the channel PLAINTEXT — the encryption-cost
+# bench toggle (PEER_TUNNEL_PLAN §7), decided by the hub (`KAIMONSLATE_BLOB_CURVE`) and baked in at
+# spawn so both ends agree; the hub then omits the server key so its client connects plaintext too.
+function _blob_server!(host::String, port::Int; curve::Bool = true)
     ctx = try; KaimonGate._GATE_CONTEXT[]; catch; nothing; end
     configure! = curve ? function (sock)
         sec = try; KaimonGate._CURVE_SERVER_SECRET[]; catch; ""; end
         isempty(sec) && ((_, sec) = KaimonGate._load_or_create_server_keypair())
         KaimonGate.make_curve_server!(sock, sec)
-        # Same ZAP domain as the gate sockets → the running ZAP handler applies the client
-        # allow-list here too. If the gate runs allow_any, so do we (no handler).
+        # Enforce the client allow-list (ZAP domain) ONLY when a ZAP handler is actually running
+        # on this context — i.e. a CURVE gate with an allow-list (`:direct`). A plaintext-gate
+        # (`:tunnel`) worker or an allow_any gate has no handler, so the channel runs CURVE
+        # encryption-only; setting ZAP_DOMAIN with no handler would hang every handshake. Peer
+        # allow-listing over tunnels arrives with its own handler (PEER_TUNNEL_PLAN Phase 2).
         try
-            KaimonGate._CURVE_ALLOW_ANY[] ||
+            (KaimonGate._ZAP_SOCKET[] !== nothing && !KaimonGate._CURVE_ALLOW_ANY[]) &&
                 KaimonGate._setsockopt_str(sock, KaimonGate._ZMQ_ZAP_DOMAIN, KaimonGate._ZAP_DOMAIN)
         catch
         end
@@ -1853,7 +1879,8 @@ workers) turns on the 2s telemetry sampler writing that sidecar + PUBbing `slate
 """
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                curve::Bool = false, allowed_clients::Vector{String} = String[],
-               data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "")
+               data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "",
+               blob_curve::Bool = true)
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
@@ -1881,10 +1908,11 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                      curve = curve, allowed_clients = allowed_clients)
     _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
     # The blob data channel (port+2): bulk memo transfer that never queues ahead of cell results.
-    # Same CURVE posture as the gate: encrypted + allow-listed on :direct, plaintext behind SSH.
+    # ALWAYS CURVE (decoupled from hub transport): allow-listed on :direct (shares the gate's ZAP
+    # handler), encryption-only behind SSH on :tunnel. No plaintext blob path on any worker.
     # Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
     data_port > 0 && _MEMO_OK && Threads.@spawn try
-        _blob_server!(host, data_port; curve = curve)
+        _blob_server!(host, data_port; curve = blob_curve)
     catch e
         @warn "slate worker: blob channel died" port = data_port exception = e
     end

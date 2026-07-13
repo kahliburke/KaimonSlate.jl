@@ -628,18 +628,20 @@ function create_tools(GateTool::Type)
     """
     function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
                     preload::String = "", data_root::String = "", cache_root::String = "", warm::Int = 0,
-                    threads::String = "", sysimage::Bool = false)::String
+                    threads::String = "", sysimage::Bool = false, curve::Bool = true)::String
         nm = strip(name); isempty(nm) && return "Give a region name."
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
         pl = strip(preload); (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"
         r = ReportEngine.region_set!(nm; host = String(strip(host)), transport = tr, base_port = base_port,
                                      preload = isempty(pl) ? "" : abspath(expanduser(pl)),
                                      data_root = String(strip(data_root)), cache_root = String(strip(cache_root)),
-                                     warm = max(0, warm), threads = String(strip(threads)), sysimage = sysimage)
+                                     warm = max(0, warm), threads = String(strip(threads)), sysimage = sysimage,
+                                     curve = curve)
         r.warm > 0 && Threads.@spawn try; ReportEngine.region_reconcile!(r.name); catch; end
         return "✅ region '$(r.name)' → $(isempty(r.host) ? "(no host)" : r.host) ($(r.transport))" *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
                (r.sysimage ? ", sysimage=on" : "") *
+               (r.curve ? "" : ", curve=off") *
                (isempty(r.data_root) ? "" : ", data_root=$(r.data_root)") *
                (isempty(r.cache_root) ? "" : ", cache_root=$(r.cache_root)")
     end
