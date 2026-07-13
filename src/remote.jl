@@ -642,6 +642,13 @@ end
 # Region-level wrappers for the UI/API: read a region's sysimage state, or kick off an EXPLICIT build
 # (forced past the opt-in gate). The build first provisions (idempotent — ensures the env's Project/Manifest
 # exist) then launches detached; both in a background task so the request returns at once (UI polls status).
+# Telemetry history the hub recorded for the worker on (host, port) — the ring for the kernel connected to
+# it (conn.name == "slate-<host>-<port>"). Empty when the hub has no live connection (only attached workers
+# stream telemetry in; an idle / other-hub worker surfaces just its point-in-time `.stats` sidecar). Each
+# sample is the flat telemetry NamedTuple (cpu, rss, memo, sys_cpu, load1, …, rcv = hub arrival time).
+worker_stats_history(host::AbstractString, port::Integer) =
+    (st = kernel_stats("slate-$host-$port"); st === nothing ? Any[] : st.history)
+
 sysimage_status_for_region(name) = (r = region_get(name); r === nothing ? nothing : sysimage_status(_region_target(r)))
 function sysimage_build_for_region!(name)
     r = region_get(name); r === nothing && return (; ok = false, error = "no region '$name'")

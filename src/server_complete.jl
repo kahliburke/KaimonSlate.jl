@@ -757,6 +757,18 @@ function _make_router(h::Hub)
         try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake any eval bound to this worker before it dies
         _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
     end)
+    # Recorded telemetry history for a worker on a host — the hub's ring for its live kernel connection,
+    # for the worker-detail popup's CPU/memory history chart. Query {host, port}. Empty `samples` when the
+    # hub isn't connected to that worker (only its point-in-time `.stats` is then available via the roster).
+    HTTP.register!(router, "GET", "/api/worker-stats", req -> begin
+        q = HTTP.queryparams(HTTP.URI(req.target))
+        host = strip(String(get(q, "host", ""))); port = tryparse(Int, String(get(q, "port", "")))
+        (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
+        hist = ReportEngine.worker_stats_history(host, port)
+        _json(Dict("ok" => true, "host" => host, "port" => port,
+                   "samples" => [Dict("t" => round(s.rcv), "cpu" => s.cpu, "rss" => s.rss, "memo" => s.memo,
+                                      "sys_cpu" => s.sys_cpu, "load1" => s.load1) for s in hist]))
+    end)
     # Sysimage build state for a region's env — one ssh to the host: is it built (key/size/age), building
     # now, is there a compiler. Feeds the Regions UI sysimage panel. Query {region}.
     HTTP.register!(router, "GET", "/api/sysimage", req -> begin

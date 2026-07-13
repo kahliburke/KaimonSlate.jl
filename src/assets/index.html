@@ -1,6 +1,18 @@
 <!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Kaimon Slate</title>
 <script>window.__SLATE_LEDGER__=null;/* server inlines the last-known ledger here → Sites paint in frame 1 */</script>
 <script src="/assets/js/platform.js"></script>
+<!-- Preact via import map (ESM), served locally from /assets/vendor/* (pinned in assets/vendor.json,
+     shared with the notebook page). Bootstraps home-page islands like the remote-activity monitor. -->
+<script type="importmap">
+{ "imports": {
+  "preact": "/assets/vendor/preact/dist/preact.module.js",
+  "preact/hooks": "/assets/vendor/preact/hooks/dist/hooks.module.js",
+  "@preact/signals-core": "/assets/vendor/signals-core/dist/signals-core.module.js",
+  "@preact/signals": "/assets/vendor/signals/dist/signals.module.js",
+  "htm": "/assets/vendor/htm/dist/htm.module.js",
+  "htm/preact": "/assets/vendor/htm/preact/index.module.js"
+}}
+</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23569cd6'/><text x='50' y='73' font-size='62' text-anchor='middle' fill='%23ffffff' font-family='monospace'>S</text></svg>"/>
 <style>html{background:#0d1120;color-scheme:dark;}
 body{background:#0d1120;color:#d4d8e8;font-family:system-ui,sans-serif;margin:0;padding:40px;min-height:100vh;box-sizing:border-box;}
@@ -80,7 +92,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .importmodal{max-width:640px;}
 .imrow{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
 /* Remotes manager modal */
-.remotesmodal{max-width:640px;}
+.remotesmodal{max-width:640px;position:relative;}
+/* Standard top-right modal close (✕) — consistent across modals; Esc also closes. `.modal .modalx`
+   specificity (0,2,1) beats the `.modal button` base rule so it stays a bare glyph, no button chrome. */
+.modal .modalx{position:absolute;top:8px;right:10px;background:none;border:none;box-shadow:none;color:#6a7090;font-size:1.15rem;line-height:1;cursor:pointer;padding:4px 8px;z-index:3;}
+.modal .modalx:hover{color:#569cd6;background:none;}
+/* Reserve right-space in the remotes header rows so the absolute ✕ never overlaps their text. */
+.remotesmodal>.msg{padding-right:30px;}
+.rtfhead{padding-right:30px;}
 .remotesmodal .imrow{flex-direction:row;align-items:center;gap:10px;}
 .remotesmodal .imrow>label{flex:0 0 70px;color:#8a90a8;font-size:.82rem;}
 .remotesmodal #rthost{flex:1 1 auto;min-width:0;background:#0d1120;color:#d4d8e8;border:1px solid #2a2e40;border-radius:7px;padding:7px 10px;font-family:Menlo,monospace;font-size:.82rem;}
@@ -114,7 +133,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 /* Warm-pool + live-worker management: a focused per-host view inside the Remotes modal */
 .rthexp{flex:0 0 auto;background:none;border:1px solid #2a2e40;color:#8a90a8;cursor:pointer;font-size:.72rem;padding:2px 8px;border-radius:6px;transition:background .1s,color .1s,border-color .1s;}
 .rthexp:hover{background:rgba(88,110,240,.16);color:#cdd3e6;border-color:#3a4b7a;}
-.remotesmodal.focusmode>*:not(.rtfocus){display:none;}
+.remotesmodal.focusmode>*:not(.rtfocus):not(.modalx){display:none;}
 .rtfocus{display:none;}
 .remotesmodal.focusmode .rtfocus{display:block;}
 /* Breadcrumb header, mirroring the Publishing dashboard: "Remotes › host — subtitle" with the host
@@ -124,10 +143,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rtfhead .rtfcrumb{color:#9aa3c0;cursor:pointer;}
 .rtfhead .rtfcrumb:hover{color:#569cd6;text-decoration:underline;}
 .rtfhead .rtfsub{color:#6a7090;font-size:.78rem;}
-.modal .rtfref{margin-left:auto;padding:3px 9px;font-size:.82rem;border-radius:6px;}
 .rppcfg{margin-bottom:6px;padding-bottom:12px;border-bottom:1px solid #21253a;}
 .rpprow{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
-.rpprow>label{flex:0 0 88px;color:#8a90a8;font-size:.8rem;}
+.rpprow>label:not(.rppchk){flex:0 0 88px;color:#8a90a8;font-size:.8rem;}
 .rppact{display:flex;gap:8px;padding-left:98px;}
 .rppn{width:56px;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 8px;font-size:.82rem;text-align:center;}
 .rppname{flex:1 1 auto;min-width:0;background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:6px 9px;font-size:.82rem;}
@@ -153,7 +171,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rppchk{display:flex;align-items:baseline;gap:8px;color:#b8bed4;font-size:.8rem;cursor:pointer;flex:1 1 auto;min-width:0;line-height:1.45;}
 .rppchk>input{flex:0 0 auto;width:15px;height:15px;cursor:pointer;accent-color:#569cd6;position:relative;top:2px;}
 .rppchk>span{flex:1 1 auto;min-width:0;}
-.rppchk .pddim{font-size:.73rem;}
+.rppchk .pddim{display:block;font-size:.73rem;margin-top:1px;}
 .modal .rppsavereg{padding:6px 18px;font-size:.84rem;border-radius:6px;color:#a9d4ff;border-color:#2f5680;background:rgba(86,156,214,.12);}
 .modal .rppsavereg:hover{border-color:#569cd6;background:rgba(86,156,214,.2);}
 /* blank "+ New region" pill — dashed to read as an add-affordance, not a real region */
@@ -163,7 +181,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rppregnew.sel .rppregname{color:#a9d4ff;}
 /* sysimage status + build panel (in the region editor) */
 .rppsysrow{margin-top:-3px;}
-.rppsysbox{flex:1 1 auto;min-width:0;font-size:.78rem;}
+.rppsysbox{flex:1 1 auto;min-width:0;font-size:.78rem;min-height:30px;display:flex;align-items:center;}
 .rppsysstat{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 .rppsysok{color:#7fc8a0;}
 .rppsysok code,.rppsysbox code{font-family:Menlo,monospace;color:#cdd3e6;background:#10131f;border:1px solid #21253a;border-radius:4px;padding:1px 5px;font-size:.74rem;}
@@ -171,6 +189,28 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .rppsyswarn{color:#e0a03a;font-size:.76rem;}
 .modal .rppsysbtn{padding:4px 12px;font-size:.78rem;border-radius:6px;color:#a9d4ff;border-color:#2f5680;background:rgba(86,156,214,.1);}
 .modal .rppsysbtn:hover{border-color:#569cd6;background:rgba(86,156,214,.18);}
+/* worker roster rows are clickable → detail popup */
+.rppworker{cursor:pointer;border-radius:7px;}
+.rppworker:hover{background:rgba(86,156,214,.06);}
+/* worker detail popup (manifest + live stats + CPU/mem history) */
+.wdmodal{max-width:620px;position:relative;}
+.wdhead{display:flex;align-items:baseline;gap:9px;margin:0 0 12px;padding-right:30px;}
+.wdhead strong{font-size:1.05rem;color:#fff;font-family:Menlo,monospace;}
+.wdhead .wdsub{color:#9aa3c0;font-size:.82rem;}
+.wdgrid{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:.8rem;margin-bottom:14px;}
+.wdgrid .k{color:#6a7090;}
+.wdgrid .v{color:#cdd3e6;font-family:Menlo,monospace;word-break:break-all;}
+.wdgrid .v.link{color:#7cc0ff;cursor:pointer;}
+.wdgrid .v.link:hover{text-decoration:underline;}
+.wdstats{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+.wdstat{background:#0d1120;border:1px solid #21253a;border-radius:7px;padding:4px 10px;}
+.wdstat .l{display:block;color:#6a7090;font-size:.68rem;}
+.wdstat b{color:#e6ebf7;font-weight:600;font-size:.82rem;}
+.wdchart{margin-bottom:10px;}
+.wdchtitle{display:flex;justify-content:space-between;align-items:baseline;color:#8a90a8;font-size:.74rem;margin-bottom:3px;}
+.wdchtitle b{color:#cdd3e6;font-weight:600;font-family:Menlo,monospace;}
+.wdsvg{width:100%;height:64px;display:block;background:#0d1120;border:1px solid #21253a;border-radius:7px;}
+.wdnodata{color:#6a7090;font-size:.75rem;padding:16px 0;text-align:center;background:#0d1120;border:1px solid #21253a;border-radius:7px;}
 .modal .rppwarm{padding:4px 13px;font-size:.8rem;border-radius:6px;color:#7cc0ff;border-color:#22405e;}
 .modal .rppdrain{padding:4px 11px;font-size:.8rem;border-radius:6px;color:#c08a5a;border-color:#3a3020;}
 .rppmsg{color:#7cc0ff;font-size:.78rem;min-height:1em;margin:8px 0 2px;}
@@ -319,7 +359,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdsyncdetail{margin:8px 0 0 25px;font-family:ui-monospace,Menlo,monospace;font-size:.74rem;color:#9aa3c0;white-space:pre-wrap;border-left:2px solid #2a2e40;padding-left:10px;}
 .pdspin{display:inline-block;width:10px;height:10px;margin-right:6px;border:2px solid rgba(212,216,232,.35);border-top-color:currentColor;border-radius:50%;animation:pdspin .7s linear infinite;vertical-align:-1px;}
 @keyframes pdspin{to{transform:rotate(360deg)}}
-.pdform{display:flex;flex-direction:column;gap:6px;margin:8px 0;padding:10px;border:1px dashed #2a2e40;border-radius:8px;}
+.pdform{display:flex;flex-direction:column;gap:6px;margin:8px 0;}
 .pdinp{background:#10131f;color:#d4d8e8;border:1px solid #2a2e40;border-radius:6px;padding:5px 9px;font-size:.82rem;} .pdinp:focus{outline:none;border-color:#569cd6;}
 .pdtag{display:inline-flex;align-items:center;gap:6px;font-size:.82rem;color:#d4d8e8;}
 .pdtarget{border:1px solid #2a2e40;border-radius:9px;padding:9px 12px;margin:8px 0;background:#10131f;}
@@ -382,7 +422,6 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 <div class="modal-bg" id="pubdashbg"><div class="modal pubdash">
   <div class="pdhead"><strong id="pdtitle">Publishing</strong><span class="pdsub" id="pdbackend"></span><button class="pdx" onclick="closePubDash()" title="Close">✕</button></div>
   <div id="pdbody" class="pdbody" style="flex-direction:column;display:block"></div>
-  <div class="row"><button class="primary" onclick="closePubDash()">Done</button></div>
 </div></div>
 <div class="modal-bg" id="pdarrangebg"><div class="modal pubdash" style="max-width:660px;max-height:86vh">
   <div class="pdhead"><strong>Arrange documents</strong><span class="pdsub" id="pdarrsub"></span><button class="pdx" onclick="closeArrange()" title="Close">✕</button></div>
@@ -397,7 +436,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div class="row"><button class="primary" id="pdsyncdone" onclick="pdCloseSync()" disabled>Working…</button></div>
 </div></div>
 <div class="modal-bg" id="remotesbg"><div class="modal remotesmodal">
-  <div class="msg"><strong>Remote hosts</strong> <span style="color:#7a82a4;font-weight:400">— run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config).</span></div>
+  <button class="modalx" id="rtclose" title="Close (Esc)">✕</button>
+  <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config).</span></div>
   <div class="imrow"><label>Host</label><input id="rthost" spellcheck="false" autocomplete="off" placeholder="ssh_host (or user@host)"/></div>
   <div class="imrow"><label>Transport</label>
     <span class="rttr"><label><input type="radio" name="rttr" value="tunnel" checked onchange="_rtSyncPorts()"> SSH tunnel</label>
@@ -418,7 +458,6 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     <span class="rttr"><input id="rtxcarry" class="rtportin" type="number" min="1" step="5" placeholder="30"> <span class="pddim">s / entry on attach</span></span></div>
   <div class="imrow"><label title="A cell needing a value from the other side of a region boundary pauses with a preview (exact size + estimated time) when the transfer would take longer than this; running the cell again proceeds. 0 disables previews. Blank = default.">Confirm transfers over</label>
     <span class="rttr"><input id="rtxconfirm" class="rtportin" type="number" min="0" step="5" placeholder="15"> <span class="pddim">s (0 = never ask)</span></span></div>
-  <div class="row"><button id="rtclose">Close</button></div>
 </div></div>
 <div class="modal-bg" id="importbg"><div class="modal importmodal">
   <div class="msg"><strong>Self-contained notebook</strong> <span style="color:#7a82a4;font-weight:400">— run it now (temporary), or import into a project you own</span></div>
@@ -583,7 +622,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var h=_rtFocus; if(!h) return; var box=document.getElementById('rtfocus');
     var m=_rtMsg[h], regs=_rtRegionsOn(h);
     var head='<div class="rtfhead"><strong><span class="rtfcrumb" title="back to Remotes">Remotes</span> › 🖧 '+esc(h)+
-      '</strong><span class="rtfsub">— regions &amp; live workers</span><button class="rtfref" title="refresh roster">↻</button></div>';
+      '</strong><span class="rtfsub">— regions &amp; live workers</span></div>';
     var newSel=!(_rtEdit&&_rtEdit.name);   // the "new region" form is the active one
     var list='<div class="rppreglist">'+regs.map(function(r){
         var st=r.status, stTxt=st&&!st.ok?('⚠ '+esc(st.msg)):'';
@@ -606,13 +645,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<div class="rpprow"><label>Transport</label>'+
       '<select class="rpptr" title="transport for this region\'s workers"><option value="tunnel"'+(tr==='tunnel'?' selected':'')+'>tunnel</option><option value="direct"'+(tr==='direct'?' selected':'')+'>direct</option></select>'+
       '<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" title="first port for :direct workers — worker i binds base+3i..+3i+2. Open base..base+3·warm-1 in the firewall. Blank = auto (9100+)." value="'+((e.base_port>0)?e.base_port:'')+'"'+(tr==='direct'?'':' style="display:none"')+'></div>'+
-      '<div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" class="rppsys"'+(e.sysimage?' checked':'')+'><span>bake a worker sysimage for faster boot <span class="pddim">(opt-in; needs a C compiler + free RAM on the host)</span></span></label></div>'+
-      (editing?('<div class="rpprow rppsysrow"><label></label><div class="rppsysbox" data-region="'+esc(e.name)+'"><span class="pddim">checking build status…</span></div></div>'):'')+
+      '<div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" class="rppsys"'+(e.sysimage?' checked':'')+'><span>Use worker sysimage <span class="pddim">faster worker boot — built &amp; kept fresh in the background; needs a C compiler + free RAM on the host</span></span></label></div>'+
+      '<div class="rpprow rppsysrow"><label></label><div class="rppsysbox" data-region="'+esc(e.name)+'"></div></div>'+
       '<div class="rppact"><button class="rppsavereg" title="save this region and reconcile toward its warm count">'+(editing?'Save':'Create')+'</button></div>'+
       '</div><div class="rppmsg'+(m&&m.err?' err':'')+'">'+(m?esc(m.text):'')+'</div>';
     box.innerHTML=head+list+form+'<div class="rtfworkers"></div><div class="rtfpark"></div>';
     box.querySelector('.rtfcrumb').onclick=rtUnfocus;
-    box.querySelector('.rtfref').onclick=function(){ rtFetchRoster(h); };
     Array.prototype.forEach.call(box.querySelectorAll('.rppregrow'),function(row){ row.onclick=function(ev){
       if(ev.target.classList.contains('rppregdel')) return;
       _rtEdit=_rtRegionsOn(h).filter(function(x){return x.name===row.dataset.n;})[0]||null; rtRenderFocus(); }; });
@@ -620,7 +658,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var trSel=box.querySelector('.rpptr'), portIn=box.querySelector('.rppport');
     trSel.onchange=function(){ portIn.style.display=(trSel.value==='direct')?'':'none'; };
     box.querySelector('.rppsavereg').onclick=function(){ rtSaveRegion(h); };
-    if(editing) rtLoadSysimage(e.name);
+    var _sysChk=box.querySelector('.rppsys');
+    if(_sysChk) _sysChk.onchange=function(){ rtRenderSysNote(e.name, editing); };   // reactive: toggle updates the note
+    rtRenderSysNote(e.name, editing);            // initial paint (reserves the row height before the async fetch)
+    if(editing) rtLoadSysimage(e.name);          // fetch real build status → cache + re-render
     rtRenderWorkers(h);
   }
   // Fill only the worker list + parked rows from the cached roster — leaves the config inputs alone.
@@ -643,10 +684,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         var th=tel.length?'<div class="rppwtel">'+tel.join(' · ')+'</div>':'';
         var warm=st.warm||'', wc=warm.indexOf('ready')===0?'#56d364':warm.indexOf('warming')===0?'#e8a13f':'#8a90a8';
         var wl2=warm?'<div class="rppwtel" style="color:'+wc+'">'+(warm.indexOf('warming')===0?'⏳ ':warm.indexOf('ready')===0?'✓ ':'')+esc(warm)+'</div>':'';
-        return '<div class="rppworker"><div class="rppw1"><span class="rppwport">'+(w.alive?'🟢':'⚪')+' :'+w.port+'</span>'+badges+nb+th+wl2+'</div>'+
+        return '<div class="rppworker" data-p="'+w.port+'" title="worker details + history"><div class="rppw1"><span class="rppwport">'+(w.alive?'🟢':'⚪')+' :'+w.port+'</span>'+badges+nb+th+wl2+'</div>'+
           '<button class="rppreap" data-p="'+w.port+'" title="kill this worker + remove its files">✕ Reap</button></div>';
       }).join('');
-      Array.prototype.forEach.call(wl.querySelectorAll('.rppreap'),function(b){ b.onclick=function(){ rtReapWorker(h,+b.dataset.p); }; });
+      Array.prototype.forEach.call(wl.querySelectorAll('.rppreap'),function(b){ b.onclick=function(ev){ ev.stopPropagation(); rtReapWorker(h,+b.dataset.p); }; });
+      Array.prototype.forEach.call(wl.querySelectorAll('.rppworker'),function(row){ row.onclick=function(ev){ if(ev.target.closest&&ev.target.closest('.rppreap'))return; window.slateOpenWorkerDetail&&window.slateOpenWorkerDetail(h,+row.dataset.p); }; });
     }
     var pk=box.querySelector('.rtfpark');
     if(pk){ var parked=_rtParkedFor(h);
@@ -678,23 +720,33 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         var ports=(base_port&&warm>0)?(' · ports '+base_port+'–'+(base_port+3*warm-1)):'';
         var rootS=data_root?(' · root '+data_root):'';
         _rtMsg[h]={text:'Region “'+name+'” saved'+(warm>0?(' → '+warm+' warm · '+transport+ports+rootS+' — workers booting…'):(' · '+transport+rootS))};
-        _rtEdit=null;
-        _rtLoadRegions().then(function(){ if(_rtFocus===h) rtRenderFocus(); rtRenderHosts(); });
+        _rtLoadRegions().then(function(){ _rtEdit=_rtRegionsOn(h).filter(function(x){return x.name===name;})[0]||_rtEdit; if(_rtFocus===h) rtRenderFocus(); rtRenderHosts(); });
         if(warm>0){ var polls=0; (function poll(){ if(_rtFocus!==h) return; rtFetchRoster(h); if(++polls<6) setTimeout(poll,2500); })(); }
       }).catch(function(){ msg.className='rppmsg err'; msg.textContent='request failed'; });
   }
   // ── sysimage build status + trigger (per region) ─────────────────────────────────
   function _rtAgo(unix){ var s=Math.max(0,Math.floor(Date.now()/1000-(+unix||0)));
     if(s<90) return s+'s ago'; if(s<5400) return Math.round(s/60)+'m ago'; if(s<172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }
-  function _rtSysHtml(d){
-    if(!d||!d.ok) return '<span class="pddim">sysimage status unavailable</span>';
-    if(d.reachable===false) return '<span class="pddim">host unreachable — can’t read build state</span>';
-    if(d.compiler===false) return '<span class="rppsyswarn">⚠ no C compiler on '+esc(d.host||'')+' — install build tools (e.g. <code>apt install build-essential</code>) to enable sysimages</span>';
-    var body, btn='';
-    if(d.building){ body='<span class="rppsysbuilding"><span class="hydspin"></span> building…</span>'; }
-    else if(d.current){ body='<span class="rppsysok">✓ built · <code>'+esc(d.current)+'.so</code> · '+_rtFmtBytes(d.bytes)+(d.built?' · '+_rtAgo(d.built):'')+'</span>'; btn='<button class="rppsysbtn" title="rebuild the worker sysimage for this env">Rebuild</button>'; }
-    else { body='<span class="pddim">not built yet — boots plain until you build one</span>'; btn='<button class="rppsysbtn" title="build the worker sysimage for this env (detached on the host)">Build now</button>'; }
-    return '<div class="rppsysstat">'+body+btn+'</div>';
+  // The note under the sysimage checkbox — a pure function of the LIVE checkbox state + the last-fetched
+  // server status `d` (null until the async fetch lands / for an unsaved region).
+  function _rtSysHtml(d, checked, editing){
+    if(!checked) return '<span class="pddim">off — workers boot plain</span>';
+    if(d&&d.compiler===false) return '<span class="rppsyswarn">⚠ no C compiler on '+esc(d.host||'')+' — install build tools (e.g. <code>apt install build-essential</code>) to enable sysimages</span>';
+    if(!editing) return '<span class="pddim">will be built in the background after the region’s first worker starts</span>';
+    if(!d) return '<span class="pddim">checking build status…</span>';
+    if(!d.ok||d.reachable===false) return '<span class="pddim">build status unavailable</span>';
+    if(d.building) return '<div class="rppsysstat"><span class="rppsysbuilding"><span class="hydspin"></span> building…</span></div>';
+    if(d.current) return '<div class="rppsysstat"><span class="rppsysok">✓ built · <code>'+esc(d.current)+'.so</code> · '+_rtFmtBytes(d.bytes)+(d.built?' · '+_rtAgo(d.built):'')+'</span><button class="rppsysbtn" title="rebuild the worker sysimage for this env">Rebuild</button></div>';
+    return '<div class="rppsysstat"><span class="pddim">will be built in the background on the next worker start</span><button class="rppsysbtn" title="build it now (detached on the host)">Build now</button></div>';
+  }
+  // Render the note from the live checkbox + the status cached on the box (`_sysd`). Called on render, on
+  // checkbox toggle, and after each status fetch — the box has a reserved min-height so this never pops layout.
+  function rtRenderSysNote(name, editing){
+    var box=document.getElementById('rtfocus'); if(!box) return;
+    var sb=box.querySelector('.rppsysbox'); if(!sb) return;
+    var chk=box.querySelector('.rppsys'), checked=!!(chk&&chk.checked);
+    sb.innerHTML=_rtSysHtml(sb._sysd, checked, editing);
+    var btn=sb.querySelector('.rppsysbtn'); if(btn) btn.onclick=function(){ rtBuildSysimage(name); };
   }
   function rtLoadSysimage(name){
     var box=document.getElementById('rtfocus'); if(!box) return;
@@ -702,8 +754,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     fetch('/api/sysimage?region='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
       var b2=document.getElementById('rtfocus'), sb2=b2&&b2.querySelector('.rppsysbox');
       if(!sb2||sb2.dataset.region!==name) return;   // editor moved on — drop this response
-      sb2.innerHTML=_rtSysHtml(d);
-      var btn=sb2.querySelector('.rppsysbtn'); if(btn) btn.onclick=function(){ rtBuildSysimage(name); };
+      sb2._sysd=d;                                   // cache so a checkbox toggle can re-render without refetch
+      rtRenderSysNote(name, true);
       if(d&&d.ok&&d.building) setTimeout(function(){ rtLoadSysimage(name); },4000);   // poll while building
     }).catch(function(){});
   }
@@ -758,6 +810,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     _rtSyncPorts();rtRenderHosts();_xferLoad();_rtLoadRegions().then(function(){rtRenderHosts();});
     remotesBg.classList.add('show');rtHost.focus();}
   function closeRemotes(){if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}rtUnfocus();remotesBg.classList.remove('show');}
+  // Bridge for the activity.js island: open the Remotes modal focused on a host with that region selected
+  // in its config editor. (Kept minimal — the Remotes modal itself is still vanilla; migrate it later.)
+  window.slateOpenRegionConfig=function(host,name){ openRemotes(); _rtLoadRegions().then(function(){ rtFocusHost(host);
+    var r=_rtRegionsOn(host).filter(function(x){return x.name===name;})[0]; if(r){_rtEdit=r;rtRenderFocus();} }); };
   function rtTest(){
     var host=rtHost.value.trim(); if(!host){rtSteps.innerHTML='<div class="pddim">Enter a host to test.</div>';return;}
     var tr=_rtTransport(); if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}
@@ -784,7 +840,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   rtTestBtn.onclick=rtTest;
   rtHost.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();rtTest();}});
   remotesBg.addEventListener('mousedown',function(e){if(e.target===remotesBg)closeRemotes();});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&remotesBg.classList.contains('show')){if(_rtFocus){e.stopPropagation();rtUnfocus();}else closeRemotes();}});
+  document.addEventListener('keydown',function(e){if(e.key!=='Escape')return;   // (the worker-detail popup is a Preact island; it handles its own Esc first, capture-phase)
+    if(remotesBg.classList.contains('show')){if(_rtFocus){e.stopPropagation();rtUnfocus();}else closeRemotes();}});
   function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
     if(moreTrunc)html+='<li class="more">… more entries — keep typing to filter</li>';
     comp.innerHTML=html;comp.style.display=(items.length||moreTrunc)?'block':'none';}
@@ -1626,101 +1683,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var _pb=document.getElementById('published');
     if(_pb) _pb.innerHTML='<div class="siteload"><span class="spin-sm"></span> Loading sites…</div>';
   }
-  // ── Remote activity monitor — a compact live `top` of every pool/region worker ──────────────
-  var _actTimer=null, _actInflight=false;
-  function _actFmtBytes(b){ b=+b||0; if(b<1048576) return Math.round(b/1024)+'K'; if(b<1073741824) return Math.round(b/1048576)+'M'; return (b/1073741824).toFixed(1)+'G'; }
-  // Heading (matches the other columns' `.sect` headers) + a card body. Rendered for every state so
-  // the third column reads as a real column — a heading up top, a spinner/rows/empty note below.
-  function _actShell(inner){ return '<h2 class="sect">Remote activity</h2><div class="actmon-body">'+inner+'</div>'; }
-  function _actLoading(){ var el=document.getElementById('actmon'); if(!el||el.dataset.loaded) return;
-    el.innerHTML=_actShell('<div class="actloading"><span class="actspin"></span>checking hosts…</div>'); }
-  function _actStart(){ if(_actTimer) return; _actLoading(); _actTick(); _actTimer=setInterval(function(){ if(!document.hidden) _actTick(); }, 3000); }
-  // Poll /api/regions for the configured/parked hosts, then each host's live roster (stats carry
-  // cpu/rss/running from the telemetry sampler). Overlap-guarded so a slow ssh probe can't stack.
-  function _actTick(){
-    if(_actInflight) return; _actInflight=true;
-    var done=function(){ _actInflight=false; };
-    fetch('/api/regions').then(function(r){return r.json();}).then(function(d){
-      var regions=d.regions||[];
-      var hs={}; regions.forEach(function(p){if(p.host)hs[p.host]=1;}); (d.parked||[]).forEach(function(p){hs[p.host]=1;});
-      var hosts=Object.keys(hs);
-      if(!hosts.length){ _actRender([], regions); done(); return; }
-      Promise.all(hosts.map(function(h){ return fetch('/api/remote-workers?host='+encodeURIComponent(h))
-        .then(function(r){return r.json();}).then(function(d){return {host:h,workers:(d.workers||[])};})
-        .catch(function(){return {host:h,workers:[]};}); }))
-        .then(function(hd){ _actRender(hd, regions); done(); }).catch(done);
-    }).catch(done);
-  }
-  // One worker's row → {rss, busy, alive, html}. The host lives in the group header, so the row shows
-  // just the port + state + telemetry (cpu bar / rss / current activity).
-  function _actWorkerRow(w){
-    var st={}; try{st=JSON.parse(w.stats||'{}');}catch(_){}
-    var mf={}; try{mf=JSON.parse(w.manifest||'{}');}catch(_){}
-    var alive=w.alive!==false;
-    var state=!alive?'dead':(w.state==='attached'?'attached':'idle');
-    var cpu=(st.cpu!==undefined&&st.cpu>=0)?st.cpu:null;
-    var rss=st.rss||0;
-    var running=Array.isArray(st.running)?st.running:[];
-    var warm=st.warm||'', warming=warm.indexOf('warming')===0;
-    var busy=alive&&(running.length>0||(st.evals||0)>0||warming);
-    // Notebook served, shortened: drop the `#region` suffix (region is the group header) and `.jl`.
-    var nb=(state==='attached'&&mf.notebook)?String(mf.notebook).replace(/#[^#]*$/,'').replace(/\.jl$/,''):'';
-    var runTxt=!alive?'dead':running.length?('▶ '+running.join(', ')):
-      warming?('⏳ '+warm):warm.indexOf('ready')===0?('✓ '+warm):(nb||'idle');
-    // Fill: width = cpu%, colour by load (green idle → amber busy → red hot); a tiny-but-nonzero load
-    // still shows a nub so "barely working" ≠ "idle". No telemetry (cpu==null) → empty track.
-    var cpuPct=cpu==null?0:(cpu<=0?0:Math.max(5,Math.min(100,cpu)));
-    var barCol=cpu>=85?'#e5636e':cpu>=50?'#e8a13f':'#3fb96e';
-    var fill=cpu==null||cpuPct<=0?'':'<span class="actbarf" style="width:'+cpuPct+'%;background-color:'+barCol+'"></span>';
-    return { rss:rss, busy:busy, alive:alive, html:
-      '<div class="actrow">'+
-        '<span class="actlabel"><span class="actwho">'+(alive?'🟢':'⚪')+' :'+w.port+'</span>'+
-        '<span class="actbadge '+state+'">'+state+'</span></span>'+
-        '<span class="actbar">'+fill+'</span>'+
-        '<span class="actcpun">'+(cpu==null?'—':cpu+'%')+'</span>'+
-        '<span class="actrss">'+(rss?_actFmtBytes(rss):'—')+'</span>'+
-        '<span class="actrun'+(runTxt==='idle'?' idle':'')+'" title="'+esc(runTxt)+'">'+esc(runTxt)+'</span></div>' };
-  }
-  // Grouped by REGION (manifest region= tag). Defined regions first (with their host/warm/reconcile
-  // status in the header, so a warm-but-workerless or failed region still shows); then tags with no
-  // matching def; then untagged workers (a notebook's own remote main kernel, or strays).
-  function _actRender(hostData, regions){
-    var el=document.getElementById('actmon'); if(!el) return;
-    el.dataset.loaded='1';
-    var all=[]; hostData.forEach(function(hd){ (hd.workers||[]).forEach(function(w){
-      var mf={}; try{mf=JSON.parse(w.manifest||'{}');}catch(_){}
-      all.push({w:w, host:hd.host, region:mf.region||''}); }); });
-    var byRegion={}; all.forEach(function(x){ (byRegion[x.region]=byRegion[x.region]||[]).push(x); });
-    var nW=all.length, totRss=0, busy=0, sections=[], shown={};
-    var emit=function(headHtml, xs){
-      var body=(xs||[]).map(function(x){ var r=_actWorkerRow(x.w); totRss+=r.rss; if(r.busy)busy++; return r.html; }).join('');
-      sections.push(headHtml+(body||'<div class="actempty">no workers</div>'));
-    };
-    (regions||[]).slice().sort(function(a,b){return (a.name||'').localeCompare(b.name||'');}).forEach(function(rg){
-      shown[rg.name]=1;
-      var xs=byRegion[rg.name]||[], err=rg.status&&rg.status.ok===false;
-      if(!xs.length && !(rg.warm>0) && !err) return;   // a bare def with nothing live/warm/failed → skip
-      var head='<div class="actgrouphd'+(err?' err':'')+'">🖧 '+esc(rg.name)+
-        ' <span class="actgrouphost">'+esc(rg.host||'(no host)')+'</span>'+
-        (rg.warm>0?' <span class="actgroupwarm">warm '+rg.warm+'</span>':'')+
-        (err?' <span class="actgrouperr" title="'+esc(rg.status.msg)+'">⚠ reconcile failed</span>':'')+'</div>';
-      emit(head, xs);
-    });
-    Object.keys(byRegion).sort().forEach(function(name){
-      if(name==='' || shown[name]) return;   // a region tag with no registry def (stray/renamed)
-      emit('<div class="actgrouphd">🖧 '+esc(name)+' <span class="actgrouphost">'+esc((byRegion[name][0]||{}).host||'')+' · not in registry</span></div>', byRegion[name]);
-    });
-    if(byRegion['']&&byRegion[''].length) emit('<div class="actgrouphd">💻 other workers</div>', byRegion['']);
-    if(!sections.length){ el.innerHTML=''; return; }   // nothing at all → collapse (:empty hides it)
-    var agg='<div class="actagg">'+nW+' worker'+(nW!==1?'s':'')+' · '+_actFmtBytes(totRss)+' · '+busy+
-      ' busy <span class="actlive">●</span></div>';
-    el.innerHTML=_actShell(agg+sections.join(''));
-  }
-  loadSessions(); loadPublished(); _actStart();
+  loadSessions(); loadPublished();   // the remote-activity monitor is now the activity.js Preact island (self-starts)
   // Keep the Running + Recent lists live: poll while the tab is visible (notebooks open/close
   // from other tabs, agents, or MCP tools), and refresh immediately when the tab regains focus.
   setInterval(function(){ if(!document.hidden){ loadSessions(); } }, 4000);   // not loadPublished — its ledger read can hit the network (gist)
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadPublished(); _actTick(); } });
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden){ loadSessions(); loadPublished(); } });
   window.addEventListener('pageshow',function(){ loadSessions(); loadPublished(); });   // back/forward cache restore
   // Prefill the last directory we opened from (but DON'T open the completion
   // dropdown on load — it would cover the open-sessions list; it opens when the
@@ -1737,4 +1704,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   </svg>
   <span>Docs</span>
 </a>
+<!-- Home-page Preact island: the remote-activity monitor + worker-detail popup (replaces the former
+     inline innerHTML render). Bridges to the vanilla Remotes modal via window.slateOpen* helpers. -->
+<script type="module" src="/assets/js/activity.js"></script>
 </body></html>

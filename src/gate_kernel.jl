@@ -232,7 +232,10 @@ const _POLLER = Ref{Any}(nothing)
 # to read TRENDS (rss climbing, cpu sustained), not just the latest point. Idle/detached workers
 # still surface theirs via `list_remote_workers` (the `.stats` sidecar).
 const _KERNEL_STATS = Dict{String,Vector{Any}}()
-const _KERNEL_STATS_MAX = 30              # ~60s of history at the worker's 2s cadence
+# Ring cap per kernel — how many telemetry samples the hub keeps. Default ~1h at the worker's 2s cadence
+# (each sample is a small NamedTuple, so an hour × a handful of kernels is a few MB). Tunable; the watchdog
+# reads only bounded TAILS of this (see `_watchdog_scan!`), so a long ring doesn't change its trend windows.
+_kernel_stats_max() = max(30, something(tryparse(Int, get(ENV, "KAIMONSLATE_TELEMETRY_HISTORY", "")), 1800))
 const _STATS_LOCK = ReentrantLock()
 
 # Server-injected push hooks (same inversion as `_BRINGUP_SINK` / `register_emit!`): after a telemetry
@@ -270,7 +273,8 @@ function _record_telemetry!(conn_name::AbstractString, raw::AbstractString)
     lock(_STATS_LOCK) do
         h = get!(_KERNEL_STATS, String(conn_name), Any[])
         push!(h, s)
-        length(h) > _KERNEL_STATS_MAX && deleteat!(h, 1:(length(h) - _KERNEL_STATS_MAX))
+        mx = _kernel_stats_max()
+        length(h) > mx && deleteat!(h, 1:(length(h) - mx))
     end
     # Push this fresh sample to any open page of the owning notebook (main/region pill + popup) — so an
     # IDLE worker's number updates live rather than lagging until the next notebook state version-bump.

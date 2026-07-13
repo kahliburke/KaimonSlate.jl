@@ -1093,8 +1093,12 @@ function _watchdog_scan!(nb::LiveNotebook)
             push!(alerts, (kind = "runaway-cpu", scope = "kernel", target = side, since = recent[1].rcv,
                            detail = "cpu ≥$(round(Int, _WD_CPU_HOT))% for $(length(recent)) samples"))
         end
-        if latest.rss >= _WD_RSS_CEIL && length(hist) >= 3 && hist[end].rss > hist[1].rss
-            push!(alerts, (kind = "runaway-mem", scope = "kernel", target = side, since = hist[1].rcv,
+        # "climbing" over a BOUNDED recent window (~last 30 samples ≈ 60s), not hist[1] — the ring is now up
+        # to ~1h long, and comparing against the oldest sample would flag any worker whose rss grew over the
+        # hour as "runaway". mw0 is the window's start index.
+        mw0 = max(1, length(hist) - 29)
+        if latest.rss >= _WD_RSS_CEIL && length(hist) >= 3 && hist[end].rss > hist[mw0].rss
+            push!(alerts, (kind = "runaway-mem", scope = "kernel", target = side, since = hist[mw0].rcv,
                            detail = "rss $(_gib(latest.rss)) and climbing"))
         end
         if length(hist) >= 3
