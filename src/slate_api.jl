@@ -494,7 +494,7 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
 stage restores instead of recomputing) · needs=<id>,… (manual dependency edges on earlier code cells,
 for effects no variable carries, e.g. DB tables; 🔗 link mode in the DAG pane) · plus free-form tags.
     Presentation: slide (force a new slide) · notes (speaker notes — presenter view only).
-    Document metadata (ROLES): title · abstract · bibliography. Expensive cells (≥400ms) auto-cache.
+    Document metadata (ROLES): title · abstract · bibliography. Expensive cells (≥150ms) auto-cache.
 
 ## Document metadata = role-tagged cells (publishable PDF / slides / HTML)
 A notebook is also a publishable document. Tag ordinary cells with a ROLE; exports interpret it:
