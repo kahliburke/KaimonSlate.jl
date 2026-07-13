@@ -31,6 +31,17 @@ function effective_worker_threads(kthreads::AbstractString)
     return get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
 end
 
+# Self-identifying process tag for `ps` — "slate:<region>@<notebook>:<port>". Either part may be absent:
+# a WARM-POOL worker has a region but no notebook yet (label is empty), a notebook's own worker has no
+# region. The kernel label encodes "<notebook>[#region]" — split the notebook off it. Sanitised to a
+# single shell-safe token (used as a KAIMONSLATE_WORKER env var and a trailing cmdline arg).
+function _worker_tag(label::AbstractString, region::AbstractString, port::Integer)
+    nb = first(split(String(label), '#'))
+    ident = join(filter(!isempty, String[String(region), String(nb)]), "@")
+    isempty(ident) && (ident = "worker")
+    return "slate:" * replace(ident, r"[^\w.@=+-]" => "_") * ":" * string(port)
+end
+
 const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
 # Slate-owned env carrying ONLY Revise (+ its deps), so the worker can hot-reload the
 # notebook's parent-project /src without adding Revise to the user's project. Stacked AFTER
@@ -454,7 +465,9 @@ function _spawn_worker!(k::GateKernel)
                get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
     cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas,
-                 "KAIMON_SESSION_LABEL" => k.label)   # worker reports this as its gate-session name (notebook filename)
+                 "KAIMON_SESSION_LABEL" => k.label,   # worker reports this as its gate-session name (notebook filename)
+                 # Self-identifying process tag (see the remote path) — in `ps e` / /proc/<pid>/environ.
+                 "KAIMONSLATE_WORKER" => _worker_tag(k.label, "", port))
     # Memo-store cap: forward the panel/config setting into the worker (its env/adaptive default
     # applies when unset — passing nothing keeps the worker's own resolution intact).
     MEMO_CAP_GB[] > 0 && (cmd = addenv(cmd, "KAIMONSLATE_MEMO_CAP_GB" => string(MEMO_CAP_GB[])))

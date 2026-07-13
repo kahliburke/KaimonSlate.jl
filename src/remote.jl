@@ -709,8 +709,13 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     end
     nthreads = effective_worker_threads(threads)
     proj = startswith(t.project, "~/") ? "\$HOME/" * t.project[3:end] : t.project   # --project=~ won't expand
-    jl = "julia --project=$proj --startup-file=no --threads=$nthreads $remote_script"
-    launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+    # Self-identifying process tag: which region/notebook/port this worker serves, so `ps` isn't a wall of
+    # anonymous `julia … worker-<port>.jl`. Exposed BOTH ways — as `KAIMONSLATE_WORKER` (visible in `ps e` /
+    # /proc/<pid>/environ) and as a trailing cmdline arg the worker ignores (visible in plain `ps aux`, e.g.
+    # `ps aux | grep slate:`). Region AND/OR notebook, whichever this spawn has (see `_worker_tag`).
+    tag = _worker_tag(label, region, port)
+    jl = "julia --project=$proj --startup-file=no --threads=$nthreads $remote_script '$tag'"
+    launch = "cd \$HOME && export KAIMONSLATE_WORKER='$tag' && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
     # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
     # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
