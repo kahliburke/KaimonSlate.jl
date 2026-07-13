@@ -11,14 +11,15 @@
 
 using Tachikoma
 
-# Offered thread specs: "<compute>,<interactive>". One interactive thread is reserved so the gate
-# stays responsive; vary the compute count. `auto` lets Julia pick (≈ all cores).
-const _OPTIONS = ["1,1", "2,1", "4,1", "8,1", "auto,1"]
+# Offered thread specs: "<compute>,<interactive>". TWO interactive threads are reserved so the gate stays
+# responsive (heartbeats/cancels + reactive handling) even while a data transfer or compute batch runs;
+# vary the compute count. `auto` lets Julia pick (≈ all cores).
+const _OPTIONS = ["1,2", "2,2", "4,2", "8,2", "auto,2"]
 
 mutable struct PanelState
     list::Tachikoma.SelectableList
     ctx::Any
-    current::String     # spec currently applied in the extension ("" → default 1,1)
+    current::String     # spec currently applied in the extension ("" → the adaptive default, min(cores,8),2)
     ncpu::Int
     status::String
 end

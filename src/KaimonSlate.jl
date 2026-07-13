@@ -212,7 +212,7 @@ _slate_config_path() = SlateHome.config_file()   # our OWN XDG config home (off 
 _slate_config() = (f = _slate_config_path(); isfile(f) ?
     (try; JSON.parsefile(f); catch; Dict{String,Any}(); end) : Dict{String,Any}())
 
-"Current worker Julia-thread spec (\"<compute>,<interactive>\"); \"\" means the default (1,1)."
+"Current worker Julia-thread spec (\"<compute>,<interactive>\"); \"\" means the adaptive default (min(cores,8),2)."
 worker_threads()::String = String(get(_slate_config(), "worker_threads", ""))
 
 """
