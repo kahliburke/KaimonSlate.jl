@@ -607,7 +607,7 @@ function create_tools(GateTool::Type)
     """
     function reap_worker(host::String, port::Int)::String
         h = strip(host); isempty(h) && return "Give an ssh host."
-        try; _drop_kernels_for_worker!(h, port); catch; end   # wake any eval bound to this worker before it dies
+        try; NotebookServer._drop_kernels_for_worker!(_HUB[], h, port); catch; end   # wake any eval bound to this worker before it dies
         ReportEngine.reap_remote_worker(h, port)
         return "✅ reaped worker-$port on '$h' (process killed, files removed)."
     end

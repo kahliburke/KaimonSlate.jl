@@ -49,6 +49,10 @@
           try { window.onWorkerLog && window.onWorkerLog(m.side, m.line); } catch (_) {}
           return;
         }
+        if (m.t === 'workers') {                              // worker/pill list push (region spawn start/connect)
+          try { window.onWorkersUpdate && window.onWorkersUpdate(m.data); } catch (_) {}
+          return;
+        }
         const p = pending.get(m.id); if (!p) return;          // else: a call reply
         pending.delete(m.id);
         m.ok ? p.resolve(m.value) : p.reject(new Error(m.error || 'slateCall failed'));

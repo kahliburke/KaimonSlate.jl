@@ -753,7 +753,7 @@ function _make_router(h::Hub)
         host = strip(String(get(b, "host", "")))
         port = tryparse(Int, string(get(b, "port", "")))
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
-        try; _drop_kernels_for_worker!(host, port); catch; end   # wake any eval bound to this worker before it dies
+        try; _drop_kernels_for_worker!(h, host, port); catch; end   # wake any eval bound to this worker before it dies
         _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
     end)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin
@@ -1672,6 +1672,18 @@ function _log_push!(h, conn_name::AbstractString, line::AbstractString)
     nb, side = owner
     frame = try
         string("{\"t\":\"log\",\"side\":", JSON.json(String(side)), ",\"line\":", JSON.json(String(line)), "}")
+    catch; return nothing; end
+    _ws_broadcast!(nb, frame)
+    return nothing
+end
+
+# Current worker/pill list → `{t:"workers",data:[...]}`. Pushed at a region spawn-START (so the pill
+# appears immediately in a "starting" state, before the worker's gate is even up and any telemetry flows)
+# and again on connect — the browser's renderWorkers() then draws/updates the pills without waiting for
+# the next notebook state version-bump (which is why they used to pop in only after the first run).
+function _workers_push!(nb::LiveNotebook)
+    frame = try
+        string("{\"t\":\"workers\",\"data\":", JSON.json(_workers_json(nb)), "}")
     catch; return nothing; end
     _ws_broadcast!(nb, frame)
     return nothing

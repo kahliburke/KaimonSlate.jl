@@ -1164,6 +1164,13 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .wstat:empty { display:none; }
 .wpill.reconnecting { color:#e8a13f; border-color:color-mix(in srgb, #e8a13f 55%, var(--border));
   background:color-mix(in srgb, #e8a13f 12%, var(--bg3)); animation:btnpulse 1.1s ease-in-out infinite; }
+/* Degraded: still connected but missing liveness pings — a MUTED-yellow early warning (no pulse; it's a
+   heads-up that trouble may be coming, not an active respawn). Distinct from the amber .reconnecting
+   (worker actually dropped / reconnecting). */
+.wpill.degraded, .runloc.degraded { color:#c2b158; border-color:color-mix(in srgb, #c2b158 55%, var(--border));
+  background:color-mix(in srgb, #c2b158 12%, var(--bg3)); }
+.wchip-warn { color:#c2b158; background:color-mix(in srgb, #c2b158 12%, var(--bg3));
+  border-color:color-mix(in srgb, #c2b158 45%, var(--border)); }
 /* Worker / region status + live-log popup. */
 .workerpop { width:min(760px, 92vw); max-height:80vh; display:flex; flex-direction:column; padding:0; overflow:hidden; }
 .workerpop-head { display:flex; flex-direction:column; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg2); font-size:.86rem; }

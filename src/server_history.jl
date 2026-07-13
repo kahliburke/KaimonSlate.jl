@@ -685,6 +685,22 @@ function _worker_entry(nb::LiveNotebook, side::AbstractString, k)
         catch
         end
     end
+    # Graduated health for the pill (green → muted-yellow "degraded" → amber "disconnected") + a note
+    # saying WHY — surfacing what the liveness supervisor already knows so an unwell pill isn't a mystery.
+    if k isa ReportEngine.GateKernel && (k.target isa ReportEngine.RemoteTarget || k.remote)
+        since = get(_KERNEL_UNRESPONSIVE_SINCE, k, nothing)
+        if k.conn === nothing
+            d["status"] = k.redial_hold ? "disconnected" : "connecting"
+            d["note"]   = k.redial_hold ?
+                "worker stopped responding — press ▶ or re-run to reconnect" : "reconnecting…"
+        elseif since !== nothing
+            el = round(Int, time() - something(since, time()))
+            d["status"] = "degraded"
+            d["note"]   = "no liveness reply for $(el)s — auto-drops & reconnects at $(round(Int, _DEAD_WIRE_GRACE))s"
+        else
+            d["status"] = "ok"
+        end
+    end
     return d
 end
 

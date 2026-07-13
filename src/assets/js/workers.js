@@ -17,8 +17,11 @@ const _wpMB = v => (v == null || v < 0) ? '' : (v / 2 ** 20 >= 1024 ? (v / 2 ** 
 // every metric stays visible on its own chip, wrapping to a new row as needed. `note` shows when there's no
 // sample yet (e.g. an in-process kernel or a just-spawned worker).
 function _wpStatsChips(statsJson, note) {
+  // A degraded/disconnected/starting worker carries a `note` explaining WHY — show it as a leading warning
+  // chip so the popup says what's wrong even when telemetry is stale or absent (was a bare "(no log yet)").
+  const warn = note ? '<span class="wchip wchip-warn">⚠ ' + _wpEsc(note) + '</span>' : '';
   let s; if (statsJson) { try { s = JSON.parse(statsJson); } catch (_) { s = null; } }
-  if (!s) return note ? '<span class="wchip wchip-note">' + _wpEsc(note) + '</span>' : '';
+  if (!s) return warn;
   // `w` = reserved value width (ch) sized to the metric's max, so a chip's width stays fixed as the number
   // changes each tick (paired with tabular-nums in CSS) — the row no longer jitters on every update.
   const chip = (k, v, w) => '<span class="wchip"><span class="wchip-k">' + k + '</span>' +
@@ -32,7 +35,7 @@ function _wpStatsChips(statsJson, note) {
   if (s.sys_cpu >= 0) p.push(chip('host cpu', s.sys_cpu + '%', 5));
   if (s.load1 >= 0) p.push(chip('load', s.load1, 5));
   if (s.sys_mem_total > 0) p.push(chip('host mem', _wpMB(s.sys_mem_total - s.sys_mem_free) + ' / ' + _wpMB(s.sys_mem_total), 13));
-  return p.join('');
+  return warn + p.join('');
 }
 
 // ── Worker-log prettifier ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +110,10 @@ function _wpRenderLog(note) {
 function _wpPillStat(statsJson) {
   if (!statsJson) return '';
   let s; try { s = JSON.parse(statsJson); } catch (_) { return ''; }
+  // While the worker is still importing/precompiling its packages, show that progress on the pill face
+  // instead of cpu·rss (which is meaningless mid-boot). `warm` is the worker's _WARM_STATUS —
+  // "warming n/total · Pkg" during preload, then "ready · …" (which falls through to cpu·rss below).
+  if (s.warm && s.warm.indexOf('warming') === 0) return '⏳ ' + s.warm;
   const p = [];
   if (s.cpu >= 0) p.push(Math.round(s.cpu) + '%');
   if (s.rss > 0) p.push(_wpMB(s.rss));
@@ -131,14 +138,37 @@ function renderWorkers(state) {
   const box = document.getElementById('workerpills'); if (!box) return;
   box.innerHTML = ws.filter(w => w.side).map(w => {
     const label = _wpLabel(w.side, w.host);
-    const stat = _wpPillStat(_wpLive[w.side] || w.stats);
-    // No inline onclick — a side name with a quote would break the attribute (`JSON.stringify` emits ")
-    // and truncate the handler. Opened via delegation off `data-side` (see the listener below) instead.
-    return '<span class="wpill' + (w.connected ? '' : ' reconnecting') + '" data-side="' + _wpEsc(w.side) +
-      '" title="region ‘' + _wpEsc(label) +
-      '’ — click for its live log &amp; status">🖧 ' + _wpEsc(label) +
-      (stat ? ' <span class="wstat">' + _wpEsc(stat) + '</span>' : '') + (w.connected ? '' : ' · …') + '</span>';
+    // Graduated health: green (ok) → muted-yellow (degraded: connected but missing liveness pings) → amber
+    // (connecting/disconnected). The class drives the colour; the face gives a one-glance reason.
+    const st = w.status || (w.connected ? 'ok' : 'connecting');
+    const cls = st === 'degraded' ? ' degraded' : (st === 'ok' ? '' : ' reconnecting');
+    let face = _wpPillStat(_wpLive[w.side] || w.stats);
+    if (st === 'degraded') face = '⚠ ' + _wpUnwellShort(w.note);
+    else if (st === 'disconnected') face = '✕ offline';
+    else if (st === 'connecting') face = face || '⏳ starting';
+    // No inline onclick — a side name with a quote would break the attribute; opened via data-side delegation.
+    const tipEnd = w.note ? _wpEsc(w.note) : 'click for its live log &amp; status';
+    return '<span class="wpill' + cls + '" data-side="' + _wpEsc(w.side) +
+      '" title="region ‘' + _wpEsc(label) + '’ — ' + tipEnd + '">🖧 ' + _wpEsc(label) +
+      (face ? ' <span class="wstat">' + _wpEsc(face) + '</span>' : '') + '</span>';
   }).join('');
+}
+
+// Short reason for a degraded pill face — pull the "Ns" out of the note ("no liveness reply for 18s …").
+function _wpUnwellShort(note) { const m = note && /(\d+)s/.exec(note); return m ? m[1] + 's no reply' : 'unresponsive'; }
+
+// The worker/pill list pushed over the WS (region spawn-start/connect, and every liveness miss/recovery)
+// → redraw the pills immediately, without waiting for the next full notebook state. If a popup is open for
+// one of these workers, refresh its status/note chips too so the degraded countdown ticks live in the popup.
+function onWorkersUpdate(ws) {
+  try {
+    ws = ws || [];
+    renderWorkers({ workers: ws });
+    if (_wpSide !== null) {
+      const w = ws.find(x => (x.side || '') === _wpSide);
+      if (w) { const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(_wpLive[_wpSide] || w.stats, w.note); }
+    }
+  } catch (_) {}
 }
 
 // A worker telemetry sample pushed over the WS → update its pill face live (and the popup breakdown if
@@ -193,7 +223,7 @@ async function _wpRefresh() {
   let r; try { r = await api('GET', '/api/worker-log?side=' + encodeURIComponent(side) + '&lines=500'); }
   catch (_) { return; }
   if (_wpSide !== side) return;                                  // switched to another region (or closed) mid-fetch → stale response, drop it
-  const dot = r.connected ? '🟢' : '🟡';
+  const dot = !r.connected ? '🟠' : (r.status === 'degraded' ? '🟡' : '🟢');
   document.getElementById('workerpop-title').innerHTML = dot + ' ' + (r.side ? 'region' : 'main worker') +
     ' · ' + _wpEsc(_wpLabel(r.side, r.host)) + (r.port ? ' :' + r.port : '');
   document.getElementById('workerpop-stats').innerHTML = _wpStatsChips(r.stats, r.note);

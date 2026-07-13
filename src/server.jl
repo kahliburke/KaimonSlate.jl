@@ -868,6 +868,7 @@ function _heal_dead_wire!(nb::LiveNotebook, k, unresp_s::Real = 0.0)
     catch e; ReportEngine._rlog("liveness: drop failed on $(nb.id)/$(side): " * first(sprint(showerror, e), 120)); false
     end
     dropped && !auto && (try; k.redial_hold = true; catch; end)
+    dropped && (try; _workers_push!(nb); catch; end)   # pill flips to amber "reconnecting" NOW, not at the next state
     return dropped
 end
 
@@ -891,13 +892,21 @@ function _liveness_sweep!(nb::LiveNotebook)
             ReportEngine._rlog("liveness: __slate_running failed on $(nb.id)/$(_kernel_side_label(nb, k)): " * first(sprint(showerror, e), 120))
         end
         if ok
-            delete!(_KERNEL_UNRESPONSIVE_SINCE, k)   # any reply resets the clock — a blip is forgiven
+            if haskey(_KERNEL_UNRESPONSIVE_SINCE, k)   # was unwell → recovered this sweep
+                delete!(_KERNEL_UNRESPONSIVE_SINCE, k) # any reply resets the clock — a blip is forgiven
+                try; _workers_push!(nb); catch; end    # pill back to green immediately
+            end
         elseif k.target isa ReportEngine.RemoteTarget || k.remote   # remote-only auto-drop
             since = get!(() -> time(), _KERNEL_UNRESPONSIVE_SINCE, k)   # stamp the first silent sweep
             unresp = time() - since
             if unresp >= _DEAD_WIRE_GRACE
                 delete!(_KERNEL_UNRESPONSIVE_SINCE, k)
-                _heal_dead_wire!(nb, k, unresp)
+                _heal_dead_wire!(nb, k, unresp)        # → amber "disconnected" (pushes inside)
+            else
+                # Still CONNECTED but missing pings: surface it as a muted-yellow "degraded" pill NOW (an
+                # early warning, well before the drop), and re-push each sweep so its unresponsive-countdown
+                # ticks live in the pill/popup.
+                try; _workers_push!(nb); catch; end
             end
         end
     end
@@ -919,8 +928,8 @@ end
 # a now-dead wire — an in-flight eval on it would otherwise block until the liveness sweep drops the wire
 # (~15s) or, worst case, the full eval timeout. Drop those wires NOW so the eval wakes and errors at once.
 # The liveness sweep remains the safety net if this host/port match is imperfect (e.g. a remapped tunnel).
-function _drop_kernels_for_worker!(host::AbstractString, port::Integer)
-    h = _HUB[]; h === nothing && return 0
+function _drop_kernels_for_worker!(h, host::AbstractString, port::Integer)
+    h === nothing && return 0   # the hub is PASSED IN — `_HUB` lives in the outer KaimonSlate module, not here
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     n = 0; seen = String[]
     for nb in nbs, k in _nb_kernels(nb)
@@ -932,6 +941,7 @@ function _drop_kernels_for_worker!(host::AbstractString, port::Integer)
             if ReportEngine._drop_kernel_conn!(k)
                 n += 1
                 ReportEngine._rlog("reap: dropped live wire on $(nb.id)/$(_kernel_side_label(nb, k)) (worker-$port on $host reaped)")
+                try; _workers_push!(nb); catch; end   # pill flips to amber "reconnecting" immediately
             end
         catch; end
     end
@@ -1470,9 +1480,11 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
             _broadcast_progress(nb, cell)
         end
         ReportEngine._do_userprog(nb.report.id, 0.0, "⌛ bringing up worker on $host…", "spawn-" * cell.id, false)
+        try; _workers_push!(nb); catch; end   # the pill appears NOW (starting), not after the run completes
         try
             ReportEngine.prepare!(kernel, nb.report)
             _prime_namespace!(nb, kernel, side)
+            try; _workers_push!(nb); catch; end   # connected → pill flips out of "starting"; telemetry takes over
         catch e
             ReportEngine._rlog("region: prime before $(cell.id) on $host failed: " *
                                first(sprint(showerror, e), 160))
