@@ -753,6 +753,7 @@ function _make_router(h::Hub)
         host = strip(String(get(b, "host", "")))
         port = tryparse(Int, string(get(b, "port", "")))
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
+        try; _drop_kernels_for_worker!(host, port); catch; end   # wake any eval bound to this worker before it dies
         _json(Dict("ok" => ReportEngine.reap_remote_worker(host, port)))
     end)
     HTTP.register!(router, "GET", "/n/{id}", req -> begin

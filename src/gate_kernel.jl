@@ -154,10 +154,14 @@ mutable struct GateKernel <: Kernel
                      # NOT bumped on a reattach (park/record/probe reuse the SAME live process + namespace).
                      # The region dedups (prime / resource / datadir / synced) fold this into their key, so
                      # a swapped worker's blank namespace is correctly re-established instead of skipped.
+    redial_hold::Bool # set when the liveness supervisor DROPS this wire as dead under the MANUAL retry
+                     # policy: `prepare!` then refuses to re-dial/cold-spawn until an EXPLICIT run clears
+                     # it (a reactive cascade errors instead), so a flaky region isn't silently replaced
+                     # behind the user's back. Always false under the `auto` policy (eager re-dial).
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "", label::AbstractString = "",
                target = nothing) =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing, 0)
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing, 0, false)
 end
 
 """
@@ -535,8 +539,38 @@ function _kill_worker!(k::GateKernel; kill_remote::Bool = false)
     return nothing
 end
 
+# Drop a kernel's LIVE gate connection without killing the worker — the dead-wire self-heal. Unlike
+# `_kill_worker!` this never parks the wire (a silent wire must not be cached for reuse) and never
+# touches the remote process (it may be alive-but-unreachable, or already gone). It just tears the
+# local side down: `disconnect!` closes the DEALER and — crucially — fails every pending caller fast
+# (`_close_request_channel!` closes their inboxes), so an eval BLOCKED on this wire wakes immediately
+# and errors instead of hanging out the full eval timeout. Closing the tunnel forces a fresh transport,
+# and nulling `conn` makes the next `prepare!` re-dial (reconnect/re-adopt). Idempotent; returns whether
+# a live connection was actually dropped. Called by the hub's liveness supervisor and by an explicit reap.
+function _drop_kernel_conn!(k::GateKernel)
+    lock(k.lock) do
+        c = k.conn
+        c === nothing && return false
+        try; lock(_GATE_SESSION_LOCK) do; delete!(_GATE_SESSION, c.name); end; catch; end
+        try; _kaimon().disconnect!(c); catch; end   # wakes any eval blocked on this wire
+        if k.tunnel !== nothing
+            try; close_tunnel(k.tunnel); catch; end
+            k.tunnel = nothing
+        end
+        k.conn = nothing
+        return true
+    end
+end
+
 function prepare!(k::GateKernel, report::Report)
     lock(k.lock) do                               # serialize: concurrent callers must not double-spawn
+        # MANUAL retry policy: the liveness supervisor dropped this remote wire as dead and flagged it to
+        # await an explicit run. A reactive cascade must NOT silently re-dial/cold-spawn a replacement
+        # (a flaky worker shouldn't be resurrected behind the user's back) — error clearly instead. An
+        # explicit run clears the flag first (see `_eval_one!`), so this only bites the automatic path.
+        if k.redial_hold && k.conn === nothing && (k.target isa RemoteTarget || k.remote)
+            error("region worker is disconnected (a previous worker went unresponsive) — re-run to reconnect")
+        end
         if k.target isa RemoteTarget
             # Provision (idempotent) + spawn the worker on the host + connect over CURVE (:direct) or a
             # supervised SSH tunnel (:ssh_tunnel), keeping the parent project synced. A dropped

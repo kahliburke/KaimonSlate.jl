@@ -972,7 +972,15 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
         _rlog("reconnect: probe found live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
         r = dial(k.port, k.stream_port; deadline = 15.0)
         r.conn !== nothing && return attached!(r, "probe")
-        _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — falling back to a fresh spawn")
+        # It answered the probe but not a 15s dial: wedged/half-dead (a merely-busy worker answers on its
+        # interactive thread). We're about to redo its work on a fresh worker, so REAP the superseded one
+        # now rather than leaving it for manual cleanup — a worker that went unresponsive once tends to
+        # repeat it, and a lingering ghost only eats the host's memory (and could resurface to fight its
+        # replacement). Synchronous + best-effort so no port/file race with the fresh spawn that follows;
+        # the kill lands at once if reachable, else when the process thaws.
+        _rlog("reconnect: live worker-$(k.port) didn't answer the 15s dial — reaping the superseded worker and cold-spawning fresh")
+        try; reap_remote_worker(host, k.port)
+        catch e; _rlog("reconnect: reap of superseded worker-$(k.port) failed: $(first(sprint(showerror, e), 100))"); end
     end
 
     # 2.5 Adoption: no worker of OURS is serving this notebook — but a warm POOL worker with the
@@ -2255,7 +2263,13 @@ function reap_remote_worker(host, port::Int)
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
     try; _evict_data_tunnels!(host; port = port + 2); catch; end
     try; _release_pool_claim!(host, port); catch; end
-    try; _ssh_test(host, `pkill -f $("worker-" * string(port) * ".jl")`); catch; end
+    # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
+    # supersede-reap targets — never processes SIGTERM (a stopped process queues it; a signal-ignoring one
+    # drops it), so the SIGKILL escalation is what actually frees its LISTEN port and RAM. Synchronous, so
+    # by the time a cold spawn reuses this port the old holder is gone (no "address already in use").
+    let pat = "worker-$(port).jl"
+        try; _ssh_test(host, `sh -c $("pkill -TERM -f '$pat'; sleep 1; pkill -KILL -f '$pat'; true")`); catch; end
+    end
     try; _ssh_ok(host, `rm -f $("$_REMOTE_WORKER/worker-$port.jl") $("$_REMOTE_WORKER/worker-$port.log") $("$_REMOTE_WORKER/worker-$port.json") $("$_REMOTE_WORKER/worker-$port.state") $("$_REMOTE_WORKER/worker-$port.stats")`); catch; end
     return true
 end

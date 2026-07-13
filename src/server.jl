@@ -820,24 +820,126 @@ function _nb_kernels(nb::LiveNotebook)
     return ks
 end
 
-# Union of the cell ids every connected kernel says it's evaluating right now, or `nothing` if NO
-# kernel could be queried (all unreachable) — in which case we must not judge anything orphaned.
-function _worker_running_ids(nb::LiveNotebook)
+# ── Kernel liveness heartbeat + dead-wire self-heal ─────────────────────────────────────────
+# Every sweep pings each connected kernel's authoritative in-flight set (`__slate_running`, 8s). It
+# serves two purposes at once: (1) the union of running cell ids feeds the orphan reconciler below, and
+# (2) it's the hub's DEAD-WIRE detector. A remote worker whose wire has gone silent — a half-open TCP,
+# or an SSH `-L` forward left standing after the worker died or was reaped — answers nothing, yet ZMQ
+# still reports the socket "connected"; an eval dispatched on it would then block for the full eval
+# timeout (an hour), which surfaces as a wedged notebook and a zombie "Still executing…" in the TUI.
+# A remote wire that stays CONTINUOUSLY unresponsive for `_DEAD_WIRE_GRACE` seconds is declared dead and
+# DROPPED: the disconnect wakes any eval blocked on that wire (it errors cleanly), and a later run re-dials.
+# The grace is deliberately generous — a brief network partition, a stop-the-world GC pause, or a
+# suspended-then-resumed process should NOT tear the wire down. During such a blip the in-flight eval is
+# simply WAITING on its own (long) timeout — a channel independent of the liveness ping — so when the
+# worker comes back the reply arrives and the cell completes as if nothing happened. A single successful
+# ping resets the clock, so only a wire silent the WHOLE window (genuinely gone) is dropped. This is also
+# safe against the busy/dead ambiguity: `__slate_running` is served on the worker's reserved INTERACTIVE
+# thread, so a busy-but-alive worker keeps answering. LOCAL kernels are left to `prepare!`'s process-death
+# path (respawn on a dead proc); we only auto-drop REMOTE wires, where the process is out of our sight and
+# the wire is the only signal. `WeakKeyDict` so a closed notebook's kernels don't pin the clock in memory.
+const _KERNEL_UNRESPONSIVE_SINCE = WeakKeyDict{Any,Float64}()   # kernel → wall time it first went silent (cleared on any success)
+const _DEAD_WIRE_GRACE = something(tryparse(Float64, get(ENV, "KAIMONSLATE_DEADWIRE_GRACE", "")), 45.0)  # s of continuous silence ⇒ dead
+const _LAST_RUNNING = Dict{String,Tuple{Set{String},Bool}}()   # nb id → (running ids, anyok) from the last sweep
+
+# Retry policy after a dead-wire drop (global for now; per-region later). `manual` (default): flag the
+# dropped kernel `redial_hold` so ONLY an explicit run reconnects it — a reactive cascade errors rather
+# than silently cold-spawning a replacement for a flaky worker. `auto`: no hold, the reactive path
+# re-dials eagerly (storm-safe: a failed re-dial errors the cell → not stale → the runner stops).
+const _REGION_AUTORETRY = Ref{Bool}(false)
+_region_autoretry() = something(tryparse(Bool, get(ENV, "KAIMONSLATE_REGION_AUTORETRY", "")), _REGION_AUTORETRY[])
+_kernel_held(k) = k isa ReportEngine.GateKernel && k.redial_hold
+# Clear the reconnect-hold on all of a notebook's kernels — called when a cell is EXPLICITLY run, so an
+# explicit play (even of a downstream cell) reconnects the upstream region it depends on.
+function _clear_region_holds!(nb::LiveNotebook)
+    for k in _nb_kernels(nb)
+        k isa ReportEngine.GateKernel && (k.redial_hold = false)
+    end
+    return nothing
+end
+
+# Tear down a remote kernel's silent wire and surface the auto-recovery (log + the woken eval's error).
+# Under the manual policy also flag the kernel so prepare! won't auto-reconnect it until an explicit run.
+function _heal_dead_wire!(nb::LiveNotebook, k, unresp_s::Real = 0.0)
+    side = _kernel_side_label(nb, k)
+    auto = _region_autoretry()
+    ReportEngine._rlog("liveness: dead wire on $(nb.id)/$(side) — worker unresponsive for $(round(Int, unresp_s))s (grace $(round(Int, _DEAD_WIRE_GRACE))s); dropping the connection ($(auto ? "auto-retry: next run re-dials" : "manual: holds until an explicit re-run"))")
+    dropped = try; ReportEngine._drop_kernel_conn!(k)
+    catch e; ReportEngine._rlog("liveness: drop failed on $(nb.id)/$(side): " * first(sprint(showerror, e), 120)); false
+    end
+    dropped && !auto && (try; k.redial_hold = true; catch; end)
+    return dropped
+end
+
+# Ping every connected kernel: refresh the heartbeat, track failures, heal dead remote wires, and
+# stash the union of running cell ids for the orphan reconciler. Runs every sweep (idle or busy) so a
+# wire that dies while nothing is running is still healed before the next cell is dispatched onto it.
+function _liveness_sweep!(nb::LiveNotebook)
     ids = Set{String}(); anyok = false
     for k in _nb_kernels(nb)
         (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
+        ok = false
         try
             r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = 8.0)
             run = r isa NamedTuple ? get(r, :running, nothing) :
                   r isa AbstractDict ? get(r, "running", get(r, :running, nothing)) : nothing
-            run === nothing && continue
-            for id in run; push!(ids, String(id)); end
-            anyok = true
+            if run !== nothing
+                for id in run; push!(ids, String(id)); end
+                anyok = true; ok = true
+            end
         catch e
-            ReportEngine._rlog("supervisor: __slate_running failed on $(nb.id): " * first(sprint(showerror, e), 120))
+            ReportEngine._rlog("liveness: __slate_running failed on $(nb.id)/$(_kernel_side_label(nb, k)): " * first(sprint(showerror, e), 120))
+        end
+        if ok
+            delete!(_KERNEL_UNRESPONSIVE_SINCE, k)   # any reply resets the clock — a blip is forgiven
+        elseif k.target isa ReportEngine.RemoteTarget || k.remote   # remote-only auto-drop
+            since = get!(() -> time(), _KERNEL_UNRESPONSIVE_SINCE, k)   # stamp the first silent sweep
+            unresp = time() - since
+            if unresp >= _DEAD_WIRE_GRACE
+                delete!(_KERNEL_UNRESPONSIVE_SINCE, k)
+                _heal_dead_wire!(nb, k, unresp)
+            end
         end
     end
+    _LAST_RUNNING[nb.id] = (ids, anyok)
+    return nothing
+end
+
+# Union of the cell ids every connected kernel said it's evaluating on the last liveness sweep, or
+# `nothing` if NO kernel could be queried (all unreachable) — in which case we must not judge anything
+# orphaned. Reads the sweep's cache (populated just before the reconciler runs) to avoid double-pinging.
+function _worker_running_ids(nb::LiveNotebook)
+    cached = get(_LAST_RUNNING, nb.id, nothing)
+    cached === nothing && return nothing
+    ids, anyok = cached
     return anyok ? ids : nothing
+end
+
+# Explicit-reap fast-path: killing a worker on host:port leaves any LIVE kernel still bound to it holding
+# a now-dead wire — an in-flight eval on it would otherwise block until the liveness sweep drops the wire
+# (~15s) or, worst case, the full eval timeout. Drop those wires NOW so the eval wakes and errors at once.
+# The liveness sweep remains the safety net if this host/port match is imperfect (e.g. a remapped tunnel).
+function _drop_kernels_for_worker!(host::AbstractString, port::Integer)
+    h = _HUB[]; h === nothing && return 0
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    n = 0; seen = String[]
+    for nb in nbs, k in _nb_kernels(nb)
+        k isa ReportEngine.GateKernel && k.conn !== nothing || continue
+        k.target isa ReportEngine.RemoteTarget || continue
+        push!(seen, "$(nb.id)/$(_kernel_side_label(nb, k))@$(k.target.ssh_host):$(k.port)")
+        (k.target.ssh_host == host && k.port == Int(port)) || continue
+        try
+            if ReportEngine._drop_kernel_conn!(k)
+                n += 1
+                ReportEngine._rlog("reap: dropped live wire on $(nb.id)/$(_kernel_side_label(nb, k)) (worker-$port on $host reaped)")
+            end
+        catch; end
+    end
+    # Diagnostic when the fast-path misses: the liveness sweep still backstops it, but with the generous
+    # dead-wire grace that's a slow path for an EXPLICIT reap — so surface the actual live endpoints to
+    # show why the host/port didn't match (e.g. a base-port vs slot-port drift on a :direct region).
+    n == 0 && ReportEngine._rlog("reap: no live kernel matched $host:$port (live remote kernels: $(isempty(seen) ? "none" : join(seen, ", "))) — liveness sweep will backstop")
+    return n
 end
 
 function _reconcile_nb_runs!(nb::LiveNotebook)
@@ -876,6 +978,9 @@ end
 function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, included at ~1510) — untyped so this loads
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     for nb in nbs
+        try; _liveness_sweep!(nb)   # heartbeat + dead-wire heal; caches running ids for the reconciler
+        catch e; ReportEngine._rlog("supervisor: liveness error on $(nb.id): " * first(sprint(showerror, e), 120))
+        end
         try; _reconcile_nb_runs!(nb)
         catch e; ReportEngine._rlog("supervisor: reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
         end
@@ -1327,6 +1432,28 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
     # cell's cross-boundary inputs ship over first. A presync failure is the CELL's error —
     # surfaced in place instead of a mystery UndefVarError on the other side.
     kernel, side = _region_route(nb, cell)
+    # Reconnect-hold policy (manual mode). A cell EXPLICITLY run (▶ force marker) reconnects a region that
+    # was dropped as dead; a reactive cascade must not. Peek the force marker WITHOUT consuming it (the
+    # memo build below consumes it): a forced cell clears the hold on ALL the notebook's kernels, so an
+    # explicit run of even a DOWNSTREAM cell reconnects the upstream region it needs. A non-forced cell
+    # whose OWN region is held errors here instead of silently cold-spawning a replacement worker. (A
+    # non-forced cell that merely PULLS from a held region is stopped one level down, in prepare!.)
+    if !isempty(side)
+        forced = lock(nb.lock) do
+            ids = get(_FORCE_RUN, nb.id, nothing); ids !== nothing && cell.id in ids
+        end
+        if forced
+            _clear_region_holds!(nb)
+        elseif _kernel_held(kernel)
+            lock(nb.lock) do
+                cell.output = ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[],
+                    ReportEngine.BindSpec[], "", "region '$side' is disconnected — a previous worker went unresponsive; press ▶ (or re-run) to reconnect", nothing, 0.0)
+                cell.state = ERRORED
+                _broadcast_progress(nb, cell)
+            end
+            return nothing
+        end
+    end
     # A cell running on a REGION needs the notebook's environment established there first — its own
     # `using`/scaffold cells may live on the main kernel (they aren't cross-boundary READS, so the
     # presync below won't ship them). Bring the kernel up and prime it (idempotent, once per kernel)
