@@ -10,12 +10,13 @@
 import { html, render } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
+import { detail } from './stores.js';   // worker-detail popup target, shared with other home-page islands
 
 const POLL_MS = 3000;
 const regions  = signal([]);     // /api/regions            → [{name,host,warm,status,…}]
 const hostData = signal([]);     // per-host live rosters    → [{host, workers:[…]}]
-const detail   = signal(null);   // open worker              → {host, port} | null
 const history  = signal([]);     // /api/worker-stats samples for the open worker
+// `detail` (open worker popup target) is imported from ./stores.js — shared across home-page islands.
 
 let timer = null, inflight = false;
 
@@ -49,17 +50,23 @@ async function tick() {
 function start() { if (timer) return; tick(); timer = setInterval(tick, POLL_MS); }
 
 // ── sparkline ──────────────────────────────────────────────────────────────────────
-function Spark({ samples, get, color, min, max }) {
-  const n = samples.length;
-  if (n < 2) return html`<div class="wdnodata">not enough history yet</div>`;
-  const W = 580, H = 64, pad = 5, vals = samples.map(get);
+const fmtSpan = (s) => (s = Math.max(0, Math.round(s)), s < 90 ? s + 's' : s < 5400 ? Math.round(s / 60) + 'm' : Math.round(s / 3600) + 'h');
+// Sparkline. Renders even with 0–1 real samples: a `now` fallback seeds a single reading so the CURRENT
+// value shows immediately (a dashed flat line) — you don't wait for history to accumulate to see live data.
+function Spark({ samples, get, color, min, max, now }) {
+  const vals = samples.map(get);
+  if (!vals.length && now != null && now >= 0) vals.push(now);
+  const n = vals.length;
+  if (!n) return html`<div class="wdnodata">no data yet</div>`;
+  const W = 580, H = 64, pad = 5;
   let mx = (max != null) ? max : Math.max(...vals), mn = (min != null) ? min : Math.min(...vals);
   if (mx <= mn) mx = mn + 1;
-  const pts = vals.map((v, i) => {
-    const x = pad + (W - 2 * pad) * (i / (n - 1));
-    const y = pad + (H - 2 * pad) * (1 - (Math.max(mn, Math.min(mx, v)) - mn) / (mx - mn));
-    return x.toFixed(1) + ',' + y.toFixed(1);
-  }).join(' ');
+  const y = (v) => (pad + (H - 2 * pad) * (1 - (Math.max(mn, Math.min(mx, v)) - mn) / (mx - mn))).toFixed(1);
+  if (n === 1) {   // one reading → a dashed flat line (a single point, not yet a trend)
+    const yy = y(vals[0]);
+    return html`<svg class="wdsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><line x1=${pad} y1=${yy} x2=${W - pad} y2=${yy} stroke=${color} stroke-width="1.5" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/></svg>`;
+  }
+  const pts = vals.map((v, i) => (pad + (W - 2 * pad) * (i / (n - 1))).toFixed(1) + ',' + y(v)).join(' ');
   return html`<svg class="wdsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
     <polyline points=${pts} fill="none" stroke=${color} stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
 }
@@ -105,9 +112,8 @@ function Monitor() {
     shown[rg.name] = 1;
     const xs = byRegion[rg.name] || [], err = rg.status && rg.status.ok === false;
     if (!xs.length && !(rg.warm > 0) && !err) return;
-    const head = html`<div class=${'actgrouphd' + (err ? ' err' : '')} title="open this region's config" style="cursor:pointer"
-        onClick=${() => window.slateOpenRegionConfig && window.slateOpenRegionConfig(rg.host, rg.name)}>
-      🖧 ${rg.name} <span class="actgrouphost">${rg.host || '(no host)'}</span>
+    const head = html`<div class=${'actgrouphd' + (err ? ' err' : '')}>
+      <span class="actgroupname" title="open this region's config" onClick=${() => window.slateOpenRegionConfig && window.slateOpenRegionConfig(rg.host, rg.name)}>🖧 ${rg.name}</span> <span class="actgrouphost">${rg.host || '(no host)'}</span>
       ${rg.warm > 0 ? html` <span class="actgroupwarm">warm ${rg.warm}</span>` : null}
       ${err ? html` <span class="actgrouperr" title=${rg.status.msg}>⚠ reconcile failed</span>` : null}</div>`;
     groups.push(group(head, xs));
@@ -152,6 +158,8 @@ function WorkerDetail() {
     const chip = (l, v) => (v == null || v === '') ? null : html`<div class="wdstat"><span class="l">${l}</span><b>${String(v)}</b></div>`;
     const cpuNow = samples.length ? samples[samples.length - 1].cpu : (st.cpu != null ? st.cpu : -1);
     const rssNow = samples.length ? samples[samples.length - 1].rss : (st.rss || 0);
+    const span = samples.length >= 2 ? (samples[samples.length - 1].t - samples[0].t) : 0;   // window covered (s)
+    const axis = html`<div class="wdaxis"><span>${span > 0 ? '−' + fmtSpan(span) : ''}</span><span>now</span></div>`;
     return html`
       <div class="wdhead"><strong>${w.alive !== false ? '🟢' : '⚪'} :${w.port}</strong>
         <span class="wdsub">${(w.state || '') + (mf.region ? ' · ' + mf.region : '')}</span></div>
@@ -163,9 +171,9 @@ function WorkerDetail() {
         ${st.sys_cpu >= 0 ? chip('Host CPU', st.sys_cpu + '%') : null} ${st.load1 >= 0 ? chip('Load', st.load1) : null}
         ${st.sys_mem_total ? chip('Host mem', fmtB2(st.sys_mem_total - (st.sys_mem_free || 0)) + ' / ' + fmtB2(st.sys_mem_total)) : null}</div>
       <div class="wdchart"><div class="wdchtitle"><span>CPU %</span><b>${cpuNow >= 0 ? cpuNow + '%' : '—'}</b></div>
-        <${Spark} samples=${samples} get=${(s) => Math.max(0, s.cpu)} color="#4f7cf0" min=${0} max=${100}/></div>
+        <${Spark} samples=${samples} now=${cpuNow} get=${(s) => Math.max(0, s.cpu)} color="#4f7cf0" min=${0} max=${100}/>${axis}</div>
       <div class="wdchart"><div class="wdchtitle"><span>Memory (RSS)</span><b>${fmtB2(rssNow)}</b></div>
-        <${Spark} samples=${samples} get=${(s) => s.rss} color="#3fb96e" min=${0}/></div>
+        <${Spark} samples=${samples} now=${rssNow} get=${(s) => s.rss} color="#3fb96e" min=${0}/>${axis}</div>
       ${samples.length < 2 ? html`<div class="pddim" style="font-size:.72rem;margin-top:2px">History builds as the hub receives telemetry from this worker${w.state !== 'attached' ? ' — only an attached worker streams in.' : '.'}</div>` : null}`;
   };
   return html`<div class="modal-bg show" onMouseDown=${(e) => { if (e.target.classList.contains('modal-bg')) close(); }}>

@@ -610,13 +610,20 @@ function sysimage_status(t::RemoteTarget)
     d = _sysimage_dir(t.project)
     res = Dict{String,Any}("host" => host, "envkey" => _sysimage_envkey(t.project), "opt_in" => t.sysimage,
                            "reachable" => false, "building" => false, "current" => "", "bytes" => 0,
-                           "built" => 0, "compiler" => true, "log" => "")
+                           "built" => 0, "stale" => false, "compiler" => true, "log" => "")
     isempty(host) && return res
+    pr = startswith(t.project, "~/") ? t.project[3:end] : t.project   # env dir → Manifest for the staleness check
     # Pass the WHOLE script as the single remote-command arg (like `_launch_worker!`'s launch line): ssh
     # flattens argv and the remote LOGIN shell re-parses, so `sh -c <multi-word>` would be mangled — but a
     # lone command string is parsed intact (`$(...)`, `[ … ]`, `;`, `&&` all survive).
+    # Staleness is an mtime heuristic (cheap, no content hash): a payload `.jl` (EXCLUDING the transient
+    # per-port `worker-<port>.jl` boot scripts, which the build key also ignores) or the env Manifest newer
+    # than the `.so` ⇒ the image predates a code/dep change and should be rebuilt.
     sh = "D=\$HOME/$d; CUR=\$(cat \$D/current 2>/dev/null); echo \"current=\$CUR\"; " *
-         "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then echo \"bytes=\$(stat -c %s \$D/\$CUR.so 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$D/\$CUR.so 2>/dev/null)\"; fi; " *
+         "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then SO=\$D/\$CUR.so; echo \"bytes=\$(stat -c %s \$SO 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$SO 2>/dev/null)\"; " *
+         "N=\$(find \$HOME/$_REMOTE_WORKER -maxdepth 1 -name '*.jl' ! -name 'worker-*.jl' -newer \$SO -print -quit 2>/dev/null); " *
+         "MF=\$HOME/$pr/Manifest.toml; if [ -z \"\$N\" ] && [ -f \"\$MF\" ] && [ \"\$MF\" -nt \"\$SO\" ]; then N=\$MF; fi; " *
+         "[ -n \"\$N\" ] && echo stale=1; fi; " *
          "if [ -f \$D/.building ]; then echo building=1; fi; " *
          "if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then echo nocompiler=1; fi; " *
          # Marker must NOT start with `=` — zsh (a common login shell) would try equals-expansion on `===LOG===`
@@ -633,6 +640,7 @@ function sysimage_status(t::RemoteTarget)
         k == "bytes" && (res["bytes"] = something(tryparse(Int, v), 0))
         k == "built" && (res["built"] = something(tryparse(Int, v), 0))
         k == "building" && (res["building"] = true)
+        k == "stale" && (res["stale"] = true)
         k == "nocompiler" && (res["compiler"] = false)
     end
     length(parts) > 1 && (res["log"] = String(strip(parts[2])))
