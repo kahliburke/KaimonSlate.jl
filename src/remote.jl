@@ -1656,7 +1656,7 @@ _direct_viable(src_k, dst_k) =
 # Broker one direct B←A pull: authorise B's client key on A's blob channel, hand B A's data endpoint,
 # have B pull the blob straight into its CAS, then revoke. Returns bytes moved (0 = deduped). THROWS
 # on any failure — the caller (`:auto`) decides whether to fall back to relay.
-function _pull_direct!(src_k, dst_k, name, h::String, meta; on_plan = nothing)
+function _pull_direct!(src_k, dst_k, name, h::String, meta)
     epA = _data_endpoint!(src_k.target, src_k)              # A's blob endpoint (routable ip+key on :direct)
     bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
     bkerr = try; getproperty(bk, :error); catch; nothing; end
@@ -1669,7 +1669,6 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta; on_plan = nothing)
         akerr === nothing || error("direct: authorise on source failed: $akerr")
     end
     try
-        on_plan === nothing || on_plan(Int(meta.bytes), meta)   # preview gate — exact encoded bytes
         pr = _tool(dst_k, "__slate_pull_blob", Dict{String,Any}(
             "ip" => epA.ip, "port" => epA.port, "server_key" => epA.server_key, "hash" => h); timeout = 600.0)
         perr = try; getproperty(pr, :error); catch; nothing; end
@@ -1690,12 +1689,22 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     err === nothing || error("transfer '$name': $err")
     h = String(meta.hash); codec = String(meta.codec)
 
+    # Transfer-preview / confirmation gate: it's about the transfer SIZE, not the path taken, so fire it
+    # ONCE, up front. A big-transfer "confirm by rerun" then PROPAGATES to the cell (approve-by-rerun)
+    # rather than being caught by the :auto fallback and mistaken for a direct-transport failure — the
+    # bug that silently dropped a large co-located transfer onto the slow, tunnel-bound hub relay. Only
+    # gate a move that actually crosses a wire (a remote endpoint); a fully-local move (shared hub CAS)
+    # costs nothing and needs no confirmation.
+    if on_plan !== nothing && (src_k.target isa RemoteTarget || dst_k.target isa RemoteTarget)
+        on_plan(Int(meta.bytes), meta)
+    end
+
     moved = 0
     used = :relay
     if mode === :direct || mode === :auto
         if _direct_viable(src_k, dst_k)
             try
-                moved = _pull_direct!(src_k, dst_k, name, h, meta; on_plan = on_plan)
+                moved = _pull_direct!(src_k, dst_k, name, h, meta)
                 used = :direct
             catch e
                 mode === :direct && rethrow()               # strict: surface the failure
@@ -1711,16 +1720,13 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     if used !== :direct                                     # :relay (default) or :auto fallback
         root = joinpath(_slate_cache_dir(), "memo")
         if src_k.target isa RemoteTarget                   # remote source → land the blob locally
-            have = isfile(joinpath(root, "blobs", "sha256", h[1:2], h))
-            on_plan === nothing || on_plan(have ? 0 : Int(meta.bytes), meta)
             ep = _data_endpoint!(src_k.target, src_k)
             moved += pull_blob!(ep.ip, ep.port, h; server_key = ep.server_key, on_progress = on_progress)
         end
         if dst_k.target isa RemoteTarget                   # remote destination → ship it there
             ep = _data_endpoint!(dst_k.target, dst_k)
             moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key,
-                                on_plan = src_k.target isa RemoteTarget ? nothing : on_plan, meta = meta,
-                                on_progress = on_progress)
+                                on_plan = nothing, meta = meta, on_progress = on_progress)
         end
     end
 
