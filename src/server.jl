@@ -840,6 +840,7 @@ end
 # the wire is the only signal. `WeakKeyDict` so a closed notebook's kernels don't pin the clock in memory.
 const _KERNEL_UNRESPONSIVE_SINCE = WeakKeyDict{Any,Float64}()   # kernel → wall time it first went silent (cleared on any success)
 const _DEAD_WIRE_GRACE = something(tryparse(Float64, get(ENV, "KAIMONSLATE_DEADWIRE_GRACE", "")), 45.0)  # s of continuous silence ⇒ dead
+const _LIVENESS_PING_TIMEOUT = 8.0   # per-ping timeout; also how far to BACKDATE first-silence — when a ping first fails the worker has already been silent this long, so the countdown starts at ~8s, not 0
 const _LAST_RUNNING = Dict{String,Tuple{Set{String},Bool}}()   # nb id → (running ids, anyok) from the last sweep
 
 # Retry policy after a dead-wire drop (global for now; per-region later). `manual` (default): flag the
@@ -881,7 +882,7 @@ function _liveness_sweep!(nb::LiveNotebook)
         (k isa ReportEngine.GateKernel && k.conn !== nothing) || continue
         ok = false
         try
-            r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = 8.0)
+            r = ReportEngine._tool(k, "__slate_running", Dict{String,Any}(); timeout = _LIVENESS_PING_TIMEOUT)
             run = r isa NamedTuple ? get(r, :running, nothing) :
                   r isa AbstractDict ? get(r, "running", get(r, :running, nothing)) : nothing
             if run !== nothing
@@ -897,7 +898,7 @@ function _liveness_sweep!(nb::LiveNotebook)
                 try; _workers_push!(nb); catch; end    # pill back to green immediately
             end
         elseif k.target isa ReportEngine.RemoteTarget || k.remote   # remote-only auto-drop
-            since = get!(() -> time(), _KERNEL_UNRESPONSIVE_SINCE, k)   # stamp the first silent sweep
+            since = get!(() -> time() - _LIVENESS_PING_TIMEOUT, _KERNEL_UNRESPONSIVE_SINCE, k)   # stamp the first silent sweep, backdated by the ping timeout it already waited
             unresp = time() - since
             if unresp >= _DEAD_WIRE_GRACE
                 delete!(_KERNEL_UNRESPONSIVE_SINCE, k)
