@@ -47,8 +47,8 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
             t = RE._region_target(r)
             @test t.project == "~/.cache/kaimonslate/remote/My Proj"   # env dir keyed by preload basename
             @test t.transport === :direct && t.origin_env == "/tmp/My Proj"
-            @test t.datadir == "/scratch/flights" && t.region == name  # worker is tagged with its region
-            @test any(x -> x.name == name && x.warm == 2 && x.data_root == "/scratch/flights", RE.regions())
+            @test t.datadir == "/scratch/flights" && t.region == RE._fold_region(name)  # worker is tagged with its (folded) region
+            @test any(x -> x.name == RE._fold_region(name) && x.warm == 2 && x.data_root == "/scratch/flights", RE.regions())
             RE.region_set!(name; host = "h1")                          # full-record upsert clears the rest
             @test RE.region_get(name).preload == "" && RE.region_get(name).data_root == ""
             @test RE._region_target(RE.region_get(name)).project == "~/.cache/kaimonslate/remote/detached"

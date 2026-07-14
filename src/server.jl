@@ -1176,10 +1176,12 @@ const _XFER_OFFERED = Set{Tuple{String,String,String}}()   # (nb id, cell id, to
 
 function _xfer_plan_gate(nb::LiveNotebook, cell::Cell, host::AbstractString,
                          name, token::String)
-    return function (bytes::Int, meta)
+    return function (bytes::Int, meta, rate = nothing)
         limit = ReportEngine._xfer_confirm_s()
         (limit <= 0 || bytes <= 0 || isempty(host)) && return nothing
-        bw = max(ReportEngine._bw_get(host), 1.0e6)
+        # `rate` (the caller-priced path bandwidth: peer for a direct move, uplink for relay) wins;
+        # fall back to this host's uplink with the conservative floor when it isn't supplied.
+        bw = (rate !== nothing && rate > 0) ? Float64(rate) : max(ReportEngine._bw_get(host), 1.0e6)
         secs = bytes / bw
         secs <= limit && return nothing
         key = (nb.id, cell.id, token)

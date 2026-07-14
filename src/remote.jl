@@ -2218,6 +2218,10 @@ end
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
 _asint(x) = x isa Integer ? Int(x) : x isa AbstractFloat ? round(Int, x) : something(tryparse(Int, String(x)), 0)
 _asbool(x) = x === true || x == 1 || (x isa AbstractString && lowercase(strip(x)) in ("1", "true", "yes", "on"))
+# Fold a region name to a tag-safe identifier — a cell's `region=<name>` tag folds non-word chars to
+# `_`, so region_set!/region_get/region_delete! MUST fold identically or a stored region can never be
+# looked up again ("slate-remote" stored as "slate_remote"; a get on "slate-remote" would miss).
+_fold_region(name) = replace(strip(String(name)), r"[^A-Za-z0-9_]+" => "_")
 _region_from_dict(d::AbstractDict) = Region(
     String(get(d, "name", "")), String(get(d, "host", "")),
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
@@ -2244,7 +2248,7 @@ function regions()
     sort!(out; by = r -> r.name)
     return out
 end
-region_get(name) = (n = String(name); for r in regions(); r.name == n && return r; end; nothing)
+region_get(name) = (n = _fold_region(name); for r in regions(); r.name == n && return r; end; nothing)
 
 function _write_regions!(list::AbstractVector{Region})
     mkpath(_slate_config_dir())
@@ -2257,9 +2261,7 @@ end
 function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
                      data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
                      curve = true)
-    # Fold to a tag-safe identifier: a cell's `region=<name>` tag folds non-word chars to `_`, so the
-    # stored name must fold the same way or no cell could reference it ("slate-remote" → "slate_remote").
-    n = replace(strip(String(name)), r"[^A-Za-z0-9_]+" => "_")
+    n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
     r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
                String(data_root), String(cache_root), Int(warm), String(threads), _asbool(sysimage),
@@ -2274,7 +2276,7 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
 end
 
 function region_delete!(name)
-    n = String(name)
+    n = _fold_region(name)
     lock(_REGIONS_LOCK) do
         _write_regions!(filter(x -> x.name != n, regions()))
     end
@@ -2295,7 +2297,7 @@ function region_remove!(name)
         end
     end
     region_delete!(name)
-    delete!(_REGION_STATUS, String(name))
+    delete!(_REGION_STATUS, _fold_region(name))   # status is keyed by the folded region name
     return nothing
 end
 
