@@ -45,7 +45,8 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
             @test r.host == "h1" && r.warm == 2 && r.transport === :direct && r.base_port == 9200
             @test r.preload == "/tmp/My Proj" && r.data_root == "/scratch/flights" && r.threads == "8,1"
             t = RE._region_target(r)
-            @test t.project == "~/.cache/kaimonslate/remote/My Proj"   # env dir keyed by preload basename
+            @test t.project == "~/.cache/kaimonslate/remote/" * RE._proj_key("/tmp/My Proj")   # env dir isolated by preload path
+            @test startswith(basename(t.project), "My_Proj-")          # readable prefix + a path hash (no cross-project collision)
             @test t.transport === :direct && t.origin_env == "/tmp/My Proj"
             @test t.datadir == "/scratch/flights" && t.region == RE._fold_region(name)  # worker is tagged with its (folded) region
             @test any(x -> x.name == RE._fold_region(name) && x.warm == 2 && x.data_root == "/scratch/flights", RE.regions())

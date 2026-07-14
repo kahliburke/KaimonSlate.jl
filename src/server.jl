@@ -127,14 +127,16 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             proj = Base.current_project(dirname(abspath(path)))
             parent = proj === nothing ? "" : dirname(proj)
             report.meta["assetbase"] = parent
-            # per-host remote project dir keyed by the local parent's basename (avoid cross-notebook clash)
-            rproj = "~/.cache/kaimonslate/remote/" * (isempty(parent) ? "detached" : basename(parent))
             # The LOCAL env to REPLICATE on the remote so packages/dev-sources match exactly: the notebook's
             # own fork env (its added packages) when it has one, else the parent project. Empty ⇒ nothing to
             # replicate (bare notebook) — the worker just gets Slate's payload + KaimonGate.
             envdir = ReportEngine.notebook_env_dir(path)
             origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
                          (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
+            # Remote env dir keyed by the CONTENT it replicates (origin_env) or the parent project — a path
+            # hash, so two unrelated notebooks (or a stale/failed provision) never share one mutable env and
+            # poison each other. Truly bare (nothing to replicate) ⇒ the infra-only shared "detached".
+            rproj = "~/.cache/kaimonslate/remote/" * ReportEngine._remote_env_key(origin_env, parent)
             target = ReportEngine.RemoteTarget(rhost; transport = transport, project = rproj,
                                                port = pport, stream_port = psport, origin_env = origin_env)
             ReportEngine._rlog("_select_kernel → REMOTE kernel host=$rhost transport=$transport rproj=$rproj parent=$parent")

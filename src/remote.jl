@@ -2335,12 +2335,27 @@ function _direct_port_slots(base_port::Int, n::Int; roster, label::AbstractStrin
     return ports
 end
 
-# A region's RemoteTarget. Env dir keyed by the preload basename (the same formula a notebook's parent
-# uses → --project parity); `region` tags the worker so its OWN region reclaims it on adoption. For a
-# :direct region, `port` carries base_port as the range HINT — fresh_spawn allocates a free slot from it
-# (see _direct_port_slots) so the kernel lands in the firewall-opened range, not the growing auto counter.
+# Isolate the per-project remote env dir: key it by the FULL project/env path (a hash), NOT just the
+# basename — so two unrelated notebooks (or a stale/failed provision) can never share and poison one
+# mutable env. Readable prefix + a path hash: the SAME path → the SAME key, so a region's preload and a
+# notebook's parent pointing at one project still share the env (--project parity preserved); only the
+# collision/pollution goes away. Empty path ⇒ the infra-only shared "detached" — nothing is replicated
+# there, so there's nothing to pollute.
+function _proj_key(p)
+    s = String(p); isempty(s) && return "detached"
+    ap = abspath(expanduser(s))
+    replace(basename(rstrip(ap, '/')), r"[^A-Za-z0-9._-]" => "_") * "-" * bytes2hex(_SHA.sha1(codeunits(ap)))[1:8]
+end
+# A notebook's remote env dir: keyed by the content it REPLICATES (origin_env) when it has one, else its
+# parent project — never the shared mutable dir when there's content to isolate.
+_remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? parent : origin_env)
+
+# A region's RemoteTarget. Env dir keyed (isolated) by the preload PATH; `region` tags the worker so its
+# OWN region reclaims it on adoption. For a :direct region, `port` carries base_port as the range HINT —
+# fresh_spawn allocates a free slot from it (see _direct_port_slots) so the kernel lands in the
+# firewall-opened range, not the growing auto counter.
 _region_target(r::Region) = RemoteTarget(r.host; transport = r.transport,
-    project = "~/.cache/kaimonslate/remote/" * (isempty(r.preload) ? "detached" : basename(rstrip(r.preload, '/'))),
+    project = "~/.cache/kaimonslate/remote/" * _proj_key(r.preload),
     port = (r.transport === :direct ? r.base_port : 0),
     origin_env = r.preload, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
     sysimage = r.sysimage, curve = r.curve)
