@@ -429,18 +429,32 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     infra = _local_has_revise() ?
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\")]"
-    if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
-        _replicate_env!(t)                                    # notebook env + worker infra
-    elseif !isempty(parent_project) && isdir(parent_project)
-        _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)")
-        _rsync!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
-            error("provision: rsync parent project → $host failed")
-        first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()",
-                          "instantiate parent project on $host")) || error("provision: parent env build → $host failed")
-    else
-        _rlog("provision [3/3] bare notebook — worker env = worker infra only")
-        first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); Pkg.instantiate()",
-                          "bare worker env on $host")) || error("provision: could not build the worker env on $host")
+    build_env! = function ()
+        if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
+            _replicate_env!(t)                                # notebook env + worker infra
+        elseif !isempty(parent_project) && isdir(parent_project)
+            _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)")
+            _rsync!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
+                error("provision: rsync parent project → $host failed")
+            first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()",
+                              "instantiate parent project on $host")) || error("provision: parent env build → $host failed")
+        else
+            _rlog("provision [3/3] bare notebook — worker env = worker infra only")
+            first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); Pkg.instantiate()",
+                              "bare worker env on $host")) || error("provision: could not build the worker env on $host")
+        end
+    end
+    try
+        build_env!()
+    catch e
+        # A build failure usually means the env dir carries broken resolve state — a dev-dep whose path
+        # vanished, a half-written manifest, a stale entry left by an earlier provision. Reset the env's
+        # Project + Manifest and rebuild ONCE from the authoritative local source, so one bad provision
+        # self-heals instead of wedging every future spawn on this env. (The isolation keying means this
+        # only ever touches THIS project's env.) A second failure is a real problem — let it surface.
+        _rlog("provision [3/3] env build failed on $host — resetting env + one retry: " * first(sprint(showerror, e), 140))
+        _ssh_ok(host, `rm -f $rel/Project.toml $rel/Manifest.toml`)
+        build_env!()
     end
     _rlog("provision DONE host=$host")
     _kickoff_sysimage_build!(t, rel)   # detached + idempotent — fast workers once it lands, plain boot until then
