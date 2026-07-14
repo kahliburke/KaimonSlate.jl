@@ -209,4 +209,43 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test r[] == 99           # handler2's write landed cleanly; handler1 never raced it
     end
 
+    @testset "valueless set on a button is a click: server increments the count" begin
+        # The core new behaviour, at the registry layer: a button's value IS its click count, so a
+        # set with `nothing` increments it server-side — the caller never needs (or races) the count.
+        reg = Dict{Symbol,Tuple{RE.Widget,Any}}(:go => (RE.Button("Run"), 0))
+        lk = ReentrantLock()
+        @test RE._do_set_bind(reg, lk, :go, nothing) == 1       # click: 0 → 1
+        @test RE._do_set_bind(reg, lk, :go, nothing) == 2       # click: 1 → 2
+        @test reg[:go][2] == 2
+        @test RE._do_set_bind(reg, lk, :go, 10) == 10           # an explicit value (browser path) still sets exactly
+        # the increment is button-only: a valueless slider set just coerces (no magic count bump)
+        reg2 = Dict{Symbol,Tuple{RE.Widget,Any}}(:s => (RE.Slider(0:10), 3))
+        @test RE._do_set_bind(reg2, lk, :s, 6) == 6
+    end
+
+    @testset "@bind Button: a valueless click increments the global AND fires @onclick" begin
+        r = parse_report("#%% code id=ctl\n@bind go Button(\"Run\")\n@onclick go (fires[] += 1)\n" *
+                         "#%% code id=use\nseen = go")
+        build_dependencies!(r); eval_stale!(r)
+        # inject the counter the handler bumps AFTER eval (the module exists now); the @onclick
+        # closure only resolves `fires` when it fires, so registering it earlier is fine.
+        Core.eval(r.mod, :(const fires = $(Ref(0))))
+        @test findcell(r, "ctl").binds[1].widget == "button"
+        @test Base.invokelatest(getproperty, r.mod, :go) == 0
+
+        set_bind_value!(r, findcell(r, "ctl"), :go, nothing)    # click — no value passed
+        findcell(r, "use").state = STALE; eval_stale!(r)
+        @test Base.invokelatest(getproperty, r.mod, :go) == 1   # count advanced server-side
+        @test Base.invokelatest(getproperty, r.mod, :seen) == 1 # a reader reacted
+
+        set_bind_value!(r, findcell(r, "ctl"), :go, nothing)    # click again
+        @test Base.invokelatest(getproperty, r.mod, :go) == 2
+        @test findcell(r, "ctl").binds[1].value == 2            # host-side spec mirrors it
+
+        # @onclick dispatch is async (__on_fire! spawns a task) — wait for both fires to land
+        fires = Base.invokelatest(getproperty, r.mod, :fires)
+        for _ in 1:200; fires[] == 2 && break; sleep(0.01); end
+        @test fires[] == 2                                       # the handler fired on each click
+    end
+
 end

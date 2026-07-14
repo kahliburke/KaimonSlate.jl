@@ -1020,6 +1020,43 @@ function create_tools(GateTool::Type)
     end
 
     """
+        set_bind(notebook, name; value="") -> String
+
+    Set a `@bind` control's value from OUTSIDE the browser — the write-half of the reactive loop
+    (`read`/`inspect` observe state; this DRIVES it). Routes through the exact same path as a
+    browser change: coerce against the widget, update the registry, restale the reader cells, and
+    fire any `@onclick`/`@onchange` handler. Works headless — no open tab required.
+
+    `name` is the bound variable (e.g. "njobs"), NOT a cell id. `value` is JSON: a number ("42"),
+    bool ("true"), string, or array ("[1,2]"); a bare word that isn't valid JSON is taken literally.
+    For a Button, OMIT `value` — a valueless set is a CLICK: the server increments the click count
+    and fires the handler, so you never need to read (or race) the current count.
+    """
+    function set_bind_tool(notebook::String, name::String; value::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        bindref, _ = NotebookServer._bind_index(nb.report)
+        entry = get(bindref, name, nothing)
+        if entry === nothing
+            names = sort(collect(keys(bindref)))
+            return isempty(names) ? "⛔ '$(basename(nb.path))' has no @bind controls." :
+                   "⛔ no @bind named '$name' (available: $(join(names, ", ")))."
+        end
+        cell, spec = entry
+        isbtn = spec.widget == "button"
+        v = if isempty(strip(value))
+            isbtn || return "⛔ '$name' is a $(spec.widget) — pass value= (JSON), e.g. value=\"5\". Only a button fires with no value (a click)."
+            nothing                                   # valueless → server-side click increment
+        else
+            try; JSON.parse(value); catch; String(value); end
+        end
+        NotebookServer.set_bind!(nb, cell.id, name, v)
+        newv = let (br, _) = NotebookServer._bind_index(nb.report)
+            haskey(br, name) ? br[name][2].value : v
+        end
+        return "✅ $name = $(repr(newv))" * (isbtn && v === nothing ? "  (button clicked)" : "")
+    end
+
+    """
         diag(notebook) -> String
 
     Browser diagnostics for an OPEN notebook tab: console errors, failed resource loads
@@ -1440,6 +1477,7 @@ function create_tools(GateTool::Type)
         GateTool("release_floor", release_floor),
         GateTool("view", view_cell),
         GateTool("inspect", inspect_cell),
+        GateTool("set_bind", set_bind_tool),
         GateTool("diag", notebook_diag),
         GateTool("eval", scratch_eval),
         GateTool("check_eval", check_scratch_eval),

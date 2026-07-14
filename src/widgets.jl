@@ -368,7 +368,14 @@ function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLoc
             reg[name] = (Widget("?", Dict{String,Any}(), value), value)
             return value
         end
-        w = prev[1]; cv = coerce_bind(w, value)
+        w = prev[1]
+        # A VALUELESS set on a button is a "click": increment its count server-side. A button's
+        # value IS its click count, so this lets a caller (an agent / a script) press the button
+        # without knowing — or racing — the current count. The browser always sends an explicit
+        # value, so its path is unchanged.
+        cv = value === nothing && w.kind == "button" ?
+             (prev[2] isa Integer ? prev[2] : 0) + 1 :
+             coerce_bind(w, value)
         reg[name] = (w, cv)
         return cv
     end
