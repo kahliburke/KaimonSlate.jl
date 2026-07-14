@@ -84,6 +84,14 @@ Two helpers, callable from a cell:
   hashes. `slate_table(slate_memo_entries())` renders exactly what a cold open will restore;
   `name="x"` filters to entries carrying a binding `x`.
 
+And to answer **"why did this cell (not) restore?"** directly:
+
+- **`slate_memo_trace(notebook; cell="")`** → what the cache *did* on each cell's latest eval:
+  the action (**restored / stored / recomputed / unkeyed**), the full cache key with its source- and
+  package-digest components (compare across hosts to spot a key drift), the per-binding blobs read or
+  written, and the exact **miss reason** on a recompute (no manifest · blob missing · decode failed ·
+  below threshold · …). Reads the live worker, so run a cell first.
+
 ## Display objects are elided
 
 Makie/Plots figures are pathological to serialize — a huge scene graph, seconds of work — for a chart
@@ -127,10 +135,10 @@ large tabular/array data reopen and transfer far faster.
 When a notebook runs on a [remote worker](remotes.md), `slate_sync_memo` pushes the whole store to it
 (dedup-aware) so the remote **restores** cached results instead of recomputing them. On attach, recent
 entries are carried automatically when moving them beats recomputing. See
-[Remotes & Pools → Your cache follows you](remotes.md#your-cache-follows-you).
+[Remotes → Your cache follows you](remotes.md#your-cache-follows-you).
 
 ## See also
 
 - [Cell Tags & Caching](cell-tags.md) — the `cache` / `nocache` / `resource` tags in the header.
 - [Reactive Cells](reactivity.md) — the dependency graph that defines a cell's inputs (and its key).
-- [Remotes & Pools](remotes.md) — carrying the cache to another machine.
+- [Remotes](remotes.md) — carrying the cache to another machine.

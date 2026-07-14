@@ -30,7 +30,7 @@ launcher for every notebook, and where you open or upload a document:
   ask the **💬 agent** to open one.)
 - **Open notebooks** — everything currently open on the hub; click to jump back in.
 - **Run on** — choose where a notebook's worker runs: locally, or on a remote SSH host you set up with
-  **🖧 Remotes**. See [Remotes & Pools](remotes.md).
+  **🖧 Remotes**. See [Remotes](remotes.md).
 - **☁ Publishing** — manage published sites and destinations. See [Publishing](publishing.md).
 
 Open one and you're in the notebook itself:

@@ -289,28 +289,38 @@ const SLATE_API = SlateApiEntry[
     SlateApiEntry("slate_memo_stats", "Caching", Base.Docs.Binding(ReportEngine, :slate_memo_stats)),
     SlateApiEntry("slate_memo_entries", "Caching", Base.Docs.Binding(ReportEngine, :slate_memo_entries)),
 
-    # ── Remote execution & worker pools ──────────────────────────────────────────────────────────────
-    # A discoverability SIGNPOST for the `slate.*` AGENT tools (not cell helpers). It names each tool
-    # and its purpose so `slate_api("remote")` / `slate_search_docs("warm pool")` surface them; the full
-    # per-parameter reference is each tool's own schema (its docstring in `create_tools`).
-    SlateApiEntry("remote", "Remote & pools",
-        "slate.run_on · slate.warm_pool · slate.pools · slate.whereis · slate.remote_workers · slate.reap_worker · slate.sync_memo · slate.check_remote",
-        """Run a notebook's worker on another machine, and keep warm workers ready for instant adoption.
-        These are `slate.*` AGENT TOOLS — call the tool (they act on a notebook/host from OUTSIDE a cell;
-        cell code never calls them). Each tool's schema has the full parameters:
+    # ── Remote execution & regions ─────────────────────────────────────────────────────────────────
+    # Discoverability SIGNPOSTS for the `slate.*` AGENT tools (not cell helpers), so `slate_api("remote")`
+    # / `slate_search_docs("region")` surface them; each tool's own schema (in `create_tools`) has the
+    # full per-parameter reference.
+    SlateApiEntry("remote", "Remote & regions",
+        "slate.run_on · slate.check_remote · slate.whereis · slate.remote_workers · slate.reap_worker · slate.sync_memo",
+        """Run a WHOLE notebook's worker on another machine. These are `slate.*` AGENT TOOLS — call the
+        tool (they act on a notebook/host from OUTSIDE a cell; cell code never calls them):
           • `slate.run_on(notebook, host, scope)` — place THIS notebook's worker locally or on an SSH
             host (transport `tunnel`|`direct`; `scope` `session`|`notebook`|`clear`). Reactivity,
             hot-reload and streaming stay transparent. `slate.check_remote(host)` dry-runs + primes a
             host first.
-          • `slate.warm_pool(host; n, preload)` — keep `n` prewarmed workers on `host` (optionally with
-            a replicated `preload` project) so opening a matching notebook ADOPTS one (~1s) instead of a
-            cold boot. `slate.pools()` shows configured pools + parked wires.
           • `slate.remote_workers(host)` — a host's live roster (state + telemetry);
             `slate.reap_worker(host, port)` kills one; `slate.whereis(notebook)` shows where a notebook
             runs right now.
-          • `slate.sync_memo(notebook)` — push local durable-cache blobs to a `direct`-transport remote
+          • `slate.sync_memo(notebook)` — push local durable-cache blobs to the remote (either transport)
             so it RESTORES cached results instead of recomputing (companion to `slate_memo_stats` /
-            `slate_memo_entries`)."""),
+            `slate_memo_entries` / `slate_memo_trace`).
+        To run only SOME cells elsewhere (and keep workers warm), see the `regions` entry."""),
+    SlateApiEntry("regions", "Remote & regions",
+        "slate.region · slate.region_on · slate.regions  ·  cell tag `region=<name>`",
+        """Run SOME of a notebook's cells on a second kernel (another host) while the rest stay local —
+        boundary values cross automatically as content-addressed blobs (a DataFrame crosses as Arrow IPC;
+        unchanged values dedup to nothing). AGENT TOOLS define the compute; cell TAGS assign the work:
+          • `slate.region(name; host, transport, warm, preload, data_root, …)` — define/update a global
+            named region: a host over `tunnel`|`direct`, `warm` workers kept booted for instant adoption
+            (a region with warm>0 IS a warm pool), an optional `preload` project replicated on the host,
+            and a remote `data_root`. Many regions may point at one host.
+          • `slate.region_on(notebook, "name1,name2")` — choose which regions a notebook uses (durable in
+            its footer). `slate.regions()` lists the registry + parked wires.
+          • Tag a cell `region=<name>` (the 🏷 tag editor's "Run on") to run it there. Keep the main kernel
+            and `@bind` cells local; a region cell should PRODUCE values, not mutate main-kernel state (v1)."""),
 
     # ── Cell tags (header) ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("cell tags", "Cell tags", "#%% code id=… <tag> …    (or the 🏷 tag editor)",
@@ -423,7 +433,7 @@ function slate_api_reference(topic::AbstractString = "")
         return String(take!(io))
     end
     # Match when EVERY whitespace-separated word of the topic appears somewhere in the entry's
-    # name/category/doc — so a multi-word query ("warm pool") finds `warm_pool`/`warm workers`/`pools`.
+    # name/category/doc — so a multi-word query ("warm region") finds `region`/`warm workers`/`regions`.
     words = split(t)
     hits = [e for e in SLATE_API if (c = lowercase(string(e.name, " ", e.category, " ", _entry_doc(e)));
                                      all(w -> occursin(w, c), words))]

@@ -132,7 +132,7 @@ export default withMermaid(defineConfig({
           { text: 'Publishing', link: '/publishing' },
           { text: 'Packages', link: '/packages' },
           { text: 'Configuration', link: '/configuration' },
-          { text: 'Remotes & Pools', link: '/remotes' },
+          { text: 'Remotes', link: '/remotes' },
           { text: 'Regions', link: '/regions' },
         ],
       },

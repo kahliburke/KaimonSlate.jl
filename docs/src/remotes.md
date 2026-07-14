@@ -1,12 +1,19 @@
-# Remotes & Worker Pools
+# Remotes
 
 A notebook's **worker** — the Julia process that evaluates its cells — normally runs on your
 machine. It can just as easily run on **another machine**: a beefy workstation, a GPU box, a cloud
-VM. Reactivity, hot-reload, package management, figures, and streaming all stay transparent — the
-notebook behaves exactly as if it were local; only the compute moves.
+VM. Reactivity, hot-reload, package management, figures, and streaming all stay transparent — only
+the compute moves.
 
-Each notebook is placed **independently**, so one can run locally while another runs on a remote
-host, each in its own worker.
+There are two ways to use another machine:
+
+- **Move the whole notebook** — place its entire worker on a host with **`run_on`**. Every cell,
+  main kernel included, runs there.
+- **Send some cells** — keep the main kernel local and route heavy cells to a named
+  **[region](regions.md)**, which can also keep workers *warm* for instant startup.
+
+This page covers host setup, whole-notebook placement, and diagnostics. Per-cell regions — and warm
+workers — live in **[Regions](regions.md)**.
 
 ## Requirements
 
@@ -23,10 +30,12 @@ host:
 - **Transport** — how the notebook talks to the worker:
   - **SSH tunnel** (default) — traffic is forwarded over the SSH connection. Works anywhere `ssh`
     works, opens no extra ports, needs no firewall changes. The safe default.
-  - **Direct · CURVE** — encrypted ZeroMQ sockets straight to the host (CurveZMQ). Lower overhead,
-    and it's what enables the **data channel** that carries your cache (see
-    [below](#your-cache-follows-you)). Needs the worker's ports reachable through any firewall — pin
-    them under **Ports** (blank = auto, `9100+`) and open them on the host.
+  - **Direct · CURVE** — encrypted ZeroMQ sockets straight to the host (CurveZMQ), lower overhead than
+    an ssh forward. Needs the worker's ports reachable through any firewall — pin them under **Ports**
+    (blank = auto, `9100+`) and open them on the host.
+
+  Either way, cache and boundary-value transfers ride a dedicated **data channel** (a CURVE socket on
+  `direct`, its own ssh forward on `tunnel`) so a big shipment never queues ahead of cell results.
 - **🩺 Test & prime** — a full reported dry-run: SSH reachability, Julia presence (+ version),
   environment provisioning, gate load, a CURVE key (for `direct`), then a real
   spawn → connect → round-trip eval → clean teardown. It returns a step-by-step checklist **and
@@ -53,27 +62,15 @@ Placement has a **scope**, so you control how sticky it is:
 | **notebook** | Durable — saved in the `.jl` so the notebook **reopens on that host**. |
 | **clear** | Drop the overrides and fall back to the global default / local. |
 
-## Warm pools
+## Keeping workers warm
 
-A cold remote worker pays a one-time boot (provision + start Julia + load packages) that can be
-~90 s. A **warm pool** removes that wait: keep a few prewarmed workers idling on a host, and opening
-a matching notebook **adopts** one in about a second.
-
-- **`warm_pool(host; n, preload)`** — keep `n` prewarmed workers on `host`. Each is a booted Julia
-  process with the gate serving and the eval path warmed; `preload` (a local project directory)
-  additionally replicates that environment on the host and imports its packages while idle. Opening
-  a notebook whose project matches `preload` then **adopts** a pool worker (dial + namespace swap —
-  packages and cache survive) instead of cold-booting, and the pool refills itself in the
-  background. `n=0` drains idle pool workers (attached workers are never touched). Safe to re-run —
-  it reconciles toward `n`.
-- **`pools()`** — the hub's view: every configured pool (host, target size, preload env, transport)
-  and every **parked wire** (a live connection kept across a notebook close for instant reattach).
-- **`remote_workers(host)`** — a host's live roster: which notebook each worker serves, its state
-  (attached / idle / pool), telemetry (cpu / rss / cache size), and whether it looks abandoned.
-- **`reap_worker(host, port)`** — explicitly kill one worker and remove its files. Manual only —
-  nothing is auto-reaped, so a worker holding useful results is safe until you remove it.
-- **`whereis(notebook)`** — where a given notebook runs right now (local pid/port or remote host),
-  with transport, ports, connection state, and pool provenance.
+A whole-notebook `run_on` **spawns** a fresh worker on the host — a cold boot (provision + start
+Julia + load packages) that can be ~90 s the first time (a later reattach reuses a parked
+connection). To keep workers **pre-booted and ready to adopt** — startup in about a second instead of
+a cold boot — define a **[region](regions.md)** with a `warm` count and route cells to it. Warm
+pooling is now part of the region model: a region with `warm > 0` *is* a warm pool, and its
+`preload` replicates a project so the adopted worker already has its packages loaded. See
+[Regions → Defining a region](regions.md#defining-a-region).
 
 ## Your cache follows you
 
@@ -84,8 +81,9 @@ results there instead of recomputing them — "your session follows you."
   — and never if a single entry would take longer than the **carry-time budget** to transfer (that
   cell just recomputes remotely instead).
 - **`sync_memo(notebook)`** pushes **everything** — all of the notebook's local cache blobs — to the
-  remote, deduping against what it already has. Requires a **`direct`**-transport worker (the cache
-  rides the CURVE data channel, gate port + 2).
+  remote, deduping against what it already has. It works over either transport (`direct` dials the
+  CURVE data socket; `tunnel` uses a dedicated ssh forward, so a big shipment never queues ahead of
+  cell results), and it also runs automatically in the boot window on every remote (re)attach.
 
 Tune the transfer under **🖧 Remotes → Data transfer** (applies to all notebooks):
 
@@ -104,30 +102,35 @@ happening and where.
 
 - **`whereis(notebook)`** — this notebook's live placement: local (pid/port) or remote host, the
   transport, ports (main / stream / data), connection state, and, for a remote, whether it **adopted
-  a pool worker** — plus its latest telemetry.
+  a warm worker** — plus its latest telemetry.
 - **`remote_workers(host)`** — a host's full roster: each worker's lifecycle badge (⚪ stopped ·
-  🔵 pool · 🟡 idle · 🟢 attached/running), the notebook it serves, last-activity age, and telemetry
-  (cpu %, RSS, cache size, running count) alongside host-wide cpu / load / memory.
-- **`pools()`** — the hub view: configured pools (desired state) and parked wires.
+  🔵 warm·region · 🟡 idle · 🟢 attached/running), the notebook it serves, last-activity age, and
+  telemetry (cpu %, RSS, cache size, running count) alongside host-wide cpu / load / memory.
+- **`regions()`** — the compute registry: every configured region (host, warm count, preload, data
+  root, last reconcile) and parked wires. (See [Regions](regions.md).)
 
-**The Remote activity strip** — on the hub's front page, a live "top" for your remote and pool
-workers: one row per worker with a CPU meter, RSS, and *what it's doing* (▶ running-cell ids ·
-⏳ warming · ✓ ready · idle), refreshed every few seconds. It hides itself when you have no pools or
-remote hosts.
+**The Remote activity strip** — on the hub's front page, a live "top" for your remote/region workers,
+**grouped by region**: each worker row shows a CPU meter, RSS, and *what it's doing* (▶ running-cell
+ids · ⏳ warming · ✓ ready · idle), with a click-through detail popup (cpu/rss sparklines + full
+telemetry). It refreshes every few seconds and hides itself when you have no regions or remote hosts.
 
 **Inside the notebook:**
 
-- **🪵 Worker log** (**☰ → Worker log**, or the command palette) — a live tail of the worker's log,
-  following the bottom as it grows. For a remote worker it interleaves the local orchestration log and
-  the remote worker's own log.
+- **The worker/region pill** (top bar) — a live status pill for the notebook's worker, and one per
+  active region, ranked so the one needing attention shows first. Click it for a dropdown of every
+  worker plus a side panel that **streams that worker's log and telemetry** (cpu / rss / running cell)
+  live over the page's WebSocket — no polling.
+- **🪵 Worker log** (**☰ → Worker log**, or the command palette) — a full tail of the main worker's
+  log, following the bottom as it grows. For a remote worker it interleaves the local orchestration
+  log and the remote worker's own log.
 - The [DAG pane](dag.md)'s **🖧 region map** and per-cell provenance chips show where each cell last
   ran and how much data crossed the boundary — see [Regions → Seeing where cells run](regions.md#seeing-where-cells-run).
-- **📋 Activity log** — a per-cell run feed (distinct from the worker-level activity strip above).
+- **📋 Activity log** — a per-cell run feed (distinct from the worker pill and the front-page strip).
 
 !!! note "`slate_diag` is browser diagnostics, not worker state"
     Despite the name, `slate_diag` reports the **browser tab's console** (JS errors, failed asset
     loads) — useful for a broken widget or a 404, not for where a notebook runs. For execution and
-    worker state use `whereis` / `remote_workers` / `pools` and the 🪵 worker log.
+    worker state use `whereis` / `remote_workers` / `regions` and the 🪵 worker log.
 
 ## From the agent
 
@@ -136,14 +139,15 @@ has the full parameters (`slate_api("remote")` lists them):
 
 | Tool | Does |
 | --- | --- |
-| `slate_run_on(notebook, host, scope)` | Place a notebook's worker (local / SSH host; transport; scope). |
+| `slate_run_on(notebook, host, scope)` | Place a **whole** notebook's worker (local / SSH host; transport; scope). |
 | `slate_check_remote(host, transport)` | Preflight + prime a host (the **Test & prime** dry-run). |
-| `slate_warm_pool(host; n, preload)` | Maintain a warm pool for instant adoption. |
-| `slate_pools()` | Configured pools + parked wires (the hub view). |
 | `slate_remote_workers(host)` | A host's live worker roster + telemetry. |
 | `slate_reap_worker(host, port)` | Kill and remove one remote worker. |
 | `slate_whereis(notebook)` | Where a notebook runs right now. |
-| `slate_sync_memo(notebook)` | Push the notebook's full cache to a `direct` remote. |
+| `slate_sync_memo(notebook)` | Push the notebook's full cache to its remote worker. |
+
+Defining named regions and assigning them to a notebook has its own tools — `slate_region`,
+`slate_region_on`, `slate_regions` — see [Regions → From the agent](regions.md#from-the-agent).
 
 ## See also
 

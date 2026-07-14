@@ -41,11 +41,21 @@ the front page, not in any one notebook. A region carries:
 - an optional **preload** — a *local* project dir whose environment is replicated on the host and
   precompiled on idle workers, so a notebook adopts a ready worker instead of cold-booting,
 - a **data root** — a *remote* path pinned as the workers' `datadir()` / `@sfile`,
-- a **warm** count — how many workers to keep booted and idle, ready to *adopt* (0 = cold spin on demand).
+- a **cache root** — a *remote* path for the region's own durable [cache](memoization.md), kept
+  separate from other workers on the box (so a co-located region moves a blob across the boundary
+  rather than deduping it to nothing against a shared store),
+- a **warm** count — how many workers to keep booted and idle, ready to *adopt* (0 = cold spin on demand),
+- and worker **thread counts** (`"<compute>,<interactive>"`).
 
 Many regions can point at the **same host** with different config (e.g. `gpu` and `gpu_scratch` on one box
 with different data roots). Names are folded to identifiers (`slate-remote` → `slate_remote`) so they
 always match a `region=` tag.
+
+!!! note "Advanced, still settling"
+    Two newer per-region knobs: an opt-in **sysimage** (a PackageCompiler image baked for the region's
+    workers, for faster startup) and a **`curve`** toggle — the region's data channel is
+    CURVE-encrypted by default; turn it off only for a co-located / loopback region where encryption is
+    pure overhead.
 
 ## Using a region in a notebook
 

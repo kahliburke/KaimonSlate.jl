@@ -75,7 +75,7 @@ makedocs(;
             "Publishing" => "publishing.md",
             "Packages" => "packages.md",
             "Configuration" => "configuration.md",
-            "Remotes & Pools" => "remotes.md",
+            "Remotes" => "remotes.md",
             "Regions" => "regions.md",
         ],
         "API Reference" => "api.md",
