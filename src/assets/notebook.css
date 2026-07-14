@@ -184,6 +184,13 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cellhead .collapse:hover { color:var(--accent); }
 .cell.collapsed > :not(.cellhead) { display:none; }                 /* fold to just the header */
 .cell.collapsed .cellhead { opacity:.78; }
+/* Per-cell region chip — shown only when the notebook spans more than one run-location. Its colour is
+   set inline from the DAG region hue (border-color inherits via currentColor); click opens 🏷 Run-on. */
+.cellhead .cregion { display:inline-flex; align-items:center; gap:3px; font-size:.66rem; line-height:1;
+                     padding:2px 6px; border:1px solid currentColor; border-radius:6px; cursor:pointer;
+                     opacity:.85; white-space:nowrap; }
+.cellhead .cregion:hover { opacity:1; }
+.cellhead .cregion.local { color:var(--dim); border-color:var(--border); }   /* home cells: subordinate to the coloured region chips */
 /* Hide-code: editor hidden, output/figure (and any @bind control strip) shown — clean,
    interactive plots without the source. */
 /* `!important` needed: CM6's base theme forces `.cm-editor { display:flex !important }`. */
@@ -568,6 +575,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .cellhead .autoctl { color:var(--dim); }
 .cellhead .autoctl.on { color:var(--accent); }
 #nb { position:relative; }
+/* While a cell is being dragged, open a droppable gap below the last cell so it can be dropped at the
+   very end of the notebook (the region below #nb is otherwise outside the drop target). Drag-only, so
+   there's no permanent trailing whitespace. */
+body.celldnd #nb { padding-bottom: 96px; }
 /* Upper-left, clearing the topbar + the #selcount pill (top:54px) so they never overlap. */
 #toasts { position:fixed; left:16px; top:88px; z-index:80; display:flex; flex-direction:column; gap:8px;
           align-items:flex-start; pointer-events:none; }

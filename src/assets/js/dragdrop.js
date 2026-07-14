@@ -268,6 +268,10 @@ nbEl.addEventListener('dragstart', e => {
   if (!h) { e.preventDefault(); return; }
   dragId = h.closest('.cell').dataset.cid;
   e.dataTransfer.effectAllowed = 'move';
+  // Open a droppable gap below the last cell so "drag past everything → drop at the very end" lands
+  // (the area below #nb is otherwise outside the drop target). Deferred a tick like the control-drag
+  // class above, so the reflow can't make Chrome cancel the drag.
+  setTimeout(() => { if (dragId) document.body.classList.add('celldnd'); }, 0);
 });
 nbEl.addEventListener('dragover', e => {
   if (ctrlDrag) {                                  // hosting a control
@@ -316,7 +320,7 @@ nbEl.addEventListener('drop', e => {
   dragId = dropTarget = null;
   if (dt && id) moveCellRel(id, dt.id, dt.before);
 });
-nbEl.addEventListener('dragend', () => { clearDrop(); clearCtrlDrop(); dragId = dropTarget = ctrlDrag = null; document.body.classList.remove('cdnd'); });
+nbEl.addEventListener('dragend', () => { clearDrop(); clearCtrlDrop(); dragId = dropTarget = ctrlDrag = null; document.body.classList.remove('cdnd'); document.body.classList.remove('celldnd'); });
 // ✕ on a strip control → remove this instance (other hosts, if any, remain).
 nbEl.addEventListener('click', e => {
   const del = e.target.closest('.cdel');

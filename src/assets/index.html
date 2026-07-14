@@ -675,7 +675,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       if(host)return 'http://'+host+':'+(t.config.port||'8080')+'/';}
     return '';                                          // plain rsync/s3 without a public URL: unknown
   }
-  function _pubIcon(k){return k==='netlify'?'🔺':k==='cloudflare-pages'?'🟧':k==='github-pages'?'🌐':(k==='rsync-serve'||k==='rsync')?'🖥':(k==='s3'||k==='r2')?'🪣':'🗄';}
+  function _pubIcon(k){
+    if(k==='cloudflare-pages')return '<svg viewBox="0 0 24 24" width="14" height="14" style="vertical-align:-3px"><path fill="#f6821f" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg>';
+    if(k==='netlify')return '<svg viewBox="0 0 24 24" width="12" height="12" style="vertical-align:-2px"><path fill="#05bdba" d="M12 2 22 12 12 22 2 12z"/></svg>';
+    return k==='github-pages'?'🌐':(k==='rsync-serve'||k==='rsync')?'🖥':(k==='s3'||k==='r2')?'🪣':'🗄';}
   function _destLabel(k){return k==='github-pages'?'GitHub Pages':k==='cloudflare-pages'?'Cloudflare':k==='netlify'?'Netlify':k==='rsync-serve'?'Self-hosted':k==='rsync'?'rsync':k==='r2'?'R2':k==='s3'?'S3':k;}
   // Render the Sites section from a ledger view (sites+targets) and a set of names with a local build.
   // Synchronous, so it can paint the server-inlined ledger in the first frame. Destination chips + the

@@ -128,6 +128,52 @@ function controlStrip(c) {
   return `<div class="controls${_ctrlEmpty(c)}" data-cell="${c.id}">${controlStripInner(c)}</div>`;
 }
 
+// The notebook's DEFAULT worker location, where UNTAGGED cells run — from the whole-notebook placement
+// (state.runLocation, same field the run-loc pill uses). '' host ⇒ local main kernel. A host that hosts a
+// declared region reads as that region's NAME (so the home shows '🖧 gpu', not the raw host); any other
+// host shows itself. Returned as {key, name, local} — `key` normalises so a home region and a matching
+// cell tag count as ONE location.
+function _notebookHome() {
+  const loc = (window.__slateState || {}).runLocation || '';
+  const host = loc ? loc.split(',')[0] : '';
+  if (!host) return { key: 'local', name: '', local: true };
+  const regs = (typeof nbState !== 'undefined' && nbState && nbState.regions) || [];
+  const r = regs.find(x => x.host === host);
+  return r ? { key: 'r:' + r.name, name: r.name, local: false } : { key: 'h:' + host, name: host, local: false };
+}
+// A cell's effective run location as {key, name, local}, or null when it has none to show. A region tag
+// (any cell may carry one — the 🏷 Run-on picker offers it for markdown too) wins; otherwise a CODE cell
+// inherits the notebook's default worker (home). An untagged MARKDOWN cell doesn't execute anywhere, so
+// it has no location (null) — no home badge on static prose.
+function _cellRunLoc(c) {
+  const rg = cellAssignedRegion(c);
+  if (rg) return { key: 'r:' + rg, name: rg, local: false };
+  if (c.kind === 'md') return null;
+  return _notebookHome();
+}
+// The distinct set of run-locations across the notebook's cells. More than one member ⇒ the notebook
+// SPANS multiple places, so each cell header names where it runs; a single location is just the home
+// (redundant → hidden).
+function _cellRegionSet() {
+  const cs = (window.__slateState || {}).cells || [];
+  const s = new Set();
+  for (const c of cs) { const l = _cellRunLoc(c); if (l) s.add(l.key); }
+  return s;
+}
+// The region chip for a cell header — shown on every cell that HAS a run location, once the notebook
+// spans >1 location: a coloured 🖧 <name> for cells on a region/remote host (colour matches the DAG
+// region overlay), a subdued 💻 local for main-kernel cells. Untagged code cells reflect the notebook's
+// default worker (so a remotely-placed notebook reads the home region, not "local"); untagged markdown
+// shows nothing. Clicking opens the 🏷 Run-on picker.
+function cellRegionChip(c) {
+  if (_cellRegionSet().size < 2) return '';
+  const loc = _cellRunLoc(c);
+  if (!loc) return '';
+  if (loc.local) return `<span class="cregion local" onclick="openTagEditor('${c.id}', event)" title="runs on the main kernel (this notebook’s home) — click to change">💻 local</span>`;
+  const hue = (typeof _dagRegionHue === 'function' && _dagRegionHue(loc.name)) || '#8a90a8';
+  return `<span class="cregion" style="color:${hue};border-color:${hue}" onclick="openTagEditor('${c.id}', event)" title="runs on ‘${_esc(loc.name)}’ — click to change">🖧 ${_esc(loc.name)}</span>`;
+}
+
 // One compact header line per cell: run + id (left), then duration, hover-revealed
 // actions, and the state badge (right). Replaces the old two-row bar+head.
 function cellHeaderInner(c) {
@@ -144,6 +190,7 @@ function cellHeaderInner(c) {
   return '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
+    cellRegionChip(c) +
     (c.dupdefs && c.dupdefs.length
       ? `<span class="dupwarn" onclick="window.dupInfo(event,'${c.id}')" title="defined in more than one cell — click for details">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
     (c.backrefs && c.backrefs.length
