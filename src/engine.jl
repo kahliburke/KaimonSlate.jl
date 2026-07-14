@@ -20,6 +20,7 @@ export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
 export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
 export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
+export standalone!
 
 # ── Model ────────────────────────────────────────────────────────────────────
 
@@ -112,58 +113,10 @@ end
 # here stays a definition (it isn't in `mutates`). Returns a fresh Set.
 cell_definitions(c::Cell) = setdiff(c.writes, c.mutates)
 
-# Markdown variable interpolation: `{{ expr }}` blocks are captured (rich) and
-# spliced into the rendered prose; the md cell reads their free variables so it
-# re-renders reactively. The scan is brace-balanced and string-aware, so the
-# closing `}}` is never confused with braces inside the expression — e.g.
-# `Dict(:a=>1)`, `NamedTuple{(:a,)}(…)`, or a LaTeXString `L"\frac{a}{b}"`.
-# `_md_template` (template-with-tokens + exprs) is shared by deps (reads) and the
-# renderer (substitution), so captures line up positionally.
-_interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
-
-function _md_template(src::AbstractString)
-    s = String(src); out = IOBuffer(); exprs = String[]
-    i = firstindex(s); n = lastindex(s)
-    while i <= n
-        c = s[i]
-        if c == '{' && (i2 = nextind(s, i)) <= n && s[i2] == '{'
-            k = nextind(s, i2); depth = 0; instr = false; closeat = 0
-            while k <= n
-                ck = s[k]
-                if instr
-                    if ck == '\\'
-                        k = nextind(s, k); k <= n && (k = nextind(s, k)); continue
-                    end
-                    ck == '"' && (instr = false)
-                    k = nextind(s, k)
-                elseif ck == '"'
-                    instr = true; k = nextind(s, k)
-                elseif ck == '{'
-                    depth += 1; k = nextind(s, k)
-                elseif ck == '}'
-                    if depth > 0
-                        depth -= 1; k = nextind(s, k)
-                    else
-                        nk = nextind(s, k)
-                        (nk <= n && s[nk] == '}') ? (closeat = k; break) : (k = nextind(s, k))
-                    end
-                else
-                    k = nextind(s, k)
-                end
-            end
-            if closeat > 0
-                push!(exprs, String(strip(s[nextind(s, i2):prevind(s, closeat)])))
-                print(out, _interp_token(length(exprs)))
-                i = nextind(s, nextind(s, closeat))
-                continue
-            end
-        end
-        print(out, c); i = nextind(s, i)
-    end
-    return String(take!(out)), exprs
-end
-
-_md_interp_exprs(src::AbstractString) = _md_template(src)[2]
+# Markdown `{{ expr }}` interpolation helpers (`_interp_token` / `_md_template` / `_md_interp_exprs`)
+# live in `widgets.jl` — the file shared by BOTH ReportEngine (this module) and the standalone
+# SlateWorker — because the injected `@md` macro needs them there too. widgets.jl is included below,
+# so ReportEngine sees them at call time (all uses are inside function bodies).
 
 mutable struct Report
     id::String
@@ -207,6 +160,34 @@ Report(id::AbstractString, title::AbstractString) =
 # - any non-blank content before the first header becomes a leading markdown cell
 
 const _HEADER = r"^#%%(.*)$"
+
+# ── Runnable-notebook skin ─────────────────────────────────────────────────────
+# A Slate `.jl` opens with this preamble so `julia notebook.jl` / `include` injects the notebook
+# namespace contract (`@bind`, widgets, `echart`, `slate_table`, …) and runs as plain Julia,
+# Pluto-style — see `standalone!` (widgets.jl). The Slate engine injects the same contract itself,
+# so `parse_report` DROPS a leading preamble line (running it as a cell would double-inject) and
+# `standalone!` also self-guards, making a stray re-run a harmless no-op.
+#
+# The `import` is wrapped so a run in an environment WITHOUT the KaimonSlate package fails with an
+# actionable message (how to get the runtime) instead of a bare `Package … not found`. It's its own
+# top-level `try` statement, so the world age advances before `standalone!` is called in the next
+# statement — the freshly-imported module's methods are visible (the reason `import X; X.f()` works
+# at top level but not inside one function).
+const _PREAMBLE = "try; import KaimonSlate; catch; error(\"This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\\\"KaimonSlate\\\")`, or open it in Kaimon Slate.\"); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)"
+_is_preamble_line(l::AbstractString) = occursin("KaimonSlate", l) && occursin(r"\bstandalone!\s*\(", l)
+
+# A markdown cell serializes its body inside `@md\"\"\"…\"\"\"` so a bare `julia notebook.jl` renders it
+# (the injected `@md` macro parses the markdown and evaluates `{{ }}`) instead of choking on prose.
+# The engine stores the INNER markdown as `cell.source` and drives its own `{{ }}`/CommonMark pipeline;
+# the wrapper is purely the on-disk runnable skin. Old bare-prose markdown cells still read (unwrap is
+# a no-op on them). Non-greedy, `.`-matches-newline, tolerant of one wrapper newline on each side.
+const _MD_WRAP_RE = r"^@md\"\"\"\n?(.*?)\n?\"\"\"$"s
+
+# Unwrap `@md\"\"\"…\"\"\"` back to bare markdown; any other body is returned unchanged.
+function _unwrap_md(src::AbstractString)
+    m = match(_MD_WRAP_RE, String(src))
+    return m === nothing ? String(src) : String(m.captures[1])
+end
 
 # Parse a `controls=` value into columns of names, respecting `[ ]` groups.
 function _parse_controls(s::AbstractString)
@@ -337,6 +318,13 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         lines = lines[1:(fi - 1)]
     end
 
+    # Drop the standalone preamble (a leading `KaimonSlate.standalone!(…)` line): the engine injects
+    # the namespace contract itself, so parsing it as a cell would double-inject. Tolerate leading blanks.
+    pi = findfirst(l -> !isempty(strip(l)), lines)
+    if pi !== nothing && _is_preamble_line(lines[pi])
+        lines = lines[(pi + 1):end]
+    end
+
     explicit = false                      # inside an explicit #%% cell?
     kind::CellKind = CODE                 # implicit default is code (Literate)
     cid::Union{String,Nothing} = nothing
@@ -351,6 +339,7 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
             idx = length(report.cells) + 1
             src = join(trimmed, "\n")
+            kind === MARKDOWN && (src = _unwrap_md(src))   # strip the `@md\"\"\"…\"\"\"` runnable skin, if present
             id_ = cid === nothing ? _unique_auto_id(kind, src, idx, used_ids) : cid
             push!(used_ids, id_)
             cell = Cell(id_, kind, src)
@@ -518,7 +507,13 @@ function _cell_source(cell::Cell)
     for t in _KNOWN_TAGS; (t in cell.flags) && (header *= " " * string(t)); end
     extra = sort!([string(f) for f in cell.flags if !(f in _INTERNAL_FLAGS) && !(f in _KNOWN_TAGS)])
     for t in extra; header *= " " * t; end
-    return isempty(cell.source) ? header : "$header\n$(cell.source)"
+    isempty(cell.source) && return header
+    body = cell.source
+    # Markdown gets the runnable `@md\"\"\"…\"\"\"` skin, EXCEPT when the body itself contains `\"\"\"`
+    # (which would break the triple-quoted literal) — that rare cell falls back to the bare form,
+    # which still parses in the engine (just not standalone-runnable). `_unwrap_md` reads both.
+    cell.kind === MARKDOWN && !occursin("\"\"\"", body) && (body = "@md\"\"\"\n" * body * "\n\"\"\"")
+    return "$header\n$body"
 end
 
 """
@@ -530,7 +525,8 @@ Cell *outputs* are deliberately not serialized (regenerated by eval) — clean d
 """
 # Just the cells (no footer) — the runnable notebook body, shared by `serialize_report`
 # and the standalone-bundle export (which appends its own footer instead of the delta one).
-serialize_cells(report::Report) = join((_cell_source(c) for c in report.cells), "\n\n") * "\n"
+serialize_cells(report::Report) =
+    _PREAMBLE * "\n\n" * join((_cell_source(c) for c in report.cells), "\n\n") * "\n"
 
 function serialize_report(report::Report)
     body = serialize_cells(report)

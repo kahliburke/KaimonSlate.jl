@@ -42,7 +42,7 @@ using .NotebookServer: serve_notebook, start_server, LiveNotebook,
                       index_docs!, search_docs, cell_image, cell_image_fresh, cell_inspect, diag_report,
                       request_live_eval, export_standalone, export_pdf, expand
 
-export serve_notebook, LiveNotebook, expand, register_extension
+export serve_notebook, LiveNotebook, expand, standalone!, register_extension
 
 # ── Auto-registration as a Kaimon extension ───────────────────────────────────
 # The intended path is zero-setup: install KaimonSlate, and if Kaimon is present on

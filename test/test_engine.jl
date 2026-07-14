@@ -220,6 +220,68 @@ mean(data)
 
 end
 
+@testset "runnable-notebook format (preamble + @md skin)" begin
+    src = "#%% md id=intro\n# Head\nProse **bold** with {{ 1 + 1 }}.\n\n#%% code id=calc\nx = 6 * 7"
+    r = parse_report(src)
+    s = serialize_report(r)
+
+    @testset "serialize emits the runnable skin" begin
+        @test startswith(s, ReportEngine._PREAMBLE)          # standalone preamble is the first line
+        @test occursin("@md\"\"\"", s)                         # markdown wrapped for a standalone run
+        @test !occursin("@md\"\"\"\nx = 6 * 7", s)             # code cells are NOT wrapped
+        # the stored (engine-facing) source is the BARE markdown, not the wrapper
+        @test r.cells[1].source == "# Head\nProse **bold** with {{ 1 + 1 }}."
+    end
+
+    @testset "parse drops the preamble and unwraps @md" begin
+        r2 = parse_report(s)
+        @test length(r2.cells) == 2                            # no phantom preamble cell
+        @test [c.id for c in r2.cells] == ["intro", "calc"]
+        @test r2.cells[1].source == r.cells[1].source          # @md unwrapped back to bare markdown
+        @test serialize_report(r2) == s                        # fixed point across the new format
+    end
+
+    @testset "old bare-prose markdown still reads; gains the skin on save" begin
+        old = "#%% md id=m\n# Legacy\nno wrapper here\n\n#%% code id=c\ny = 1"   # no preamble, no @md
+        ro = parse_report(old)
+        @test ro.cells[1].kind == MARKDOWN
+        @test ro.cells[1].source == "# Legacy\nno wrapper here"
+        so = serialize_report(ro)
+        @test startswith(so, ReportEngine._PREAMBLE)           # migration: preamble added
+        @test occursin("@md\"\"\"\n# Legacy", so)              # migration: markdown wrapped
+    end
+
+    @testset "markdown containing triple-quotes falls back to bare form" begin
+        rq = ReportEngine.Report("r", "")
+        push!(rq.cells, ReportEngine.Cell("m", MARKDOWN, "a \"\"\" b"))
+        sq = ReportEngine._cell_source(rq.cells[1])
+        @test !occursin("@md", sq)                             # can't wrap safely → bare
+        @test parse_report(serialize_report(rq)).cells[1].source == "a \"\"\" b"   # still round-trips
+    end
+end
+
+@testset "standalone! injects the runnable contract" begin
+    m = Module(:StandaloneContract)
+    standalone!(m; dir = "/tmp")
+    Core.eval(m, Meta.parse("v = 6 * 7"))
+    Core.eval(m, Meta.parse("@bind n Slider(1:100; default=42)"))     # real bind path → widget default
+    Core.eval(m, Meta.parse("@bind flag Checkbox()"))
+    ec = Core.eval(m, Meta.parse("echart(:line, [1,2,3], [4,5,6])"))  # pure constructor builds an object
+    md = Core.eval(m, Meta.parse("@md\"\"\"# H\n\nValue {{ v }}\"\"\""))
+    noop = Core.eval(m, Meta.parse("(slate_emit(\"c\", 1), slate_progress(0.5), slate_refresh())"))
+
+    @test Core.eval(m, :v) == 42                             # code runs
+    @test Core.eval(m, :n) == 42                              # @bind yields the default, no browser
+    @test Core.eval(m, :flag) == false
+    @test nameof(typeof(ec)) == :EChart
+    @test nameof(typeof(md)) == :MD && occursin("42", sprint(show, MIME("text/plain"), md))
+    @test noop == (nothing, nothing, nothing)                # live-only features are no-ops
+    @test Core.eval(m, :__slate_standalone) == true
+
+    # idempotent: a second call (or the engine re-populating the same module) is a no-op
+    @test (standalone!(m; dir = "/tmp"); Core.eval(m, :n)) == 42
+end
+
 @testset "Slate.config footer — per-notebook settings round-trip" begin
     r = parse_report("#%% code id=a\nx = 1")
     r.meta["parallel"] = true

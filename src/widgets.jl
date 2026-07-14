@@ -13,10 +13,65 @@
 #
 # Dependency-light (Base + stdlib only) so it loads cleanly into the standalone worker.
 import Base64   # stdlib — for WebPage(obscure=true) base64 packaging
+import Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `_populate_notebook_ns!`)
 
 # slate_fingerprint + memo-store introspection — shared notebook helpers injected below
 # (one include here serves both namespaces, mirroring how this file itself is shared).
 include(joinpath(@__DIR__, "fingerprint.jl"))
+
+# Markdown variable interpolation: `{{ expr }}` blocks are captured (rich) and spliced into the
+# rendered prose; the md cell reads their free variables so it re-renders reactively. The scan is
+# brace-balanced and string-aware, so the closing `}}` is never confused with braces inside the
+# expression — e.g. `Dict(:a=>1)`, `NamedTuple{(:a,)}(…)`, or a LaTeXString `L"\frac{a}{b}"`.
+# `_md_template` (template-with-tokens + exprs) is shared by deps (reads), the renderer
+# (substitution), AND the injected `@md` macro (standalone rendering) — so captures line up
+# positionally. Lives HERE, not in engine.jl, because widgets.jl is included into BOTH ReportEngine
+# and the standalone SlateWorker; the `@md` macro built in `_populate_notebook_ns!` needs it in both.
+_interp_token(i::Int) = "xslateinterpx" * string(i; pad = 5) * "x"
+
+function _md_template(src::AbstractString)
+    s = String(src); out = IOBuffer(); exprs = String[]
+    i = firstindex(s); n = lastindex(s)
+    while i <= n
+        c = s[i]
+        if c == '{' && (i2 = nextind(s, i)) <= n && s[i2] == '{'
+            k = nextind(s, i2); depth = 0; instr = false; closeat = 0
+            while k <= n
+                ck = s[k]
+                if instr
+                    if ck == '\\'
+                        k = nextind(s, k); k <= n && (k = nextind(s, k)); continue
+                    end
+                    ck == '"' && (instr = false)
+                    k = nextind(s, k)
+                elseif ck == '"'
+                    instr = true; k = nextind(s, k)
+                elseif ck == '{'
+                    depth += 1; k = nextind(s, k)
+                elseif ck == '}'
+                    if depth > 0
+                        depth -= 1; k = nextind(s, k)
+                    else
+                        nk = nextind(s, k)
+                        (nk <= n && s[nk] == '}') ? (closeat = k; break) : (k = nextind(s, k))
+                    end
+                else
+                    k = nextind(s, k)
+                end
+            end
+            if closeat > 0
+                push!(exprs, String(strip(s[nextind(s, i2):prevind(s, closeat)])))
+                print(out, _interp_token(length(exprs)))
+                i = nextind(s, nextind(s, closeat))
+                continue
+            end
+        end
+        print(out, c); i = nextind(s, i)
+    end
+    return String(take!(out)), exprs
+end
+
+_md_interp_exprs(src::AbstractString) = _md_template(src)[2]
 
 # A widget spec: its kind (UI tag), display params, and default value. Built by the
 # constructors below at runtime — no syntactic parsing, no `Slider`-name matching.
@@ -543,6 +598,73 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(macro use(args...)
         return :(nothing)
     end))
+    # `@md\"\"\"…\"\"\"` — render a markdown cell on a STANDALONE run (`julia notebook.jl`). Parses the
+    # markdown (stdlib `Markdown`) and evaluates each `{{ expr }}` in the run scope, substituting its
+    # string form back in — the SAME interpolation the engine does (`_md_template`), so a cell reads the
+    # same live or standalone. In the Slate engine this macro is never reached: `parse_report` unwraps
+    # the `@md` skin and the markdown pipeline handles the cell. Returns a `Markdown.MD` (renders in a
+    # display context; the value is discarded — hence inert — in a plain `julia file.jl` script run).
+    Core.eval(m, :(macro md(str)
+        str isa AbstractString ||
+            error("@md expects a string literal (e.g. @md\"\"\"# Title\"\"\")")
+        tmpl, exprs = $(_md_template)(String(str))
+        tokfn = $(_interp_token)
+        mdparse = $(Markdown.parse)
+        blk = Expr(:block, :(local __md_s = $tmpl))
+        for (i, e) in enumerate(exprs)
+            tok = tokfn(i)
+            push!(blk.args, :(__md_s = replace(__md_s, $tok => string($(esc(Base.Meta.parse(e)))))))
+        end
+        push!(blk.args, Expr(:call, $(_standalone_show_md), Expr(:call, mdparse, :__md_s)))
+        blk
+    end))
+    return m
+end
+
+# ── Standalone runnability ────────────────────────────────────────────────────
+# Standalone document output: on a non-interactive run (`julia notebook.jl`) a markdown cell's value
+# is otherwise discarded, so print its rendered form to stdout — the notebook reads as a document, not
+# just its code side-effects. In a REPL / `include` session the value displays normally, so skip (no
+# double-render). `KAIMONSLATE_QUIET_MD=1` suppresses it entirely (code-only run). Only ever fires on a
+# genuine standalone run — the Slate engine unwraps the `@md` skin at parse time and never calls it.
+function _standalone_show_md(md)
+    (isinteractive() || strip(get(ENV, "KAIMONSLATE_QUIET_MD", "")) in ("1", "true")) && return md
+    try
+        show(stdout, MIME("text/plain"), md)
+        println(stdout)
+    catch
+    end
+    return md
+end
+
+"""
+    standalone!(m::Module = @__MODULE__; dir = nothing) -> Module
+
+Inject the notebook-namespace contract into `m` so a Slate `.jl` runs as **plain Julia**
+(`julia notebook.jl` / `include`), Pluto-style. This is the single lever that makes a
+notebook runnable outside the Slate server: the same `_populate_notebook_ns!` contract is
+installed, but the live-only features degrade to no-ops.
+
+- `@bind x W(…)` → `x = W`'s default (empty registry, no browser wiring) — the real bind
+  path, so it works with no special-casing.
+- `echart` / `slate_table` / `slate_query` build their display objects as usual (pure
+  constructors); they render via `show`/MIME if the run is display-capable, else are inert.
+- `slate_refresh` / `slate_progress` / `slate_emit` / reactive fires → no-op.
+- `@asset` / `readfile` / `datadir` / `@sfile` resolve against `dir` (the notebook file's
+  directory), defaulting to `pwd()`.
+
+Idempotent: a second call — or the Slate engine re-populating the same module — is a no-op
+(guarded on the `__slate_standalone` marker), so the emitted preamble never double-injects.
+"""
+function standalone!(m::Module = Main; dir::Union{Nothing,AbstractString} = nothing)
+    isdefined(m, :__slate_standalone) && return m
+    base = dir === nothing ? "" : String(dir)
+    _populate_notebook_ns!(m;
+        echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
+        slate_query = slate_query,
+        slate_refresh = (vars...) -> nothing,        # reactive recompute is the engine's job — inert here
+        assetbase = () -> base)                       # asset/data paths anchor on the notebook's dir
+    Core.eval(m, :(const __slate_standalone = true))
     return m
 end
 
