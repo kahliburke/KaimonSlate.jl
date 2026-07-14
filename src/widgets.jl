@@ -252,9 +252,18 @@ function _row_namedtuple(w::Widget, idx::Integer)
     return NamedTuple{names}(vals)
 end
 
+# A generic widget of a THIRD-PARTY kind — the Julia half of the widget extension point.
+# Pair it with a front-end `slateRegisterWidget("<kind>", …)` (assets/js/view.js) that renders
+# and wires the control in the browser. `params` cross to the browser as the spec's params; the
+# value round-trips through `coerce_bind`'s identity default (unknown kinds pass through), so a
+# string-valued custom widget needs no server-side coercion. Example:
+#   @bind ans custom_widget("mathfield"; label = "your answer")
+custom_widget(kind::AbstractString, default = ""; kwargs...) =
+    Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in kwargs), default)
+
 const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :TextArea,
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
-                       :TimeField, :Button, :playhead, :TableSelect)
+                       :TimeField, :Button, :playhead, :TableSelect, :custom_widget)
 
 # ── Value reconcile (the persistence policy) ──────────────────────────────────
 # Re-running a bind cell updates the SPEC (range/params) but KEEPS the user's value

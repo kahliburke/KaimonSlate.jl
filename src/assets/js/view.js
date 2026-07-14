@@ -18,6 +18,33 @@ function _ctrlValLabel(el, v) {
   return _showVal(v);
 }
 
+// ── Custom widget registry (extension point) ─────────────────────────────────
+// Third-party packages register a widget KIND's front-end here, so a widget can
+// live ENTIRELY OUTSIDE core. Core emits a generic empty container for any kind it
+// doesn't recognise (see controlMarkup) and delegates the live behaviour to the
+// registered impl:
+//   slateRegisterWidget('mathfield', {
+//     wire(el, api) { /* build DOM inside el; on change, api.push(value) */ },
+//     sync(el, value, params) { /* reflect a server-pushed value (optional) */ },
+//   });
+// `api` = { push, schedule, flush, name, bindId, params, mirror }. `push`/`flush` send
+// the value immediately; `schedule` is throttled/coalesced (same policy as built-ins).
+window.slateWidgets = window.slateWidgets || {};
+window.slateRegisterWidget = function (kind, impl) {
+  const im = impl || {};
+  window.slateWidgets[String(kind)] = im;
+  // Registration can land AFTER the control mounted (e.g. an async import): wire any instances
+  // already in the DOM that haven't been wired yet, THEN push their current value so an
+  // async-registered widget restores its state immediately (the mount-time sync already ran with
+  // no impl to receive it).
+  document.querySelectorAll('[data-bind][data-widget="' + String(kind) + '"]').forEach(el => {
+    try {
+      if (!el._customWired) wireControl(el);
+      if (im.sync) { const bs = _bindSpec(el.dataset.bind, el.dataset.name); if (bs) im.sync(el, bs.value, bs.params || {}); }
+    } catch (e) { console.error(e); }
+  });
+};
+
 function controlMarkup(bindId, b) {
   const p = b.params || {}, w = b.widget;
   const a = `data-bind="${bindId}" data-name="${b.name}" data-widget="${w}"`;
@@ -77,6 +104,10 @@ function controlMarkup(bindId, b) {
     // current selection so the highlight is right on the first paint.
     ctrl = `<div class="tablesel slatetable selectable" ${a} data-selrow="${parseInt(b.value, 10) || 0}"></div>`;
     wval = '';                                        // the highlighted row IS the value indicator
+  }
+  else {                                              // any non-builtin kind → a registered custom widget
+    ctrl = `<span class="customwidget" ${a}></span>`; // empty container; its wire() builds + wires the DOM
+    wval = '';
   }
   const nm = p.label != null ? p.label : b.name;   // a widget's `label=` overrides the displayed var name
   return `<span class="wname" title="${_esc(b.name)}">${_esc(nm)}</span>${ctrl}${wval}`;
@@ -262,6 +293,20 @@ function wireControl(el) {
   const touch = () => { el._touched = performance.now(); };
   el.addEventListener('pointerdown', touch);
   el.addEventListener('focus', touch, true);
+  // Custom (third-party) widget: it owns its element's DOM + events, so it NEVER takes the built-in
+  // input wiring below — not even before its impl registers. An async import can register AFTER the
+  // control mounted; the empty container then just waits for slateRegisterWidget to re-wire it. This
+  // early return is what stops a stale built-in `oninput` (from a fallthrough) later firing on the
+  // plugin's own inner inputs and pushing a garbage value.
+  if (el.classList.contains('customwidget')) {
+    const _reg = window.slateWidgets && window.slateWidgets[widget];
+    if (_reg && _reg.wire && !el._customWired) {
+      el._customWired = true;
+      const bs = _bindSpec(id, name), params = (bs && bs.params) || {};
+      _reg.wire(el, { push: flush, schedule, flush, name, bindId: id, params, mirror });
+    }
+    return;                                          // the plugin owns this element (or it's awaiting registration)
+  }
   if (widget === 'button') {                       // action button → increments a counter
     el.onclick = () => { touch(); const n = (parseInt(el.dataset.count, 10) || 0) + 1; el.dataset.count = n; mirror(n); flush(n); };
     return;
@@ -709,6 +754,7 @@ function syncControlValues(state) {
     else if (w === 'radio') { const c = el.querySelector('input[value="' + _q(String(v)) + '"]'); if (c) c.checked = true; }
     else if (w === 'tableselect') { const sel = parseInt(v, 10) || 0; el.dataset.selrow = sel; el.querySelectorAll('tr.selrow').forEach(tr => tr.classList.toggle('on', (parseInt(tr.dataset.row, 10) || 0) === sel)); }
     else if (w === 'button') el.dataset.count = v;
+    else if (window.slateWidgets && window.slateWidgets[w] && window.slateWidgets[w].sync) window.slateWidgets[w].sync(el, v, p);
     else el.value = String(v);
     const wrap = el.closest('.widget, .control'); const m = wrap && wrap.querySelector('.wval');
     if (m) m.textContent = _ctrlValLabel(el, v);

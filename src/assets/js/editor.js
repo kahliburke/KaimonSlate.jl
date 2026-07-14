@@ -64,6 +64,28 @@
 
   window.editors = window.editors || {};
 
+  // ── Editor-extension registry (extension point) ──────────────────────────────
+  // A package can teach EVERY cell editor a new behaviour (e.g. render giac"…" as an
+  // inline math field) without editing core — the editor counterpart of
+  // slateRegisterWidget. Register a function that, given the editor's context
+  // ({markdown, cellId}), returns CM6 extension(s) to merge in. It's consulted when an
+  // editor is built, so register at notebook load (before cells hydrate); editors that
+  // mount later pick it up. Registered extensions sit BEFORE the default keymap, so a
+  // returned keymap can take precedence.
+  window._slateEditorExts = window._slateEditorExts || [];
+  const _editorExtComp = new Compartment();
+  const _buildEditorExts = ctx => window._slateEditorExts.flatMap(fn => {
+    try { return fn(ctx) || []; } catch (e) { console.error('slate editor extension failed', e); return []; }
+  });
+  window.slateRegisterEditorExtension = fn => {
+    if (typeof fn !== 'function' || window._slateEditorExts.includes(fn)) return;
+    window._slateEditorExts.push(fn);
+    // Apply to editors already open (registration can land after they mounted).
+    for (const v of Object.values(window.editors || {})) {
+      try { v.dispatch({ effects: _editorExtComp.reconfigure(_buildEditorExts(v._edctx || {})) }); } catch (e) {}
+    }
+  };
+
   // Complete Julia keywords — a finished one is a token, not a completion prefix (e.g. `end`).
   const JL_KEYWORDS = new Set(['baremodule', 'begin', 'break', 'catch', 'const', 'continue', 'do',
     'else', 'elseif', 'end', 'export', 'false', 'finally', 'for', 'function', 'global', 'if', 'import',
@@ -465,6 +487,7 @@
     const themed = [chromeComp.of(chromeFor(cur)), themeComp.of(styleFor(cur))];
     const lang = opts.markdown ? themed : [julia(), ...themed];
     const cellKeys = (opts.keys || []).map(k => ({ key: k.key, run: () => { k.run(); return true; } }));
+    const _edctx = { markdown: !!opts.markdown, cellId: opts.cellId };   // for registered editor extensions
     const view = new EditorView({
       parent,
       doc: opts.doc || '',
@@ -479,6 +502,10 @@
         // popup). Manual triggers (Tab / Ctrl-Space / Alt-Space) are immediate regardless. Tunable
         // via window.slateCompleteDelay (a settings hook); default 500ms.
         acompComp.of(_acompExt(!!opts.markdown)),
+        // Registered editor extensions (e.g. inline-math rendering), in a compartment so a
+        // later registration can reconfigure this open editor. Before the keymap below so a
+        // returned keymap out-precedences the defaults.
+        _editorExtComp.of(_buildEditorExts(_edctx)),
         keymap.of([
           ...completionKeymap,                  // popup nav/close (Escape) takes precedence over cell keys
           ...cellKeys,                          // a cell's own Escape (e.g. cancelSource) wins over the blur below
@@ -537,6 +564,7 @@
       ],
     });
     view._wrapMd = !!opts.markdown;   // markdown views stay wrapped when the code-wrap toggle flips
+    view._edctx = _edctx;             // ctx for reconfiguring registered editor extensions
     if (opts.cellId) window.editors[opts.cellId] = view;
     return view;
   }

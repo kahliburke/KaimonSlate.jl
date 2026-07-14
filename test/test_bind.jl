@@ -44,6 +44,18 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test RE.coerce_bind(RE.ColorPicker(), "#123456") == "#123456"
     end
 
+    @testset "custom_widget: third-party kind passes through the value contract" begin
+        w = RE.custom_widget("mathfield"; label = "answer")
+        @test w.kind == "mathfield" && w.default == "" && w.params["label"] == "answer"
+        @test RE.custom_widget("mathfield", "\\frac{1}{2}").default == "\\frac{1}{2}"   # positional default carries
+        # coerce is identity for an unknown kind — the browser value crosses unchanged (no server coercion)
+        @test RE.coerce_bind(w, "x^2 + 1") == "x^2 + 1"
+        @test RE.coerce_bind(w, 42) === 42
+        # reconcile keeps the user's value across a re-run (same custom kind), resets on a kind change
+        @test RE._reconcile_bind(w, "kept", RE.custom_widget("mathfield")) == "kept"
+        @test RE._reconcile_bind(w, "kept", RE.Slider(0:10)) == 0                        # kind changed → default
+    end
+
     @testset "TableSelect binds the clicked row as a NamedTuple" begin
         ts = RE.TableSelect([(sym = "AAPL", px = 42.0), (sym = "MSFT", px = 13.5)])
         @test ts.kind == "tableselect"

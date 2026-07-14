@@ -2,7 +2,7 @@
 // global `CM6`). Exposes the CM6 primitives the editor wrapper (cm6compat.js) needs, plus a Julia
 // LanguageSupport whose highlighting comes from @plutojl/lezer-julia's parser + a styleTags map.
 import { EditorView, keymap, drawSelection, highlightActiveLine, highlightSpecialChars,
-         crosshairCursor, Decoration, ViewPlugin } from "@codemirror/view";
+         crosshairCursor, Decoration, ViewPlugin, WidgetType } from "@codemirror/view";
 import { EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess,
          toggleComment, undoDepth, redoDepth } from "@codemirror/commands";
@@ -162,7 +162,7 @@ const juliaHighlightStyle = juliaThemes["dark-plus"];   // default / back-compat
 
 export {
   EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, RangeSetBuilder, Transaction,
-  keymap, drawSelection, highlightActiveLine, highlightSpecialChars, crosshairCursor, Decoration, ViewPlugin,
+  keymap, drawSelection, highlightActiveLine, highlightSpecialChars, crosshairCursor, Decoration, ViewPlugin, WidgetType,
   defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess, toggleComment,
   undoDepth, redoDepth,
   indentUnit, bracketMatching, indentOnInput, syntaxTree,
