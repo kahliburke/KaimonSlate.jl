@@ -427,8 +427,8 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     # no stacked-env skew).
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     infra = _local_has_revise() ?
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"Revise\")]" :
-        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\")]"
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
+        "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\")]"
     if !isempty(t.origin_env) && isfile(joinpath(t.origin_env, "Project.toml"))
         _replicate_env!(t)                                    # notebook env + worker infra
     elseif !isempty(parent_project) && isdir(parent_project)
@@ -1084,7 +1084,9 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             # (refused) just retries; a port that stays unreachable is a firewall → fail fast with a clear
             # message instead of waiting out the whole deadline.
             if t.transport === :direct
+                _pt = time()
                 pr = _probe_tcp(connect_host, connect_port; timeout = 4.0)
+                _rlog("  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)")
                 if pr === :unreachable
                     firewall_since == 0.0 && (firewall_since = time())
                     last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
@@ -1101,6 +1103,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                 conn = K.connect_tcp!(_manager(), connect_host, connect_port;
                                       name = "slate-$(host)-$(port)", stream_port = connect_stream,
                                       server_key = server_key, label = k.label)
+                _rlog("connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')")
                 break
             catch e
                 last = sprint(showerror, e); sleep(0.25)

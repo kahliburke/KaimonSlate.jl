@@ -16,6 +16,12 @@ import Serialization                         # slate_emit value → bytes (uncon
 import Base64                                # …then base64 so an arbitrary Julia value rides the string stream
 import Logging, Dates                        # timestamped worker log (legible after a slow bring-up / eval)
 
+# Cold-boot phase timing: a module-load timer so the payload's heavy blocks (memo layer, ExpressionExplorer)
+# and start()'s socket bring-up self-report into the worker log — same `[slate-boot]` prefix the boot script
+# uses. Cheap prints; this timer starts ~0.5s into the include, so add that to correlate with boot markers.
+const _BOOT_T0 = time()
+_blog(m) = try; println("[slate-boot] payload +" * string(round(time() - _BOOT_T0; digits = 1)) * "s " * m); flush(stdout); catch; end
+
 # The enclosing/parent project dir stacked behind this notebook env on LOAD_PATH (set by
 # the boot script; "" when the notebook is detached). Used to attribute package provenance
 # — which deps are notebook-specific adds vs. inherited from the parent project.
@@ -103,6 +109,25 @@ catch e
     _MEMO_ERR[] = e
     false
 end
+
+# Prefer a vendored, version-pinned OpenSSL (SHA-NI) for CAS content hashing when it's in the worker
+# env; otherwise MemoStore falls back to the system libcrypto, then SHA.jl. Best-effort and isolated
+# from the memo load above — a missing OpenSSL_jll must never disable memoization. `@eval` runs the
+# import + path read in one latest-world step (no world-age on the fresh binding).
+_MEMO_OK && try
+    p = @eval begin
+        import OpenSSL_jll
+        if isdefined(OpenSSL_jll, :libcrypto_path)      # JLLWrappers const path
+            String(OpenSSL_jll.libcrypto_path)
+        else                                            # older String product / newer LazyLibrary
+            lc = OpenSSL_jll.libcrypto
+            lc isa AbstractString ? String(lc) : String(lc.path)
+        end
+    end
+    MemoStore.set_libcrypto!(p)
+catch
+end
+_blog("memo layer loaded (ok=$(_MEMO_OK))")   # memostore + codecs + blobchannel compiled
 const _MEMO_DIR = Ref{String}("")
 # On-disk ceiling for the durable memo store (LRU-evicted). Configurable — big-data notebooks
 # legitimately cache multi-GB artifacts: `KAIMONSLATE_MEMO_CAP_GB` (forwarded into the worker's env
@@ -1114,6 +1139,7 @@ catch e
     @warn "slate: ExpressionExplorer unavailable — macro-aware dependency recovery disabled" error = sprint(showerror, e)
     false
 end
+_blog("ExpressionExplorer loaded (ok=$(_EE_OK))")
 
 "Macro-expand cell sources in the live notebook namespace (recursive, NO evaluation) and ANALYZE
 them right here, where the macros live — returns id → {reads, writes} name lists. A cell whose
@@ -1902,16 +1928,26 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
     # key — proper mutual auth. Local + :ssh_tunnel workers leave them off (loopback / SSH-encrypted).
+    _blog("start(): entering KaimonGate.serve")
     KaimonGate.serve(; mode = :tcp, host = host, port = port, stream_port = stream_port,
                      tools = tools(), force = true, allow_mirror = false,
                      allow_restart = false, spawned_by = "slate",
                      curve = curve, allowed_clients = allowed_clients)
-    _start_src_watcher()   # resilient /src hot-reload (Revise); no-op if Revise didn't load
+    _blog("start(): gate SERVING — port reachable (hub can dial now)")
+    # DEFERRED (~5s): Revise/src-watcher setup is heavy compilation; running it now would contend for
+    # the codegen lock with the hub's CURVE handshake in the first seconds after the port opens (the
+    # handshake path is precompiled but still needs the lock free to run fast). Let the attach win the
+    # quiet CPU first, then set up hot-reload.
+    Threads.@spawn begin
+        sleep(5)
+        try; _start_src_watcher(); catch e; @warn "slate worker: src-watcher start failed" exception = e; end
+    end
     # The blob data channel (port+2): bulk memo transfer that never queues ahead of cell results.
     # ALWAYS CURVE (decoupled from hub transport): allow-listed on :direct (shares the gate's ZAP
     # handler), encryption-only behind SSH on :tunnel. No plaintext blob path on any worker.
     # Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
     data_port > 0 && _MEMO_OK && Threads.@spawn try
+        sleep(5)   # DEFERRED: another CURVE-server setup; keep it out of the hub's handshake window
         _blob_server!(host, data_port; curve = blob_curve)
     catch e
         @warn "slate worker: blob channel died" port = data_port exception = e
@@ -1927,6 +1963,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # worse) — while an idle-spawned worker (warm pool, detach target) has it fully paid before
     # anyone attaches. "1 + 1" exercises exactly the measured slow path; it writes no globals.
     Threads.@spawn try
+        sleep(5)   # DEFERRED: this is the biggest boot compile — let the hub attach on a clear CPU first
         t0 = time()
         # Through the TOOL entry point (not _eval_one) so the wrapper + cancel-registry +
         # kwarg path compile too — the layers a real first request would otherwise JIT.
