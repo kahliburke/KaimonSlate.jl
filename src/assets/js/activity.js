@@ -3,14 +3,13 @@
 // and the components follow — no manual re-render or event re-wiring, no innerHTML clobbering. Reuses the
 // existing `.act*` / `.wd*` / `.modal*` CSS already in index.html (same class names), so no styles here.
 //
-// Cross-boundary bridges to the still-vanilla Remotes modal (index.html inline script):
-//   • window.slateOpenRegionConfig(host, name) — open the Remotes modal focused on a region's config.
-//   • window.slateOpenWorkerDetail(host, port) — this island exposes it so the modal's worker roster can
-//     open the SAME detail popup (so both entry points share one implementation).
+// Coordinates with the Remotes modal island (remotes.js) purely through shared signals (stores.js):
+// clicking a region group / worker row calls openRegionConfig(host, name) to open the modal focused on
+// that region, and sets the shared `detail` signal to open the worker-detail popup.
 import { html, render } from 'htm/preact';
 import { signal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
-import { detail } from './stores.js';   // worker-detail popup target, shared with other home-page islands
+import { detail, openRegionConfig } from './stores.js';   // shared with the other home-page islands
 
 const POLL_MS = 3000;
 const regions  = signal([]);     // /api/regions            → [{name,host,warm,status,…}]
@@ -113,7 +112,7 @@ function Monitor() {
     const xs = byRegion[rg.name] || [], err = rg.status && rg.status.ok === false;
     if (!xs.length && !(rg.warm > 0) && !err) return;
     const head = html`<div class=${'actgrouphd' + (err ? ' err' : '')}>
-      <span class="actgroupname" title="open this region's config" onClick=${() => window.slateOpenRegionConfig && window.slateOpenRegionConfig(rg.host, rg.name)}>🖧 ${rg.name}</span> <span class="actgrouphost">${rg.host || '(no host)'}</span>
+      <span class="actgroupname" title="open this region's config" onClick=${() => openRegionConfig(rg.host, rg.name)}>🖧 ${rg.name}</span> <span class="actgrouphost">${rg.host || '(no host)'}</span>
       ${rg.warm > 0 ? html` <span class="actgroupwarm">warm ${rg.warm}</span>` : null}
       ${err ? html` <span class="actgrouperr" title=${rg.status.msg}>⚠ reconcile failed</span>` : null}</div>`;
     groups.push(group(head, xs));
@@ -150,7 +149,7 @@ function WorkerDetail() {
     if (!w) return html`<div class="wdnodata">worker :${d.port} is no longer on ${host}.</div>`;
     const mf = pj(w.manifest), st = pj(w.stats), samples = history.value;
     const rows = [];
-    const row = (k, v, region) => { if (v == null || v === '') return; rows.push(html`<div class="k">${k}</div><div class=${'v' + (region ? ' link' : '')} onClick=${region ? (() => { const rn = region; close(); window.slateOpenRegionConfig && window.slateOpenRegionConfig(host, rn); }) : null} style=${region ? 'cursor:pointer' : ''}>${String(v)}</div>`); };
+    const row = (k, v, region) => { if (v == null || v === '') return; rows.push(html`<div class="k">${k}</div><div class=${'v' + (region ? ' link' : '')} onClick=${region ? (() => { const rn = region; close(); openRegionConfig(host, rn); }) : null} style=${region ? 'cursor:pointer' : ''}>${String(v)}</div>`); };
     row('Host', host);
     if (mf.region) row('Region', mf.region, mf.region);
     row('Notebook', mf.notebook); row('Transport', mf.transport); row('Project', mf.project);
@@ -181,15 +180,12 @@ function WorkerDetail() {
       <div>${body()}</div></div></div>`;
 }
 
-// ── mount + bridges ──────────────────────────────────────────────────────────────────
+// ── mount ────────────────────────────────────────────────────────────────────────────
 const mon = document.getElementById('actmon');
 if (mon) render(html`<${Monitor}/>`, mon);
 const popHost = document.createElement('div');
 document.body.appendChild(popHost);
 render(html`<${WorkerDetail}/>`, popHost);
-
-window.slateOpenWorkerDetail = (host, port) => { detail.value = { host, port: +port }; history.value = []; tick(); };
-window.slateCloseWorkerDetail = () => { detail.value = null; };
 
 start();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });

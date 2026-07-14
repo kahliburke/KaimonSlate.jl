@@ -1,15 +1,12 @@
-// Remotes-modal REGION FOCUS VIEW — Preact island (strangler-fig migration of the vanilla
-// rtRenderFocus / rtRenderWorkers / rtSaveRegion / rtDelete / rtReap / sysimage funcs into #rtfocus).
-// Owns: the focused host's region list + editor (with the sysimage panel) + live worker roster + parked
-// wires. Driven by shared signals (stores.js): the still-vanilla modal shell sets focusHost/editRegion
-// via window.__slate* setters; a worker-row click sets the shared `detail` so the activity.js popup shows
-// it (retiring the window.slateOpenWorkerDetail bridge here). Reuses the existing .rtf*/.rpp* CSS.
-import { html, render } from 'htm/preact';
+// Remotes-modal REGION FOCUS VIEW — Preact component (the focused host's region list + editor with the
+// sysimage panel + live worker roster + parked wires). Exported as `Focus` and mounted by the modal
+// island (remotes.js); driven entirely by shared signals (stores.js) — no window.__slate* bridges. A
+// worker-row click sets the shared `detail` so the activity.js popup shows it. Reuses the .rtf*/.rpp* CSS.
+import { html } from 'htm/preact';
 import { signal, effect } from '@preact/signals';
-import { detail, focusHost, editRegion } from './stores.js';
+import { detail, focusHost, editRegion, pendingRegion, regions, parked, loadRegions } from './stores.js';
+import { hostTransport } from './hoststore.js';
 
-const regions = signal([]);    // registry regions (all hosts; filtered by focusHost)
-const parked  = signal([]);
 const roster  = signal({});    // host -> workers[] | undefined (loading)
 const rmsg    = signal(null);  // {text, err} save-status line
 const sysd    = signal({});    // region name -> last /api/sysimage payload
@@ -23,12 +20,8 @@ const fmtB = (b) => (b = +b || 0, b < 1024 ? b + 'B' : b < 1048576 ? Math.round(
 const ago = (u) => { let s = Math.max(0, Math.floor(Date.now() / 1000 - (+u || 0))); return s < 90 ? s + 's ago' : s < 5400 ? Math.round(s / 60) + 'm ago' : s < 172800 ? Math.round(s / 3600) + 'h ago' : Math.round(s / 86400) + 'd ago'; };
 const regionsOn = (h) => regions.value.filter(r => r.host === h);
 const confirmP = (msg, ok, cls) => (window.confirmDark ? window.confirmDark(msg, ok, cls) : Promise.resolve(window.confirm(msg)));
-// Default transport for a NEW region: inferred from a remembered `,direct` spec (host store lives in the
-// still-vanilla shell, exposed as window.slateKnownRemotes).
-const hostTr = (h) => { try { const s = ((window.slateKnownRemotes && window.slateKnownRemotes()) || []).filter(x => x.split(',')[0] === h)[0] || ''; return s.indexOf('direct') >= 0 ? 'direct' : 'tunnel'; } catch (_) { return 'tunnel'; } };
 
 // ── data ──────────────────────────────────────────────────────────────────────────
-function loadRegions() { return fetch('/api/regions').then(r => r.json()).then(d => { regions.value = (d && d.regions) || []; parked.value = (d && d.parked) || []; }).catch(() => {}); }
 function fetchRoster(h) { fetch('/api/remote-workers?host=' + encodeURIComponent(h)).then(r => r.json()).then(d => { roster.value = { ...roster.value, [h]: (d && d.workers) || [] }; }).catch(() => { roster.value = { ...roster.value, [h]: [] }; }); }
 function loadSysimage(name) { fetch('/api/sysimage?region=' + encodeURIComponent(name)).then(r => r.json()).then(d => { sysd.value = { ...sysd.value, [name]: d }; if (d && d.ok && d.building) setTimeout(() => loadSysimage(name), 4000); }).catch(() => {}); }
 function buildSysimage(name) {
@@ -48,7 +41,7 @@ function saveRegion() {
       if (!d || !d.ok) { rmsg.value = { text: (d && d.error) || 'failed', err: true }; return; }
       const ports = (base_port && warm > 0) ? (' · ports ' + base_port + '–' + (base_port + 3 * warm - 1)) : '', rootS = data_root ? (' · root ' + data_root) : '';
       rmsg.value = { text: 'Region “' + name + '” saved' + (warm > 0 ? (' → ' + warm + ' warm · ' + transport + ports + rootS + ' — workers booting…') : (' · ' + transport + rootS)) };
-      loadRegions().then(() => { editRegion.value = regionsOn(h).find(x => x.name === name) || editRegion.value; window.slateSyncHosts && window.slateSyncHosts(); });
+      loadRegions().then(() => { editRegion.value = regionsOn(h).find(x => x.name === name) || editRegion.value; });
       if (warm > 0) { let n = 0; (function poll() { if (focusHost.value !== h) return; fetchRoster(h); if (++n < 6) setTimeout(poll, 2500); })(); }
     }).catch(() => { rmsg.value = { text: 'request failed', err: true }; });
 }
@@ -56,7 +49,7 @@ function deleteRegion(h, name) {
   confirmP('Delete region “' + name + '”?\nIts warm workers are reaped (attached ones keep running).', 'Delete', 'danger').then(ok => {
     if (!ok) return;
     fetch('/api/regions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }).then(r => r.json())
-      .then(() => { if (editRegion.value && editRegion.value.name === name) editRegion.value = null; loadRegions().then(() => window.slateSyncHosts && window.slateSyncHosts()); fetchRoster(h); }).catch(() => {});
+      .then(() => { if (editRegion.value && editRegion.value.name === name) editRegion.value = null; loadRegions(); fetchRoster(h); }).catch(() => {});
   });
 }
 function reapWorker(h, port) {
@@ -95,7 +88,7 @@ function RegionList() {
       <div class=${'rppregrow rppregnew' + (newSel ? ' sel' : '')} title="create a new region on this host" onClick=${() => editRegion.value = null}>
         <span class="rppregname">＋ New region</span><span class="rppregmeta">a new compute def on ${h}</span></div>
     </div>
-    ${regs.length ? null : html`<div class="pddim" style="margin:2px 0 8px">No regions here yet — fill in the form below. Cells target one with a <code>region=&lt;name&gt;</code> tag.</div>`}</div>`;
+    ${regs.length ? null : html`<div class="pddim" style="margin:2px 0 8px">No regions here yet — fill in the form below. Cells target one with a <code>${'region=<name>'}</code> tag.</div>`}</div>`;
 }
 function Editor() {
   const h = focusHost.value, e = editRegion.value, editing = !!(e && e.name);
@@ -110,7 +103,7 @@ function Editor() {
     <div class="rpprow"><label>Transport</label>
       <select class="rpptr" value=${fTr.value} onChange=${ev => fTr.value = ev.target.value}><option value="tunnel">tunnel</option><option value="direct">direct</option></select>
       ${fTr.value === 'direct' ? html`<input class="rppport" type="text" inputmode="numeric" autocomplete="off" placeholder="base port" value=${fPort.value} onInput=${ev => fPort.value = ev.target.value}/>` : null}</div>
-    <div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" checked=${fSys.value} onChange=${ev => fSys.value = ev.target.checked}/><span>Use worker sysimage <span class="pddim">faster worker boot — built &amp; kept fresh in the background; needs a C compiler + free RAM on the host</span></span></label></div>
+    <div class="rpprow"><label>Sysimage</label><label class="rppchk"><input type="checkbox" checked=${fSys.value} onChange=${ev => fSys.value = ev.target.checked}/><span>Use worker sysimage <span class="pddim">faster worker boot — built & kept fresh in the background; needs a C compiler + free RAM on the host</span></span></label></div>
     <div class="rpprow rppsysrow"><label></label><div class="rppsysbox">${sysNote(editing ? e.name : '', fSys.value, editing)}</div></div>
     <div class="rppact"><button class="rppsavereg" title="save this region and reconcile toward its warm count" onClick=${saveRegion}>${editing ? 'Save' : 'Create'}</button></div>
     </div>
@@ -140,32 +133,28 @@ function Roster() {
     }</div>
     <div class="rtfpark">${parkedFor.map(p => html`<div class="rpppark">⇄ parked: ${p.label} → :${p.port} <span style="opacity:.7">(idle ${p.idle_s}s)</span></div>`)}</div></div>`;
 }
-function Focus() {
+// The breadcrumb "Remotes ›" returns to the host list — just clear the focus signal (the modal island
+// renders the list whenever focusHost is '').
+export function Focus() {
   const h = focusHost.value;
   if (!h) return null;
   return html`<div>
-    <div class="rtfhead"><strong><span class="rtfcrumb" title="back to Remotes" onClick=${() => window.slateUnfocus && window.slateUnfocus()}>Remotes</span> › 🖧 ${h}</strong><span class="rtfsub">— regions &amp; live workers</span></div>
+    <div class="rtfhead"><strong><span class="rtfcrumb" title="back to Remotes" onClick=${() => { focusHost.value = ''; editRegion.value = null; }}>Remotes</span> › 🖧 ${h}</strong><span class="rtfsub">— regions & live workers</span></div>
     <${RegionList}/><${Editor}/><${Roster}/></div>`;
 }
 
-// ── mount + effects + shell bridges ──────────────────────────────────────────────────
-const mnt = document.getElementById('rtfocus');
-if (mnt) render(html`<${Focus}/>`, mnt);
-
+// ── effects ────────────────────────────────────────────────────────────────────────
 effect(() => { const h = focusHost.value; if (h) { loadRegions(); fetchRoster(h); } });   // focus → load
 effect(() => {   // seed the editor form from the selected region (or blank for "new")
   const e = editRegion.value, h = focusHost.value; if (!h) return;
   if (e && e.name) { fName.value = e.name; fWarm.value = +e.warm || 0; fPre.value = e.preload || ''; fRoot.value = e.data_root || ''; fTr.value = e.transport || 'tunnel'; fPort.value = e.base_port > 0 ? e.base_port : ''; fSys.value = !!e.sysimage; }
-  else { fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTr(h); fPort.value = ''; fSys.value = false; }
+  else { fName.value = ''; fWarm.value = 0; fPre.value = ''; fRoot.value = ''; fTr.value = hostTransport(h); fPort.value = ''; fSys.value = false; }
   rmsg.value = null;
 });
 effect(() => { const e = editRegion.value; if (e && e.name && focusHost.value) loadSysimage(e.name); });   // editing → fetch build status
-
-// Transitional setters the still-vanilla modal shell calls (retire when the shell migrates):
-window.__slateFocus = (h) => { editRegion.value = null; focusHost.value = h || ''; };
-window.__slateUnfocus = () => { focusHost.value = ''; editRegion.value = null; };
-window.__slateSelectRegion = (name) => {
-  const pick = () => { const r = regionsOn(focusHost.value).find(x => x.name === name); if (r) editRegion.value = r; };
-  const r = regionsOn(focusHost.value).find(x => x.name === name);
-  r ? (editRegion.value = r) : loadRegions().then(pick);
-};
+// Resolve a pending region-by-name (set by openRegionConfig) once this host's regions have loaded.
+effect(() => {
+  const name = pendingRegion.value, h = focusHost.value; if (!name || !h) return;
+  const r = regionsOn(h).find(x => x.name === name);
+  if (r) { editRegion.value = r; pendingRegion.value = ''; }
+});

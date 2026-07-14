@@ -411,8 +411,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   </div>
   <div class="openctl">
     <span class="ctllabel">Run on</span>
-    <select id="openrunon" class="runonsel" title="where this notebook's worker will run" onchange="_runonSelChanged('openrunon')"></select>
-    <input id="openrunonhost" class="runonsel" type="text" placeholder="ssh host" title="type any SSH host (or user@host)" spellcheck="false" autocomplete="off" style="display:none">
+    <span id="openrunon-mount" style="display:contents"></span>
     <button id="openbtn">Open</button>
     <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
     <input type="file" id="uploadin" accept=".jl" style="display:none"/>
@@ -441,36 +440,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div id="pdsyncrows" class="pdsyncrows"></div>
   <div class="row"><button class="primary" id="pdsyncdone" onclick="pdCloseSync()" disabled>Working…</button></div>
 </div></div>
-<div class="modal-bg" id="remotesbg"><div class="modal remotesmodal">
-  <button class="modalx" id="rtclose" title="Close (Esc)">✕</button>
-  <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config).</span></div>
-  <div class="imrow"><label>Host</label><input id="rthost" spellcheck="false" autocomplete="off" placeholder="ssh_host (or user@host)"/></div>
-  <div class="imrow"><label>Transport</label>
-    <span class="rttr"><label><input type="radio" name="rttr" value="tunnel" checked onchange="_rtSyncPorts()"> SSH tunnel</label>
-    <label><input type="radio" name="rttr" value="direct" onchange="_rtSyncPorts()"> Direct · CURVE</label></span></div>
-  <div class="imrow" id="rtports" style="display:none"><label>Ports</label>
-    <span class="rttr"><input id="rtport" class="rtportin" type="number" min="1024" max="65535" placeholder="main" title="remote main/REP port — blank = auto (9100+)">
-    <input id="rtstream" class="rtportin" type="number" min="1024" max="65535" placeholder="stream" title="remote stream/PUB port — blank = main+1">
-    <span class="pddim">blank = auto</span></span></div>
-  <div class="rtactions"><button id="rttest" class="primary">🩺 Test &amp; prime</button>
-    <span id="rtdefnote" class="pddim"></span></div>
-  <div id="rtsteps" class="rtsteps"></div>
-  <div class="rthosts" id="rthosts"></div>
-  <div id="rtfocus" class="rtfocus"></div>
-  <div class="rthhead" style="margin-top:14px">Data transfer (all notebooks)</div>
-  <div class="imrow"><label title="MB sent per round-trip when cached results move to a remote worker. Transfers ride their own channel, so this never delays cell results — it sets the round-trip granularity: smaller chunks bound per-chunk timeouts and let an abort land sooner on a slow uplink; bigger ones move data faster on a good link. Blank = default.">Transfer chunk size</label>
-    <span class="rttr"><input id="rtxchunk" class="rtportin" type="number" min="0.1" step="0.5" placeholder="8"> <span class="pddim">MB / round-trip</span></span></div>
-  <div class="imrow"><label title="When a notebook attaches to a remote worker, cached results are carried over only when moving them beats recomputing them — and never if one entry would take longer than this to transfer (the cell just recomputes remotely). The sync_memo tool always pushes everything. Blank = default.">Carry time budget</label>
-    <span class="rttr"><input id="rtxcarry" class="rtportin" type="number" min="1" step="5" placeholder="30"> <span class="pddim">s / entry on attach</span></span></div>
-  <div class="imrow"><label title="A cell needing a value from the other side of a region boundary pauses with a preview (exact size + estimated time) when the transfer would take longer than this; running the cell again proceeds. 0 disables previews. Blank = default.">Confirm transfers over</label>
-    <span class="rttr"><input id="rtxconfirm" class="rtportin" type="number" min="0" step="5" placeholder="15"> <span class="pddim">s (0 = never ask)</span></span></div>
-</div></div>
+<!-- Remotes modal — rendered by the remotes.js Preact island (host setup + SSE preflight + known-hosts
+     list + xfer settings + the region focus view). -->
+<div class="modal-bg" id="remotesbg"></div>
 <div class="modal-bg" id="importbg"><div class="modal importmodal">
   <div class="msg"><strong>Self-contained notebook</strong> <span style="color:#7a82a4;font-weight:400">— run it now (temporary), or import into a project you own</span></div>
   <div class="imrow"><label>Source</label><span id="imsrc" class="impath"></span></div>
   <div class="imrow"><label>Import to (new project directory)</label><input id="imtarget" spellcheck="false" autocomplete="off"/></div>
-  <div class="imrow"><label>Run on</label><select id="imrunon" class="runonsel" onchange="_runonSelChanged('imrunon')"></select>
-    <input id="imrunonhost" class="runonsel" type="text" placeholder="ssh host (or user@host)" spellcheck="false" autocomplete="off" style="display:none"></div>
+  <div class="imrow"><label>Run on</label><span id="imrunon-mount" style="display:contents"></span></div>
   <pre id="imlog" class="imlog" style="display:none"></pre>
   <div class="imstatus" id="imstatus"></div>
   <div class="row"><button id="imcancel">Cancel</button><button id="imimport">📦 Import</button><button id="imrun" class="primary">▶ Run (temporary)</button></div>
@@ -496,31 +473,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   document.addEventListener('keydown',function(e){if(modalBg.classList.contains('show')&&e.key==='Escape')_close(false);});
   function showLoading(m){loadMsg.textContent=m||'Working…';loadEl.classList.add('show');}
   function hideLoading(){loadEl.classList.remove('show');}
-  // ── Run-location selects (home) — populated from ~/.ssh/config + the global default ─────────
-  var _sshHosts=[], _sshGlobal='';
-  // Hosts you've tested here but that aren't in ~/.ssh/config are remembered locally so they stay
-  // pickable (the "set up a new remote" story). Value is the "host[,transport]" spec.
-  function _knownRemotes(){ try{ return JSON.parse(localStorage.getItem('slateRemotes')||'[]'); }catch(_){ return []; } }
-  function _rememberRemote(spec){ if(!spec||spec==='local') return; var a=_knownRemotes(); if(a.indexOf(spec)<0){ a.push(spec); try{localStorage.setItem('slateRemotes',JSON.stringify(a));}catch(_){}} }
-  function _forgetRemote(spec){ var a=_knownRemotes().filter(function(x){return x!==spec;}); try{localStorage.setItem('slateRemotes',JSON.stringify(a));}catch(_){}}
-  function _allRemoteHosts(){ var s=_sshHosts.slice(); _knownRemotes().forEach(function(spec){ var h=spec.split(',')[0]; if(s.indexOf(h)<0) s.push(h); }); return s; }
-  function _fillRunon(sel){ if(!sel) return; var cur=sel.value; sel.innerHTML='';
-    function opt(v,t){var o=document.createElement('option');o.value=v;o.textContent=t;sel.appendChild(o);}
-    opt('', _sshGlobal ? ('Default — '+_sshGlobal+' (global)') : 'Local (this machine)');
-    if(_sshGlobal) opt('local','Local (this machine)');
-    _allRemoteHosts().forEach(function(h){ if(h!==_sshGlobal) opt(h,'🖧 '+h); });
-    opt('__custom__','✎ Custom host…');
-    if(cur){ sel.value=cur; }   // keep a prior pick if still valid
-  }
-  // Reveal a free-text host field when "Custom host…" is chosen, so any SSH host can be typed.
+  // ── Run-location selects (home) ─────────
+  // The run-on host store + the two run-on pickers are Preact now (hoststore.js / remotes.js): the
+  // <select>s are rendered into #openrunon-mount / #imrunon-mount but keep the ids openrunon / imrunon
+  // (+ openrunonhost / imrunonhost for the custom-host field), so the submit reader below is unchanged.
   function _runonHostId(selId){ return selId==='imrunon' ? 'imrunonhost' : 'openrunonhost'; }
-  function _runonSelChanged(selId){ var s=document.getElementById(selId),hi=document.getElementById(_runonHostId(selId));
-    if(hi){ hi.style.display=(s.value==='__custom__')?'':'none'; if(s.value==='__custom__') hi.focus(); } }
-  function _loadRunon(){ fetch('/api/ssh-hosts').then(function(r){return r.json();}).then(function(d){
-    _sshHosts=d.hosts||[]; _sshGlobal=d.global||'';
-    _fillRunon(document.getElementById('openrunon')); _fillRunon(document.getElementById('imrunon'));
-  }).catch(function(){}); }
-  _loadRunon();
   function _runonOf(id){ var s=document.getElementById(id); if(!s) return '';
     if(s.value==='__custom__'){ var hi=document.getElementById(_runonHostId(id)); return hi?hi.value.trim():''; }
     return s.value||''; }
@@ -573,115 +530,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   imTarget.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();if(!imImport.disabled)startImport();}});
   importBg.addEventListener('mousedown',function(e){if(e.target===importBg)closeImport();});
   document.addEventListener('keydown',function(e){if(e.key==='Escape'&&importBg.classList.contains('show'))closeImport();});
-  // ── Remotes manager (set up + test a remote host, set the default) ─────────────
-  var remotesBg=document.getElementById('remotesbg'),rtHost=document.getElementById('rthost'),
-      rtSteps=document.getElementById('rtsteps'),rtTestBtn=document.getElementById('rttest'),
-      rtHostsEl=document.getElementById('rthosts'),_rtES=null,_rtLastOK='';
-  function _rtTransport(){var r=document.querySelector('input[name="rttr"]:checked');return r?r.value:'tunnel';}
-  function _rtSyncPorts(){document.getElementById('rtports').style.display=(_rtTransport()==='direct')?'flex':'none';}
-  // "host[,transport[,port,stream]]" — ports only for :direct, blank = auto.
-  function _rtSpec(h){var t=_rtTransport();if(t!=='direct')return h;
-    var p=(document.getElementById('rtport').value||'').trim(),s=(document.getElementById('rtstream').value||'').trim();
-    return p?(h+',direct,'+p+(s?','+s:'')):(h+',direct');}
-  function rtRenderHosts(){
-    var all=_allRemoteHosts();
-    if(!all.length){rtHostsEl.innerHTML='<div class="pddim" style="margin-top:6px">No remotes yet — test one above to add it.</div>';return;}
-    rtHostsEl.innerHTML='<div class="rthhead">Known remotes</div>'+all.map(function(h){
-      var isDef=(h===_sshGlobal), isCustom=(_sshHosts.indexOf(h)<0), nreg=_rtRegionsOn(h).length;
-      return '<div class="rthrow'+(isDef?' isdef':'')+'">'+
-        '<span class="rthname" data-h="'+esc(h)+'" role="button" title="use this remote">'+(isDef?'★':'🖧')+' '+esc(h)+
-        (isDef?' <em>(default)</em>':'')+(isCustom?' <em>(custom)</em>':'')+(nreg?' <em>('+nreg+' region'+(nreg>1?'s':'')+')</em>':'')+'</span>'+
-        '<span class="rthbtns">'+
-        '<button class="rthexp" data-h="'+esc(h)+'" title="regions &amp; live workers on this host">Regions ›</button>'+
-        (isDef?'<button data-h="" class="rthdef" title="stop using this as the default → new notebooks run local">★ Unset</button>'
-              :'<button data-h="'+esc(h)+'" class="rthdef" title="make this the default for new notebooks">★ Default</button>')+
-        (isCustom?'<button data-h="'+esc(h)+'" class="rthforget" title="forget this custom host">✕</button>':'')+'</span></div>';
-    }).join('');
-    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthname'),function(b){b.onclick=function(){rtHost.value=b.dataset.h;};});
-    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthexp'),function(b){b.onclick=function(){rtFocusHost(b.dataset.h);};});
-    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthdef'),function(b){b.onclick=function(){rtSetDefaultHost(b.dataset.h);};});
-    Array.prototype.forEach.call(rtHostsEl.querySelectorAll('.rthforget'),function(b){b.onclick=function(){
-      _knownRemotes().filter(function(s){return s.split(',')[0]===b.dataset.h;}).forEach(_forgetRemote);
-      _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();};});
-  }
-  // ── Regions + live workers — a focused per-host view inside the Remotes modal ────────
-  // Regions are GLOBAL named compute defs (registry); a host can carry several. This panel lists the
-  // regions on the focused host, edits/creates one, and shows the host's live worker roster.
-  var _rtRegions=[], _rtParked=[], _rtRoster={}, _rtMsg={}, _rtFocus='', _rtEdit=null;
-  function _rtRegionsOn(h){ return _rtRegions.filter(function(r){return r.host===h;}); }
-  function _rtHasRegion(h){ return _rtRegionsOn(h).length>0; }
-  function _rtParkedFor(h){ return _rtParked.filter(function(p){return p.host===h;}); }
-  function _rtModal(){ return document.querySelector('#remotesbg .remotesmodal'); }
-  // Default transport for a NEW region on this host: inferred from a remembered ,direct spec.
-  function _rtHostTr(h){ var spec=(_knownRemotes().filter(function(s){return s.split(',')[0]===h;})[0])||'';
-    return spec.indexOf('direct')>=0?'direct':'tunnel'; }
-  function _rtLoadRegions(){ return fetch('/api/regions').then(function(r){return r.json();})
-    .then(function(d){_rtRegions=(d&&d.regions)||[];_rtParked=(d&&d.parked)||[];}).catch(function(){}); }
-  function _rtFmtBytes(b){ b=+b||0; if(b<1024) return b+'B'; if(b<1048576) return Math.round(b/1024)+'KB';
-    if(b<1073741824) return Math.round(b/1048576)+'MB'; return (b/1073741824).toFixed(1)+'GB'; }
-  // #rtfocus is now the remotes-focus.js Preact island; the shell just toggles focusmode + hands it the host.
-  function rtFocusHost(h){ _rtFocus=h; _rtModal().classList.add('focusmode'); window.__slateFocus&&window.__slateFocus(h); }
-  function rtUnfocus(){ _rtFocus=''; var m=_rtModal(); if(m)m.classList.remove('focusmode'); window.__slateUnfocus&&window.__slateUnfocus(); }
-  function rtSetDefaultHost(host){
-    fetch('/api/run-on-default',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({host:host})})
-      .then(function(r){return r.json();}).then(function(d){_sshGlobal=(d&&d.global)||'';
-        _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();}).catch(function(){});}
-  // Global data-transfer knobs (server-side slate.json; 0/blank = default). The placeholder
-  // shows the EFFECTIVE value, so "blank" is never a mystery. Committed together on change.
-  function _xferReflect(d){
-    var c=document.getElementById('rtxchunk'),k=document.getElementById('rtxcarry'),f=document.getElementById('rtxconfirm');
-    if(!c||!k||!f||!d)return;
-    c.value=d.chunk_mb>0?d.chunk_mb:'';k.value=d.carry_max_s>0?d.carry_max_s:'';
-    f.value=d.confirm_s>=0?d.confirm_s:'';   // 0 is a real value here (previews off)
-    c.placeholder=d.effective_chunk_mb;k.placeholder=d.effective_carry_max_s;f.placeholder=d.effective_confirm_s;}
-  function _xferLoad(){fetch('/api/transfer-settings').then(function(r){return r.json();}).then(_xferReflect).catch(function(){});}
-  function _xferCommit(){var c=document.getElementById('rtxchunk'),k=document.getElementById('rtxcarry'),f=document.getElementById('rtxconfirm');
-    fetch('/api/transfer-settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chunk_mb:c.value||0,carry_max_s:k.value||0,confirm_s:f.value===''?-1:f.value})})
-      .then(function(r){return r.json();}).then(_xferReflect).catch(function(){});}
-  (function(){['rtxchunk','rtxcarry','rtxconfirm'].forEach(function(id){
-    var el=document.getElementById(id);if(el)el.onchange=_xferCommit;});})();
-  function openRemotes(){_rtLastOK='';rtSteps.innerHTML='';
-    rtHost.value='';var pp=document.getElementById('rtport'),ps=document.getElementById('rtstream');if(pp)pp.value='';if(ps)ps.value='';
-    rtUnfocus();_rtRoster={};_rtMsg={};   // start on the list; rosters refetch when a host is focused
-    _rtSyncPorts();rtRenderHosts();_xferLoad();_rtLoadRegions().then(function(){rtRenderHosts();});
-    remotesBg.classList.add('show');rtHost.focus();}
-  function closeRemotes(){if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}rtUnfocus();remotesBg.classList.remove('show');}
-  // Bridges the still-vanilla shell exposes to the Preact islands (activity.js + remotes-focus.js).
-  window.confirmDark=confirmDark;                          // shared dark-theme confirm dialog
-  window.slateKnownRemotes=_knownRemotes;                  // host store (specs) — focus island infers default transport
-  window.slateSyncHosts=function(){ _rtLoadRegions().then(rtRenderHosts); };   // refresh host-list region counts after save/delete
-  window.slateUnfocus=rtUnfocus;                           // island breadcrumb → back to the host list
-  // Open the Remotes modal focused on a host with that region selected in its (island) config editor.
-  window.slateOpenRegionConfig=function(host,name){ openRemotes(); rtFocusHost(host); window.__slateSelectRegion&&window.__slateSelectRegion(name); };
-  function rtTest(){
-    var host=rtHost.value.trim(); if(!host){rtSteps.innerHTML='<div class="pddim">Enter a host to test.</div>';return;}
-    var tr=_rtTransport(); if(_rtES){try{_rtES.close();}catch(_){}_rtES=null;}
-    _rtLastOK='';
-    rtSteps.innerHTML='<div class="rtnote"><span class="hydspin"></span> Testing '+esc(host)+' ('+tr+')… a first-time host provisions Julia deps and can take a few minutes.</div><div id="rtstepl"></div>';
-    var list=document.getElementById('rtstepl'),rows={};
-    var es=new EventSource('/api/preflight-stream?host='+encodeURIComponent(host)+'&transport='+encodeURIComponent(tr));_rtES=es;
-    es.addEventListener('step',function(e){var s;try{s=JSON.parse(e.data);}catch(_){return;}
-      var el=rows[s.name]; if(!el){el=document.createElement('div');rows[s.name]=el;list.appendChild(el);}
-      var run=s.status==='run',m=run?'<span class="hydspin"></span>':s.status==='ok'?'✓':s.status==='skip'?'–':'✗';
-      el.className='rtstep '+(run?'run':s.status);
-      el.innerHTML='<span class="rtmark">'+m+'</span> <b>'+esc(s.name)+'</b> <span class="rtms">'+(run?'…':s.ms+'ms')+'</span>'+(s.detail?'<div class="rtdetail">'+esc(s.detail)+'</div>':'');});
-    es.addEventListener('done',function(e){var d={};try{d=JSON.parse(e.data);}catch(_){}es.close();_rtES=null;
-      var n=rtSteps.querySelector('.rtnote'); if(n)n.remove();
-      var v=document.createElement('div');v.className='rtverdict '+(d.ok?'ok':'fail');
-      v.textContent=d.ok?'✅ All checks passed — host is primed and ready.':'❌ Some checks failed — see above.';
-      list.parentNode.insertBefore(v,list);
-      if(d.ok){_rtLastOK=_rtSpec(host);_rememberRemote(_rtLastOK);
-        _fillRunon(document.getElementById('openrunon'));_fillRunon(document.getElementById('imrunon'));rtRenderHosts();}});
-    es.addEventListener('failed',function(e){es.close();_rtES=null;list.insertAdjacentHTML('beforeend','<div class="rtnote err">'+esc(e.data)+'</div>');});
-  }
-  document.getElementById('remotesbtn').onclick=openRemotes;
-  document.getElementById('rtclose').onclick=closeRemotes;
-  rtTestBtn.onclick=rtTest;
-  rtHost.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();rtTest();}});
-  remotesBg.addEventListener('mousedown',function(e){if(e.target===remotesBg)closeRemotes();});
-  document.addEventListener('keydown',function(e){if(e.key!=='Escape')return;   // (the worker-detail popup is a Preact island; it handles its own Esc first, capture-phase)
-    if(remotesBg.classList.contains('show')){if(_rtFocus){e.stopPropagation();rtUnfocus();}else closeRemotes();}});
+  // The Remotes modal (host setup + SSE preflight + known-hosts list + xfer + region focus view) is a
+  // Preact island now (remotes.js). It shares the dark confirm dialog with the notebook side:
+  window.confirmDark=confirmDark;
   function render(){var html=items.map(function(c,i){return '<li class="'+(i===sel?'on':'')+'" data-i="'+i+'">'+esc(c)+'</li>';}).join('');
     if(moreTrunc)html+='<li class="more">… more entries — keep typing to filter</li>';
     comp.innerHTML=html;comp.style.display=(items.length||moreTrunc)?'block':'none';}
@@ -1547,7 +1398,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 <!-- Home-page Preact island: the remote-activity monitor + worker-detail popup (replaces the former
      inline innerHTML render). Bridges to the vanilla Remotes modal via window.slateOpen* helpers. -->
 <script type="module" src="/assets/js/activity.js"></script>
-<!-- Remotes-modal region focus view (region list + editor + sysimage + worker roster), Preact island
-     mounted into #rtfocus; the vanilla shell drives it via window.__slate* setters. -->
-<script type="module" src="/assets/js/remotes-focus.js"></script>
+<!-- Remotes modal island: host setup + SSE preflight + known-hosts list + xfer + the region focus view
+     (imports Focus from remotes-focus.js) + the run-on pickers. Driven by shared signals (stores.js). -->
+<script type="module" src="/assets/js/remotes.js"></script>
 </body></html>

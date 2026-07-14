@@ -9,8 +9,29 @@
 import { signal } from '@preact/signals';
 
 export const detail = signal(null);       // worker-detail popup target {host, port} | null
-// Remotes-modal region focus view (migrated to Preact in remotes-focus.js). The still-vanilla modal shell
-// (openRemotes / the known-hosts list / closeRemotes) drives these via thin window.__slate* setters during
-// the strangler-fig transition; they retire once the shell itself migrates.
+// Remotes-modal region focus view (remotes-focus.js) + the modal shell (remotes.js) — both are Preact
+// islands driven off these shared signals, so no window.__slate* bridges are needed between them.
+export const modalOpen  = signal(false);  // is the Remotes modal (#remotesbg) open?
 export const focusHost  = signal('');     // the host whose regions/workers the focus view shows ('' = none)
 export const editRegion = signal(null);   // region object being edited (null = the "new region" form)
+export const pendingRegion = signal('');  // a region name to auto-select once focusHost's regions load ('' = none)
+
+// The global region registry (all hosts) + parked wires, shared so BOTH the modal's known-hosts list
+// (per-host region counts) and the focus view's region list read one source — a save/delete anywhere
+// calls loadRegions() and every island re-renders. This is what retires the old slateSyncHosts bridge.
+export const regions = signal([]);
+export const parked  = signal([]);
+export function loadRegions() {
+  return fetch('/api/regions').then(r => r.json())
+    .then(d => { regions.value = (d && d.regions) || []; parked.value = (d && d.parked) || []; }).catch(() => {});
+}
+
+// Open the Remotes modal focused on a host with a specific region selected in its editor. Called by the
+// activity monitor (a region group / worker-detail row) and the known-hosts list. The focus island's
+// effects resolve pendingRegion → editRegion once that host's regions have loaded.
+export function openRegionConfig(host, name) {
+  focusHost.value = host || '';
+  editRegion.value = null;
+  pendingRegion.value = name || '';
+  modalOpen.value = true;
+}
