@@ -538,7 +538,17 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     # Free-RAM guard: a sysimage link peaks at several GB; on a tight box DEFER rather than OOM-thrash. We keep
     # any existing `current` bootable (a slightly-stale image still loads — Revise reloads /src on top), so
     # deferring is safe; a later provision on a quieter box builds it. Tunable via KAIMONSLATE_SYSIMAGE_MINFREE_GB.
-    P("avail = try; parse(Float64, match(r\"MemAvailable:\\s+(\\d+)\", read(\"/proc/meminfo\", String)).captures[1]) / 1048576; catch; Inf; end")
+    # Available RAM is read per-OS (the remote's Julia): Linux /proc/meminfo, macOS `vm_stat` (free+inactive
+    # pages), anything else unbounded (Inf ⇒ guard off) rather than assuming a Linux-only /proc.
+    P("avail = try")
+    P("  if Sys.islinux()")
+    P("    parse(Float64, match(r\"MemAvailable:\\s+(\\d+)\", read(\"/proc/meminfo\", String)).captures[1]) / 1048576")
+    P("  elseif Sys.isapple()")
+    P("    vs = read(`vm_stat`, String); pg = (m = match(r\"page size of (\\d+)\", vs)) === nothing ? 4096 : parse(Int, m.captures[1])")
+    P("    fp(re) = ((m = match(re, vs)) === nothing ? 0 : parse(Int, m.captures[1]))")
+    P("    (fp(r\"Pages free:\\s+(\\d+)\") + fp(r\"Pages inactive:\\s+(\\d+)\")) * pg / 2^30")
+    P("  else; Inf; end")
+    P("catch; Inf; end")
     P("if avail < $minfree_gb; println(\"[sysimg] only \$(round(avail; digits = 1))GB free (< $(minfree_gb)GB) — deferring build (lower KAIMONSLATE_SYSIMAGE_MINFREE_GB to force)\"); exit(0); end")
     # drift → clear the stale pointer so workers fall back to a plain boot while we rebuild
     P("if isfile(curf); prev = strip(read(curf, String)); rm(curf; force = true); println(\"[sysimg] payload/env drift (\$prev → \$key) — invalidated; rebuilding\"); end")
@@ -621,7 +631,7 @@ function sysimage_status(t::RemoteTarget)
     # per-port `worker-<port>.jl` boot scripts, which the build key also ignores) or the env Manifest newer
     # than the `.so` ⇒ the image predates a code/dep change and should be rebuilt.
     sh = "D=\$HOME/$d; CUR=\$(cat \$D/current 2>/dev/null); echo \"current=\$CUR\"; " *
-         "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then SO=\$D/\$CUR.so; echo \"bytes=\$(stat -c %s \$SO 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$SO 2>/dev/null)\"; " *
+         "if [ -n \"\$CUR\" ] && [ -f \"\$D/\$CUR.so\" ]; then SO=\$D/\$CUR.so; echo \"bytes=\$(stat -c %s \$SO 2>/dev/null || stat -f %z \$SO 2>/dev/null)\"; echo \"built=\$(stat -c %Y \$SO 2>/dev/null || stat -f %m \$SO 2>/dev/null)\"; " *
          "N=\$(find \$HOME/$_REMOTE_WORKER -maxdepth 1 -name '*.jl' ! -name 'worker-*.jl' -newer \$SO -print -quit 2>/dev/null); " *
          "MF=\$HOME/$pr/Manifest.toml; if [ -z \"\$N\" ] && [ -f \"\$MF\" ] && [ \"\$MF\" -nt \"\$SO\" ]; then N=\$MF; fi; " *
          "[ -n \"\$N\" ] && echo stale=1; fi; " *
@@ -629,7 +639,10 @@ function sysimage_status(t::RemoteTarget)
          "if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then echo nocompiler=1; fi; " *
          # Marker must NOT start with `=` — zsh (a common login shell) would try equals-expansion on `===LOG===`
          # (`=cmd` → path of cmd), fail with a nonzero exit, and make the whole ssh command look like it failed.
-         "echo __SLATELOG__; tail -n 14 \$D/build.log 2>/dev/null"
+         # `|| true` so a MISSING build.log (a host that hasn't built yet) doesn't make `tail` — the last
+         # command — exit nonzero, which _ssh_capture would read as an unreachable host (false "status
+         # unavailable"). A genuine ssh/connection failure still returns nonzero via ssh itself.
+         "echo __SLATELOG__; tail -n 14 \$D/build.log 2>/dev/null || true"
     ok, out = try; _ssh_capture(host, `$sh`); catch; (false, ""); end
     ok || return res
     res["reachable"] = true
@@ -1591,6 +1604,43 @@ function _bw_note!(host_ip, bps::Float64)
     return nothing
 end
 
+# ── Per-PAIR peer bandwidth — the DIRECT (worker→worker) transfer rate ────────────────────────
+# Distinct from the hub uplink (`_bw_get`): a direct pull never touches the hub's link, so pricing
+# it at the uplink (often a laptop's slow SSH) trips a spurious "run the cell again" on a move that's
+# actually seconds. Recorded from completed direct pulls, keyed per (src_host → dst_host); co-located
+# peers share the same host (loopback rate). Unmeasured ⇒ a FAST default: direct is fast, so bias
+# AWAY from a needless confirm (the opposite of the uplink's conservative 1 MB/s recompute-bias).
+const PEER_BW_DEFAULT = 30.0e6                 # 30 MB/s assumed for an unmeasured peer link
+_peer_bw_path(a, b) = joinpath(_slate_cache_dir(), "bw", "peer",
+    replace("$(a)__$(b)", r"[^A-Za-z0-9._-]" => "_") * ".json")
+function _peer_bw_get(a, b)
+    p = _peer_bw_path(a, b); isfile(p) || return 0.0
+    something(tryparse(Float64, _manifest_get(try; read(p, String); catch; return 0.0; end, "bps")), 0.0)
+end
+function _peer_bw_note!(a, b, bps::Float64)
+    bps > 0 || return nothing
+    old = _peer_bw_get(a, b)
+    ema = old > 0 ? 0.7 * old + 0.3 * bps : bps
+    try
+        mkpath(dirname(_peer_bw_path(a, b)))
+        write(_peer_bw_path(a, b), "{\"bps\":\"$(round(ema; digits = 1))\",\"ts\":\"$(round(Int, time()))\"}")
+    catch
+    end
+    return nothing
+end
+
+# The bandwidth the confirm gate should price a transfer at: the measured PEER rate when it will go
+# direct (given `mode` + two distinct :direct workers), else the hub uplink to the remote side.
+function _plan_rate(src_k, dst_k, mode::Symbol)
+    if (mode === :direct || mode === :auto) && _direct_viable(src_k, dst_k)
+        pb = _peer_bw_get(src_k.target.ssh_host, dst_k.target.ssh_host)
+        return pb > 0 ? pb : PEER_BW_DEFAULT
+    end
+    host = dst_k.target isa RemoteTarget ? dst_k.target.ssh_host :
+           (src_k.target isa RemoteTarget ? src_k.target.ssh_host : "")
+    return _bw_get(host)                        # 0 ⇒ the gate applies its own conservative floor
+end
+
 function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String};
                           timeout_ms::Int = 20_000, server_key::AbstractString = "",
                           max_transfer_s::Float64 = 0.0, bw_key::AbstractString = host_ip)
@@ -2019,7 +2069,7 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     # gate a move that actually crosses a wire (a remote endpoint); a fully-local move (shared hub CAS)
     # costs nothing and needs no confirmation.
     if on_plan !== nothing && (src_k.target isa RemoteTarget || dst_k.target isa RemoteTarget)
-        on_plan(Int(meta.bytes), meta)
+        on_plan(Int(meta.bytes), meta, _plan_rate(src_k, dst_k, mode))   # price at the PATH's rate (peer vs uplink)
     end
 
     moved = 0
@@ -2027,8 +2077,12 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     if mode === :direct || mode === :auto
         if _direct_viable(src_k, dst_k)
             try
+                _t0 = time()
                 moved = _pull_direct!(src_k, dst_k, name, h, meta)
                 used = :direct
+                _el = time() - _t0                          # feed the peer-rate memory (skip dedup/tiny moves)
+                (moved > (4 << 20) && _el > 0) &&
+                    _peer_bw_note!(src_k.target.ssh_host, dst_k.target.ssh_host, moved / _el)
             catch e
                 mode === :direct && rethrow()               # strict: surface the failure
                 _rlog("region transfer '$name': direct failed, falling back to relay — " *
