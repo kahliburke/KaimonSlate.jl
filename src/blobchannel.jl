@@ -73,7 +73,7 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
         writechunk!(io)
         last || return "ok"
         close(io); delete!(open_tmps, h)
-        got = bytes2hex(open(MemoStore.SHA.sha256, tmp))
+        got = MemoStore.sha_file_hex(tmp)
         got == h || (rm(tmp; force = true); return "err: hash mismatch (got $got)")
         dest = MemoStore.blob_path(root, h)
         mkpath(dirname(dest)); mv(tmp, dest; force = true)
@@ -193,7 +193,7 @@ function pull_blob_into!(Z, ip::AbstractString, port::Integer, root::AbstractStr
                 length(payload) == 0 && off < total && error("pull $hash: empty chunk at $off/$total")
             end
         end
-        got = bytes2hex(open(MemoStore.SHA.sha256, tmp))
+        got = MemoStore.sha_file_hex(tmp)
         got == String(hash) || (rm(tmp; force = true); error("pull $hash: hash mismatch (got $got)"))
         mv(tmp, dest; force = true)
         return total < 0 ? 0 : total

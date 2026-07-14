@@ -21,8 +21,88 @@ module MemoStore
 
 import SHA
 import TOML
+import Libdl
 
 const FMT = 3
+
+# ── Accelerated content hashing (SHA-NI via OpenSSL libcrypto; stdlib SHA.jl fallback) ────────────
+# The CAS hashes every blob on write and re-verifies it on receive. Stdlib SHA.jl is pure-Julia
+# (~120 MB/s) — the measured throughput wall for peer transfer. libcrypto's sha256 uses SHA-NI
+# (~1.4 GB/s) and ships on essentially every host: we dlopen it once, self-test that its digest
+# matches SHA.jl, and fall back to SHA.jl if it's absent or mismatched. The output is byte-identical
+# either way, so content addresses NEVER change (no cache invalidation). Streamed over the file, so
+# a multi-GB blob never spikes RSS. Kept dependency-pure (Libdl + a runtime dlopen, no new package).
+struct _Evp
+    md::Ptr{Cvoid}; ctxnew::Ptr{Cvoid}; init::Ptr{Cvoid}; update::Ptr{Cvoid}; final::Ptr{Cvoid}; free::Ptr{Cvoid}
+end
+function _evp_digest(ev::_Evp, p::Ptr{UInt8}, n::Integer)   # one-shot, for the self-test
+    h = ccall(ev.ctxnew, Ptr{Cvoid}, ())
+    ccall(ev.init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), h, ev.md, C_NULL)
+    ccall(ev.update, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), h, p, n)
+    out = Vector{UInt8}(undef, 32); nout = Ref{Cuint}(0)
+    ccall(ev.final, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ptr{Cuint}), h, out, nout)
+    ccall(ev.free, Cvoid, (Ptr{Cvoid},), h)
+    return out
+end
+const _LIBCRYPTO = Ref{String}("")   # explicit path (e.g. OpenSSL_jll.libcrypto) — tried FIRST
+
+"""
+    set_libcrypto!(path)
+
+Register an explicit libcrypto path — tried before the system names so a vendored, version-pinned
+lib (OpenSSL_jll) wins over whatever the host happens to ship. The worker calls this at startup;
+clears the cached backend so the next hash re-probes.
+"""
+set_libcrypto!(path::AbstractString) = (_LIBCRYPTO[] = String(path); _EVP[] = missing; nothing)
+
+function _load_evp()
+    names = String[]
+    isempty(_LIBCRYPTO[]) || push!(names, _LIBCRYPTO[])
+    append!(names, ["libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so",
+                    "libcrypto.3.dylib", "libcrypto.1.1.dylib", "libcrypto.dylib", "libcrypto"])
+    for name in names
+        try
+            lib = Libdl.dlopen(name; throw_error = false); lib === nothing && continue
+            s(nm) = Libdl.dlsym(lib, nm; throw_error = false)
+            shafn, cn, ini, upd, fin, fr = s(:EVP_sha256), s(:EVP_MD_CTX_new), s(:EVP_DigestInit_ex),
+                                           s(:EVP_DigestUpdate), s(:EVP_DigestFinal_ex), s(:EVP_MD_CTX_free)
+            any(==(C_NULL), (shafn, cn, ini, upd, fin, fr)) && continue
+            md = ccall(shafn, Ptr{Cvoid}, ()); md == C_NULL && continue
+            ev = _Evp(md, cn, ini, upd, fin, fr)
+            probe = codeunits("abc")
+            ok = GC.@preserve probe (_evp_digest(ev, pointer(probe), length(probe)) == SHA.sha256(b"abc"))
+            ok && return ev
+        catch
+        end
+    end
+    return nothing
+end
+const _EVP = Ref{Any}(missing)                     # missing = not yet probed; nothing = unavailable
+_evp() = (b = _EVP[]; b === missing ? (_EVP[] = _load_evp()) : b)
+
+"""
+    sha_file_hex(path) -> hex::String
+
+sha256 of a file's bytes, hex. SHA-NI-accelerated (OpenSSL libcrypto) when available, else stdlib
+SHA.jl; identical output either way. Streamed in 1 MiB chunks — flat RSS on a multi-GB blob.
+"""
+function sha_file_hex(path::AbstractString)
+    ev = _evp()
+    open(path, "r") do io
+        ev === nothing && return bytes2hex(SHA.sha256(io))
+        buf = Vector{UInt8}(undef, 1 << 20)
+        h = ccall(ev.ctxnew, Ptr{Cvoid}, ())
+        ccall(ev.init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), h, ev.md, C_NULL)
+        while !eof(io)
+            n = readbytes!(io, buf)
+            GC.@preserve buf ccall(ev.update, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), h, pointer(buf), n)
+        end
+        out = Vector{UInt8}(undef, 32); nout = Ref{Cuint}(0)
+        ccall(ev.final, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ptr{Cuint}), h, out, nout)
+        ccall(ev.free, Cvoid, (Ptr{Cvoid},), h)
+        bytes2hex(out)
+    end
+end
 
 # Manifest keys become filenames — constrain to filename-safe (worker passes hex hashes).
 const _VALID_KEY = r"^[A-Za-z0-9_-]{1,200}$"
@@ -54,7 +134,7 @@ function put_blob(f, root::AbstractString)
     tmp = tempname(broot)
     try
         open(f, tmp, "w")
-        h = bytes2hex(open(SHA.sha256, tmp))
+        h = sha_file_hex(tmp)
         n = Int(filesize(tmp))
         dest = blob_path(root, h)
         if isfile(dest)
