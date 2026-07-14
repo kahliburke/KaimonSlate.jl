@@ -295,6 +295,11 @@ function renderTables(c) {
 // reorder the view, so each row carries its original index (into spec.rows), which is what's bound.
 function drawTable(wrap, spec, st, sel) {
   wrap._sel = sel || null;
+  // Keep the CURRENT spec on the element. The persistent sort/filter/viz handlers are built ONCE in
+  // _buildShell (the shell isn't rebuilt while the column signature is unchanged), so they must read the
+  // live spec here rather than one captured at build time — a reactively-growing table replaces spec.rows
+  // (e.g. 1 → 15) without a shell rebuild, and a stale closure would sort/filter the original tiny spec.
+  wrap._spec = spec;
   const cols = spec.columns || [];
   const sig = (spec.paged ? 'p:' : 'e:') + cols.map(_colName).join('');
   if (wrap._sig !== sig) { _buildShell(wrap, cols, spec, st); wrap._sig = sig; }
@@ -306,14 +311,14 @@ function _buildShell(wrap, cols, spec, st) {
   const fi = document.createElement('input');
   fi.type = 'text'; fi.className = 'st-filter';
   fi.placeholder = spec.paged ? 'search…' : 'filter…'; fi.value = st.filter;
-  const doFilter = () => { st.filter = fi.value; st.page = 0; _refreshTable(wrap, spec, st); };
+  const doFilter = () => { st.filter = fi.value; st.page = 0; _refreshTable(wrap, wrap._spec, st); };
   fi.oninput = spec.paged ? debounce(doFilter, 250) : doFilter;   // paged hits the server → debounce
   const info = document.createElement('span'); info.className = 'st-info';
   bar.appendChild(fi); bar.appendChild(info);
   if (cols.some(c => c && c.viz)) {                          // in-cell viz present → a show/hide toggle
     const vb = document.createElement('button'); vb.className = 'st-viztoggle'; vb.title = 'toggle in-cell bars / heat';
     vb.textContent = st.vizOff ? '▢ viz' : '▤ viz';
-    vb.onclick = () => { st.vizOff = !st.vizOff; vb.textContent = st.vizOff ? '▢ viz' : '▤ viz'; _refreshTable(wrap, spec, st); };
+    vb.onclick = () => { st.vizOff = !st.vizOff; vb.textContent = st.vizOff ? '▢ viz' : '▤ viz'; _refreshTable(wrap, wrap._spec, st); };
     bar.appendChild(vb);
   }
   wrap.appendChild(bar);
@@ -325,7 +330,7 @@ function _buildShell(wrap, cols, spec, st) {
     if (sortable) th.onclick = () => {
       if (st.sort && st.sort.col === ci) st.sort.dir = st.sort.dir === 'asc' ? 'desc' : 'asc';
       else st.sort = { col: ci, dir: 'asc' };
-      _refreshTable(wrap, spec, st);
+      _refreshTable(wrap, wrap._spec, st);
     }; else th.style.cursor = 'default';
     htr.appendChild(th); return th;
   });
@@ -421,7 +426,7 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
   const pages = Math.max(1, Math.ceil(total / st.pageSize));
   pag.innerHTML = '';
   if (pages > 1) {
-    const go = to => { st.page = Math.max(0, Math.min(pages - 1, to)); _refreshTable(wrap, spec, st); };
+    const go = to => { st.page = Math.max(0, Math.min(pages - 1, to)); _refreshTable(wrap, wrap._spec, st); };
     const mk = (label, to, disabled) => {
       const b = document.createElement('button'); b.textContent = label; b.disabled = disabled;
       b.onclick = () => go(to); return b;
@@ -436,7 +441,7 @@ function _fillTable(wrap, spec, st, pageRows, total, baseCount, pageIdx) {
       lbl.replaceWith(inp); inp.focus(); inp.select();
       const commit = jump => { inp.onblur = null;
         if (jump) { const n = parseInt(inp.value, 10); if (!isNaN(n)) return go(n - 1); }   // go() clamps to [1, pages]
-        _refreshTable(wrap, spec, st); };
+        _refreshTable(wrap, wrap._spec, st); };
       inp.onkeydown = e => { if (e.key === 'Enter') commit(true); else if (e.key === 'Escape') commit(false); };
       inp.onblur = () => commit(true);
     };
