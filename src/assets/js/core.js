@@ -124,11 +124,19 @@ function _applySize(el, inst, s) {
 // switch (window._onSlateThemeChange). Series colour cycle order mirrors slate_series_cycle() in Julia.
 let _slateThemeReady = false;
 function _slateThemeVar(cs, name, dflt) { const v = cs.getPropertyValue(name).trim(); return v || dflt; }
-function _slateAxisTheme(line, label) {
+function _slateAxisTheme(line, label, name) {
+  // Font sizes lifted off ECharts' small defaults (12px) toward the Makie Slate theme, so an ECharts
+  // figure and a Makie figure read at the same scale (see slate_look.jl). Tick labels in the dim tone,
+  // axis names (titles) in the brighter text tone.
   return { axisLine: { lineStyle: { color: line } }, axisTick: { lineStyle: { color: line } },
-    axisLabel: { color: label }, splitLine: { lineStyle: { color: line, opacity: 0.4 } },
+    axisLabel: { color: label, fontSize: 14 }, nameTextStyle: { color: name, fontSize: 15 },
+    splitLine: { lineStyle: { color: line, opacity: 0.4 } },
     splitArea: { areaStyle: { color: ['transparent', 'transparent'] } } };
 }
+// Sequential ramp for heatmap / calendar visualMaps — the SAME viridis Makie uses by default, so a
+// heatmap reads identically whether it's an interactive ECharts figure or a rendered Makie one.
+const _SLATE_VIRIDIS = ['#440154', '#472d7b', '#3b528b', '#2c728e', '#21918c',
+  '#28ae80', '#5ec962', '#addc30', '#fde725'];
 function _slateEchartsTheme() {
   const cs = getComputedStyle(document.documentElement);
   const V = (n, d) => _slateThemeVar(cs, n, d);
@@ -137,16 +145,16 @@ function _slateEchartsTheme() {
   const cycle = [['--accent', '#569cd6'], ['--green', '#56d364'], ['--orange', '#ce9178'],
     ['--purple', '#c586c0'], ['--teal', '#4ec9b0'], ['--gold', '#ffd700'], ['--red', '#e57575']]
     .map(([n, d]) => V(n, d));
-  const ax = _slateAxisTheme(border, dim);
+  const ax = _slateAxisTheme(border, dim, text);
   return {
     color: cycle, backgroundColor: 'transparent',
-    textStyle: { color: text, fontFamily: 'inherit' },
-    title: { textStyle: { color: text }, subtextStyle: { color: dim } },
-    legend: { textStyle: { color: dim } },
+    textStyle: { color: text, fontFamily: 'inherit', fontSize: 14 },
+    title: { left: 'center', textStyle: { color: text, fontSize: 19, fontWeight: 'bold' }, subtextStyle: { color: dim, fontSize: 12 } },
+    legend: { textStyle: { color: dim, fontSize: 14 } },
     categoryAxis: ax, valueAxis: ax, logAxis: ax, timeAxis: ax,
     line: { symbolSize: 5 }, graph: { color: cycle },
     tooltip: { backgroundColor: bg2, borderColor: border, textStyle: { color: text } },
-    visualMap: { textStyle: { color: dim } },
+    visualMap: { textStyle: { color: dim }, inRange: { color: _SLATE_VIRIDIS } },
     timeline: { lineStyle: { color: dim }, label: { color: dim } },
     calendar: { splitLine: { lineStyle: { color: border } }, itemStyle: { borderColor: border } },
   };

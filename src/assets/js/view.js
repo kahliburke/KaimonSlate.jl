@@ -313,6 +313,11 @@ function wireControl(el) {
   const fire = v => {
     lastSent = performance.now(); inflight = true; pending = null;
     clearTimeout(timer); timer = null;
+    // A `ui_theme` bind doubles as the Slate theme switch: swap the client CSS + ECharts here, and let
+    // the POST below flow the value through the dependency graph so a `use_slate_theme!(theme=ui_theme)`
+    // cell re-runs and the SERVER-rendered (Makie) figures re-theme too. setSlateTheme no-ops on an
+    // unknown value, so this is inert for every other bind.
+    if (name === 'ui_theme' && window.setSlateTheme) { try { window.setSlateTheme(v); } catch (_) {} }
     api('POST', '/api/bind/' + id, { name, value: v })
       .then(updateStates)
       .finally(() => { inflight = false; if (pending !== null) schedule(pending); });
