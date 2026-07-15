@@ -2041,7 +2041,7 @@ workers) turns on the 2s telemetry sampler writing that sidecar + PUBbing `slate
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                curve::Bool = false, allowed_clients::Vector{String} = String[],
                data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "",
-               blob_curve::Bool = true)
+               blob_curve::Bool = true, blob_bind::String = "")
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
@@ -2083,7 +2083,11 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # path on any worker. Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
     data_port > 0 && _MEMO_OK && Threads.@spawn try
         sleep(5)   # DEFERRED: another CURVE-server setup; keep it out of the hub's handshake window
-        _blob_server!(host, data_port; curve = blob_curve)
+        # The blob server binds `blob_bind` when given (remote workers → 0.0.0.0 so same-subnet PEERS can
+        # reach it for direct pulls) else the gate's `host` (local → loopback). CURVE-protected regardless
+        # (a peer must hold the server key to even handshake), so exposing it on a firewalled cloud subnet
+        # is safe; peer allow-listing over :tunnel is the follow-on hardening.
+        _blob_server!(isempty(blob_bind) ? host : blob_bind, data_port; curve = blob_curve)
     catch e
         @warn "slate worker: blob channel died" port = data_port exception = e
     end

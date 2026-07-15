@@ -1009,7 +1009,7 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     SlateWorker.PAYLOAD_SHA[] = raw"$(_payload_sha())"
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
-                      warm_deps=$warm_deps, blob_curve=$(_blob_curve(t)),
+                      warm_deps=$warm_deps, blob_curve=$(_blob_curve(t)), blob_bind="0.0.0.0",
                       stats_path=joinpath(homedir(), raw"$_REMOTE_WORKER", "worker-$port.stats"))
     _bt("serving")   # phase breakdown: Julia-init = launch→script-start; then KaimonGate / Revise / payload / serve
     while true; sleep(3600); end   # serve() returns after starting its loop on a spawned thread; keep alive
@@ -1730,10 +1730,12 @@ function _peer_bw_note!(a, b, bps::Float64)
     return nothing
 end
 
-# The bandwidth the confirm gate should price a transfer at: the measured PEER rate when it will go
-# direct (given `mode` + two distinct :direct workers), else the hub uplink to the remote side.
+# The bandwidth the confirm gate should price a transfer at: the measured PEER rate when it will actually
+# go direct (ask the SAME resolver the transfer will use — its probe verdict is cached, so this is the
+# real path, not the `_direct_viable` proxy that mis-priced a :tunnel source's reachable peer as a slow
+# hub relay), else the hub uplink to the remote side.
 function _plan_rate(src_k, dst_k, mode::Symbol)
-    if (mode === :direct || mode === :auto) && _direct_viable(src_k, dst_k)
+    if (mode === :direct || mode === :auto) && _resolve_peer_route(src_k, dst_k).kind === :direct
         pb = _peer_bw_get(src_k.target.ssh_host, dst_k.target.ssh_host)
         return pb > 0 ? pb : _peer_bw_default()
     end
@@ -2141,15 +2143,45 @@ _peer_route_forget!(host) = lock(_PEER_ROUTE_LOCK) do
     end
 end
 
+# A worker's blob CURVE server key (its own identity — vantage-independent). On :direct it's in the
+# attach record (learned at spawn); else fetched via `__slate_server_key` (cached). "" when the region
+# runs the blob channel plaintext.
+function _peer_server_key(k)
+    t = k.target
+    _blob_curve(t) || return ""
+    if t.transport === :direct
+        rec = _attach_lookup(t.ssh_host, k.label)
+        rec !== nothing && !isempty(String(rec.server_key)) && return String(rec.server_key)
+    end
+    return _blob_server_key!(t, k, k.port + 2)
+end
+
+# A host's PEER-reachable IP — the address a co-located / same-subnet peer dials (NOT the hub's route).
+# `_remote_ip` (SSH_CONNECTION field 3) is the box's own interface address, which IS the peer address on
+# a shared subnet and the public IP for a directly-public box. Cached (an ssh round-trip). §5.6
+# (cross-network NAT — a hub reaching a box by a public IP that NATs to a private one) will need an
+# explicit region `peer` override; not required for the same-subnet case.
+const _HOST_IP_CACHE = Dict{String,String}()
+const _HOST_IP_LOCK  = ReentrantLock()
+function _peer_host_ip(host)
+    h = String(host)
+    hit = lock(_HOST_IP_LOCK) do; get(_HOST_IP_CACHE, h, ""); end
+    isempty(hit) || return hit
+    ip = try; _remote_ip(h); catch; h; end
+    lock(_HOST_IP_LOCK) do; _HOST_IP_CACHE[h] = ip; end
+    return ip
+end
+
 function _resolve_peer_route(src_k, dst_k)
     (src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget && src_k !== dst_k) ||
         return PeerRoute(:relay, "", 0, "")
-    epA = _data_endpoint!(src_k.target, src_k)                 # A's blob endpoint (ip + CURVE key)
-    ip, port, skey = String(epA.ip), Int(epA.port), String(epA.server_key)
-    # Co-located peers reach A over loopback (its :direct worker binds 0.0.0.0) — skip the NAT hairpin.
-    if src_k.target.ssh_host == dst_k.target.ssh_host && src_k.port > 0
-        ip, port = "127.0.0.1", src_k.port + 2
-    end
+    # A's PEER-vantage endpoint: its RAW blob port (gate+2) at its PEER-reachable IP — NOT `_data_endpoint!`,
+    # which is hub-vantage (a :tunnel worker's would be the hub-local `ssh -L` forward, meaningless to a
+    # peer, and calling it would open a tunnel as a side effect). Co-located ⇒ loopback (§3).
+    port = src_k.port + 2
+    colocated = src_k.target.ssh_host == dst_k.target.ssh_host
+    ip = colocated ? "127.0.0.1" : _peer_host_ip(src_k.target.ssh_host)
+    skey = _peer_server_key(src_k)
     sh, dh = String(src_k.target.ssh_host), String(dst_k.target.ssh_host)
     kind = lock(_PEER_ROUTE_LOCK) do; get(_PEER_ROUTE_CACHE, (sh, dh), nothing); end
     if kind === nothing
@@ -2162,7 +2194,7 @@ function _resolve_peer_route(src_k, dst_k)
         lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = kind; end
         _rlog("peer route $sh→$dh: probe $ip:$port → " *
               (reachable ? "reachable ($(try; round(pr.rtt_ms; digits=1); catch; "?"; end)ms) ⇒ direct" :
-                           "unreachable ⇒ relay (SSH bridge not built yet)"))
+                           "unreachable ⇒ relay"))
     end
     return PeerRoute(kind, ip, port, skey)
 end
