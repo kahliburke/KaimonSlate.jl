@@ -998,7 +998,7 @@ body.modkey .cm-content { cursor: pointer; }
    at z-index 82, above the DAG pane (60) so it's never clipped by the pane it floats over. */
 .dagregcard { position:fixed; z-index:82; background:var(--bg); border:1px solid var(--border);
   border-radius:10px; padding:9px 11px; box-shadow:0 14px 40px #000b; font-size:.8rem;
-  min-width:200px; max-width:340px; color:var(--text); }
+  min-width:200px; max-width:340px; color:var(--text); overflow-wrap:anywhere; }
 .dagregcard-h { display:flex; align-items:center; gap:7px; margin-bottom:4px; }
 .dagregcard-h b { font-size:.86rem; }
 .dagregdot { width:9px; height:9px; border-radius:50%; border:1.5px solid; flex:0 0 auto; }
@@ -1250,7 +1250,10 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .wpill.degraded, .runloc.degraded { color:#c2b158; border-color:color-mix(in srgb, #c2b158 55%, var(--border));
   background:color-mix(in srgb, #c2b158 12%, var(--bg3)); }
 .wchip-warn { color:#c2b158; background:color-mix(in srgb, #c2b158 12%, var(--bg3));
-  border-color:color-mix(in srgb, #c2b158 45%, var(--border)); }
+  border-color:color-mix(in srgb, #c2b158 45%, var(--border));
+  /* Unlike a metric chip (fixed-width, nowrap), the warn chip holds a status/error MESSAGE — let it
+     wrap and take its own full row so a long note stays inside the card/popup instead of overflowing. */
+  white-space:normal; overflow-wrap:anywhere; flex-basis:100%; min-width:0; }
 /* The bar is a SINGLE "top" pill (the most-salient worker) in a fixed slot: a reserved min-width so it doesn't
    jump as the top worker changes, and the LABEL elides on overflow so a long region name can't blow out the
    bar. It carries the ranked dropdown of ALL workers, anchored to it. */
@@ -1270,7 +1273,7 @@ body.dag-open.dag-bottom .page { padding-bottom:calc(var(--dagh, 42vh) + 40px); 
 .workerpop { width:min(760px, 92vw); max-height:80vh; display:flex; flex-direction:column; padding:0; overflow:hidden; }
 /* As a NON-covering side panel: docked top-right, below the topbar, so it coexists with the (top-left)
    dropdown — you can keep hovering rows to switch which worker it shows. No backdrop, no dimming. */
-.workerpop-panel { position:fixed; top:calc(var(--topbar-h,49px) + 8px); right:14px; z-index:45;
+.workerpop-panel { position:fixed; top:calc(var(--topbar-h,49px) + 8px); right:14px; z-index:62;   /* above the DAG pane (60) so the Log popup opened from a region card isn't hidden behind a right-docked pane */
   width:380px; max-width:calc(100vw - 28px); max-height:72vh;
   border:1px solid var(--border); border-radius:10px; background:var(--bg2);
   box-shadow:0 12px 40px rgba(0,0,0,.5); display:none; }

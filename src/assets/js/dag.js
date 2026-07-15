@@ -1003,8 +1003,8 @@ function _dagOption() {
     by0 = Math.min(by0, p[1] - 6); by1 = Math.max(by1, p[1] + 6);
   }));
   zones.forEach(zn => {                              // empty zones live in the right margin — keep them in the fit window
-    bx0 = Math.min(bx0, zn.x0); bx1 = Math.max(bx1, zn.x1);
-    by0 = Math.min(by0, zn.y0); by1 = Math.max(by1, zn.y1);
+    bx0 = Math.min(bx0, zn.x0 - 6); bx1 = Math.max(bx1, zn.x1 + 6);   // same breathing room as nodes/links so a zone box isn't flush to the pane edge
+    by0 = Math.min(by0, zn.y0 - 6); by1 = Math.max(by1, zn.y1 + 6);
   });
   const bw = bx1 - bx0, bh = by1 - by0;
   const u = Math.max(bw / w, bh / h, 0.0001);
@@ -1616,7 +1616,7 @@ function _dagRegCardShow(zn, cx, cy) {
   card.addEventListener('mouseleave', _dagRegCardScheduleHide);
   card.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.act === 'log') { _dagRegCardHide(); if (typeof openWorkerPop === 'function') openWorkerPop(zn.name); return; }
+    if (b.dataset.act === 'log') { _dagRegCardHide(); if (typeof openWorkerPop === 'function') openWorkerPop(zn.name, e, true); return; }
     if (b.dataset.act === 'reap') {
       const host = zn.host, port = w.port;
       if (typeof confirmDark === 'function' &&

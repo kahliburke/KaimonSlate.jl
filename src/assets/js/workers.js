@@ -247,14 +247,16 @@ function onWorkerLog(side, line) {
   _wpRenderLog();
 }
 
-function openWorkerPop(side, ev) {
-  ev && ev.stopPropagation();
+function openWorkerPop(side, ev, pin) {
+  ev && ev.stopPropagation();   // opened from a click → don't let it bubble to the document close-on-outside-click handler
   _wpSide = side;
+  if (pin) _wpPinned = true;    // a deliberate click (e.g. a region card's Log) opens PINNED so it stays put
   const bg = document.getElementById('workerpopbg'); if (!bg) return;
   _wpRaw = [];
   document.getElementById('workerpop-log').textContent = 'loading…';
   document.getElementById('workerpop-stats').textContent = '';
   bg.classList.add('show');
+  _wpUpdatePin();
   _wpRefresh();   // ONE snapshot for history + title/status; live stats & new log lines then arrive via the WS push
 }
 function closeWorkerPop() {
