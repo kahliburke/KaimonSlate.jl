@@ -710,36 +710,55 @@ function _dagRouteEdges(L) {
   const cols = ((maxx / CELL) | 0) + 3, rowsG = ((maxy / CELL) | 0) + 3;
   const cellsOf = n => [Math.max(0, ((n.x - n.b.w / 2 - MG) / CELL) | 0), Math.max(0, ((n.y - n.b.h / 2 - MG) / CELL) | 0), Math.min(cols - 1, ((n.x + n.b.w / 2 + MG) / CELL) | 0), Math.min(rowsG - 1, ((n.y + n.b.h / 2 + MG) / CELL) | 0)];
   const wall = Array.from({ length: rowsG }, () => new Uint8Array(cols));
-  const rect = (x0, y0, x1, y1) => { const c0 = Math.max(0, (x0 / CELL) | 0), c1 = Math.min(cols - 1, (x1 / CELL) | 0), r0 = Math.max(0, (y0 / CELL) | 0), r1 = Math.min(rowsG - 1, (y1 / CELL) | 0); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) wall[r][c] = 1; };
   L.nodes.forEach(n => { const [c0, r0, c1, r1] = cellsOf(n); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) wall[r][c] = 1; });
-  L.partitions.forEach(p => rect(p.x0, p.y0, p.x1, p.y0 + HEADER));   // zone header bars (region label + status) are obstacles too
   const dist = Array.from({ length: rowsG }, () => new Int16Array(cols).fill(99)); const q = [];
   for (let r = 0; r < rowsG; r++) for (let c = 0; c < cols; c++) if (wall[r][c]) { dist[r][c] = 0; q.push([r, c]); }
   for (let head = 0; head < q.length; head++) { const [r, c] = q[head]; if (dist[r][c] >= CLEAR) continue; for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nr = r + dr, nc = c + dc; if (nr < 0 || nc < 0 || nr >= rowsG || nc >= cols) continue; if (dist[nr][nc] > dist[r][c] + 1) { dist[nr][nc] = dist[r][c] + 1; q.push([nr, nc]); } } }
   const cost = Array.from({ length: rowsG }, (_, r) => Float32Array.from({ length: cols }, (_, c) => wall[r][c] ? 0 : 1 + (dist[r][c] > 0 && dist[r][c] <= CLEAR ? (CLEAR - dist[r][c] + 1) * SOFT : 0)));
+  // Zone-header bars (region label + status dot) are SOFT obstacles, not walls. An edge entering a zone
+  // from above MUST cross that zone's header to reach the nodes below it, so a hard wall forced ugly
+  // detours around the whole zone. A crossing penalty instead lets an edge drop straight down through
+  // the header's empty span while still discouraging it from running ALONG the header (over the text).
+  L.partitions.forEach(p => { const c0 = Math.max(0, (p.x0 / CELL) | 0), c1 = Math.min(cols - 1, (p.x1 / CELL) | 0), r0 = Math.max(0, (p.y0 / CELL) | 0), r1 = Math.min(rowsG - 1, ((p.y0 + HEADER) / CELL) | 0);
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (!wall[r][c]) cost[r][c] += 5; });
   const losBlocked = (x0, y0, x1, y1, free) => { const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (CELL * 0.6)); for (let i = 1; i < steps; i++) { const t = i / steps, r = ((y0 + (y1 - y0) * t) / CELL) | 0, c = ((x0 + (x1 - x0) * t) / CELL) | 0; if (r < 0 || c < 0 || r >= rowsG || c >= cols) continue; if (wall[r][c] && !free(r, c)) return true; } return false; };
   const used = Array.from({ length: rowsG }, () => new Float32Array(cols)), MARK = 3.2;
   const stamp = pts => { for (let s = 0; s + 1 < pts.length; s++) { const steps = Math.ceil(Math.hypot(pts[s + 1][0] - pts[s][0], pts[s + 1][1] - pts[s][1]) / (CELL * 0.5)); for (let i = 0; i <= steps; i++) { const t = i / steps, r = ((pts[s][1] + (pts[s + 1][1] - pts[s][1]) * t) / CELL) | 0, c = ((pts[s][0] + (pts[s + 1][0] - pts[s][0]) * t) / CELL) | 0; for (const [dr, dc] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) { const rr = r + dr, cc = c + dc; if (rr >= 0 && cc >= 0 && rr < rowsG && cc < cols) used[rr][cc] += (dr || dc) ? MARK * 0.5 : MARK; } } } };
   const xlinks = L.links.filter(l => { const a = nd(l.s), b = nd(l.t); return a && b && _dagAssignedRegion(a.c) !== _dagAssignedRegion(b.c); })
     .sort((p, q2) => { const pa = nd(p.s), pb = nd(p.t), qa = nd(q2.s), qb = nd(q2.t); return Math.hypot(qb.x - qa.x, qb.y - qa.y) - Math.hypot(pb.x - pa.x, pb.y - pa.y); });   // longest first
-  const STUB = 16;
+  const STUB = 16, TILT = 10 * Math.PI / 180;   // the approach may lean up to ±TILT off the border normal
   // Outward normal of the border the attach point sits on (robust for short/narrow nodes where a
   // dominant-axis guess would pick the wrong side) → used to approach the node SQUARE-ON.
   const bnorm = (pt, n) => { const rx = n.x + n.b.w / 2, lx = n.x - n.b.w / 2, by = n.y + n.b.h / 2, ty = n.y - n.b.h / 2;
     if (Math.abs(pt[0] - rx) < 1.5) return [1, 0]; if (Math.abs(pt[0] - lx) < 1.5) return [-1, 0];
     if (Math.abs(pt[1] - by) < 1.5) return [0, 1]; if (Math.abs(pt[1] - ty) < 1.5) return [0, -1]; return [0, 0]; };
+  // Rotate a border normal up to TILT toward direction (tx,ty): the arrival need not be EXACTLY
+  // perpendicular — leaning a few degrees toward the far end shortens the route and softens the bend
+  // where the routed middle meets the stub, while still reading as square-on.
+  const lean = (nrm, tx, ty) => { const tl = Math.hypot(tx, ty) || 1, ux = tx / tl, uy = ty / tl;
+    const ang = Math.acos(Math.max(-1, Math.min(1, nrm[0] * ux + nrm[1] * uy))); if (ang < 1e-4) return nrm;
+    const th = Math.min(ang, TILT), rot = a => [nrm[0] * Math.cos(a) - nrm[1] * Math.sin(a), nrm[0] * Math.sin(a) + nrm[1] * Math.cos(a)];
+    const p = rot(th), m = rot(-th); return (p[0] * ux + p[1] * uy) >= (m[0] * ux + m[1] * uy) ? p : m; };
   const routes = {};
   xlinks.forEach(l => {
     const a = nd(l.s), b = nd(l.t);
     const ap = attach[l.s + '>' + l.t + '@' + a.c.id] || [a.x, a.y], bp = attach[l.s + '>' + l.t + '@' + b.c.id] || [b.x, b.y];
-    const na = bnorm(ap, a), nb = bnorm(bp, b);
-    // Route between points just OUTSIDE each border, then step perpendicularly in — so the edge exits and
-    // enters its nodes square-on (neat, visible arrowheads) instead of grazing at a shallow angle.
+    // Lean each border normal toward the OTHER endpoint (≤ ±TILT), then step out along it to the stub tip.
+    const na = lean(bnorm(ap, a), bp[0] - ap[0], bp[1] - ap[1]), nb = lean(bnorm(bp, b), ap[0] - bp[0], ap[1] - bp[1]);
+    // Route between points just OUTSIDE each border, then step in along the (leaned) normal — so the edge
+    // exits and enters its nodes near-square-on (neat, visible arrowheads) instead of grazing.
     const aS = [ap[0] + na[0] * STUB, ap[1] + na[1] * STUB], bS = [bp[0] + nb[0] * STUB, bp[1] + nb[1] * STUB];
-    const fa = cellsOf(a), fbx = cellsOf(b), free = (r, c) => (r >= fa[1] && r <= fa[3] && c >= fa[0] && c <= fa[2]) || (r >= fbx[1] && r <= fbx[3] && c >= fbx[0] && c <= fbx[2]);
+    // free() opens ONLY the exact start + goal cells (never the whole box). Freeing a node's entire
+    // footprint let A* shortcut THROUGH the node and reach the attach point from the inside — which
+    // flipped the arrowhead 180° and looped the edge through the box. The stub tips sit outside the
+    // wall, so this only matters for the border-to-border fallback (its endpoints ARE on the border).
+    const cellOf = pt => [Math.min(rowsG - 1, Math.max(0, (pt[1] / CELL) | 0)), Math.min(cols - 1, Math.max(0, (pt[0] / CELL) | 0))];
+    const only = (u, v) => (r, c) => (r === u[0] && c === u[1]) || (r === v[0] && c === v[1]);
     let sp = aS, gp = bS, prefix = [ap], suffix = [bp];
-    let path = _dagAstar(cost, used, free, [(aS[1] / CELL) | 0, (aS[0] / CELL) | 0], [(bS[1] / CELL) | 0, (bS[0] / CELL) | 0], cols, rowsG);
-    if (!path) { sp = ap; gp = bp; prefix = []; suffix = []; path = _dagAstar(cost, used, free, [(ap[1] / CELL) | 0, (ap[0] / CELL) | 0], [(bp[1] / CELL) | 0, (bp[0] / CELL) | 0], cols, rowsG); }   // a stub cell was blocked → route border-to-border
+    const aSc = cellOf(aS), bSc = cellOf(bS);
+    let free = only(aSc, bSc);
+    let path = _dagAstar(cost, used, free, aSc, bSc, cols, rowsG);
+    if (!path) { sp = ap; gp = bp; prefix = []; suffix = []; const apc = cellOf(ap), bpc = cellOf(bp); free = only(apc, bpc); path = _dagAstar(cost, used, free, apc, bpc, cols, rowsG); }   // a stub cell was blocked → route border-to-border
     if (!path) return;
     const pts = path.map(([r, c]) => [c * CELL + CELL / 2, r * CELL + CELL / 2]); pts[0] = sp; pts[pts.length - 1] = gp;
     const mid = [pts[0]]; let i = 0;
@@ -830,6 +849,12 @@ function _dagOption() {
     const clip = n => Math.min(dx ? Math.abs((n.b.w / 2 + 5) / dx) : 9, dy ? Math.abs((n.b.h / 2 + 5) / dy) : 9, 0.45);
     const tA = clip(a), tB = clip(z);
     l.pts = [[a.x + dx * tA, a.y + dy * tA], [z.x - dx * tB, z.y - dy * tB]];
+  });
+  // Snap each edge's ends exactly onto the source/target borders — dagre-routed edges stop a few px
+  // short, which shows as a gap (and a floating arrowhead) when zoomed in. No-op for routed cross-edges.
+  L.links.forEach(l => { if (!l.pts || l.pts.length < 2) return; const a = ndOf[l.s], z = ndOf[l.t];
+    if (z && z.b) l.pts[l.pts.length - 1] = _dagClipToBorder(l.pts[l.pts.length - 2], l.pts[l.pts.length - 1], z);
+    if (a && a.b) l.pts[0] = _dagClipToBorder(l.pts[1], l.pts[0], a);
   });
   const stOf = id => _dagState(m.byId[id]);
   _dagAnyRunning = m.nodes.some(c => _dagState(c) === 'running');
@@ -975,33 +1000,44 @@ function _dagOption() {
                    : faded ? (l.dim ? 0.04 : 0.15) : l.dim ? 0.12 : hot ? 0.95 : 0.6;
           // Decimate waypoints (Douglas-Peucker): keep endpoints + genuine detours, drop
           // micro-wiggles — the spline relaxes into longer arcs but still dodges nodes.
-          const pts = _dagRdp(l.pts.map(p => api.coord(p)), 18);
+          const pts = _dagRdpStubs(l.pts.map(p => api.coord(p)), 18);
           const n = pts.length;
-          let x1 = pts[n - 2][0], y1 = pts[n - 2][1];
-          const x2 = pts[n - 1][0], y2 = pts[n - 1][1];
+          const tip = pts[n - 1];
           const style = { fill: 'none', stroke: col, lineWidth: lw, opacity: op };
           if (l.manual) style.lineDash = [6, 4];       // user-asserted (`needs=`) — an assertion, not derived dataflow
           const kids = [];
+          // Arrowhead tracks the zoom so it stays proportionate to the boxes, but clamped to a pixel
+          // band — it grows as you zoom in (instead of pinning at a few px against a huge node) without
+          // ballooning at extreme zoom or vanishing when zoomed out. Scale = mean px per layout unit.
+          const _o0 = api.coord([0, 0]);
+          const _sc = Math.max(0.85, Math.min(3.2, ((Math.abs(api.coord([1, 0])[0] - _o0[0]) + Math.abs(api.coord([0, 1])[1] - _o0[1])) / 2) || 1));
+          const ah = 7 * _sc, aw = 3.4 * _sc;
+          let ux, uy;                                  // arrival unit tangent → arrowhead direction
+          // The stroke stops at the head's BASE (not the tip) so the semi-transparent line doesn't
+          // show through the (also semi-transparent) arrowhead.
           if (!l.dim && n === 2) {
             // no detour → the canonical SYMMETRIC S: leave the source square along the flow
             // axis, inflect at the midpoint, arrive square — tangents vertical in TB.
             const s0 = pts[0], k = 0.45;
+            const cp2 = tb ? [tip[0], tip[1] - k * (tip[1] - s0[1])] : [tip[0] - k * (tip[0] - s0[0]), tip[1]];
+            const dl = Math.hypot(tip[0] - cp2[0], tip[1] - cp2[1]) || 1; ux = (tip[0] - cp2[0]) / dl; uy = (tip[1] - cp2[1]) / dl;
+            const bx = tip[0] - ux * ah, by = tip[1] - uy * ah;
             const shp = tb
-              ? { x1: s0[0], y1: s0[1], cpx1: s0[0], cpy1: s0[1] + k * (y2 - s0[1]),
-                  cpx2: x2, cpy2: y2 - k * (y2 - s0[1]), x2, y2 }
-              : { x1: s0[0], y1: s0[1], cpx1: s0[0] + k * (x2 - s0[0]), cpy1: s0[1],
-                  cpx2: x2 - k * (x2 - s0[0]), cpy2: s0[1], x2, y2 };
+              ? { x1: s0[0], y1: s0[1], cpx1: s0[0], cpy1: s0[1] + k * (tip[1] - s0[1]), cpx2: cp2[0], cpy2: cp2[1], x2: bx, y2: by }
+              : { x1: s0[0], y1: s0[1], cpx1: s0[0] + k * (tip[0] - s0[0]), cpy1: s0[1], cpx2: cp2[0], cpy2: cp2[1], x2: bx, y2: by };
             kids.push({ type: 'bezierCurve', style, shape: shp });
-            x1 = shp.cpx2; y1 = shp.cpy2;             // arrow follows the arrival tangent
           } else if (n === 2) {
-            kids.push({ type: 'line', shape: { x1: pts[0][0], y1: pts[0][1], x2, y2 }, style });
+            const s0 = pts[0], dl = Math.hypot(tip[0] - s0[0], tip[1] - s0[1]) || 1; ux = (tip[0] - s0[0]) / dl; uy = (tip[1] - s0[1]) / dl;
+            kids.push({ type: 'line', shape: { x1: s0[0], y1: s0[1], x2: tip[0] - ux * ah, y2: tip[1] - uy * ah }, style });
           } else {
-            const Pp = [pts[0], pts[0], ...pts, pts[n - 1], pts[n - 1]];
+            const prev = pts[n - 2], dl = Math.hypot(tip[0] - prev[0], tip[1] - prev[1]) || 1; ux = (tip[0] - prev[0]) / dl; uy = (tip[1] - prev[1]) / dl;
+            const cpts = pts.slice(0, n - 1); cpts.push([tip[0] - ux * ah, tip[1] - uy * ah]);   // last point → arrow base
+            const m2 = cpts.length, Pp = [cpts[0], cpts[0], ...cpts, cpts[m2 - 1], cpts[m2 - 1]];
             for (let i = 0; i + 3 < Pp.length; i++) {
               const a1 = Pp[i + 1], a2 = Pp[i + 2], a3 = Pp[i + 3];
               const sx2 = (a1[0] + 4 * a2[0] + a3[0]) / 6, sy2 = (a1[1] + 4 * a2[1] + a3[1]) / 6;
-              const px2 = i === 0 ? pts[0][0] : (Pp[i][0] + 4 * a1[0] + a2[0]) / 6;
-              const py2 = i === 0 ? pts[0][1] : (Pp[i][1] + 4 * a1[1] + a2[1]) / 6;
+              const px2 = i === 0 ? cpts[0][0] : (Pp[i][0] + 4 * a1[0] + a2[0]) / 6;
+              const py2 = i === 0 ? cpts[0][1] : (Pp[i][1] + 4 * a1[1] + a2[1]) / 6;
               kids.push({ type: 'bezierCurve', style, shape: {
                 x1: px2, y1: py2,
                 cpx1: (2 * a1[0] + a2[0]) / 3, cpy1: (2 * a1[1] + a2[1]) / 3,
@@ -1009,12 +1045,11 @@ function _dagOption() {
                 x2: sx2, y2: sy2 } });
             }
           }
-          const len = Math.hypot(x2 - x1, y2 - y1) || 1, ux = (x2 - x1) / len, uy = (y2 - y1) / len;
-          const ah = 7, aw = 3.4, bx = x2 - ux * ah, by = y2 - uy * ah;
-          kids.push({ type: 'polygon', shape: { points: [[x2, y2], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
+          const bx = tip[0] - ux * ah, by = tip[1] - uy * ah;
+          kids.push({ type: 'polygon', shape: { points: [[tip[0], tip[1]], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] },
             style: { fill: col, opacity: Math.min(1, op + 0.1) } });
           if (del) {   // ✕ badge at the edge's midpoint — "click deletes this edge"
-            const m = n === 2 ? [(pts[0][0] + x2) / 2, (pts[0][1] + y2) / 2] : pts[Math.floor(n / 2)];
+            const m = n === 2 ? [(pts[0][0] + tip[0]) / 2, (pts[0][1] + tip[1]) / 2] : pts[Math.floor(n / 2)];
             kids.push({ type: 'circle', shape: { cx: m[0], cy: m[1], r: 8 },
               style: { fill: P.bg, stroke: P.errored, lineWidth: 1.6, opacity: 1 } });
             kids.push({ type: 'text', style: { x: m[0], y: m[1], text: '✕', fill: P.errored,
@@ -1446,6 +1481,32 @@ function _dagRdp(pts, eps) {
   }
   if (maxD <= eps) return [pts[0], pts[pts.length - 1]];
   return _dagRdp(pts.slice(0, maxI + 1), eps).slice(0, -1).concat(_dagRdp(pts.slice(maxI), eps));
+}
+// Simplify a routed polyline while PRESERVING its endpoint stubs. The router lays the first and
+// last segments perpendicular to the node borders they touch (square-on departure/arrival, keyed to
+// which SIDE the transfer connects to), so those stubs carry the arrival angle — decimating them
+// collapses the edge into a shallow graze along the border. Pin pts[0..1] and pts[n-2..n-1]; RDP only
+// the interior span between the stub tips.
+function _dagRdpStubs(pts, eps) {
+  const n = pts.length;
+  if (n <= 3) return pts;
+  return [pts[0], ..._dagRdp(pts.slice(1, n - 1), eps), pts[n - 1]];
+}
+// Clip an edge's terminal point exactly onto its node's border, along the incoming direction. Dagre
+// leaves a few-px gap between an edge and the node (invisible at fit, an obvious gap zoomed in); this
+// snaps it — and for routed cross-edges (already on the border) it's a no-op. Returns the border point
+// where the ray from `prev` through `end` first meets the box, or `end` if it doesn't cross it.
+function _dagClipToBorder(prev, end, node) {
+  const L0 = node.x - node.b.w / 2, R0 = node.x + node.b.w / 2, T0 = node.y - node.b.h / 2, B0 = node.y + node.b.h / 2;
+  const dx = end[0] - prev[0], dy = end[1] - prev[1];
+  if (!dx && !dy) return end;
+  let best = null;
+  const hit = (t, x, y, ok) => { if (t < 0 || !ok) return; if (!best || t < best[0]) best = [t, [x, y]]; };
+  if (dx) { const t1 = (L0 - prev[0]) / dx, y1 = prev[1] + dy * t1; hit(t1, L0, y1, y1 >= T0 - 0.5 && y1 <= B0 + 0.5);
+            const t2 = (R0 - prev[0]) / dx, y2 = prev[1] + dy * t2; hit(t2, R0, y2, y2 >= T0 - 0.5 && y2 <= B0 + 0.5); }
+  if (dy) { const t1 = (T0 - prev[1]) / dy, x1 = prev[0] + dx * t1; hit(t1, x1, T0, x1 >= L0 - 0.5 && x1 <= R0 + 0.5);
+            const t2 = (B0 - prev[1]) / dy, x2 = prev[0] + dx * t2; hit(t2, x2, B0, x2 >= L0 - 0.5 && x2 <= R0 + 0.5); }
+  return best ? best[1] : end;
 }
 
 // ── Manual edges: 🔗 link mode ──────────────────────────────────────────────────
