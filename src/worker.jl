@@ -1744,15 +1744,18 @@ end
 # gate's control clients (the hub — already trusted, so it keeps data access with no second grant)
 # and blob-only peers (`_authorized_blob_clients`).
 
-# The blob allow-file lives beside the gate's key material; one Z85 client pubkey per line. Reads are
-# lock-free (the ZAP handler reads it on EVERY handshake), so writes MUST be atomic — a torn file would
-# fail every handshake. `_authorize`/`_revoke` therefore rewrite it via tmp+mv (rename is atomic within
-# a dir): a reader always sees a COMPLETE old-or-new file. An in-process lock serializes this worker's
-# own concurrent transfers (add vs revoke). Cross-process writers on a SHARED curve dir (co-located
-# workers, same $HOME) can still lose an update — but never tear the file, and the loss is recoverable
-# (a dropped add just retries/relays; a dropped revoke leaves one extra authorized peer key) and is
-# eliminated once the curve dir is scoped per worker/region.
-_blob_allow_path() = joinpath(KaimonGate._curve_dir(), "authorized_blob_clients")
+# The blob allow-file is SLATE's (one Z85 client pubkey per line), so it lives under the kaimonslate
+# cache base — NOT the gate's shared curve dir. That base honors `KAIMONSLATE_CACHE_HOME` (`cache_root`),
+# the SAME per-region knob that isolates the CAS, so co-located regions with distinct cache_roots get
+# distinct blob allow-lists and never write the same file — ending the cross-region write race. (The
+# gate's shared CURVE identity — server/client keys + the control allow-list — is untouched; blob-only
+# peer grants just don't ride on it.) Reads are lock-free (the ZAP handler reads it on EVERY handshake),
+# so writes MUST be atomic: `_authorize`/`_revoke` rewrite via tmp+mv (rename is atomic within a dir), so
+# a reader always sees a COMPLETE old-or-new file. An in-process lock serializes this worker's own
+# concurrent transfers; same-region warm workers still share their region's file, but the atomic writes
+# keep that non-corrupting (a lost update is recoverable — a dropped add retries/relays, a dropped revoke
+# leaves one extra peer key).
+_blob_allow_path() = joinpath(dirname(_memo_dir()), "authorized_blob_clients")
 const _BLOB_ALLOW_LOCK = ReentrantLock()
 
 function _authorized_blob_clients()
