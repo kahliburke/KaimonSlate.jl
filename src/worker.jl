@@ -1744,8 +1744,17 @@ end
 # gate's control clients (the hub — already trusted, so it keeps data access with no second grant)
 # and blob-only peers (`_authorized_blob_clients`).
 
-# The blob allow-file lives beside the gate's key material; one Z85 client pubkey per line.
+# The blob allow-file lives beside the gate's key material; one Z85 client pubkey per line. Reads are
+# lock-free (the ZAP handler reads it on EVERY handshake), so writes MUST be atomic — a torn file would
+# fail every handshake. `_authorize`/`_revoke` therefore rewrite it via tmp+mv (rename is atomic within
+# a dir): a reader always sees a COMPLETE old-or-new file. An in-process lock serializes this worker's
+# own concurrent transfers (add vs revoke). Cross-process writers on a SHARED curve dir (co-located
+# workers, same $HOME) can still lose an update — but never tear the file, and the loss is recoverable
+# (a dropped add just retries/relays; a dropped revoke leaves one extra authorized peer key) and is
+# eliminated once the curve dir is scoped per worker/region.
 _blob_allow_path() = joinpath(KaimonGate._curve_dir(), "authorized_blob_clients")
+const _BLOB_ALLOW_LOCK = ReentrantLock()
+
 function _authorized_blob_clients()
     f = _blob_allow_path(); s = Set{String}(); isfile(f) || return s
     for line in eachline(f)
@@ -1754,24 +1763,33 @@ function _authorized_blob_clients()
     end
     return s
 end
-function _authorize_blob_client!(pubkey::AbstractString)
-    pubkey in _authorized_blob_clients() && return :already
-    open(_blob_allow_path(), "a") do io; println(io, String(pubkey)); end
-    return :added
+
+# Atomically replace the allow-file with `keys` (normalized: one sorted Z85 key per line). tmp is
+# per-pid so co-located workers' tmp files never collide; the mv is the atomic publish point.
+function _write_blob_allow!(keys)
+    f = _blob_allow_path(); mkpath(dirname(f))
+    tmp = string(f, ".tmp.", getpid())
+    open(tmp, "w") do io; for k in sort!(collect(keys)); println(io, k); end; end
+    mv(tmp, f; force = true)
+    return nothing
 end
-function _revoke_blob_client!(pubkey::AbstractString)
-    f = _blob_allow_path(); isfile(f) || return :absent
-    kept = String[]; removed = false
-    for line in eachline(f)
-        t = strip(line)
-        if !isempty(t) && !startswith(t, "#") && String(first(split(t))) == String(pubkey)
-            removed = true; continue
-        end
-        push!(kept, line)
+
+function _authorize_blob_client!(pubkey::AbstractString)
+    lock(_BLOB_ALLOW_LOCK) do
+        s = _authorized_blob_clients()
+        String(pubkey) in s && return :already
+        push!(s, String(pubkey)); _write_blob_allow!(s)
+        return :added
     end
-    removed || return :absent
-    open(f, "w") do io; for l in kept; println(io, l); end; end
-    return :removed
+end
+
+function _revoke_blob_client!(pubkey::AbstractString)
+    lock(_BLOB_ALLOW_LOCK) do
+        s = _authorized_blob_clients()
+        String(pubkey) in s || return :absent
+        delete!(s, String(pubkey)); _write_blob_allow!(s)
+        return :removed
+    end
 end
 
 # Does this worker enforce a blob allow-list? Only a CURVE gate with an allow-list (`:direct`) — the
