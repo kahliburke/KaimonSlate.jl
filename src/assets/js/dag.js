@@ -319,6 +319,17 @@ function _dagRegionHue(name) {
   if (!name) return null;
   return _DAG_REGION_HUES[Math.max(0, _dagRegionNamesAll().indexOf(name)) % _DAG_REGION_HUES.length];
 }
+
+// ── Region aliveness (join the live worker payload onto each zone) ──────────────────────────────
+// The `workers` WS frame (window.onWorkersUpdate → _dagOnWorkers) carries each active worker's
+// graduated status, freshest between full-state bumps; fall back to the last full state's list.
+let _dagWorkersLive = null;
+function _dagWorkersList() { return _dagWorkersLive || (window.__slateState && window.__slateState.workers) || []; }
+// The worker backing a region — matched by `side` (== region name; '' is the local/main kernel).
+function _dagRegionWorker(name) { return _dagWorkersList().find(w => (w.side || '') === name) || null; }
+// Status → dot colour. `none` (no active worker for a declared region) is a hollow grey ring.
+const _DAG_STATUS_COL = { ok: '#3fb96e', degraded: '#e8b23f', connecting: '#e8a13f', disconnected: '#e0596a', none: '#6a7183' };
+function _dagWorkerStatus(w) { return w ? (w.status || (w.connected ? 'ok' : 'connecting')) : 'none'; }
 function _dagRegionLegend() {
   const pane = document.getElementById('dagpane') || document.getElementById('dag');
   let el = document.getElementById('dagregleg');
@@ -580,12 +591,17 @@ function _dagPartitionedLayout(m, w, h) {
 // Partitions → zone rectangles for rendering + drop hit-testing. `local` is included (neutral tint);
 // dropping a cell there un-tags it.
 function _dagPartitionZones(parts) {
-  return parts.map(p => ({
-    name: p.side, isLocal: p.side === '',
-    host: p.side === '' ? '' : _dagRegionHost(p.side),
-    hue: p.side === '' ? '#586089' : (_dagRegionHue(p.side) || '#5a6a90'),
-    x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, empty: p.empty,
-  }));
+  return parts.map(p => {
+    const isLocal = p.side === '';
+    const w = isLocal ? null : _dagRegionWorker(p.side);   // the live worker serving this region (if any)
+    return {
+      name: p.side, isLocal,
+      host: isLocal ? '' : ((w && w.host) || _dagRegionHost(p.side)),
+      hue: isLocal ? '#586089' : (_dagRegionHue(p.side) || '#5a6a90'),
+      x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, empty: p.empty,
+      worker: w, wstatus: _dagWorkerStatus(w),            // aliveness for the header dot + hover card
+    };
+  });
 }
 
 // The region zone under a pixel (topmost wins), or null for the local/main area. Used for drop
@@ -748,6 +764,15 @@ function _dagOption() {
           ];
           if (zn.empty) kids.push({ type: 'text', silent: true, style: { x: x + wpx / 2, y: y + hpx / 2 + 8,
             text: 'drag cells here', fill: P.dim, font: '11px sans-serif', textAlign: 'center', textVerticalAlign: 'middle' } });
+          // Aliveness dot at the header's right edge — filled = a live worker (green ok · amber degraded ·
+          // orange connecting/disconnected), hollow grey = no worker running for this region. Hovering it
+          // (hit-tested in the zr mousemove handler) opens the region worker card. Silent like the rest.
+          if (!zn.isLocal) {
+            const col = _DAG_STATUS_COL[zn.wstatus] || _DAG_STATUS_COL.none;
+            const dcx = x + wpx - 14, dcy = y + Math.min(24, hpx) / 2 + 1;
+            kids.push({ type: 'circle', silent: true, shape: { cx: dcx, cy: dcy, r: 5 },
+              style: { fill: zn.wstatus === 'none' ? 'transparent' : col, stroke: col, lineWidth: 1.6, opacity: 0.95 } });
+          }
           return { type: 'group', children: kids };
         },
       },
@@ -945,7 +970,13 @@ function _dagRender() {
       _dagFreezePan();                                       // freeze NOW so ECharts' roam can't steal the drag
     });
     _zr.on('mousemove', e => {
-      if (!_dagDrag) return;
+      if (!_dagDrag) {                                        // not dragging → region header-dot hover
+        const hit = _dagBadgeAtPixel(e.offsetX, e.offsetY);
+        const cv = el.querySelector('canvas');
+        if (hit) { _dagRegCardShow(hit.zn, hit.cx, hit.cy); if (cv) cv.style.cursor = 'pointer'; }
+        else { if (_dagRegCardName) _dagRegCardScheduleHide(); if (cv) cv.style.cursor = ''; }
+        return;
+      }
       if (!_dagDrag.moved) {
         if (Math.hypot(e.offsetX - _dagDrag.sx, e.offsetY - _dagDrag.sy) < 4) return;   // still a click, not a drag
         _dagDrag.moved = true;                                // pan already frozen on mousedown
@@ -1139,6 +1170,82 @@ function _dagCard(id, cx, cy) {
 function _dagCardClose() {
   const el = _dagCardEl();
   if (el) { el._close && document.removeEventListener('mousedown', el._close); el.remove(); _dagQueue(); }
+}
+
+// ── Region aliveness card — hover the header status dot for worker info + an inline reap ─────────
+// The zones are silent, so the dot isn't an ECharts target; we hit-test it against the pixel canvas.
+// Returns { zn, cx, cy } for the region zone whose header dot the pixel is over, else null.
+let _dagRegCardName = null, _dagRegHideTimer = null;
+function _dagBadgeAtPixel(px, py) {
+  if (!_dagChart || !_dagCtx || !_dagCtx.zones) return null;
+  for (const zn of _dagCtx.zones) {
+    if (zn.isLocal) continue;
+    const tl = _dagChart.convertToPixel({ gridIndex: 0 }, [zn.x0, zn.y0]);
+    const br = _dagChart.convertToPixel({ gridIndex: 0 }, [zn.x1, zn.y1]);
+    if (!tl || !br) continue;
+    const cx = br[0] - 14, cy = tl[1] + Math.min(24, br[1] - tl[1]) / 2 + 1;
+    if ((px - cx) ** 2 + (py - cy) ** 2 <= 100) return { zn, cx, cy };   // r≈10px hit halo
+  }
+  return null;
+}
+function _dagRegCardEl() { return document.getElementById('dagregcard'); }
+function _dagRegCardHide() { const el = _dagRegCardEl(); if (el) el.remove(); _dagRegCardName = null; }
+function _dagRegCardScheduleHide() {
+  clearTimeout(_dagRegHideTimer);
+  _dagRegHideTimer = setTimeout(() => { const el = _dagRegCardEl(); if (el && !el.matches(':hover')) _dagRegCardHide(); }, 220);
+}
+// Build (or keep) the hover card for a region's worker, anchored beside its header dot.
+function _dagRegCardShow(zn, cx, cy) {
+  clearTimeout(_dagRegHideTimer);
+  const existing = _dagRegCardEl();
+  if (existing && _dagRegCardName === zn.name && cx != null) return;   // hover re-fire, already open → leave it
+  let keepL = null, keepT = null;                                       // refresh-in-place (live update): keep position
+  if (existing && _dagRegCardName === zn.name) { keepL = existing.style.left; keepT = existing.style.top; }
+  _dagRegCardHide();
+  _dagRegCardName = zn.name;
+  const w = zn.worker, st = zn.wstatus, col = _DAG_STATUS_COL[st] || _DAG_STATUS_COL.none;
+  const decl = _dagDeclaredRegions().find(r => r.name === zn.name);
+  const transport = (w && w.transport) || (decl && decl.transport) || '';
+  const nm = zn.name === 'default' ? 'remote' : zn.name;
+  const stLabel = st === 'none' ? 'no worker running' : st;
+  const statsJson = (window._wpLive && window._wpLive[zn.name]) || (w && w.stats) || '';
+  const chips = (typeof _wpStatsChips === 'function') ? _wpStatsChips(statsJson, w && w.note) : '';
+  const meta = [
+    zn.host ? `<span><i>host</i> ${_esc(zn.host)}</span>` : '',
+    (w && w.port) ? `<span><i>port</i> ${w.port}</span>` : '',
+    transport ? `<span><i>transport</i> ${_esc(transport)}</span>` : '',
+  ].filter(Boolean).join('');
+  const card = document.createElement('div');
+  card.id = 'dagregcard'; card.className = 'dagregcard';
+  card.innerHTML =
+    `<div class="dagregcard-h"><span class="dagregdot" style="background:${st === 'none' ? 'transparent' : col};border-color:${col}"></span>` +
+      `<b>🖧 ${_esc(nm)}</b><span class="dagregcard-st" style="color:${col}">${_esc(stLabel)}</span></div>` +
+    (meta ? `<div class="dagregcard-meta">${meta}</div>` : '') +
+    (chips ? `<div class="dagregcard-chips">${chips}</div>`
+           : `<div class="dagcard-dim">${st === 'none' ? 'no worker is currently serving this region' : 'no telemetry yet'}</div>`) +
+    (w ? '<div class="dagregcard-acts">' +
+      '<button data-act="log" title="open this worker’s live log + telemetry">🪵 Log</button>' +
+      ((zn.host && w.port) ? '<button data-act="reap" class="dagreap" title="kill this worker + remove its files — un-fetched results are lost">✕ Reap</button>' : '') +
+      '</div>' : '');
+  document.body.appendChild(card);
+  if (cx != null) {                                                    // fresh hover → anchor beside the dot
+    const cv = document.getElementById('dagcanvas'), r = cv ? cv.getBoundingClientRect() : { left: 0, top: 0 };
+    card.style.left = Math.max(6, Math.min(window.innerWidth - card.offsetWidth - 8, r.left + cx - card.offsetWidth / 2)) + 'px';
+    card.style.top = Math.min(window.innerHeight - card.offsetHeight - 8, r.top + cy + 12) + 'px';
+  } else if (keepL != null) { card.style.left = keepL; card.style.top = keepT; }   // live refresh → keep position
+  card.addEventListener('mouseenter', () => clearTimeout(_dagRegHideTimer));
+  card.addEventListener('mouseleave', _dagRegCardScheduleHide);
+  card.addEventListener('click', async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.act === 'log') { _dagRegCardHide(); if (typeof openWorkerPop === 'function') openWorkerPop(zn.name); return; }
+    if (b.dataset.act === 'reap') {
+      const host = zn.host, port = w.port;
+      if (typeof confirmDark === 'function' &&
+          !await confirmDark('Reap worker :' + port + ' on ' + host + '?\nThis kills it and removes its files — any un-fetched results are lost.', 'Reap', 'danger')) return;
+      _dagRegCardHide();
+      try { await api('POST', '/api/reap-worker', { host, port }); } catch (_) {}
+    }
+  });
 }
 
 // Reverse navigation: selecting a cell in the notebook lights up its node in the graph.
@@ -1366,6 +1473,18 @@ function dagFit() {
   window.onCellsPatched = cells => {                                   // targeted refresh — states/durations moved
     (cells || []).forEach(c => delete _dagEcThumbs[c.id]);             // chart may have re-rendered → re-snapshot
     _dagQueue();
+  };
+  // Live worker/region aliveness pushed over the WS (workers.js onWorkersUpdate) → refresh the region
+  // header dots (and any open region card) without waiting for the next full notebook state.
+  window._dagOnWorkers = ws => {
+    _dagWorkersLive = ws || [];
+    if (!_dagOpen()) return;
+    _dagQueue();                                                       // repaint the header dots
+    if (_dagRegCardName) {                                             // refresh the open card in place (no _dagCtx timing dep)
+      const w = _dagRegionWorker(_dagRegCardName);
+      _dagRegCardShow({ name: _dagRegCardName, isLocal: false, host: (w && w.host) || _dagRegionHost(_dagRegCardName),
+                        worker: w, wstatus: _dagWorkerStatus(w) });
+    }
   };
   window.addEventListener('resize', debounce(() => { if (_dagOpen() && _dagChart) { _dagChart.resize(); _dagQueue(); } }, 150));
 })();
