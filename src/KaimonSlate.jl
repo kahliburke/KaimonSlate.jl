@@ -551,7 +551,15 @@ function create_tools(GateTool::Type)
     function check_remote(host::String; transport::String = "tunnel")::String
         h = strip(host); isempty(h) && return "Give an ssh host (a `Host` in ~/.ssh/config)."
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
-        r = ReportEngine.preflight_remote(h; transport = tr)
+        # Stream each step to the caller — a cold provision (juliaup install + first env build) is
+        # minutes, so without this the tool call is a silent "evaluating…". `on_step` fires at each
+        # step's START ("run") and completion; mirror that to KaimonGate.progress.
+        on_step = function (s)
+            mark = s.status == "run" ? "▸" : s.status == "ok" ? "✓" : s.status == "skip" ? "–" : "✗"
+            detail = isempty(s.detail) ? "" : " — " * first(s.detail, 100)
+            ReportEngine._gate_progress("$mark $(s.name)$detail")
+        end
+        r = ReportEngine.preflight_remote(h; transport = tr, on_step = on_step)
         io = IOBuffer()
         println(io, (r["ok"] ? "✅" : "❌"), " preflight '$h' ($(r["transport"])) — ", r["ok"] ? "ALL OK" : "FAILED")
         for s in r["steps"]

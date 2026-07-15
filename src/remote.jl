@@ -309,6 +309,12 @@ end
 const _BRINGUP_SINK = Ref{Any}(nothing)
 _bringup_note(line::AbstractString) = (f = _BRINGUP_SINK[]; f === nothing || (try; f(String(line)); catch; end); nothing)
 
+# Stream a one-line status to the MCP CALLER of the in-flight gate tool (agent-visible progress via
+# KaimonGate.progress, keyed to the current request) — so a slow tool like `check_remote` (a cold
+# provision is minutes) isn't a silent "evaluating…". No-op if the gate/progress isn't available.
+# Distinct from `_bringup_note` (browser bring-up banner) and `_rlog` (durable disk log).
+_gate_progress(msg::AbstractString) = (try; getfield(_kaimon(), :KaimonGate).progress(String(msg)); catch; end; nothing)
+
 _ssh_ok(host, argv::Cmd) = first(_run_logged(_ssh(host, argv), "ssh $host"))
 
 # Existence/predicate check over ssh — a nonzero exit is a normal FALSE (e.g. `test -f` on a missing
