@@ -722,16 +722,29 @@ function _dagRouteEdges(L) {
   const stamp = pts => { for (let s = 0; s + 1 < pts.length; s++) { const steps = Math.ceil(Math.hypot(pts[s + 1][0] - pts[s][0], pts[s + 1][1] - pts[s][1]) / (CELL * 0.5)); for (let i = 0; i <= steps; i++) { const t = i / steps, r = ((pts[s][1] + (pts[s + 1][1] - pts[s][1]) * t) / CELL) | 0, c = ((pts[s][0] + (pts[s + 1][0] - pts[s][0]) * t) / CELL) | 0; for (const [dr, dc] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) { const rr = r + dr, cc = c + dc; if (rr >= 0 && cc >= 0 && rr < rowsG && cc < cols) used[rr][cc] += (dr || dc) ? MARK * 0.5 : MARK; } } } };
   const xlinks = L.links.filter(l => { const a = nd(l.s), b = nd(l.t); return a && b && _dagAssignedRegion(a.c) !== _dagAssignedRegion(b.c); })
     .sort((p, q2) => { const pa = nd(p.s), pb = nd(p.t), qa = nd(q2.s), qb = nd(q2.t); return Math.hypot(qb.x - qa.x, qb.y - qa.y) - Math.hypot(pb.x - pa.x, pb.y - pa.y); });   // longest first
+  const STUB = 16;
+  // Outward normal of the border the attach point sits on (robust for short/narrow nodes where a
+  // dominant-axis guess would pick the wrong side) → used to approach the node SQUARE-ON.
+  const bnorm = (pt, n) => { const rx = n.x + n.b.w / 2, lx = n.x - n.b.w / 2, by = n.y + n.b.h / 2, ty = n.y - n.b.h / 2;
+    if (Math.abs(pt[0] - rx) < 1.5) return [1, 0]; if (Math.abs(pt[0] - lx) < 1.5) return [-1, 0];
+    if (Math.abs(pt[1] - by) < 1.5) return [0, 1]; if (Math.abs(pt[1] - ty) < 1.5) return [0, -1]; return [0, 0]; };
   const routes = {};
   xlinks.forEach(l => {
     const a = nd(l.s), b = nd(l.t);
     const ap = attach[l.s + '>' + l.t + '@' + a.c.id] || [a.x, a.y], bp = attach[l.s + '>' + l.t + '@' + b.c.id] || [b.x, b.y];
+    const na = bnorm(ap, a), nb = bnorm(bp, b);
+    // Route between points just OUTSIDE each border, then step perpendicularly in — so the edge exits and
+    // enters its nodes square-on (neat, visible arrowheads) instead of grazing at a shallow angle.
+    const aS = [ap[0] + na[0] * STUB, ap[1] + na[1] * STUB], bS = [bp[0] + nb[0] * STUB, bp[1] + nb[1] * STUB];
     const fa = cellsOf(a), fbx = cellsOf(b), free = (r, c) => (r >= fa[1] && r <= fa[3] && c >= fa[0] && c <= fa[2]) || (r >= fbx[1] && r <= fbx[3] && c >= fbx[0] && c <= fbx[2]);
-    const path = _dagAstar(cost, used, free, [(ap[1] / CELL) | 0, (ap[0] / CELL) | 0], [(bp[1] / CELL) | 0, (bp[0] / CELL) | 0], cols, rowsG);
+    let sp = aS, gp = bS, prefix = [ap], suffix = [bp];
+    let path = _dagAstar(cost, used, free, [(aS[1] / CELL) | 0, (aS[0] / CELL) | 0], [(bS[1] / CELL) | 0, (bS[0] / CELL) | 0], cols, rowsG);
+    if (!path) { sp = ap; gp = bp; prefix = []; suffix = []; path = _dagAstar(cost, used, free, [(ap[1] / CELL) | 0, (ap[0] / CELL) | 0], [(bp[1] / CELL) | 0, (bp[0] / CELL) | 0], cols, rowsG); }   // a stub cell was blocked → route border-to-border
     if (!path) return;
-    const pts = path.map(([r, c]) => [c * CELL + CELL / 2, r * CELL + CELL / 2]); pts[0] = ap; pts[pts.length - 1] = bp;
-    const out = [pts[0]]; let i = 0;
-    while (i < pts.length - 1) { let j = pts.length - 1; while (j > i + 1 && losBlocked(pts[i][0], pts[i][1], pts[j][0], pts[j][1], free)) j--; out.push(pts[j]); i = j; }
+    const pts = path.map(([r, c]) => [c * CELL + CELL / 2, r * CELL + CELL / 2]); pts[0] = sp; pts[pts.length - 1] = gp;
+    const mid = [pts[0]]; let i = 0;
+    while (i < pts.length - 1) { let j = pts.length - 1; while (j > i + 1 && losBlocked(pts[i][0], pts[i][1], pts[j][0], pts[j][1], free)) j--; mid.push(pts[j]); i = j; }
+    const out = prefix.concat(mid, suffix);   // border point → perpendicular stub → routed middle → stub → border point
     routes[l.s + '>' + l.t] = out; stamp(out);
   });
   return routes;
