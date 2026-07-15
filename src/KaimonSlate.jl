@@ -625,11 +625,20 @@ function create_tools(GateTool::Type)
     `cache_root` (a REMOTE absolute path) pins the workers' `KAIMONSLATE_CACHE_HOME` — a SEPARATE
     content-addressed store per region, so co-located region workers don't share `~/.cache/kaimonslate/memo`
     (they otherwise dedup a cross-region blob to 0 bytes instead of moving it over the peer channel).
+
+    Pass `delete=true` to REMOVE the named region from the registry (all other args ignored): its warm
+    workers are reaped, but any worker currently attached to a notebook keeps running.
     """
     function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
                     preload::String = "", data_root::String = "", cache_root::String = "", warm::Int = 0,
-                    threads::String = "", sysimage::Bool = false, curve::Bool = true)::String
+                    threads::String = "", sysimage::Bool = false, curve::Bool = true,
+                    delete::Bool = false)::String
         nm = strip(name); isempty(nm) && return "Give a region name."
+        if delete
+            ReportEngine.region_get(nm) === nothing && return "No region '$nm' to delete."
+            ReportEngine.region_remove!(nm)   # reaps this region's warm workers, then drops the record
+            return "🗑️ region '$nm' deleted (warm workers reaped; attached workers keep running)."
+        end
         tr = Symbol(strip(transport)); tr in (:tunnel, :direct) || (tr = :tunnel)
         pl = strip(preload); (isempty(pl) || isdir(expanduser(pl))) || return "preload project dir not found: $pl"
         r = ReportEngine.region_set!(nm; host = String(strip(host)), transport = tr, base_port = base_port,
