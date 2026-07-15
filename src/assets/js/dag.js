@@ -280,6 +280,7 @@ function dagRegions() {
   _dagRegionsOn = !_dagRegionsOn;
   try { localStorage.setItem('slateDagRegions', _dagRegionsOn ? '1' : '0'); } catch (_) {}
   _dagRegionsBtn(); _dagRegionLegend();
+  _dagRoutesPoll(_dagRegionsOn);        // fetch + poll region-routing data while the overlay is on
   _dagQueue();
 }
 function _dagRegionsBtn() { const b = document.getElementById('dagregions'); if (b) b.classList.toggle('on', _dagRegionsOn); }
@@ -290,8 +291,14 @@ function _dagCellRegion(c) {
   const st = c.stats;
   if (st && st.ranOn) {
     if (st.ranOn === 'local') return '';
-    const r = _dagDeclaredRegions().find(x => x.host === st.ranOn);   // ranOn is the HOST → map back to the region NAME
-    return r ? r.name : st.ranOn;
+    // ranOn is "<region> (<host>)" (a host running >1 region is disambiguated by name); older workers
+    // reported the BARE host. Recover the region NAME so it matches the zones/hues either way.
+    const raw = String(st.ranOn);
+    const nm = raw.replace(/\s*\([^)]*\)\s*$/, '');                   // strip a trailing " (host)"
+    const regs = _dagDeclaredRegions();
+    if (regs.some(x => x.name === nm)) return nm;                     // "<region> (<host>)" form
+    const byHost = regs.find(x => x.host === raw);                    // legacy bare-host form
+    return byHost ? byHost.name : nm;
   }
   return _dagAssignedRegion(c);
 }
@@ -377,6 +384,30 @@ const _DAG_ROUTE_COL = { direct: '#3fb96e', ssh: '#4f7cf0', relay: '#e8a13f', un
 const _DAG_ROUTE_LBL = { direct: 'direct', ssh: 'ssh-bridge', relay: 'relay', unresolved: 'unresolved' };
 function _dagAge(s) { return s < 0 ? '' : s < 90 ? s + 's ago' : Math.round(s / 60) + 'm ago'; }
 function _dagEsc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+// ── Region-routing overlay data ─────────────────────────────────────────────────────────────────
+// The peer-plan routes, keyed 'src\0dst', fetched while the region overlay is on (verdicts + measured
+// throughput evolve as transfers run). Drives the region→region edges and their tooltips.
+let _dagRouteData = null, _dagRouteTimer = 0;
+async function _dagFetchRoutes() {
+  try {
+    const d = await (await fetch(_apipath('/api/peer-plan'))).json();
+    const map = {}; for (const r of (d.routes || [])) map[r.src + ' ' + r.dst] = r;
+    _dagRouteData = map;
+  } catch (_) { if (!_dagRouteData) _dagRouteData = {}; }
+  if (_dagRegionsOn) _dagQueue();                          // repaint with fresh verdicts/throughput
+}
+function _dagRouteFor(src, dst) { return _dagRouteData ? _dagRouteData[src + ' ' + dst] : null; }
+// Poll while the overlay is on (throughput/verdicts drift); stop when off.
+function _dagRoutesPoll(on) {
+  if (_dagRouteTimer) { clearInterval(_dagRouteTimer); _dagRouteTimer = 0; }
+  if (on) { _dagFetchRoutes(); _dagRouteTimer = setInterval(_dagFetchRoutes, 5000); }
+}
+// px edge width HINTING throughput (log-scaled — MB/s spans orders of magnitude; unmeasured = thin default).
+function _dagThroughputWidth(mbps) { return Math.max(2, Math.min(13, 2.4 + 3.3 * Math.log10(1 + (mbps || 0)))); }
+// Speed label: "0.2 MB/s" · "12 MB/s" · "" when unmeasured.
+function _dagSpeed(mbps) { return !mbps ? '' : (mbps >= 10 ? Math.round(mbps) : mbps) + ' MB/s'; }
+
 function _dagRenderPeerPlan(d) {
   if (d && d.error) return `<div class="dagpp-empty">peer plan failed: ${_dagEsc(d.error)}</div>`;
   const routes = (d && d.routes) || [], hosts = (d && d.hosts) || [];
@@ -983,12 +1014,48 @@ function _dagOption() {
   const zx = [mX / totX * 100, (mX + bw + 2 * exX) / totX * 100];
   const zy = [mY / totY * 100, (mY + bh + 2 * exY) / totY * 100];
 
+  // ── Region→region transfer edges (overlay) ──────────────────────────────────────────────────────
+  // Collapse the cross-zone CELL edges into ONE edge per (source region → dest region) pair — the data
+  // hand-offs the region view is about. Each carries its route verdict + measured throughput (from
+  // _dagRouteData). Built only while the overlay is on; endpoints connect the zones' facing edges so the
+  // line runs in the gutter, not through cell boxes.
+  const _regEdges = [];
+  if (_dagRegionsOn && zones.length) {
+    const zoneOf = {}; zones.forEach(z => { zoneOf[z.isLocal ? '' : z.name] = z; });
+    const byPair = new Map();
+    for (const l of L.links) {
+      if (l.dim) continue;                             // skip setup/using whispers
+      const sc = m.byId[l.s], tc = m.byId[l.t]; if (!sc || !tc) continue;
+      const sr = _dagCellRegion(sc), tr = _dagCellRegion(tc);
+      if (sr === tr) continue;                         // same env → in-process, not a transfer
+      const k = sr + ' ' + tr, e = byPair.get(k) || { src: sr, dst: tr, n: 0 };
+      e.n++; byPair.set(k, e);
+    }
+    for (const e of byPair.values()) {
+      const zs = zoneOf[e.src], zt = zoneOf[e.dst]; if (zs && zt) _regEdges.push({ ...e, zs, zt });
+    }
+  }
+  const regionEdgeTip = i => {
+    const e = _regEdges[i]; if (!e) return '';
+    const r = _dagRouteFor(e.src, e.dst), kind = r ? r.kind : 'unresolved';
+    const via = { direct: 'direct peer', ssh: 'SSH bridge', relay: 'via hub (relay)', unresolved: 'not yet resolved' }[kind] || kind;
+    let h = `<b>${_dagEsc(e.dst || 'local')} ← ${_dagEsc(e.src || 'local')}</b>` +
+      `<br>transport: <b style="color:${_DAG_ROUTE_COL[kind] || P.text}">${via}</b>`;
+    if (r && r.addr) h += `<br>address: ${_dagEsc(r.addr)}`;
+    if (r && r.mbps) h += `<br>throughput: ${_dagSpeed(r.mbps)}`;
+    if (r && r.age_s >= 0) h += `<br><span style="color:${P.dim}">probed ${_dagAge(r.age_s)}</span>`;
+    h += `<br><span style="color:${P.dim}">${e.n} cross-region ${e.n === 1 ? 'value' : 'values'}</span>`;
+    return h;
+  };
+
   return {
     animation: false,
     tooltip: {
       show: !_dagCardEl(), trigger: 'item', confine: true, backgroundColor: P.bg, borderColor: P.border,
       textStyle: { color: P.text, fontSize: 12 }, extraCssText: 'max-width:340px; white-space:normal;',
-      formatter: p => p.seriesName === 'nodes' ? nodeTip(p.dataIndex) : edgeTip(p.dataIndex),
+      formatter: p => p.seriesName === 'nodes' ? nodeTip(p.dataIndex)
+                    : p.seriesName === 'region-edges' ? regionEdgeTip(p.dataIndex)
+                    : edgeTip(p.dataIndex),
     },
     grid: { left: 0, right: 0, top: 0, bottom: 0 },
     xAxis: { type: 'value', min: bx0 - exX - mX, max: bx1 + exX + mX, show: false },
@@ -1037,6 +1104,44 @@ function _dagOption() {
           return { type: 'group', children: kids };
         },
       },
+      { // REGION→REGION transfer edges (overlay): one bowed line per (src→dst) region pair, COLORED by the
+        // route's transport (direct=green · ssh-bridge=blue · relay=amber-dashed · unresolved=grey-dotted),
+        // WIDTH hints measured throughput; hovering shows method/speed/address. Above cell edges, below
+        // nodes (z ABOVE dag-nodes so the hand-offs read as the foreground); endpoints join the zones'
+        // facing edges so it runs in the gutter. Empty unless the overlay's on.
+        type: 'custom', id: 'dag-region-edges', name: 'region-edges', coordinateSystem: 'cartesian2d', z: 3,
+        data: _regEdges.map((_, i) => [i]),
+        renderItem: (params, api) => {
+          const e = _regEdges[params.dataIndex]; if (!e) return null;
+          const zs = e.zs, zt = e.zt;
+          let a, b;
+          if (zt.x0 >= zs.x1)      { a = [zs.x1, (zs.y0 + zs.y1) / 2]; b = [zt.x0, (zt.y0 + zt.y1) / 2]; }
+          else if (zs.x0 >= zt.x1) { a = [zs.x0, (zs.y0 + zs.y1) / 2]; b = [zt.x1, (zt.y0 + zt.y1) / 2]; }
+          else                     { a = [(zs.x0 + zs.x1) / 2, zs.y0]; b = [(zt.x0 + zt.x1) / 2, zt.y0]; }
+          const A = api.coord(a), B = api.coord(b);
+          const r = _dagRouteFor(e.src, e.dst), kind = r ? r.kind : 'unresolved';
+          const col = _DAG_ROUTE_COL[kind] || '#6a7183';
+          const lw = _dagThroughputWidth(r ? r.mbps : 0);
+          const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
+          const cp = [mx, my - Math.abs(0.16 * (B[0] - A[0])) - 16];        // bow up so ↔ pairs don't overlap
+          const dl = Math.hypot(B[0] - cp[0], B[1] - cp[1]) || 1, ux = (B[0] - cp[0]) / dl, uy = (B[1] - cp[1]) / dl;
+          const ah = 11, hbx = B[0] - ux * ah, hby = B[1] - uy * ah;
+          const dash = kind === 'relay' ? [9, 6] : kind === 'unresolved' ? [3, 5] : null;
+          const spd = _dagSpeed(r ? r.mbps : 0);
+          const lbl = (_DAG_ROUTE_LBL[kind] || kind) + (spd ? ' · ' + spd : '');
+          const curve = { x1: A[0], y1: A[1], cpx1: cp[0], cpy1: cp[1], x2: hbx, y2: hby };
+          return { type: 'group', children: [
+            { type: 'bezierCurve', style: { fill: 'none', stroke: col, lineWidth: Math.max(14, lw + 12), opacity: 0.001 },
+              shape: { x1: A[0], y1: A[1], cpx1: cp[0], cpy1: cp[1], x2: B[0], y2: B[1] } },   // wide hover target
+            { type: 'bezierCurve', silent: true, shape: curve,
+              style: { fill: 'none', stroke: col, lineWidth: lw, opacity: 0.92, lineDash: dash, shadowBlur: 7, shadowColor: col } },
+            { type: 'polygon', silent: true, style: { fill: col, opacity: 0.95 },
+              shape: { points: [[B[0], B[1]], [hbx - uy * 5, hby + ux * 5], [hbx + uy * 5, hby - ux * 5]] } },
+            { type: 'text', silent: true, style: { x: cp[0], y: cp[1] - 3, text: lbl, fill: col,
+              font: '600 11px sans-serif', textAlign: 'center', textVerticalAlign: 'bottom', stroke: P.bg, lineWidth: 3 } },
+          ] };
+        },
+      },
       { // edges under nodes — routed/S-curve waypoints, smoothed, arrowhead at the target border
         type: 'custom', id: 'dag-edges', name: 'edges', coordinateSystem: 'cartesian2d', z: 1,
         data: L.links.map((_, i) => [i, _dagEdgeV]),
@@ -1057,9 +1162,12 @@ function _dagOption() {
                     : hv ? (hv.up ? _DAG_UP_HUE : _DAG_DOWN_HUE)   // amber upstream · teal downstream
                     : hot ? P.edgeHot : P.edge;
           const lw = del ? 3 : hv ? (hv.d === 1 ? 2.8 : 1.8) : l.dim ? 0.8 : hot ? 2.4 : 1.4;
-          const op = del ? 1
-                   : hv ? (hv.d === 1 ? 0.98 : Math.max(0.3, 0.62 - 0.12 * (hv.d - 2)))
-                   : faded ? (l.dim ? 0.04 : 0.15) : l.dim ? 0.12 : hot ? 0.95 : 0.6;
+          let op = del ? 1
+                 : hv ? (hv.d === 1 ? 0.98 : Math.max(0.3, 0.62 - 0.12 * (hv.d - 2)))
+                 : faded ? (l.dim ? 0.04 : 0.15) : l.dim ? 0.12 : hot ? 0.95 : 0.6;
+          // Region overlay: the region→region edges carry the story, so recede the cell-level edges (unless
+          // hovered/hot/being-deleted — those still need to read).
+          if (_dagRegionsOn && !hv && !del && !hot) op *= 0.28;
           // Decimate waypoints (Douglas-Peucker): keep endpoints + genuine detours, drop
           // micro-wiggles — the spline relaxes into longer arcs but still dodges nodes.
           const pts = _dagRdpStubs(l.pts.map(p => api.coord(p)), 18);
@@ -1745,6 +1853,7 @@ function toggleDag() {
   _dagReflowCharts();                                        // the notebook column changed width
   if (open) requestAnimationFrame(_dagRender);               // after the pane lays out (sizes valid)
   else { _dagCardClose(); _dagPulseSync(); }
+  _dagRoutesPoll(open && _dagRegionsOn);                     // region-routing poll rides the pane's open state
 }
 // The pane reflows the notebook column, but only window.resize normally re-measures the
 // NOTEBOOK's chart instances — nudge them (and again post-layout) or they keep stale canvases.

@@ -936,7 +936,10 @@ function _make_router(h::Hub)
     # §6.2). `?refresh=1` first clears the cached verdicts so the next transfer re-probes (the DAG
     # "recalculate" action — a fresh verdict lands on the next transfer, since probing needs live workers).
     HTTP.register!(router, "GET", "/api/{id}/peer-plan", req -> _withnb(h, req, nb -> begin
-        names = _nb_region_names(nb)
+        # The region set the DAG actually shows = declared footer ∪ cell-tagged (a cell can be tagged into a
+        # region the footer never listed). Mirror `_regions_json` so the plan matches the zones on screen.
+        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
+        filter!(!isempty, names)
         ref = get(HTTP.queryparams(HTTP.URI(req.target)), "refresh", "0") == "1"
         isempty(names) && return _json(Dict("regions" => String[], "routes" => [], "hosts" => [], "refreshed" => ref))
         data = try; ReportEngine.peer_plan_data(names; refresh = ref)
