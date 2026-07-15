@@ -550,43 +550,69 @@ function _dagLayoutCached(m, w, h, dir) {
   return _dagLayoutVal;
 }
 
-// Region ZONES for the DAG: a hull around each region's member cells (a compute-env container you
-// can see the subgraph forming inside), plus a placeholder box for a declared-but-empty region so
-// there's somewhere to aim cells. Coords are in layout space (same as nodes) → api.coord() in the
-// renderItem maps them to pixels. Members can interleave with local flow; the hull just bounds them.
-// Partitioned layout: with regions active, the WHOLE canvas splits into side-by-side columns —
-// `local` (main kernel) first, then one per region — each laid out independently and tiled left to
-// right. Dragging a cell between columns moves it to that compute env; cross-column edges are the
-// boundary transfers. Recomputed per render (dagre per column); notebooks with regions are modest.
+// Region ZONES for the DAG: a container per compute env (`local` + one per region) with its member
+// cells laid out inside, plus a placeholder box for a declared-but-empty region to aim cells at.
+// Coords are in layout space (same as nodes) → api.coord() in the renderItem maps them to pixels.
+//
+// GRID PACKING: the envs are arranged in a GRID, not a single left→right row of full-height columns.
+// The column count is chosen to best match the pane's aspect ratio, and each grid ROW is only as tall
+// as its content — so `local + 3 hosts` in a tall/square pane becomes a 2×2 of quadrants instead of
+// four tall, mostly-empty swimlanes, while a wide bottom-dock with a couple of regions still packs
+// into a single row. Cells in the same grid row/column share width/height so the boxes line up clean.
+// Dragging a cell between zones moves it to that compute env; cross-zone edges are the boundary
+// transfers. Recomputed per render (dagre per env); notebooks with regions are modest.
 function _dagPartitionedLayout(m, w, h) {
   const assigned = m.nodes.map(_dagAssignedRegion).filter(Boolean);
   const sides = ['', ...new Set([..._dagDeclaredRegions().map(r => r.name), ...assigned])];   // local + declared ∪ assigned
-  const COLGAP = 56, PAD = 18, HEAD = 30, MINW = 156, MINH = 130;
-  let xOff = 0;
-  const nodes = [], parts = [], linkPts = {};
-  sides.forEach(side => {
+  const CELLGAP = 44, PAD = 18, HEAD = 30, MINW = 156, MINH = 130;
+
+  // 1. Sub-layout each env independently (dagre TB); capture its nodes in LOCAL coords (origin 0,0)
+  //    and its intrinsic content size, so we can place the whole block into a grid cell afterwards.
+  const cells = sides.map(side => {
     const sub = m.nodes.filter(c => _dagAssignedRegion(c) === side);   // group by ASSIGNMENT (tags), not where it ran
     const ids = new Set(sub.map(c => c.id));
     const subLinks = m.links.filter(l => ids.has(l.source) && ids.has(l.target));
-    let colW = MINW, colH = MINH;
+    let cw = MINW, ch = MINH - HEAD; const snodes = [], slinks = {};
     if (sub.length) {
       const subL = _dagLayout({ nodes: sub, links: subLinks, byId: m.byId, layers: [], layer: {}, slot: {} }, 440, h, 'TB');
       let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
       subL.nodes.forEach(n => { minx = Math.min(minx, n.x - n.b.w / 2); miny = Math.min(miny, n.y - n.b.h / 2); maxx = Math.max(maxx, n.x + n.b.w / 2); maxy = Math.max(maxy, n.y + n.b.h / 2); });
-      colW = Math.max(MINW, maxx - minx); colH = Math.max(MINH - HEAD, maxy - miny);
-      const tx = xOff + PAD - minx, ty = HEAD + PAD - miny;
-      subL.nodes.forEach(n => nodes.push({ c: n.c, b: n.b, x: n.x + tx, y: n.y + ty }));
-      subL.links.forEach(l => { if (l.pts) linkPts[l.s + '>' + l.t] = l.pts.map(p => [p[0] + tx, p[1] + ty]); });
+      cw = Math.max(MINW, maxx - minx); ch = Math.max(MINH - HEAD, maxy - miny);
+      subL.nodes.forEach(n => snodes.push({ c: n.c, b: n.b, x: n.x - minx, y: n.y - miny }));   // origin-relative
+      subL.links.forEach(l => { if (l.pts) slinks[l.s + '>' + l.t] = l.pts.map(p => [p[0] - minx, p[1] - miny]); });
     }
-    const fullW = colW + 2 * PAD;
-    parts.push({ side, x0: xOff, y0: 0, x1: xOff + fullW, y1: HEAD + colH + 2 * PAD, empty: sub.length === 0 });
-    xOff += fullW + COLGAP;
+    return { side, empty: sub.length === 0, pw: cw + 2 * PAD, ph: HEAD + ch + 2 * PAD, snodes, slinks };
   });
-  const maxY = Math.max(...parts.map(p => p.y1), MINH);
-  parts.forEach(p => { p.y1 = maxY; });                 // columns share the tallest height → full-height bands
+
+  // 2. Pick the grid column count G (1…K) whose packed grid best matches the pane's aspect ratio.
+  const K = cells.length;
+  const gridFor = G => {
+    const rows = Math.ceil(K / G), colW = new Array(G).fill(0), rowH = new Array(rows).fill(0);
+    cells.forEach((c, i) => { const col = i % G, r = (i / G) | 0; colW[col] = Math.max(colW[col], c.pw); rowH[r] = Math.max(rowH[r], c.ph); });
+    const gw = colW.reduce((a, b) => a + b, 0) + CELLGAP * (G - 1);
+    const gh = rowH.reduce((a, b) => a + b, 0) + CELLGAP * (rows - 1);
+    return { G, rows, colW, rowH, gw, gh };
+  };
+  const target = Math.max(0.2, (w || 1) / (h || 1));                  // desired grid aspect ≈ the pane's
+  let best = gridFor(1);
+  for (let G = 2; G <= K; G++) { const g = gridFor(G); if (Math.abs(Math.log(g.gw / g.gh / target)) < Math.abs(Math.log(best.gw / best.gh / target))) best = g; }
+  const { G, rows, colW, rowH, gw, gh } = best;
+
+  // 3. Place each env's block into its grid cell (same row → aligned height; same col → aligned width),
+  //    centered horizontally in its cell; translate its nodes/links into global layout coords.
+  const colX = [0]; for (let c = 1; c < G; c++) colX[c] = colX[c - 1] + colW[c - 1] + CELLGAP;
+  const rowY = [0]; for (let r = 1; r < rows; r++) rowY[r] = rowY[r - 1] + rowH[r - 1] + CELLGAP;
+  const nodes = [], parts = [], linkPts = {};
+  cells.forEach((cell, i) => {
+    const col = i % G, r = (i / G) | 0, x0 = colX[col], y0 = rowY[r], x1 = x0 + colW[col], y1 = y0 + rowH[r];
+    const tx = x0 + Math.max(PAD, (colW[col] - cell.pw) / 2 + PAD), ty = y0 + HEAD + PAD;   // center the block in its cell
+    cell.snodes.forEach(n => nodes.push({ c: n.c, b: n.b, x: n.x + tx, y: n.y + ty }));
+    for (const k in cell.slinks) linkPts[k] = cell.slinks[k].map(p => [p[0] + tx, p[1] + ty]);
+    parts.push({ side: cell.side, x0, y0, x1, y1, empty: cell.empty });
+  });
   const links = m.links.map(l => ({ s: l.source, t: l.target, dim: l.dim, manual: l.manual,
-                                    pts: linkPts[l.source + '>' + l.target] || null }));   // cross-column → null → straight
-  return { nodes, links, gw: Math.max(xOff - COLGAP, MINW), gh: maxY, partitions: parts };
+                                    pts: linkPts[l.source + '>' + l.target] || null }));   // cross-zone → null → routed straight
+  return { nodes, links, gw: Math.max(gw, MINW), gh: Math.max(gh, MINH), partitions: parts };
 }
 // Partitions → zone rectangles for rendering + drop hit-testing. `local` is included (neutral tint);
 // dropping a cell there un-tags it.

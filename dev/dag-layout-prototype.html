@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<!-- ────────────────────────────────────────────────────────────────────────────────────────────
+  DAG region-layout PROTOTYPE — an isolated harness for iterating on the multi-region DAG packing
+  WITHOUT realizing real remote workers. It runs the REAL `_dagPartitionedLayout` (grid packing)
+  from src/assets/js/dag.js against SYNTHETIC notebook state, and draws the zones/nodes/edges with a
+  simplified-but-representative ECharts renderer. Change the fixture + "pane" size to see how the
+  packing adapts. Open it in a browser (file:// is fine — ECharts loads from a CDN).
+
+  KEEP `_dagPartitionedLayout` BELOW IN SYNC with dag.js (it's copied verbatim, marked ⇩REAL⇩). The
+  intra-env `_dagLayout` is a lightweight STUB here (real dagre isn't needed to prototype the ENV grid;
+  only realistic per-env content SIZES matter).
+──────────────────────────────────────────────────────────────────────────────────────────────── -->
+<html lang="en"><head><meta charset="utf-8"><title>DAG region layout prototype</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  :root { --bg:#0d1120; --bg2:#141828; --bg3:#1a1e2e; --border:#2a2e40; --text:#d4d8e8; --dim:#6a7090; --accent:#569cd6; }
+  * { box-sizing:border-box; } body { margin:0; background:#07090f; color:var(--text); font:14px/1.4 'Segoe UI',system-ui,sans-serif; }
+  header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header b { color:#fff; } label { color:var(--dim); font-size:.85rem; display:inline-flex; gap:6px; align-items:center; }
+  select, input[type=range] { accent-color:var(--accent); }
+  select { background:var(--bg2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:4px 8px; }
+  .wrap { padding:22px; } #pane { background:var(--bg2); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin:0 auto; }
+  #canvas { width:100%; height:100%; } .hint { color:var(--dim); font-size:.8rem; padding:6px 16px; }
+  .metrics { color:var(--dim); font-size:.78rem; margin-left:auto; font-family:ui-monospace,monospace; }
+</style></head>
+<body>
+<header>
+  <b>DAG region-layout prototype</b>
+  <label>fixture <select id="fx"></select></label>
+  <label>dock <select id="dock"><option value="right">right (tall)</option><option value="bottom">bottom (wide)</option><option value="square">square</option></select></label>
+  <label><input type="checkbox" id="opt" checked> optimize (least spaghetti)</label>
+  <label>pane W <input id="pw" type="range" min="360" max="1600" value="760"><span id="pwv"></span></label>
+  <label>pane H <input id="ph" type="range" min="240" max="1000" value="820"><span id="phv"></span></label>
+  <span class="metrics" id="metrics"></span>
+</header>
+<div class="hint">Real <code>_dagPartitionedLayout</code> packing · zones are compute envs · pick a fixture and resize the pane to watch the grid adapt (swimlane ⇄ quadrants).</div>
+<div class="wrap"><div id="pane"><div id="canvas"></div></div></div>
+
+<script>
+// ── Fixtures: synthetic notebook state {cells:[{id, tags:['region=NAME'], state, duration}], regions} ──
+const HUES = ['#4f7cf0', '#3fb96e', '#c07ae8', '#e8a13f', '#3fbdc0', '#e86a8a', '#8a8f4f'];
+function cell(id, region, deps) { return { id, tags: region ? ['region=' + region] : [], deps: deps || [], state: 'fresh', duration: 40 + ((id.length * 37) % 400) }; }
+function reg(name, host) { return { name, host: host || 'host-' + name, transport: 'tunnel' }; }
+const FIXTURES = {
+  '2 regions · linear': { regions: [reg('rega'), reg('regb')], cells: [cell('load'), cell('prodA', 'rega'), cell('consB', 'regb', ['prodA'])] },
+  '4 envs · one node each (the pain case)': { regions: [reg('rega'), reg('regb'), reg('regc')], cells: [cell('local1'), cell('a1', 'rega'), cell('b1', 'regb'), cell('c1', 'regc')] },
+  '4 envs · richer subgraphs': { regions: [reg('rega'), reg('regb'), reg('regc')],
+    cells: [cell('l1'), cell('l2', null, ['l1']), cell('a1', 'rega'), cell('a2', 'rega', ['a1']), cell('a3', 'rega', ['a1']), cell('b1', 'regb'), cell('b2', 'regb', ['b1']), cell('c1', 'regc'), cell('c2', 'regc', ['c1']), cell('c3', 'regc', ['c2'])] },
+  '6 envs': { regions: [reg('r1'), reg('r2'), reg('r3'), reg('r4'), reg('r5')], cells: [cell('loc'), ...['r1', 'r2', 'r3', 'r4', 'r5'].flatMap(r => [cell(r + 'a', r), cell(r + 'b', r, [r + 'a'])])] },
+  'complex back-and-forth': { regions: [reg('rega'), reg('regb'), reg('regc')],
+    cells: [cell('seed'), cell('a1', 'rega', ['seed']), cell('b1', 'regb', ['a1']), cell('a2', 'rega', ['b1']), cell('c1', 'regc', ['a2']), cell('b2', 'regb', ['c1']), cell('sink', null, ['b2', 'a2'])] },
+  // ── Dense fixtures: ~6–10 nodes per region with internal deps + several cross-region transfers ──
+  '3 regions · 8 nodes each · pipeline': (() => {
+    const R = ['ingest', 'model', 'report'], c = [cell('raw')];
+    R.forEach((r, ri) => { let prev = ri === 0 ? 'raw' : R[ri - 1] + '7';
+      for (let i = 0; i < 8; i++) { const id = r + i, deps = i === 0 ? [prev] : (i < 3 ? [r + (i - 1)] : [r + (i - 1), r + (i - 2)]); c.push(cell(id, r, deps)); } });
+    c.push(cell('publish', null, R.map(r => r + '7')));
+    return { regions: R.map(x => reg(x)), cells: c };
+  })(),
+  '4 regions · dense mesh (cross-heavy)': (() => {
+    const R = ['rega', 'regb', 'regc', 'regd'], c = [cell('src')];
+    R.forEach((r, ri) => { for (let i = 0; i < 7; i++) {
+      const id = r + i;
+      const deps = i === 0 ? ['src'] : i === 1 ? [r + '0'] : [r + (i - 1), R[(ri + i) % R.length] + (i - 2)];   // every ~3rd dep reaches another region
+      c.push(cell(id, r, deps.filter(Boolean))); } });
+    c.push(cell('collect', null, R.map(r => r + '6')));
+    return { regions: R.map(x => reg(x)), cells: c };
+  })(),
+  'heavy back-and-forth · 3×9': (() => {
+    const R = ['rega', 'regb', 'regc'], c = [cell('start')]; let prev = 'start';
+    for (let i = 0; i < 9; i++) { const r = R[i % 3], id = r + '_' + i, deps = [prev]; if (i > 2) deps.push(R[(i + 1) % 3] + '_' + (i - 3)); c.push(cell(id, r, deps)); prev = id; }
+    c.push(cell('end', null, [prev]));
+    return { regions: R.map(x => reg(x)), cells: c };
+  })(),
+};
+
+// ── Minimal shims so the copied _dagPartitionedLayout runs standalone ──
+let STATE = { cells: [], regions: [] };
+let _placeCache = { key: null, place: null };   // memoized optimizer placement (invariant to pane size)
+function _dagAssignedRegion(c) { for (const t of (c.tags || [])) if (t.startsWith('region=')) return t.slice(7); return ''; }
+function _dagDeclaredRegions() { return STATE.regions; }
+function _dagBlock(c) { return { w: 150, h: c.deps && c.deps.length ? 54 : 44 }; }
+// STUB intra-env layout: a simple LAYERED-by-depth placement (real dagre isn't needed to prototype the
+// ENV grid, but layering the sub-DAG makes dense fixtures render like real subgraphs + gives cross-region
+// edges sensible attach points). depth = longest path from a root within the sub-graph.
+function _dagLayout(g) {
+  const ns = g.nodes, ids = new Set(ns.map(n => n.id)), preds = {};
+  ns.forEach(n => preds[n.id] = []);
+  g.links.forEach(l => { if (ids.has(l.source) && ids.has(l.target)) preds[l.target].push(l.source); });
+  const depth = {}, dfs = (id, seen) => { if (depth[id] != null) return depth[id]; if (seen.has(id)) return 0; seen.add(id); let d = 0; for (const p of preds[id]) d = Math.max(d, dfs(p, seen) + 1); seen.delete(id); return depth[id] = d; };
+  ns.forEach(n => dfs(n.id, new Set()));
+  const byLayer = {}; ns.forEach(n => (byLayer[depth[n.id]] = byLayer[depth[n.id]] || []).push(n));
+  const bw = 150, bh = 46, GX = 30, GY = 42, nodes = [];
+  Object.keys(byLayer).sort((a, b) => a - b).forEach(layer => byLayer[layer].forEach((n, i) => nodes.push({ c: n, b: { w: bw, h: bh }, x: i * (bw + GX) + bw / 2, y: (+layer) * (bh + GY) + bh / 2 })));
+  return { nodes, links: g.links.map(l => ({ s: l.source, t: l.target, pts: null })) };
+}
+
+// ⇩REAL⇩ (evolving) — grid scaffold + connectivity-driven slot assignment. Once it reads well here,
+// this ports back to src/assets/js/dag.js. `optimize` toggles the least-spaghetti slot assignment.
+function _dagPartitionedLayout(m, w, h, optimize) {
+  const assigned = m.nodes.map(_dagAssignedRegion).filter(Boolean);
+  const sides = ['', ...new Set([..._dagDeclaredRegions().map(r => r.name), ...assigned])];
+  const CELLGAP = 44, PAD = 18, HEAD = 30, MINW = 156, MINH = 130;
+  // 1. Sub-layout each env; capture nodes (local coords) + content size.
+  const cells = sides.map(side => {
+    const sub = m.nodes.filter(c => _dagAssignedRegion(c) === side);
+    const ids = new Set(sub.map(c => c.id));
+    const subLinks = m.links.filter(l => ids.has(l.source) && ids.has(l.target));
+    let cw = MINW, ch = MINH - HEAD; const snodes = [], slinks = {};
+    if (sub.length) {
+      const subL = _dagLayout({ nodes: sub, links: subLinks, byId: m.byId, layers: [], layer: {}, slot: {} }, 440, h, 'TB');
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      subL.nodes.forEach(n => { minx = Math.min(minx, n.x - n.b.w / 2); miny = Math.min(miny, n.y - n.b.h / 2); maxx = Math.max(maxx, n.x + n.b.w / 2); maxy = Math.max(maxy, n.y + n.b.h / 2); });
+      cw = Math.max(MINW, maxx - minx); ch = Math.max(MINH - HEAD, maxy - miny);
+      subL.nodes.forEach(n => snodes.push({ c: n.c, b: n.b, x: n.x - minx, y: n.y - miny }));
+      subL.links.forEach(l => { if (l.pts) slinks[l.s + '>' + l.t] = l.pts.map(p => [p[0] - minx, p[1] - miny]); });
+    }
+    return { side, empty: sub.length === 0, pw: cw + 2 * PAD, ph: HEAD + ch + 2 * PAD, snodes, slinks };
+  });
+  const K = cells.length;
+  // 2. Grid dimensions (G cols × rows) — aspect-fit to the pane. Uses the multiset of sizes, not the assignment.
+  const gridFor = G => {
+    const rows = Math.ceil(K / G), colW = new Array(G).fill(0), rowH = new Array(rows).fill(0);
+    cells.forEach((c, i) => { const col = i % G, r = (i / G) | 0; colW[col] = Math.max(colW[col], c.pw); rowH[r] = Math.max(rowH[r], c.ph); });
+    const gw = colW.reduce((a, b) => a + b, 0) + CELLGAP * (G - 1), gh = rowH.reduce((a, b) => a + b, 0) + CELLGAP * (rows - 1);
+    return { G, rows, gw, gh };
+  };
+  const target = Math.max(0.2, (w || 1) / (h || 1));
+  let bg = gridFor(1);
+  for (let G = 2; G <= K; G++) { const g = gridFor(G); if (Math.abs(Math.log(g.gw / g.gh / target)) < Math.abs(Math.log(bg.gw / bg.gh / target))) bg = g; }
+  const G = bg.G, rows = bg.rows, S = G * rows, slots = [];
+  for (let i = 0; i < S; i++) slots.push({ col: i % G, row: (i / G) | 0 });
+
+  // 3. build(place): realise an env->slot placement into geometry (empty rows/cols collapse; centered).
+  const mkLinks = linkPts => m.links.map(l => ({ s: l.source, t: l.target, dim: l.dim, manual: l.manual, pts: linkPts[l.source + '>' + l.target] || null }));
+  function build(place) {
+    const envAtSlot = {}; place.forEach((sl, ei) => envAtSlot[sl] = ei);
+    const colW = new Array(G).fill(0), rowH = new Array(rows).fill(0);
+    for (let sl = 0; sl < S; sl++) { const ei = envAtSlot[sl]; if (ei == null) continue; colW[slots[sl].col] = Math.max(colW[slots[sl].col], cells[ei].pw); rowH[slots[sl].row] = Math.max(rowH[slots[sl].row], cells[ei].ph); }
+    const colX = [0]; for (let c = 1; c < G; c++) colX[c] = colX[c - 1] + colW[c - 1] + (colW[c - 1] ? CELLGAP : 0);
+    const rowY = [0]; for (let r = 1; r < rows; r++) rowY[r] = rowY[r - 1] + rowH[r - 1] + (rowH[r - 1] ? CELLGAP : 0);
+    const nodes = [], parts = [], linkPts = {};
+    cells.forEach((cell, ei) => {
+      const sl = place[ei], col = slots[sl].col, r = slots[sl].row, x0 = colX[col], y0 = rowY[r], x1 = x0 + colW[col], y1 = y0 + rowH[r];
+      const tx = x0 + Math.max(PAD, (colW[col] - cell.pw) / 2 + PAD), ty = y0 + HEAD + PAD;
+      cell.snodes.forEach(n => nodes.push({ c: n.c, b: n.b, x: n.x + tx, y: n.y + ty }));
+      for (const k in cell.slinks) linkPts[k] = cell.slinks[k].map(p => [p[0] + tx, p[1] + ty]);
+      parts.push({ side: cell.side, x0, y0, x1, y1, empty: cell.empty });
+    });
+    return { nodes, parts, linkPts };
+  }
+  // 4. Choose placement. Default = declaration order. With optimize, brute-force the placement whose
+  //    realised layout scores lowest: crossings then total length (pulls connected envs adjacent so their
+  //    routes are short) — node-avoidance is the ROUTER's job now, so it's off the (hot) scoring path.
+  //    The result depends only on (envs, sizes, grid) — NOT the pane size — so it's memoized: a slider
+  //    drag reuses it instead of re-brute-forcing. (In dag.js: recompute on a structure change, not per render.)
+  let place = cells.map((_, i) => i);
+  if (optimize) {
+    const pk = sides.join('|') + '#' + G + 'x' + rows + '#' + cells.map(c => c.pw + ',' + c.ph).join(';');
+    if (_placeCache.key === pk) place = _placeCache.place;
+    else {
+      let arr = 1; for (let i = 0; i < K; i++) arr *= (S - i);
+      if (arr <= 40320) {
+        const scoreOf = pl => { const b = build(pl); const L = { nodes: b.nodes, links: mkLinks(b.linkPts) }; const sp = spaghetti(L); return sp.crossings * 800 + sp.length + 0.01 * pl[0]; };
+        let bestS = Infinity, bestPl = place, idxs = slots.map((_, i) => i);
+        const rec = ch => { if (ch.length === K) { const s = scoreOf(ch); if (s < bestS) { bestS = s; bestPl = ch.slice(); } return; } for (let i = 0; i < idxs.length; i++) { if (ch.includes(idxs[i])) continue; ch.push(idxs[i]); rec(ch); ch.pop(); } };
+        rec([]); place = bestPl;
+      }
+      _placeCache = { key: pk, place };
+    }
+  }
+  const fin = build(place);
+  const gw = Math.max(...fin.parts.map(p => p.x1), MINW), gh = Math.max(...fin.parts.map(p => p.y1), MINH);
+  return { nodes: fin.nodes, links: mkLinks(fin.linkPts), gw, gh, partitions: fin.parts };
+}
+
+// Spaghetti metric — crossings + total pixel length of the cross-region transfers (lower = cleaner).
+function _segX(a, b) {
+  const d = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const p1 = [a[0], a[1]], p2 = [a[2], a[3]], p3 = [b[0], b[1]], p4 = [b[2], b[3]];
+  const d1 = d(p3, p4, p1), d2 = d(p3, p4, p2), d3 = d(p1, p2, p3), d4 = d(p1, p2, p4);
+  return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+}
+// node-by-id index, memoized per L object (the optimizer builds a fresh L per candidate, so this is
+// O(nodes) once per candidate instead of an O(nodes) `.find` on every edge-endpoint lookup).
+const _ndxCache = new WeakMap();
+function _NDX(L) { let m = _ndxCache.get(L); if (!m) { m = new Map(L.nodes.map(n => [n.c.id, n])); _ndxCache.set(L, m); } return m; }
+function spaghetti(L) {
+  const nd = id => _NDX(L).get(id);
+  const segs = L.links.map(l => { const a = nd(l.s), b = nd(l.t); if (!a || !b || _dagAssignedRegion(a.c) === _dagAssignedRegion(b.c)) return null; return [a.x, a.y, b.x, b.y]; }).filter(Boolean);
+  let len = 0; segs.forEach(s => len += Math.hypot(s[2] - s[0], s[3] - s[1]));
+  let cr = 0; for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) if (_segX(segs[i], segs[j])) cr++;
+  return { crossings: cr, length: Math.round(len), n: segs.length };
+}
+// segment [x1,y1,x2,y2] vs axis-aligned rect (rx,ry,rw,rh): true if it enters the box at all.
+function _segRect(s, rx, ry, rw, rh) {
+  const inside = (x, y) => x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+  if (inside(s[0], s[1]) || inside(s[2], s[3])) return true;
+  const e = [[rx, ry, rx + rw, ry], [rx + rw, ry, rx + rw, ry + rh], [rx + rw, ry + rh, rx, ry + rh], [rx, ry + rh, rx, ry]];
+  return e.some(g => _segX(s, g));
+}
+// Edges that pass OVER/UNDER a node box that isn't one of their endpoints — the ugliest spaghetti. Boxes
+// are shrunk a hair so an edge merely grazing a corner doesn't count. Counts cross-region edges (the ones
+// that travel between zones); within-region routing is dagre's job.
+function overNodes(L) {
+  const nd = id => _NDX(L).get(id); let hits = 0;
+  L.links.forEach(l => {
+    const a = nd(l.s), b = nd(l.t); if (!a || !b || _dagAssignedRegion(a.c) === _dagAssignedRegion(b.c)) return;
+    const s = [a.x, a.y, b.x, b.y];
+    for (const n of L.nodes) { if (n.c.id === l.s || n.c.id === l.t) continue; const m = 6; if (_segRect(s, n.x - n.b.w / 2 + m, n.y - n.b.h / 2 + m, n.b.w - 2 * m, n.b.h - 2 * m)) hits++; }
+  });
+  return hits;
+}
+
+// ── Obstacle-avoiding edge routing ────────────────────────────────────────────────────────────
+// Cross-region edges bend AROUND node boxes instead of tunneling through them: A* on a coarse grid
+// where (inflated) node boxes are walls. Runs once for the final layout (not inside the optimizer).
+function _simplifyPath(pts) {   // drop collinear waypoints, keep the turns
+  if (pts.length < 3) return pts;
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) { const a = out[out.length - 1], b = pts[i], c = pts[i + 1]; if (Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) > 1) out.push(b); }
+  out.push(pts[pts.length - 1]); return out;
+}
+const _DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+function _ang(a, b) { const na = Math.hypot(a[0], a[1]), nb = Math.hypot(b[0], b[1]); return Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1]) / (na * nb)))) / Math.PI; }  // 0=straight … 1=180°
+// A* with DIRECTION in the state, so we can charge for TURNS (graduated by sharpness → few, gentle bends)
+// on top of per-cell `cost` (>1 near obstacles → keeps CLEARANCE). cost[r][c]===0 is a wall.
+// A* with DIRECTION in the state → charge for TURNS (graduated by sharpness). `walk`/`mc` treat the two
+// edge-endpoint boxes (`free`) as passable so a route can exit/enter them; every other node box is a wall.
+// Binary min-heap (priority queue) — items are [priority, key]. Replaces the O(n) open-set scan.
+function _hPush(h, it) { h.push(it); let i = h.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (h[p][0] <= h[i][0]) break; const t = h[p]; h[p] = h[i]; h[i] = t; i = p; } }
+function _hPop(h) { const top = h[0], last = h.pop(); if (h.length) { h[0] = last; let i = 0, n = h.length; for (; ;) { let l = 2 * i + 1, r = l + 1, m = i; if (l < n && h[l][0] < h[m][0]) m = l; if (r < n && h[r][0] < h[m][0]) m = r; if (m === i) break; const t = h[m]; h[m] = h[i]; h[i] = t; i = m; } } return top; }
+function _astar(cost, used, free, start, goal, cols, rowsG) {
+  const walk = (r, c) => free(r, c) || cost[r][c] > 0, mc = (r, c) => (free(r, c) ? 1 : cost[r][c]) + (used ? used[r][c] : 0);   // `used` = channel-separation penalty from already-routed edges
+  const SK = (r, c, d) => (r * cols + c) * 9 + (d + 1), h = (r, c) => Math.hypot(r - goal[0], c - goal[1]);
+  const s0 = SK(start[0], start[1], -1), came = new Map(), gsc = new Map([[s0, 0]]), pos = { [s0]: [start[0], start[1], -1] }, closed = new Set(), heap = [];
+  _hPush(heap, [h(start[0], start[1]), s0]);
+  while (heap.length) {
+    const bk = _hPop(heap)[1]; if (closed.has(bk)) continue; closed.add(bk);   // lazy-deletion: skip stale duplicates
+    const [r, c, pd] = pos[bk];
+    if (r === goal[0] && c === goal[1]) { const path = [[r, c]]; let k = bk; while (came.has(k)) { k = came.get(k); path.push([pos[k][0], pos[k][1]]); } return path.reverse(); }
+    for (let di = 0; di < 8; di++) { const dr = _DIRS[di][0], dc = _DIRS[di][1], nr = r + dr, nc = c + dc; if (nr < 0 || nc < 0 || nr >= rowsG || nc >= cols || !walk(nr, nc)) continue;
+      const turn = (pd >= 0 && pd !== di) ? 0.8 + _ang(_DIRS[pd], _DIRS[di]) * 2.4 : 0;
+      const ng = gsc.get(bk) + ((dr && dc) ? 1.414 : 1) * mc(nr, nc) + turn, nk = SK(nr, nc, di);
+      if (ng < (gsc.has(nk) ? gsc.get(nk) : Infinity)) { came.set(nk, bk); gsc.set(nk, ng); pos[nk] = [nr, nc, di]; _hPush(heap, [ng + h(nr, nc), nk]); }
+    }
+  }
+  return null;
+}
+// EXPERIMENT — fan-out attach points: a node with several cross-edges shouldn't have them all stab its
+// centre. Distribute each incident edge's attach point along the node border on the side facing its target,
+// ordered by direction, so they leave/enter as a neat fan. Returns `${edgeKey}@${nodeId}` → [x,y].
+function fanAttach(L) {
+  const nd = id => _NDX(L).get(id), byNode = new Map();
+  L.links.forEach(l => { const a = nd(l.s), b = nd(l.t); if (!a || !b || _dagAssignedRegion(a.c) === _dagAssignedRegion(b.c)) return;
+    for (const [self, other] of [[a, b], [b, a]]) { const k = self.c.id; (byNode.get(k) || byNode.set(k, []).get(k)).push({ key: l.s + '>' + l.t, self, other }); } });
+  const attach = {};
+  for (const [nid, arr] of byNode) {
+    const self = arr[0].self, k = arr.length;
+    arr.sort((p, q) => Math.atan2(p.other.y - p.self.y, p.other.x - p.self.x) - Math.atan2(q.other.y - q.self.y, q.other.x - q.self.x));
+    arr.forEach((e, idx) => {
+      const dx = e.other.x - self.x, dy = e.other.y - self.y, horiz = Math.abs(dx) >= Math.abs(dy);
+      const span = (horiz ? self.b.h : self.b.w) * 0.62, off = k > 1 ? (idx - (k - 1) / 2) * Math.min(span / k, 15) : 0;
+      attach[e.key + '@' + nid] = horiz ? [self.x + Math.sign(dx || 1) * self.b.w / 2, self.y + off] : [self.x + off, self.y + Math.sign(dy || 1) * self.b.h / 2];
+    });
+  }
+  return attach;
+}
+function routeEdges(L, spread = true, fanout = true) {
+  const CELL = 18, MG = 8, CLEAR = 2, SOFT = 2.4, nd = id => _NDX(L).get(id);
+  const attach = fanout ? fanAttach(L) : {};
+  let maxx = 0, maxy = 0;
+  L.nodes.forEach(n => { maxx = Math.max(maxx, n.x + n.b.w); maxy = Math.max(maxy, n.y + n.b.h); });
+  L.partitions.forEach(p => { maxx = Math.max(maxx, p.x1); maxy = Math.max(maxy, p.y1); });
+  const cols = ((maxx / CELL) | 0) + 3, rowsG = ((maxy / CELL) | 0) + 3;
+  const cellsOf = n => [Math.max(0, ((n.x - n.b.w / 2 - MG) / CELL) | 0), Math.max(0, ((n.y - n.b.h / 2 - MG) / CELL) | 0), Math.min(cols - 1, ((n.x + n.b.w / 2 + MG) / CELL) | 0), Math.min(rowsG - 1, ((n.y + n.b.h / 2 + MG) / CELL) | 0)];
+  const wall = Array.from({ length: rowsG }, () => new Uint8Array(cols));
+  const rect = (x0, y0, x1, y1) => { const c0 = Math.max(0, (x0 / CELL) | 0), c1 = Math.min(cols - 1, (x1 / CELL) | 0), r0 = Math.max(0, (y0 / CELL) | 0), r1 = Math.min(rowsG - 1, (y1 / CELL) | 0); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) wall[r][c] = 1; };
+  L.nodes.forEach(n => { const [c0, r0, c1, r1] = cellsOf(n); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) wall[r][c] = 1; });
+  const HEADER = 30;
+  L.partitions.forEach(p => rect(p.x0, p.y0, p.x1, p.y0 + HEADER));   // zone header bars (region label + status dot) are OBSTACLES too — routes must not cross the text
+  // clearance field: BFS distance from any wall (capped) → soft cost gradient so routes keep OFF the boxes.
+  const dist = Array.from({ length: rowsG }, () => new Int16Array(cols).fill(99)); const q = [];
+  for (let r = 0; r < rowsG; r++) for (let c = 0; c < cols; c++) if (wall[r][c]) { dist[r][c] = 0; q.push([r, c]); }
+  for (let head = 0; head < q.length; head++) { const [r, c] = q[head]; if (dist[r][c] >= CLEAR) continue; for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nr = r + dr, nc = c + dc; if (nr < 0 || nc < 0 || nr >= rowsG || nc >= cols) continue; if (dist[nr][nc] > dist[r][c] + 1) { dist[nr][nc] = dist[r][c] + 1; q.push([nr, nc]); } } }
+  // cost grid built ONCE (not per edge): 0 = wall, else 1 + clearance penalty.
+  const cost = Array.from({ length: rowsG }, (_, r) => Float32Array.from({ length: cols }, (_, c) => wall[r][c] ? 0 : 1 + (dist[r][c] > 0 && dist[r][c] <= CLEAR ? (CLEAR - dist[r][c] + 1) * SOFT : 0)));
+  // straight segment crosses a HARD wall? (freed endpoint cells don't count) — for string-pulling.
+  const losBlocked = (x0, y0, x1, y1, free) => { const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (CELL * 0.6)); for (let i = 1; i < steps; i++) { const t = i / steps, r = ((y0 + (y1 - y0) * t) / CELL) | 0, c = ((x0 + (x1 - x0) * t) / CELL) | 0; if (r < 0 || c < 0 || r >= rowsG || c >= cols) continue; if (wall[r][c] && !free(r, c)) return true; } return false; };
+  // EXPERIMENT — channel separation: route the cross-region edges SEQUENTIALLY (longest first), and after
+  // each, stamp a decaying penalty into `used` along its corridor. The next edge then prefers empty space,
+  // so parallel transfers between the same box-pair fan into distinct lanes instead of stacking on one line.
+  const used = spread ? Array.from({ length: rowsG }, () => new Float32Array(cols)) : null;
+  const MARK = 3.2;
+  const stamp = pts => { for (let s = 0; s + 1 < pts.length; s++) { const steps = Math.ceil(Math.hypot(pts[s + 1][0] - pts[s][0], pts[s + 1][1] - pts[s][1]) / (CELL * 0.5)); for (let i = 0; i <= steps; i++) { const t = i / steps, r = ((pts[s][1] + (pts[s + 1][1] - pts[s][1]) * t) / CELL) | 0, c = ((pts[s][0] + (pts[s + 1][0] - pts[s][0]) * t) / CELL) | 0; for (const [dr, dc] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) { const rr = r + dr, cc = c + dc; if (rr >= 0 && cc >= 0 && rr < rowsG && cc < cols) used[rr][cc] += (dr || dc) ? MARK * 0.5 : MARK; } } } };
+  const xlinks = L.links.filter(l => { const a = nd(l.s), b = nd(l.t); return a && b && _dagAssignedRegion(a.c) !== _dagAssignedRegion(b.c); })
+    .sort((p, q) => { const pa = nd(p.s), pb = nd(p.t), qa = nd(q.s), qb = nd(q.t); return Math.hypot(qb.x - qa.x, qb.y - qa.y) - Math.hypot(pb.x - pa.x, pb.y - pa.y); });   // longest first
+  const routes = {};
+  xlinks.forEach(l => {
+    const a = nd(l.s), b = nd(l.t);
+    const ap = attach[l.s + '>' + l.t + '@' + a.c.id] || [a.x, a.y], bp = attach[l.s + '>' + l.t + '@' + b.c.id] || [b.x, b.y];
+    const fa = cellsOf(a), fbx = cellsOf(b), free = (r, c) => (r >= fa[1] && r <= fa[3] && c >= fa[0] && c <= fa[2]) || (r >= fbx[1] && r <= fbx[3] && c >= fbx[0] && c <= fbx[2]);
+    const path = _astar(cost, used, free, [(ap[1] / CELL) | 0, (ap[0] / CELL) | 0], [(bp[1] / CELL) | 0, (bp[0] / CELL) | 0], cols, rowsG);
+    if (!path) return;
+    const pts = path.map(([r, c]) => [c * CELL + CELL / 2, r * CELL + CELL / 2]); pts[0] = ap; pts[pts.length - 1] = bp;
+    // string-pull: keep only the waypoints needed to clear walls → collapses grid staircases into few, straight runs.
+    const out = [pts[0]]; let i = 0;
+    while (i < pts.length - 1) { let j = pts.length - 1; while (j > i + 1 && losBlocked(pts[i][0], pts[i][1], pts[j][0], pts[j][1], free)) j--; out.push(pts[j]); i = j; }
+    routes[l.s + '>' + l.t] = out;
+    if (used) stamp(out);
+  });
+  return routes;
+}
+// Overlap metric: grid cells shared by ≥2 routed edges (an overlapping/stacked-lane count; lower = more separated).
+function routeOverlap(routes) {
+  const CELL = 18, seen = new Map(); let shared = 0;
+  for (const key in routes) { const p = routes[key], cells = new Set();
+    for (let s = 0; s + 1 < p.length; s++) { const steps = Math.ceil(Math.hypot(p[s + 1][0] - p[s][0], p[s + 1][1] - p[s][1]) / (CELL * 0.5)); for (let i = 0; i <= steps; i++) { const t = i / steps; cells.add((((p[s][1] + (p[s + 1][1] - p[s][1]) * t) / CELL) | 0) * 100000 + (((p[s][0] + (p[s + 1][0] - p[s][0]) * t) / CELL) | 0)); } }
+    for (const cc of cells) { const n = (seen.get(cc) || 0) + 1; seen.set(cc, n); if (n === 2) shared++; }
+  }
+  return shared;
+}
+// Route-quality metric: total bends + sharp (>72°) bends across the routed cross-region edges.
+function routeQuality(L, routes) {
+  const nd = id => _NDX(L).get(id); let bends = 0, sharp = 0;
+  L.links.forEach(l => { const a = nd(l.s), b = nd(l.t); if (!a || !b || _dagAssignedRegion(a.c) === _dagAssignedRegion(b.c)) return; const p = routes[l.s + '>' + l.t]; if (!p) return;
+    for (let i = 1; i < p.length - 1; i++) { const A = _ang([p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]], [p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]]); if (A > 0.05) bends++; if (A > 0.4) sharp++; } });
+  return { bends, sharp };
+}
+// over-node count for the ROUTED edges (should be ~0 once routing dodges the boxes).
+function overNodesRouted(L, routes) {
+  const nd = id => _NDX(L).get(id); let hits = 0;
+  L.links.forEach(l => {
+    const a = nd(l.s), b = nd(l.t); if (!a || !b || _dagAssignedRegion(a.c) === _dagAssignedRegion(b.c)) return;
+    const pts = routes[l.s + '>' + l.t] || [[a.x, a.y], [b.x, b.y]];
+    for (const n of L.nodes) { if (n.c.id === l.s || n.c.id === l.t) continue; const m = 6; if (pts.some((_, i) => i + 1 < pts.length && _segRect([pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]], n.x - n.b.w / 2 + m, n.y - n.b.h / 2 + m, n.b.w - 2 * m, n.b.h - 2 * m))) hits++; }
+  });
+  return hits;
+}
+
+// Routes live in LAYOUT coords, so they only change when the layout does — NOT when the pane is merely
+// resized (that's just a render-scale change). Memoize by a layout signature so dragging the pane sliders
+// reuses the routes instead of re-running the A* fleet every tick. (In dag.js this is the same idea:
+// route only on a structure/placement change, off the render hot path.)
+let _routeCache = { sig: null, routes: null };
+function cachedRoutes(L) {
+  const sig = L.nodes.map(n => n.c.id + ':' + (n.x | 0) + ',' + (n.y | 0)).join('|') + '#' + L.partitions.map(p => (p.x0 | 0) + ',' + (p.y0 | 0) + ',' + (p.x1 | 0)).join('|');
+  if (_routeCache.sig !== sig) _routeCache = { sig, routes: routeEdges(L) };
+  return _routeCache.routes;
+}
+// ── Representative renderer (zones + nodes + edges), echarts custom series over one cartesian grid ──
+let chart;
+function hueFor(name) { const all = STATE.regions.map(r => r.name); return name === '' ? '#586089' : HUES[Math.max(0, all.indexOf(name)) % HUES.length]; }
+function render() {
+  const w = +pw.value, h = +ph.value; document.getElementById('pane').style.width = w + 'px'; document.getElementById('pane').style.height = h + 'px';
+  pwv.textContent = w; phv.textContent = h;
+  const model = { nodes: STATE.cells, links: STATE.cells.flatMap(c => (c.deps || []).map(s => ({ source: s, target: c.id }))), byId: Object.fromEntries(STATE.cells.map(c => [c.id, c])) };
+  const L = _dagPartitionedLayout(model, w - 40, h - 40, opt.checked);
+  if (!chart) chart = echarts.init(document.getElementById('canvas'));
+  chart.resize();
+  const pad = 24, sx = (w - 2 * pad) / L.gw, sy = (h - 2 * pad) / L.gh, s = Math.min(sx, sy, 1.4);
+  const X = x => pad + x * s, Y = y => pad + y * s;
+  const ROUTES = cachedRoutes(L);
+  const sp = spaghetti(L), ovS = overNodes(L), ovR = overNodesRouted(L, ROUTES), rq = routeQuality(L, ROUTES);
+  metrics.textContent = `${L.partitions.length} envs · grid ${bestGrid(L)} · over-node ${ovS}→${ovR} routed · ${rq.bends} bends (${rq.sharp} sharp) · ${sp.n} transfers`;
+  chart.setOption({ animation: false, grid: { left: 0, right: 0, top: 0, bottom: 0 },
+    xAxis: { show: false, min: 0, max: w, type: 'value' }, yAxis: { show: false, min: 0, max: h, type: 'value', inverse: true },
+    series: [
+      { type: 'custom', coordinateSystem: 'cartesian2d', z: 1, data: L.partitions.map((_, i) => [i]), renderItem: (p, api) => {
+        const zn = L.partitions[p.dataIndex], hue = hueFor(zn.side), tl = api.coord([X(zn.x0), Y(zn.y0)]), br = api.coord([X(zn.x1), Y(zn.y1)]);
+        const x = tl[0], y = tl[1], wp = br[0] - x, hp = br[1] - y, hh = Math.min(26, hp), isLocal = zn.side === '';
+        const kids = [
+          { type: 'rect', shape: { x, y, width: wp, height: hp, r: 12 }, style: { fill: hue + '14', stroke: hue, lineWidth: 1.2, lineDash: zn.empty ? [6, 5] : null } },
+          { type: 'rect', shape: { x, y, width: wp, height: hh, r: [12, 12, 0, 0] }, style: { fill: hue + '33' } },
+          { type: 'text', style: { x: x + 12, y: y + hh / 2 + 1, text: (isLocal ? '💻 ' : '🖧 ') + (isLocal ? 'local · main kernel' : zn.side + ' · ' + (STATE.regions.find(r => r.name === zn.side) || {}).host), fill: isLocal ? '#d4d8e8' : hue, font: '600 12px sans-serif', textVerticalAlign: 'middle' } },
+        ];
+        if (!isLocal) kids.push({ type: 'circle', shape: { cx: x + wp - 14, cy: y + hh / 2 + 1, r: 5 }, style: { fill: '#3fb96e', stroke: '#3fb96e' } });
+        if (zn.empty) kids.push({ type: 'text', style: { x: x + wp / 2, y: y + hp / 2, text: 'drag cells here', fill: '#6a7090', font: '11px sans-serif', textAlign: 'center', textVerticalAlign: 'middle' } });
+        return { type: 'group', children: kids };
+      } },
+      { type: 'custom', coordinateSystem: 'cartesian2d', z: 2, data: L.links.map((_, i) => [i]), renderItem: (p, api) => {
+        const l = L.links[p.dataIndex], nd = id => _NDX(L).get(id), a = nd(l.s), b = nd(l.t); if (!a || !b) return null;
+        const cross = _dagAssignedRegion(a.c) !== _dagAssignedRegion(b.c);
+        const route = cross && ROUTES[l.s + '>' + l.t];
+        if (route) {   // obstacle-avoiding routed path → smooth bendy polyline
+          const pts = route.map(pt => api.coord([X(pt[0]), Y(pt[1])]));
+          return { type: 'polyline', shape: { points: pts, smooth: 0.35 }, style: { fill: 'none', stroke: '#e8a13f', lineWidth: 2, opacity: 0.92, lineDash: [6, 4] } };
+        }
+        const p1 = api.coord([X(a.x), Y(a.y)]), p2 = api.coord([X(b.x), Y(b.y)]);   // intra-region → simple curve
+        const dx = p2[0] - p1[0], k = 0.4;
+        return { type: 'bezierCurve', shape: { x1: p1[0], y1: p1[1], cpx1: p1[0] + dx * k, cpy1: p1[1], cpx2: p2[0] - dx * k, cpy2: p2[1], x2: p2[0], y2: p2[1] },
+          style: { fill: 'none', stroke: cross ? '#e8a13f' : '#7c86a8', lineWidth: cross ? 2 : 1.2, opacity: cross ? 0.9 : 0.5, lineDash: cross ? [6, 4] : null } };
+      } },
+      { type: 'custom', coordinateSystem: 'cartesian2d', z: 3, data: L.nodes.map((_, i) => [i]), renderItem: (p, api) => {
+        const n = L.nodes[p.dataIndex], tl = api.coord([X(n.x - n.b.w / 2), Y(n.y - n.b.h / 2)]), br = api.coord([X(n.x + n.b.w / 2), Y(n.y + n.b.h / 2)]);
+        const x = tl[0], y = tl[1], wp = br[0] - x, hp = br[1] - y, hue = hueFor(_dagAssignedRegion(n.c));
+        return { type: 'group', children: [
+          { type: 'rect', shape: { x, y, width: wp, height: hp, r: 8 }, style: { fill: '#1a1e2e', stroke: hue, lineWidth: 1.5 } },
+          { type: 'text', style: { x: x + wp / 2, y: y + 15, text: n.c.id, fill: '#d4d8e8', font: '600 12px sans-serif', textAlign: 'center' } },
+          { type: 'text', style: { x: x + wp / 2, y: y + hp - 12, text: n.c.duration + ' ms', fill: '#6a7090', font: '10px sans-serif', textAlign: 'center' } },
+        ] };
+      } },
+    ] });
+}
+function bestGrid(L) { const cols = new Set(L.partitions.map(p => Math.round(p.x0))).size, rows = new Set(L.partitions.map(p => Math.round(p.y0))).size; return cols + '×' + rows; }
+
+// ── wire controls ──
+const fx = document.getElementById('fx'), dock = document.getElementById('dock'), pw = document.getElementById('pw'), ph = document.getElementById('ph'), opt = document.getElementById('opt');
+opt.onchange = render;
+Object.keys(FIXTURES).forEach(k => { const o = document.createElement('option'); o.value = o.textContent = k; fx.appendChild(o); });
+function loadFx() { STATE = FIXTURES[fx.value]; render(); }
+function applyDock() { const d = dock.value; if (d === 'right') { pw.value = 760; ph.value = 820; } else if (d === 'bottom') { pw.value = 1400; ph.value = 380; } else { pw.value = 820; ph.value = 780; } render(); }
+let _raf = false; const renderThrottled = () => { if (_raf) return; _raf = true; requestAnimationFrame(() => { _raf = false; render(); }); };   // one render per frame while dragging
+fx.onchange = loadFx; dock.onchange = applyDock; pw.oninput = renderThrottled; ph.oninput = renderThrottled;
+window.addEventListener('resize', () => chart && chart.resize());
+fx.value = '4 envs · one node each (the pain case)'; loadFx();
+</script>
+</body></html>
