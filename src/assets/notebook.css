@@ -990,6 +990,24 @@ body.modkey .cm-content { cursor: pointer; }
 .dagcard-acts button { background:var(--bg3); border:1px solid var(--border); color:var(--text); border-radius:6px;
   padding:4px 11px; cursor:pointer; font-size:.75rem; }
 .dagcard-acts button:hover { border-color:var(--accent); color:var(--accent); }
+/* Region aliveness card — hover a DAG region header's status dot: worker info + inline reap. Sits
+   at z-index 82, above the DAG pane (60) so it's never clipped by the pane it floats over. */
+.dagregcard { position:fixed; z-index:82; background:var(--bg); border:1px solid var(--border);
+  border-radius:10px; padding:9px 11px; box-shadow:0 14px 40px #000b; font-size:.8rem;
+  min-width:200px; max-width:340px; color:var(--text); }
+.dagregcard-h { display:flex; align-items:center; gap:7px; margin-bottom:4px; }
+.dagregcard-h b { font-size:.86rem; }
+.dagregdot { width:9px; height:9px; border-radius:50%; border:1.5px solid; flex:0 0 auto; }
+.dagregcard-st { margin-left:auto; font-size:.66rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em; }
+.dagregcard-meta { display:flex; flex-wrap:wrap; gap:3px 12px; font-size:.72rem; margin:3px 0 6px; }
+.dagregcard-meta i { color:var(--dim); font-style:normal; margin-right:4px; text-transform:uppercase;
+  font-size:.6rem; letter-spacing:.04em; }
+.dagregcard-chips { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0; }
+.dagregcard-acts { display:flex; gap:6px; margin-top:8px; }
+.dagregcard-acts button { background:var(--bg3); border:1px solid var(--border); color:var(--text);
+  border-radius:6px; padding:3px 10px; cursor:pointer; font-size:.73rem; }
+.dagregcard-acts button:hover { border-color:var(--accent); color:var(--accent); }
+.dagregcard-acts .dagreap:hover { border-color:var(--red); color:var(--red); }
 .dagrunon { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--bg3); border-radius:6px;
   padding:5px 8px; font-size:.78rem; margin-top:2px; }
 .dagrunon:focus { outline:none; border-color:var(--accent); }

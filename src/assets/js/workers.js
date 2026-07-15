@@ -211,6 +211,9 @@ function onWorkersUpdate(ws) {
       const w = ws.find(x => (x.side || '') === _wpSide);
       if (w) { const el = document.getElementById('workerpop-stats'); if (el) el.innerHTML = _wpStatsChips(_wpLive[_wpSide] || w.stats, w.note); }
     }
+    // Live aliveness for the DAG region containers: hand the freshest list to the pane so its
+    // header status dots (and any open region card) track liveness drops/recoveries at once.
+    if (window._dagOnWorkers) window._dagOnWorkers(ws);
   } catch (_) {}
 }
 
