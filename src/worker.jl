@@ -15,6 +15,7 @@ import Pkg                                   # project dep listing for eager doc
 import Serialization                         # slate_emit value → bytes (unconditional; memo re-imports under its guard)
 import Base64                                # …then base64 so an arbitrary Julia value rides the string stream
 import Logging, Dates                        # timestamped worker log (legible after a slow bring-up / eval)
+import Sockets                               # TCP reachability probe for peer-route resolution
 
 # Cold-boot phase timing: a module-load timer so the payload's heavy blocks (memo layer, ExpressionExplorer)
 # and start()'s socket bring-up self-report into the worker log — same `[slate-boot]` prefix the boot script
@@ -1013,6 +1014,30 @@ function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::Stri
     end
 end
 
+"Bounded NETWORK reachability probe: can THIS worker open a TCP connection to a peer's blob port at
+`ip:port`? TCP-level ONLY — NOT the CURVE handshake, which needs this worker authorised on the peer's
+blob channel (that happens inside the pull); routing just needs to know the network path exists
+(PEER_TUNNEL_PLAN §3). Only the PULLER can test B→A, so the hub asks it here to choose direct-CURVE vs
+the SSH bridge. A non-routable peer DROPS the SYN, so a timed-out connect is ABANDONED rather than
+sitting on the ~75s OS TCP timeout. Never throws. Returns (; reachable::Bool, rtt_ms)."
+function __slate_probe_peer(ip::String, port::Int)
+    result = Threads.Atomic{Int}(0)              # 0 pending · 1 open · 2 refused/error
+    t0 = time()
+    Threads.@spawn begin
+        r = try
+            s = Sockets.connect(ip, port); close(s); 1
+        catch
+            2
+        end
+        Threads.atomic_cas!(result, 0, r)
+    end
+    while result[] == 0 && time() - t0 < 3.0      # abandon a SYN-dropped connect at 3s
+        sleep(0.03)
+    end
+    reachable = result[] == 1
+    return (; reachable = reachable, rtt_ms = reachable ? round((time() - t0) * 1000; digits = 1) : -1.0)
+end
+
 "Cheap size estimate for the namespace global `name` — `(; bytes, type)` via Base.summarysize
 (walks the object, no serialization), or `(; error)`. The transfer-preview input: for numeric
 columns summarysize tracks the arrow/raw blob size closely, so how much a read will move can be
@@ -1703,6 +1728,7 @@ function tools()
         KaimonGate.GateTool("__slate_authorize_client", __slate_authorize_client),
         KaimonGate.GateTool("__slate_revoke_client", __slate_revoke_client),
         KaimonGate.GateTool("__slate_pull_blob", __slate_pull_blob),
+        KaimonGate.GateTool("__slate_probe_peer", __slate_probe_peer),
         KaimonGate.GateTool("__slate_materialize_datadir", __slate_materialize_datadir),
         KaimonGate.GateTool("__slate_sizeof", __slate_sizeof),
         KaimonGate.GateTool("__slate_portable", __slate_portable),

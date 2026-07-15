@@ -2118,25 +2118,65 @@ _direct_viable(src_k, dst_k) =
     src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget &&
     getfield(src_k.target, :transport) === :direct && src_k !== dst_k
 
-# Broker one direct B←A pull: authorise B's client key on A's blob channel, hand B A's data endpoint,
-# have B pull the blob straight into its CAS, then revoke. Returns bytes moved (0 = deduped). THROWS
-# on any failure — the caller (`:auto`) decides whether to fall back to relay.
-function _pull_direct!(src_k, dst_k, name, h::String, meta)
-    epA = _data_endpoint!(src_k.target, src_k)              # A's blob endpoint (routable ip+key on :direct)
-    # Co-located peers (same host) reach each other over LOOPBACK — skip the external-IP NAT hairpin.
-    # `_data_endpoint!` hands back A's routable/public IP, which round-trips out through the host's
-    # external interface even when B is on the same box; a :direct worker binds 0.0.0.0, so its blob
-    # port is reachable at 127.0.0.1 from a same-host peer. CURVE key unchanged (same server identity).
-    if src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget &&
-       src_k.target.ssh_host == dst_k.target.ssh_host && src_k.port > 0
-        _rlog("peer '$name': co-located → loopback 127.0.0.1:$(src_k.port + 2) (was $(epA.ip):$(epA.port))")
-        epA = (ip = "127.0.0.1", port = src_k.port + 2, server_key = epA.server_key)
+# ── Peer route resolution (PEER_TUNNEL_PLAN §3) ───────────────────────────────────────────────
+# How should dst (B) pull the boundary blob from src (A)? Only B can test B→A reachability, so the hub
+# asks B to probe A's blob endpoint (`__slate_probe_peer`) and picks: :direct (CURVE straight to A) when
+# the probe answers, else :relay (A→hub→B) — the :ssh arm (worker-local SSH forward over the friend-group
+# mesh) arrives next. `ip`/`port` is A's blob port in B's OWN vantage (co-located ⇒ loopback), NOT the
+# hub-local `_data_endpoint!` forward. This same probe is the coalesce "gap check" run on
+# `set_notebook_regions!`. Verdict is cached per ORDERED host-pair (a probe is a ~RTT+handshake) and
+# dropped when either worker is reaped (topology changed) — see `_peer_route_forget!`.
+struct PeerRoute
+    kind::Symbol       # :direct | :ssh | :relay
+    ip::String
+    port::Int
+    server_key::String
+end
+
+const _PEER_ROUTE_CACHE = Dict{Tuple{String,String},Symbol}()
+const _PEER_ROUTE_LOCK  = ReentrantLock()
+_peer_route_forget!(host) = lock(_PEER_ROUTE_LOCK) do
+    for k in collect(keys(_PEER_ROUTE_CACHE))
+        (k[1] == String(host) || k[2] == String(host)) && delete!(_PEER_ROUTE_CACHE, k)
     end
+end
+
+function _resolve_peer_route(src_k, dst_k)
+    (src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget && src_k !== dst_k) ||
+        return PeerRoute(:relay, "", 0, "")
+    epA = _data_endpoint!(src_k.target, src_k)                 # A's blob endpoint (ip + CURVE key)
+    ip, port, skey = String(epA.ip), Int(epA.port), String(epA.server_key)
+    # Co-located peers reach A over loopback (its :direct worker binds 0.0.0.0) — skip the NAT hairpin.
+    if src_k.target.ssh_host == dst_k.target.ssh_host && src_k.port > 0
+        ip, port = "127.0.0.1", src_k.port + 2
+    end
+    sh, dh = String(src_k.target.ssh_host), String(dst_k.target.ssh_host)
+    kind = lock(_PEER_ROUTE_LOCK) do; get(_PEER_ROUTE_CACHE, (sh, dh), nothing); end
+    if kind === nothing
+        pr = try
+            _tool(dst_k, "__slate_probe_peer",
+                  Dict{String,Any}("ip" => ip, "port" => port); timeout = 15.0)
+        catch; nothing; end
+        reachable = pr !== nothing && (try; pr.reachable === true; catch; false; end)
+        kind = reachable ? :direct : :relay
+        lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = kind; end
+        _rlog("peer route $sh→$dh: probe $ip:$port → " *
+              (reachable ? "reachable ($(try; round(pr.rtt_ms; digits=1); catch; "?"; end)ms) ⇒ direct" :
+                           "unreachable ⇒ relay (SSH bridge not built yet)"))
+    end
+    return PeerRoute(kind, ip, port, skey)
+end
+
+# Broker one direct B←A pull over the RESOLVED route (`route.{ip,port,server_key}` = A's blob endpoint in
+# B's OWN vantage — co-located loopback already applied by `_resolve_peer_route`): authorise B's client
+# key on A's blob channel, have B pull straight into its CAS, then revoke. Returns bytes moved (0 =
+# deduped). THROWS on any failure — the caller (`:auto`) decides whether to fall back to relay.
+function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
     bkerr = try; getproperty(bk, :error); catch; nothing; end
     bkerr === nothing || error("direct: dest client key unavailable: $bkerr")
     bpub = String(bk.key)
-    authed = !isempty(epA.server_key)                      # allow-list gate only exists under CURVE
+    authed = !isempty(route.server_key)                    # allow-list gate only exists under CURVE
     if authed
         ak = _tool(src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => bpub); timeout = 60.0)
         akerr = try; getproperty(ak, :error); catch; nothing; end
@@ -2144,7 +2184,7 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta)
     end
     try
         pr = _tool(dst_k, "__slate_pull_blob", Dict{String,Any}(
-            "ip" => epA.ip, "port" => epA.port, "server_key" => epA.server_key, "hash" => h); timeout = _blob_xfer_timeout())
+            "ip" => route.ip, "port" => route.port, "server_key" => route.server_key, "hash" => h); timeout = _blob_xfer_timeout())
         perr = try; getproperty(pr, :error); catch; nothing; end
         perr === nothing || error("direct pull on dest failed: $perr")
         return Int(pr.bytes)
@@ -2176,10 +2216,11 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     moved = 0
     used = :relay
     if mode === :direct || mode === :auto
-        if _direct_viable(src_k, dst_k)
+        route = _resolve_peer_route(src_k, dst_k)           # probe B→A; :direct when reachable, else :relay
+        if route.kind === :direct
             try
                 _t0 = time()
-                moved = _pull_direct!(src_k, dst_k, name, h, meta)
+                moved = _pull_direct!(src_k, dst_k, name, h, meta, route)
                 used = :direct
                 _el = time() - _t0                          # feed the peer-rate memory (skip dedup/tiny moves)
                 (moved > (4 << 20) && _el > 0) &&
@@ -2190,9 +2231,10 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
                       first(sprint(showerror, e), 160))
             end
         elseif mode === :direct
-            error("transfer '$name': direct not viable — needs source and destination on two distinct " *
-                  ":direct remote workers")
+            error("transfer '$name': direct not viable — peer route resolved to :$(route.kind) (source " *
+                  "and dest must be reachable peers; the SSH bridge is not built yet)")
         end
+        # :ssh route (worker-local SSH forward over the friend-group mesh) — future arm; falls to relay.
     end
 
     if used !== :direct                                     # :relay (default) or :auto fallback
@@ -2823,6 +2865,7 @@ function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
     try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
+    try; _peer_route_forget!(host); catch; end                # …and any cached peer-route verdict touching this host (topology changed)
     try; _evict_data_tunnels!(host; port = port + 2); catch; end
     try; _release_pool_claim!(host, port); catch; end
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
