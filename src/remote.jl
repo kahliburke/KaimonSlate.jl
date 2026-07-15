@@ -2183,18 +2183,23 @@ function _resolve_peer_route(src_k, dst_k)
     ip = colocated ? "127.0.0.1" : _peer_host_ip(src_k.target.ssh_host)
     skey = _peer_server_key(src_k)
     sh, dh = String(src_k.target.ssh_host), String(dst_k.target.ssh_host)
+    # B probes A (only B can test its own B→A reachability). Two questions, in preference order.
+    _probe(pip, pport) = (r = try; _tool(dst_k, "__slate_probe_peer",
+            Dict{String,Any}("ip" => pip, "port" => pport); timeout = 15.0); catch; nothing; end;
+        r !== nothing && (try; r.reachable === true; catch; false; end))
     kind = lock(_PEER_ROUTE_LOCK) do; get(_PEER_ROUTE_CACHE, (sh, dh), nothing); end
     if kind === nothing
-        pr = try
-            _tool(dst_k, "__slate_probe_peer",
-                  Dict{String,Any}("ip" => ip, "port" => port); timeout = 15.0)
-        catch; nothing; end
-        reachable = pr !== nothing && (try; pr.reachable === true; catch; false; end)
-        kind = reachable ? :direct : :relay
+        if _probe(ip, port)                          # A's blob port open to B over the network
+            kind = :direct
+            _rlog("peer route $sh→$dh: blob $ip:$port reachable ⇒ direct")
+        elseif _probe(ip, 22)                         # firewalled blob, but A reachable on SSH — tunnel the
+            kind = :ssh                               # blob port over the existing 22 (no firewall opening,
+            _rlog("peer route $sh→$dh: blob $ip:$port firewalled; ssh $ip:22 reachable ⇒ ssh-bridge") # §4; needs §5 keys)
+        else
+            kind = :relay
+            _rlog("peer route $sh→$dh: blob $ip:$port + ssh $ip:22 unreachable ⇒ relay")
+        end
         lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = kind; end
-        _rlog("peer route $sh→$dh: probe $ip:$port → " *
-              (reachable ? "reachable ($(try; round(pr.rtt_ms; digits=1); catch; "?"; end)ms) ⇒ direct" :
-                           "unreachable ⇒ relay"))
     end
     return PeerRoute(kind, ip, port, skey)
 end
@@ -2228,6 +2233,61 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     end
 end
 
+# A host's SSH user, resolved from the hub's OWN ssh config (`ssh -G` prints the resolved config without
+# connecting) so B ssh's in as the right user. Cached. Empty ⇒ let ssh pick its default.
+const _SSH_USER_CACHE = Dict{String,String}()
+const _SSH_USER_LOCK  = ReentrantLock()
+function _ssh_user(host)
+    h = String(host)
+    hit = lock(_SSH_USER_LOCK) do; get(_SSH_USER_CACHE, h, nothing); end
+    hit === nothing || return hit
+    u = try
+        m = match(r"(?m)^user (.+)$", read(`ssh -G $h`, String))
+        m === nothing ? "" : String(strip(m.captures[1]))
+    catch; ""; end
+    lock(_SSH_USER_LOCK) do; _SSH_USER_CACHE[h] = u; end
+    return u
+end
+
+# Friend-group mesh key paths (§5) on a worker's host: its OWN private key `slate-<region>-<uuid8>` (it
+# ssh's OUT to peers with this; the peer's authorized_keys holds its PUBLIC half, permitopen-scoped), and
+# a slate-OWNED known_hosts (never the user's). `~` is expanded on the worker.
+_mesh_key_path(region) = "~/.ssh/slate-$(region)-$(first(region_uuid(region), 8))"
+_mesh_known_hosts()    = "~/.ssh/slate_known_hosts"
+
+# Broker one SSH-BRIDGED B←A pull (§4): authorise B on A's blob channel, have B open a worker-local
+# `ssh -N -L` forward to A (using B's own mesh key) and CURVE-pull through it, then revoke. `route.ip` is
+# A's peer SSH address, `route.port` its blob port. Needs the friend-group keys (§5) present on B — else
+# B's ssh forward fails and the caller (`:auto`) relays. THROWS on failure.
+function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
+    bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
+    bkerr = try; getproperty(bk, :error); catch; nothing; end
+    bkerr === nothing || error("ssh: dest client key unavailable: $bkerr")
+    bpub = String(bk.key)
+    authed = !isempty(route.server_key)
+    if authed
+        ak = _tool(src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => bpub); timeout = 60.0)
+        akerr = try; getproperty(ak, :error); catch; nothing; end
+        akerr === nothing || error("ssh: authorise on source failed: $akerr")
+    end
+    a_user = _ssh_user(src_k.target.ssh_host)
+    ssh_target = isempty(a_user) ? route.ip : "$(a_user)@$(route.ip)"
+    try
+        pr = _tool(dst_k, "__slate_pull_blob_ssh", Dict{String,Any}(
+            "ssh_target" => ssh_target, "key_path" => _mesh_key_path(String(dst_k.target.region)),
+            "known_hosts" => _mesh_known_hosts(), "blob_port" => route.port,
+            "server_key" => route.server_key, "hash" => h); timeout = _blob_xfer_timeout())
+        perr = try; getproperty(pr, :error); catch; nothing; end
+        perr === nothing || error("ssh-bridged pull on dest failed: $perr")
+        return Int(pr.bytes)
+    finally
+        authed && try
+            _tool(src_k, "__slate_revoke_client", Dict{String,Any}("pubkey" => bpub); timeout = 30.0)
+        catch
+        end
+    end
+end
+
 function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, mode::Symbol = :relay,
                            on_plan = nothing, on_progress = nothing)
     meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = _blob_xfer_timeout())
@@ -2248,28 +2308,28 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     moved = 0
     used = :relay
     if mode === :direct || mode === :auto
-        route = _resolve_peer_route(src_k, dst_k)           # probe B→A; :direct when reachable, else :relay
-        if route.kind === :direct
+        route = _resolve_peer_route(src_k, dst_k)           # probe B→A: :direct / :ssh (bridge) / :relay
+        if route.kind === :direct || route.kind === :ssh
             try
                 _t0 = time()
-                moved = _pull_direct!(src_k, dst_k, name, h, meta, route)
-                used = :direct
+                moved = route.kind === :direct ? _pull_direct!(src_k, dst_k, name, h, meta, route) :
+                                                 _pull_ssh!(src_k, dst_k, name, h, meta, route)
+                used = route.kind
                 _el = time() - _t0                          # feed the peer-rate memory (skip dedup/tiny moves)
                 (moved > (4 << 20) && _el > 0) &&
                     _peer_bw_note!(src_k.target.ssh_host, dst_k.target.ssh_host, moved / _el)
             catch e
                 mode === :direct && rethrow()               # strict: surface the failure
-                _rlog("region transfer '$name': direct failed, falling back to relay — " *
+                _rlog("region transfer '$name': $(route.kind) failed, falling back to relay — " *
                       first(sprint(showerror, e), 160))
             end
         elseif mode === :direct
-            error("transfer '$name': direct not viable — peer route resolved to :$(route.kind) (source " *
-                  "and dest must be reachable peers; the SSH bridge is not built yet)")
+            error("transfer '$name': direct not viable — peer route resolved to :relay (source and dest " *
+                  "must be reachable peers, directly or via the SSH bridge)")
         end
-        # :ssh route (worker-local SSH forward over the friend-group mesh) — future arm; falls to relay.
     end
 
-    if used !== :direct                                     # :relay (default) or :auto fallback
+    if used === :relay                                      # neither direct nor ssh took it
         root = joinpath(_slate_cache_dir(), "memo")
         if src_k.target isa RemoteTarget                   # remote source → land the blob locally
             ep = _data_endpoint!(src_k.target, src_k)

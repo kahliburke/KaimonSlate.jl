@@ -1038,6 +1038,58 @@ function __slate_probe_peer(ip::String, port::Int)
     return (; reachable = reachable, rtt_ms = reachable ? round((time() - t0) * 1000; digits = 1) : -1.0)
 end
 
+# An OS-assigned free local TCP port (bind :0, read it, release) — the local end of a worker-local ssh
+# forward. Small race window between release and the ssh -L bind; acceptable for a short-lived pull.
+function _free_local_port()
+    srv = Sockets.listen(Sockets.localhost, 0)
+    p = Int(Sockets.getsockname(srv)[2])
+    close(srv)
+    return p
+end
+
+"SSH-BRIDGED pull (PEER_TUNNEL_PLAN §4): A's blob port is firewalled from THIS worker, but A is reachable
+on SSH — so tunnel the blob port over our OWN `ssh -N -L` forward and CURVE-pull through the local end.
+The forward is WORKER-LOCAL (its lifecycle rides this worker — no orphaned forward to reap across the
+network). Explicit flags, no ~/.ssh/config dependency: `key_path` + slate-owned `known_hosts` come from
+the friend-group intro (§5); `ssh_target` = A's `user@peer-ip`. Never throws. Returns (; bytes, via) or (; error)."
+function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts::String,
+                               blob_port::Int, server_key::String, hash::String)
+    _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
+    lport = _free_local_port()
+    kp = expanduser(key_path); kh = expanduser(known_hosts)
+    # -L lport → (from A) 127.0.0.1:blob_port (A binds 0.0.0.0, so its loopback works). ExitOnForwardFailure
+    # so a blocked permitopen/auth fails fast instead of hanging; least-privilege key is `permitopen`-scoped.
+    cmd = `ssh -i $kp -o IdentitiesOnly=yes -o UserKnownHostsFile=$kh -o StrictHostKeyChecking=yes
+              -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ConnectTimeout=10 -o BatchMode=yes
+              -N -L $(lport):127.0.0.1:$(blob_port) $ssh_target`
+    proc = try
+        run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
+    catch e
+        return (; error = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
+    end
+    try
+        up = false
+        for _ in 1:100                                   # wait ≤5s for the forward to accept
+            process_exited(proc) && return (; error = "ssh forward exited before coming up (auth / host key / permitopen?)")
+            if (try; s = Sockets.connect("127.0.0.1", lport); close(s); true; catch; false; end)
+                up = true; break
+            end
+            sleep(0.05)
+        end
+        up || return (; error = "ssh forward did not come up on 127.0.0.1:$lport within 5s")
+        configure! = isempty(server_key) ? nothing : function (sock)
+            cpub, csec = KaimonGate._load_or_create_client_keypair()
+            KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
+        end
+        moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", lport, _memo_dir(), hash; configure! = configure!)
+        return (; bytes = moved, via = "ssh")
+    catch e
+        return (; error = first(sprint(showerror, e), 200))
+    finally
+        try; kill(proc); catch; end
+    end
+end
+
 "Cheap size estimate for the namespace global `name` — `(; bytes, type)` via Base.summarysize
 (walks the object, no serialization), or `(; error)`. The transfer-preview input: for numeric
 columns summarysize tracks the arrow/raw blob size closely, so how much a read will move can be
@@ -1729,6 +1781,7 @@ function tools()
         KaimonGate.GateTool("__slate_revoke_client", __slate_revoke_client),
         KaimonGate.GateTool("__slate_pull_blob", __slate_pull_blob),
         KaimonGate.GateTool("__slate_probe_peer", __slate_probe_peer),
+        KaimonGate.GateTool("__slate_pull_blob_ssh", __slate_pull_blob_ssh),
         KaimonGate.GateTool("__slate_materialize_datadir", __slate_materialize_datadir),
         KaimonGate.GateTool("__slate_sizeof", __slate_sizeof),
         KaimonGate.GateTool("__slate_portable", __slate_portable),
