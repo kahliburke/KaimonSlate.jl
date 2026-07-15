@@ -225,12 +225,13 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     if (bindKey !== last.current.bindKey) {
       last.current.bindKey = bindKey;
       const host = el.querySelector('.binds');
-      if (host) { host.innerHTML = window.bindsInner(c); rebuilt = true; }
+      // Let any custom widgets clean up before the swap orphans their nodes (mirrors the .ichart dispose above).
+      if (host) { window.teardownCustomWidgets(host); host.innerHTML = window.bindsInner(c); rebuilt = true; }
     }
     if (ctrlKey !== last.current.ctrlKey) {
       last.current.ctrlKey = ctrlKey;
       const host = el.querySelector('.controls');
-      if (host) { host.innerHTML = window.controlStripInner(c); rebuilt = true; }
+      if (host) { window.teardownCustomWidgets(host); host.innerHTML = window.controlStripInner(c); rebuilt = true; }
     }
     if (rebuilt) window.mountControls(c);             // wire the freshly-built controls
     // A cell you're actively editing is YOURS until you resolve. When its editor holds unsaved edits

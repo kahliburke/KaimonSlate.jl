@@ -13,6 +13,19 @@ import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
          completionStatus, snippet, startCompletion, acceptCompletion } from "@codemirror/autocomplete";
 import { parser as juliaParser } from "@plutojl/lezer-julia";
 
+// Whole-module namespaces — the EDITOR-EXTENSION surface (window.CM6.cmView.MatchDecorator, …). A
+// registered editor extension (slateRegisterEditorExtension) must build against the HOST's single CM6
+// instance — @codemirror/state is a per-page singleton, so a plugin can't bundle its own. Exporting
+// the full namespaces (not a curated subset) means a plugin can reach ANY primitive without forcing an
+// entry.js edit + bundle rebuild. Alongside the flat exports the wrapper (editor.js) already uses.
+import * as cmView from "@codemirror/view";
+import * as cmState from "@codemirror/state";
+import * as cmCommands from "@codemirror/commands";
+import * as cmLanguage from "@codemirror/language";
+import * as cmAutocomplete from "@codemirror/autocomplete";
+import * as cmSearch from "@codemirror/search";
+import * as cmHighlight from "@lezer/highlight";
+
 // Map @plutojl/lezer-julia node names → highlight tags. Keyword nodes are the bare literals the
 // grammar emits (for/while/end/function/…); operators are the *Op nodes; CallExpression/Identifier
 // selects a call's callee so function names colour distinctly. Variables stay default.
@@ -169,4 +182,6 @@ export {
   syntaxHighlighting, julia, juliaLanguage, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,
   startCompletion, acceptCompletion,
+  // Full module namespaces for editor extensions (see the import note above).
+  cmView, cmState, cmCommands, cmLanguage, cmAutocomplete, cmSearch, cmHighlight,
 };

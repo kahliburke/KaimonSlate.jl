@@ -26,9 +26,12 @@ function _ctrlValLabel(el, v) {
 //   slateRegisterWidget('mathfield', {
 //     wire(el, api) { /* build DOM inside el; on change, api.push(value) */ },
 //     sync(el, value, params) { /* reflect a server-pushed value (optional) */ },
+//     destroy(el) { /* free resources before el is discarded (optional) */ },
 //   });
-// `api` = { push, schedule, flush, name, bindId, params, mirror }. `push`/`flush` send
-// the value immediately; `schedule` is throttled/coalesced (same policy as built-ins).
+// `api` = { push, schedule, flush, value, name, bindId, params, mirror }. `value` is the current
+// value at wire time (build from it; `sync` delivers later reactive updates). `push`/`flush` send
+// the value immediately; `schedule` is throttled/coalesced (same policy as built-ins). `destroy` is
+// called before a rebuild orphans the element, so a widget holding resources can clean up.
 window.slateWidgets = window.slateWidgets || {};
 window.slateRegisterWidget = function (kind, impl) {
   const im = impl || {};
@@ -42,6 +45,18 @@ window.slateRegisterWidget = function (kind, impl) {
       if (!el._customWired) wireControl(el);
       if (im.sync) { const bs = _bindSpec(el.dataset.bind, el.dataset.name); if (bs) im.sync(el, bs.value, bs.params || {}); }
     } catch (e) { console.error(e); }
+  });
+};
+// Tear down any custom widgets under `root` before their DOM is discarded (a bind/control-strip
+// rebuild). Mirrors the inline-echart dispose before an innerHTML swap — a plugin holding resources
+// (a math field, global listeners, observers) gets a `destroy(el)` call to clean up. No-op for a
+// widget with no destroy impl, or one that never wired.
+window.teardownCustomWidgets = function (root) {
+  if (!root) return;
+  root.querySelectorAll('.customwidget[data-bind]').forEach(el => {
+    if (!el._customWired) return;
+    const impl = window.slateWidgets[el.dataset.widget];
+    if (impl && impl.destroy) { try { impl.destroy(el); } catch (e) { console.error(e); } }
   });
 };
 
@@ -303,7 +318,9 @@ function wireControl(el) {
     if (_reg && _reg.wire && !el._customWired) {
       el._customWired = true;
       const bs = _bindSpec(id, name), params = (bs && bs.params) || {};
-      _reg.wire(el, { push: flush, schedule, flush, name, bindId: id, params, mirror });
+      // `value` is the control's current value at wire time, so a widget can build itself correctly on
+      // the first call without waiting for a `sync` (which still delivers later reactive updates).
+      _reg.wire(el, { push: flush, schedule, flush, name, bindId: id, params, value: bs ? bs.value : undefined, mirror });
     }
     return;                                          // the plugin owns this element (or it's awaiting registration)
   }
