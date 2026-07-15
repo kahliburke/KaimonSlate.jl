@@ -21,6 +21,8 @@ function setSlateTheme(name) {
   localStorage.setItem('slateTheme', name);
   if (name === 'midnight') delete document.documentElement.dataset.slateTheme;
   else document.documentElement.dataset.slateTheme = name;
+  // Charts read their palette from the CSS vars this just swapped — restyle them to match.
+  try { window._onSlateThemeChange && window._onSlateThemeChange(); } catch (_) {}
 }
 
 // ── Figure display width ────────────────────────────────────────────────────────

@@ -69,6 +69,7 @@ function _snapCell(cellId, insts, spec) {
         div = document.createElement('div');
         div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
         document.body.appendChild(div);
+        if (themeName === 'slate') _ensureSlateTheme();
         off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
         off.setOption(Object.assign({ backgroundColor: bg }, pub));
         return off.renderToSVGString();
@@ -77,7 +78,7 @@ function _snapCell(cellId, insts, spec) {
       // leaked an ECharts instance (live zrender) + a detached node on every failed snapshot.
       finally { if (off) { try { off.dispose(); } catch (_) {} } if (div) div.remove(); }
     };
-    if (spec) { svg = renderSvg(null, '#ffffff'); svgDark = renderSvg('dark', '#12141c'); }
+    if (spec) { svg = renderSvg(null, '#ffffff'); svgDark = renderSvg('slate', '#12141c'); }
     if (png) fetch(_apipath('/api/snapshot'), { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cell: cellId, image: png, svg: svg || undefined, svgDark: svgDark || undefined }) }).catch(() => {});
@@ -116,6 +117,56 @@ function _applySize(el, inst, s) {
   if (changed && inst) try { inst.resize(); } catch (_) {}
 }
 
+// ── The shared "Slate look" ECharts theme ───────────────────────────────────────────────────
+// Registered from the live CSS custom properties (the same brand palette the UI + Makie use — see
+// slate_look.jl), so interactive charts match the notebook instead of ECharts' generic 'dark', and
+// FOLLOW the active Slate theme. Built once, lazily (echarts must be loaded); rebuilt on a theme
+// switch (window._onSlateThemeChange). Series colour cycle order mirrors slate_series_cycle() in Julia.
+let _slateThemeReady = false;
+function _slateThemeVar(cs, name, dflt) { const v = cs.getPropertyValue(name).trim(); return v || dflt; }
+function _slateAxisTheme(line, label) {
+  return { axisLine: { lineStyle: { color: line } }, axisTick: { lineStyle: { color: line } },
+    axisLabel: { color: label }, splitLine: { lineStyle: { color: line, opacity: 0.4 } },
+    splitArea: { areaStyle: { color: ['transparent', 'transparent'] } } };
+}
+function _slateEchartsTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const V = (n, d) => _slateThemeVar(cs, n, d);
+  const text = V('--text', '#d4d8e8'), dim = V('--dim', '#6a7090'),
+        border = V('--border', '#2a2e40'), bg2 = V('--bg2', '#141828');
+  const cycle = [['--accent', '#569cd6'], ['--green', '#56d364'], ['--orange', '#ce9178'],
+    ['--purple', '#c586c0'], ['--teal', '#4ec9b0'], ['--gold', '#ffd700'], ['--red', '#e57575']]
+    .map(([n, d]) => V(n, d));
+  const ax = _slateAxisTheme(border, dim);
+  return {
+    color: cycle, backgroundColor: 'transparent',
+    textStyle: { color: text, fontFamily: 'inherit' },
+    title: { textStyle: { color: text }, subtextStyle: { color: dim } },
+    legend: { textStyle: { color: dim } },
+    categoryAxis: ax, valueAxis: ax, logAxis: ax, timeAxis: ax,
+    line: { symbolSize: 5 }, graph: { color: cycle },
+    tooltip: { backgroundColor: bg2, borderColor: border, textStyle: { color: text } },
+    visualMap: { textStyle: { color: dim } },
+    timeline: { lineStyle: { color: dim }, label: { color: dim } },
+    calendar: { splitLine: { lineStyle: { color: border } }, itemStyle: { borderColor: border } },
+  };
+}
+function _ensureSlateTheme() {
+  if (_slateThemeReady || typeof echarts === 'undefined') return;
+  try { echarts.registerTheme('slate', _slateEchartsTheme()); _slateThemeReady = true; } catch (_) {}
+}
+// A Slate theme switch changed the CSS vars: rebuild the 'slate' theme and re-init every chart under
+// it (ECharts snapshots a theme at init, so a restyle means dispose + re-create + re-setOption).
+window._onSlateThemeChange = () => {
+  try {
+    _slateThemeReady = false; _ensureSlateTheme();
+    Object.values(window.charts || {}).forEach(list => (list || []).forEach(i => { try { i.dispose(); } catch (_) {} }));
+    window.charts = {};
+    document.querySelectorAll('.echart, .ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
+    ((window.__slateState || {}).cells || []).forEach(c => { try { renderCharts(c); } catch (_) {} });
+  } catch (_) {}
+};
+
 // Render/refresh a cell's ECharts. Instances persist across reactive updates, so
 // data changes animate in place (setOption) instead of swapping an image.
 function renderCharts(c) {
@@ -139,7 +190,7 @@ function renderCharts(c) {
     });
     while (host.children.length < specs.length) {
       const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
-      insts.push(echarts.init(d, 'dark'));
+      _ensureSlateTheme(); insts.push(echarts.init(d, 'slate'));
     }
     while (host.children.length > specs.length) { host.removeChild(host.lastChild); const inst = insts.pop(); if (inst) try { inst.dispose(); } catch (_) {} }
     specs.forEach((s, i) => _applySize(host.children[i], insts[i], s));
@@ -150,7 +201,7 @@ function renderCharts(c) {
   // Inline `{{ echart(…) }}` placeholders in a markdown cell.
   document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
     const spec = specs[+el.dataset.i]; if (!spec) return;
-    if (!el._inst) el._inst = echarts.init(el, 'dark');
+    if (!el._inst) { _ensureSlateTheme(); el._inst = echarts.init(el, 'slate'); }
     _applySize(el, el._inst, spec);
     _ensureMaps(spec).then(() => _geoSafeSetOption(el._inst, spec));
   });

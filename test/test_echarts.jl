@@ -68,6 +68,40 @@ const RE = ReportEngine
         @test pie["series"][1]["data"][1]["name"] == "A"
     end
 
+    @testset "Relational / hierarchical / geo / calendar kinds" begin
+        # sankey: nodes auto-derived from link endpoints; pair sugar `src => tgt => val`
+        sk = RE.echart(:sankey, [("a", "b", 5), ("b" => ("c" => 3))]).option
+        @test sk["series"][1]["type"] == "sankey"
+        @test Set(n["name"] for n in sk["series"][1]["data"]) == Set(["a", "b", "c"])
+        @test sk["series"][1]["links"][1]["value"] == 5
+        @test !haskey(sk, "xAxis")                          # brings its own coordinate system
+        # explicit nodes list
+        @test length(RE.echart(:sankey, ["x", "y"], [("x", "y", 1)]).option["series"][1]["data"]) == 2
+
+        # graph: force layout by default, edges from tuples or pairs
+        g = RE.echart(:graph, ["a", "b", "c"], [("a", "b"), "b" => "c"]).option
+        @test g["series"][1]["type"] == "graph" && g["series"][1]["layout"] == "force"
+        @test length(g["series"][1]["links"]) == 2 && !haskey(g, "yAxis")
+
+        # treemap/sunburst hierarchy: pair sugar (leaf/branch) + NamedTuple passthrough
+        tm = RE.echart(:treemap, ["A" => 10, "B" => ["b1" => 3, "b2" => 4]]).option
+        @test tm["series"][1]["data"][2]["children"][1]["value"] == 3 && !haskey(tm, "xAxis")
+        sb = RE.echart(:sunburst, [(name = "root", children = [(name = "c", value = 5)])]).option
+        @test sb["series"][1]["data"][1]["children"][1]["value"] == 5
+
+        # geo lines: bound to the geo coordinate system, no cartesian axes, progressive=0 (roam-safe)
+        ln = RE.echart(:lines, [(0.0, 0.0)], [(10.0, 20.0)]; geo = (map = "world",)).option
+        @test ln["series"][1]["type"] == "lines" && ln["series"][1]["coordinateSystem"] == "geo"
+        @test ln["series"][1]["data"][1]["coords"] == [[0.0, 0.0], [10.0, 20.0]]
+        @test ln["series"][1]["progressive"] == 0 && !haskey(ln, "xAxis") && ln["geo"]["map"] == "world"
+
+        # calendar heatmap: a heatmap series on the calendar coord + implied calendar/visualMap
+        cal = RE.echart(:calendar, ["2024-01-01", "2024-12-31"], [1, 9]).option
+        @test cal["series"][1]["type"] == "heatmap" && cal["series"][1]["coordinateSystem"] == "calendar"
+        @test cal["calendar"]["range"] == "2024" && cal["visualMap"]["max"] == 9 && !haskey(cal, "xAxis")
+        @test RE.echart(:calendar, ["2023-11-01", "2024-02-01"], [2, 7]).option["calendar"]["range"] == ["2023", "2024"]
+    end
+
     @testset "Raw form is the full option surface, Symbol/NamedTuple-friendly" begin
         o = RE.echart(; xAxis = (type = :category, data = ["a"]),
                       series = [(type = :bar, data = [1])]).option

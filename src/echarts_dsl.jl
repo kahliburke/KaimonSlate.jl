@@ -84,6 +84,52 @@ function _radar!(opt, layout, indicators, vals)
         Any[Dict{String,Any}("value" => collect(vals))]
 end
 
+# ── Relational / hierarchical / geo-flow / calendar data shaping ──────────────────────────────
+# (source, target, value) from a 3-tuple/3-vector, or the pair sugar `src => (tgt => val)`.
+function _flow3(e)
+    (e isa Union{Tuple,AbstractVector} && length(e) == 3) && return (string(e[1]), string(e[2]), e[3])
+    (e isa Pair && e.second isa Pair) && return (string(e.first), string(e.second.first), e.second.second)
+    throw(ArgumentError("echart(:sankey, …): a link must be (source, target, value) or `src => tgt => val` — got $(repr(e))"))
+end
+# (source, target) from a 2-tuple/2-vector or the pair `src => tgt`.
+function _edge2(e)
+    e isa Pair && return (string(e.first), string(e.second))
+    (e isa Union{Tuple,AbstractVector} && length(e) == 2) && return (string(e[1]), string(e[2]))
+    throw(ArgumentError("echart(:graph, …): an edge must be (source, target) or `src => tgt` — got $(repr(e))"))
+end
+_uniqnodes(pairs) = unique!(reduce(vcat, [[a, b] for (a, b) in pairs]; init = String[]))
+
+# sankey: `links` (auto-derive nodes) or `(nodes, links)`; each link → {source,target,value}.
+function _sankey!(opt, args)
+    (length(args) in (1, 2)) || throw(ArgumentError("echart(:sankey, …) expects `links` or `(nodes, links)`"))
+    flows = [_flow3(e) for e in args[end]]
+    names = length(args) == 2 ? [string(n) for n in args[1]] : _uniqnodes([(f[1], f[2]) for f in flows])
+    opt["data"] = Any[Dict{String,Any}("name" => n) for n in names]
+    opt["links"] = Any[Dict{String,Any}("source" => s, "target" => t, "value" => v) for (s, t, v) in flows]
+end
+# graph (network): `edges` (auto-derive nodes) or `(nodes, edges)`; force layout + roam by default.
+function _graph!(opt, args)
+    (length(args) in (1, 2)) || throw(ArgumentError("echart(:graph, …) expects `edges` or `(nodes, edges)`"))
+    es = [_edge2(e) for e in args[end]]
+    if length(args) == 2
+        opt["data"] = Any[(n isa Union{AbstractString,Symbol}) ? Dict{String,Any}("name" => string(n)) : _ec(n) for n in args[1]]
+    else
+        opt["data"] = Any[Dict{String,Any}("name" => n) for n in _uniqnodes(es)]
+    end
+    opt["links"] = Any[Dict{String,Any}("source" => s, "target" => t) for (s, t) in es]
+    get!(opt, "layout", "force")
+    get!(opt, "roam", true)
+    haskey(opt, "label") || (opt["label"] = Dict{String,Any}("show" => true))
+    haskey(opt, "force") || (opt["force"] = Dict{String,Any}("repulsion" => 140, "edgeLength" => 70))
+end
+# treemap/sunburst: a hierarchy. `name => value` is a leaf; `name => [children…]` a branch; a
+# NamedTuple/Dict node passes through (its `children` recurse). Accepts one root or a vector of roots.
+_treenode(p::Pair) = p.second isa AbstractVector ?
+    Dict{String,Any}("name" => string(p.first), "children" => Any[_treenode(c) for c in p.second]) :
+    Dict{String,Any}("name" => string(p.first), "value" => p.second)
+_treenode(x) = _ec(x)
+_hier(data) = data isa Union{Pair,NamedTuple,AbstractDict} ? Any[_treenode(data)] : Any[_treenode(x) for x in data]
+
 """
     series(kind, args...; name=nothing, kwargs...) -> EChartSeries
 
@@ -98,6 +144,13 @@ kinds and axes in a single chart. `kind` is an ECharts series type:
 - `:radar` `(indicators, values)` — `indicators = ["Sales" => 6500, …]`; values a vector, or
   `["Allocated" => […], "Actual" => […]]` for several rings
 - `:boxplot` `(categories, data)` — each `data[i]` is `[min,Q1,med,Q3,max]` or raw samples
+- `:sankey` `(links)` or `(nodes, links)` — flows; each link `(source, target, value)` or `src => tgt => val`
+- `:graph` `(edges)` or `(nodes, edges)` — a network; each edge `(source, target)` or `src => tgt` (force layout)
+- `:treemap` / `:sunburst` `(tree)` — a hierarchy: `name => value` (leaf), `name => [children…]` (branch),
+  or NamedTuple/Dict nodes; pass one root or a vector of roots
+- `:lines` `(from, to)` or `(flows)` — geo trajectories/flows; coords `(lon, lat)`; binds `coordinateSystem="geo"`
+  (pass `geo=(map="world",…)` + `registerMap`)
+- `:calendar` `(dates, values)` — a calendar heatmap; brings the calendar component + a visualMap
 
 Any other `kind` falls back to `data = args[1]`. `name=` labels the series for the legend; every
 extra kwarg (`smooth`, `stack`, `symbolSize`, `yAxisIndex`, `areaStyle`, `markLine`, `lineStyle`, …)
@@ -144,6 +197,43 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
         opt["data"] = [length(d) == 5 ? collect(Float64, d) : _q5(d) for d in data]
         layout["xAxis"] = _cataxis(cats)
         layout["yAxis"] = Dict{String,Any}("type" => "value")
+    elseif k == "sankey"
+        _sankey!(opt, args)
+    elseif k == "graph"
+        _graph!(opt, args)
+    elseif k in ("treemap", "sunburst")
+        length(args) == 1 || throw(ArgumentError("echart(:$k, tree) expects one hierarchical data arg"))
+        opt["data"] = _hier(args[1])
+    elseif k == "lines"
+        # Geo flows (trajectories): each datum is a `{coords: [[lon,lat],[lon,lat]]}` segment. Defaults
+        # to the geo coordinate system (pass `geo=(map="world",…)`); override coordinateSystem for cartesian.
+        if length(args) == 2
+            from, to = args
+            length(from) == length(to) ||
+                throw(ArgumentError("echart(:lines, from, to): equal length required, got $(length(from)) and $(length(to))"))
+            opt["data"] = Any[Dict{String,Any}("coords" => Any[collect(from[i]), collect(to[i])]) for i in eachindex(from, to)]
+        elseif length(args) == 1
+            opt["data"] = Any[Dict{String,Any}("coords" => Any[collect(a), collect(b)]) for (a, b) in args[1]]
+        else
+            throw(ArgumentError("echart(:lines, …) expects `(from, to)` coord vectors or a list of `(ptA, ptB)` flows"))
+        end
+        get!(opt, "coordinateSystem", "geo")
+    elseif k == "calendar"
+        # Calendar heatmap: a heatmap series bound to a `calendar` coordinate system; each datum is
+        # `[date, value]`. Brings the calendar component (range auto-spanned from the dates) + a visualMap.
+        length(args) == 2 || throw(ArgumentError("echart(:calendar, dates, values) expects two args"))
+        dates, vals = args
+        length(dates) == length(vals) ||
+            throw(ArgumentError("echart(:calendar, dates, values): equal length required, got $(length(dates)) and $(length(vals))"))
+        ds = [string(d) for d in dates]                    # Date shows as ISO "yyyy-mm-dd" — no Dates dep needed
+        opt["type"] = "heatmap"; opt["coordinateSystem"] = "calendar"
+        opt["data"] = Any[Any[ds[i], vals[i]] for i in eachindex(ds, vals)]
+        lo, hi = extrema(vals)
+        y1, y2 = minimum(ds)[1:4], maximum(ds)[1:4]
+        layout["calendar"] = Dict{String,Any}("range" => (y1 == y2 ? y1 : [y1, y2]), "cellSize" => Any["auto", 16])
+        layout["visualMap"] = Dict{String,Any}("min" => lo, "max" => hi, "calculable" => true,
+                                                "orient" => "horizontal", "left" => "center", "bottom" => 0)
+        k = "heatmap"                                       # the actual ECharts series type (calendar is the coord system)
     elseif k in ("line", "bar", "scatter", "pie", "candlestick", "radar", "boxplot")
         # A known ergonomic kind matched on `k` above but not on arg count — don't silently fall
         # through to the generic branches below (which would misinterpret the args as raw data).
@@ -178,7 +268,12 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
     for s in slist, (k, v) in s.layout
         haskey(opt, k) || (opt[k] = v)
     end
-    noaxis = !isempty(slist) && all(s -> s.kind in _EC_NOAXIS, slist)
+    # A series wants no cartesian axes if its KIND brings its own coordinate system (pie/sankey/graph/
+    # treemap/…) OR it's bound to a non-cartesian coordinateSystem (geo/calendar/polar/…) — so geo `lines`
+    # and calendar heatmaps don't get empty value axes drawn over their map/calendar.
+    _nocart(s) = s.kind in _EC_NOAXIS ||
+                 get(s.opt, "coordinateSystem", "") in ("geo", "calendar", "polar", "singleAxis", "parallel")
+    noaxis = !isempty(slist) && all(_nocart, slist)
     if !noaxis
         haskey(opt, "xAxis") || (opt["xAxis"] = Dict{String,Any}("type" => "value"))
         haskey(opt, "yAxis") || (opt["yAxis"] = Dict{String,Any}("type" => "value"))
@@ -274,6 +369,16 @@ Everything else (`smooth`, `symbolSize`, `stack`, `areaStyle`, `markLine`, …) 
 ```julia
 echart(:heatmap, xlabels, ylabels, z)                       # z::Matrix (rows = y, cols = x)
 echart(:radar, ["Sales" => 6500, "Tech" => 30000], [4200, 20000])
+```
+
+# Relational, hierarchical, geo-flow, and calendar kinds — nodes/links & hierarchies inferred
+```julia
+echart(:sankey, [("coal", "grid", 40), ("solar", "grid", 25), ("grid", "homes", 65)])   # flows
+echart(:graph,  ["a", "b", "c"], [("a", "b"), "b" => "c"]; title = "Network")            # force graph
+echart(:treemap, ["Eng" => ["api" => 12, "ui" => 8], "Ops" => 5])                        # hierarchy
+echart(:lines, from, to; geo = (map = "world", roam = true),                             # geo trajectories
+       registerMap = (name = "world", url = "/assets/maps/world.json"), effect = (show = true,))
+echart(:calendar, dates, counts; title = "Commits")                                      # calendar heatmap
 ```
 
 # Composable — several series via `series(kind, …; name=…)`

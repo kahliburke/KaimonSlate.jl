@@ -78,7 +78,12 @@ const SLATE_API = SlateApiEntry[
         - `:radar` `(indicators, values)` — `indicators = ["Sales"=>6500, …]`; values a vector, or
           `["Allocated"=>[…], "Actual"=>[…]]` for several rings
         - `:boxplot` `(categories, data)` — each `data[i]` is `[min,Q1,med,Q3,max]` OR raw samples (auto 5-number)
-        - any other ECharts type via `series(:kind; data=…, …)` — gauge, funnel, sankey, graph, tree, …
+        - `:sankey` `(links)` or `(nodes, links)` — link `(source,target,value)` or `src=>tgt=>val`; nodes auto-derived
+        - `:graph` `(edges)` or `(nodes, edges)` — edge `(source,target)` or `src=>tgt`; force-directed network
+        - `:treemap` / `:sunburst` `(tree)` — hierarchy: `name=>value` leaf, `name=>[children…]` branch, or NamedTuple nodes
+        - `:lines` `(from, to)` — geo trajectories/flows; coords `(lon,lat)`; binds `coordinateSystem="geo"` (see GEO MAPS)
+        - `:calendar` `(dates, values)` — calendar heatmap; brings the calendar component + a `visualMap`
+        - any other ECharts type via `series(:kind; data=…, …)` — gauge, funnel, tree, …
 
         AXES & COMPONENTS — top-level, work in EVERY form (Express too). These kwargs go on the OPTION,
         not the series: `xAxis yAxis grid dataZoom visualMap toolbox polar angleAxis radiusAxis radar geo
@@ -100,9 +105,11 @@ const SLATE_API = SlateApiEntry[
         echart(:line, x, y; markLine=(data=[(type=:average,)],), symbolSize=6)
         ```
 
-        DEFAULTS: dark theme + transparent bg (`theme=false` to opt out); `tooltip=true`; a `legend`
-        appears when ≥2 series are named (`legend=<spec>` to place it, `legend=false` to drop it);
-        `title="…"`. Reactive charts re-`setOption` (~300 ms transition; `animation=false` to snap).
+        DEFAULTS: the Slate palette theme (drawn from the active UI theme's colours) + transparent bg
+        (`theme=false` to opt out); `tooltip=true`; a `legend` appears when ≥2 series are named
+        (`legend=<spec>` to place it, `legend=false` to drop it); `title="…"`. Reactive charts
+        re-`setOption` (~300 ms transition; `animation=false` to snap). To make MAKIE figures match this
+        look, call `use_slate_theme!()` (needs Makie loaded) or `set_theme!(slate_theme())`.
 
         SIZE: `height=520` / `width="80%"` (px number or any CSS length) size the chart's box.
 
