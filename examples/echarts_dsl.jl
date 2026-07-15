@@ -95,6 +95,43 @@ groups  = ["A", "B", "C", "D"]
 samples = [randn(60) .+ g for g in 1:4]                # raw samples → 5-number summary computed
 echart(:boxplot, groups, samples; title = "Distributions")
 
+#%% md id=h_relational
+## Relational, hierarchical, geo & calendar
+
+Flows, networks, hierarchies, map trajectories, and calendar heatmaps get the same one-liner
+treatment — nodes, links, and hierarchies inferred from friendly Julia data.
+
+#%% code id=sankey
+echart(:sankey, [("coal", "grid", 40), ("gas", "grid", 30), ("solar", "grid", 25),
+                 ("grid", "homes", 55), ("grid", "industry", 40)]; title = "Energy flow")
+
+#%% code id=graph
+echart(:graph, ["ingest", "clean", "model", "score", "report"],
+       [("ingest", "clean"), ("clean", "model"), ("model", "score"), ("score", "report"), "clean" => "report"];
+       title = "Pipeline")
+
+#%% code id=treemap
+echart(:treemap, ["Engineering" => ["api" => 12, "ui" => 8, "infra" => 6],
+                  "Product" => ["design" => 5, "research" => 4], "Ops" => 7]; title = "Headcount")
+
+#%% code id=sunburst
+echart(:sunburst, [(name = "root", children = [
+        (name = "A", value = 10, children = [(name = "A1", value = 4), (name = "A2", value = 6)]),
+        (name = "B", value = 8, children = [(name = "B1", value = 5), (name = "B2", value = 3)])])];
+       title = "Sunburst")
+
+#%% code id=calendar
+using Dates
+days = collect(Date(2024, 1, 1):Day(1):Date(2024, 3, 31))
+echart(:calendar, days, [(dayofyear(d) * 7) % 30 for d in days]; title = "Daily activity 2024")
+
+#%% code id=geolines
+echart(:lines, [(-74.0, 40.7), (2.35, 48.85), (139.7, 35.7)],        # from: NYC, Paris, Tokyo
+                [(-0.13, 51.5), (-0.13, 51.5), (-122.4, 37.8)];       # to:   London, London, SF
+       title = "Routes", registerMap = (name = "world", url = "/assets/maps/world.json"),
+       geo = (map = "world", roam = true, itemStyle = (areaColor = "#161a2b", borderColor = "#2a2e40")),
+       effect = (show = true, symbol = "arrow", symbolSize = 5), lineStyle = (curveness = 0.2, width = 1.5))
+
 #%% md id=h_raw
 ## Async + a button — a live gauge
 
