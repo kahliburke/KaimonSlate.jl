@@ -1133,7 +1133,13 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                 _rlog("connect: TCP+CURVE up after $tries tries, $(round(time() - t0; digits = 1))s of dialing (post-connect setup follows before 'connect OK')")
                 break
             catch e
-                last = sprint(showerror, e); sleep(0.25)
+                last = sprint(showerror, e)
+                # A stale live-status ConnectionManager entry for this endpoint makes connect_tcp!
+                # refuse with "Already connected" on EVERY retry (it won't replace a live corpse) —
+                # so evict it and let the next iteration build fresh, instead of burning the whole
+                # deadline re-dialing into the same corpse. Same eviction the reap path does.
+                occursin("Already connected", last) && _evict_worker_conn!(host, port)
+                sleep(0.25)
             end
         end
         if conn === nothing
@@ -2701,6 +2707,31 @@ function _find_live_worker(host, label, parent)
     return (port = matches[1][1], stream_port = matches[1][2])
 end
 
+# Evict any ConnectionManager entry the hub still holds for worker `host:port`. A superseded or
+# reaped worker whose wire lingers in a live status (:connected/:stalled) makes `connect_tcp!` refuse
+# every reconnect with "Already connected" — it won't replace a live-status corpse, so the reconnect
+# path re-probes, finds the worker live, re-dials, and loops forever (the recurring "duplicate dial"
+# in the logs). `disconnect!` marks the entry :disconnected; `connect_tcp!` then reaps the corpse and
+# builds fresh. Matched by the name `spawn_and_connect_remote!` assigns each worker wire
+# ("slate-<host>-<port>") — exact per worker, never a same-port worker on another host. Called BOTH on
+# reap (mark it dead everywhere) and self-healingly in the dial loop when "Already connected" is hit.
+function _evict_worker_conn!(host, port::Int)
+    nm = "slate-$(host)-$(port)"
+    mgr = try; _manager(); catch; return 0; end
+    K = _kaimon()
+    stale = try
+        lock(mgr.lock) do; [c for c in mgr.connections if getfield(c, :name) == nm]; end
+    catch
+        return 0
+    end
+    for c in stale
+        st = try; getfield(c, :status); catch; "?"; end
+        try; K.disconnect!(c); catch; end
+        _rlog("evicted stale hub connection '$nm' (was $st) — worker superseded/reaped")
+    end
+    return length(stale)
+end
+
 """
     reap_remote_worker(host, port) -> Bool
 
@@ -2710,6 +2741,7 @@ never auto-reaps (a worker may hold results worth keeping). Returns true if the 
 function reap_remote_worker(host, port::Int)
     _rlog("reap: killing worker-$port on $host (manual)")
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
+    try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
     try; _evict_data_tunnels!(host; port = port + 2); catch; end
     try; _release_pool_claim!(host, port); catch; end
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
