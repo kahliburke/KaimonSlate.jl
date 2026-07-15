@@ -2135,12 +2135,72 @@ struct PeerRoute
     server_key::String
 end
 
-const _PEER_ROUTE_CACHE = Dict{Tuple{String,String},Symbol}()
+# Peer-route verdicts are cached per ordered (src_host, dst_host) as (kind, chosen A-address, ts) — a
+# probe is ~RTT+handshake, so we pay it once and reuse. PERSISTED to disk (mirrors the peer-bw cache) so it
+# survives a hub restart AND doubles as a human-readable topology map (which pair resolved to what, when).
+# TTL'd: a verdict older than `_peer_route_ttl()` is re-probed, so a path UPGRADES toward optimal over time
+# (relay→direct once a firewall opens). And self-healing DOWNWARD in real time: a cached direct/ssh pull
+# that FAILS (topology changed under us) invalidates its entry (`_peer_route_forget_pair!`) and relays now.
+const _PEER_ROUTE_CACHE = Dict{Tuple{String,String},Tuple{Symbol,String,Float64}}()   # → (kind, A-addr, ts)
 const _PEER_ROUTE_LOCK  = ReentrantLock()
-_peer_route_forget!(host) = lock(_PEER_ROUTE_LOCK) do
-    for k in collect(keys(_PEER_ROUTE_CACHE))
-        (k[1] == String(host) || k[2] == String(host)) && delete!(_PEER_ROUTE_CACHE, k)
+const PEER_ROUTE_TTL = Ref{Float64}(-1.0)   # <0 = unset (env / default applies)
+_peer_route_ttl() = PEER_ROUTE_TTL[] >= 0 ? PEER_ROUTE_TTL[] :
+    something(tryparse(Float64, get(ENV, "KAIMONSLATE_PEER_ROUTE_TTL", "")), 600.0)   # 10 min default
+
+_route_sanitize(x) = replace(String(x), r"[^A-Za-z0-9._-]" => "_")
+_route_cache_path(sh, dh) = joinpath(_slate_cache_dir(), "route", "$(_route_sanitize(sh))__$(_route_sanitize(dh)).json")
+function _peer_route_load(sh, dh)
+    p = _route_cache_path(sh, dh); isfile(p) || return nothing
+    s = try; read(p, String); catch; return nothing; end
+    k = _manifest_get(s, "kind"); ip = _manifest_get(s, "ip"); ts = tryparse(Float64, _manifest_get(s, "ts"))
+    (isempty(k) || ts === nothing) && return nothing
+    return (Symbol(k), String(ip), ts)
+end
+function _peer_route_save(sh, dh, kind, ip, ts)
+    try
+        mkpath(dirname(_route_cache_path(sh, dh)))
+        write(_route_cache_path(sh, dh), "{\"kind\":\"$(kind)\",\"ip\":\"$(ip)\",\"ts\":\"$(round(Int, ts))\"}")
+    catch
     end
+    return nothing
+end
+# Fresh (kind, ip) for a pair, or nothing if absent/expired (→ caller re-probes). Load-through from disk.
+function _peer_route_lookup(sh, dh)
+    hit = lock(_PEER_ROUTE_LOCK) do; get(_PEER_ROUTE_CACHE, (sh, dh), nothing); end
+    if hit === nothing
+        hit = _peer_route_load(sh, dh)
+        hit !== nothing && lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = hit; end
+    end
+    (hit === nothing || (time() - hit[3]) > _peer_route_ttl()) && return nothing
+    return (hit[1], hit[2])
+end
+function _peer_route_store!(sh, dh, kind, ip)
+    t = time()
+    lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = (kind, ip, t); end
+    _peer_route_save(sh, dh, kind, ip, t)
+    return nothing
+end
+# Drop one pair's verdict (in-memory + disk) — the real-time downgrade on a failed direct/ssh pull.
+function _peer_route_forget_pair!(sh, dh)
+    lock(_PEER_ROUTE_LOCK) do; delete!(_PEER_ROUTE_CACHE, (String(sh), String(dh))); end
+    try; rm(_route_cache_path(sh, dh); force = true); catch; end
+    return nothing
+end
+# Drop every verdict touching `host` (in-memory + disk) — topology changed (reap).
+function _peer_route_forget!(host)
+    h = String(host); hs = _route_sanitize(h)
+    lock(_PEER_ROUTE_LOCK) do
+        for k in collect(keys(_PEER_ROUTE_CACHE))
+            (k[1] == h || k[2] == h) && delete!(_PEER_ROUTE_CACHE, k)
+        end
+    end
+    d = joinpath(_slate_cache_dir(), "route")
+    isdir(d) && for f in readdir(d)
+        endswith(f, ".json") || continue
+        parts = split(chopsuffix(f, ".json"), "__")
+        (length(parts) == 2 && hs in parts) && try; rm(joinpath(d, f); force = true); catch; end
+    end
+    return nothing
 end
 
 # A worker's blob CURVE server key (its own identity — vantage-independent). On :direct it's in the
@@ -2172,6 +2232,18 @@ function _peer_host_ip(host)
     return ip
 end
 
+# The address a PEER dials to reach `region`'s blob port. Prefer the region's explicit `peer` advertise
+# address — its PUBLIC IP when peers live on a different network than the hub (§5.6: the hub-facing IP is
+# then wrong, e.g. a private-subnet address the hub shares but a cross-cloud peer can't route). Fall back
+# to the hub-facing interface IP, which is correct only when the hub shares a network with the peer
+# (same subnet / directly-public box). A region with no inbound path leaves `peer` "" and its transfers
+# relay (the probe simply fails). `host` is the ssh alias used for the fallback lookup.
+function _region_peer_addr(region, host)
+    r = region_get(region)
+    (r !== nothing && !isempty(r.peer)) && return String(r.peer)
+    return _peer_host_ip(host)
+end
+
 function _resolve_peer_route(src_k, dst_k)
     (src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget && src_k !== dst_k) ||
         return PeerRoute(:relay, "", 0, "")
@@ -2180,28 +2252,38 @@ function _resolve_peer_route(src_k, dst_k)
     # peer, and calling it would open a tunnel as a side effect). Co-located ⇒ loopback (§3).
     port = src_k.port + 2
     colocated = src_k.target.ssh_host == dst_k.target.ssh_host
-    ip = colocated ? "127.0.0.1" : _peer_host_ip(src_k.target.ssh_host)
     skey = _peer_server_key(src_k)
     sh, dh = String(src_k.target.ssh_host), String(dst_k.target.ssh_host)
-    # B probes A (only B can test its own B→A reachability). Two questions, in preference order.
+    # Candidate A-addresses B might reach, in PREFERENCE order (probing picks the first that answers, so B's
+    # own vantage decides — no static "which network are they on?" guess): co-located ⇒ loopback; else the
+    # hub-facing interface IP first (the fast path when B shares A's network — e.g. a private subnet the hub
+    # is also on), then A's explicit `peer` advertise addr (its PUBLIC IP, for a cross-network B). A region
+    # with neither reachable (localhost/NAT source) yields no working candidate ⇒ relay.
+    adv = (r = region_get(src_k.target.region); r === nothing ? "" : String(r.peer))
+    cands = colocated ? ["127.0.0.1"] : unique(filter(!isempty, [_peer_host_ip(sh), adv]))
+    # B probes A (only B can test its own B→A reachability).
     _probe(pip, pport) = (r = try; _tool(dst_k, "__slate_probe_peer",
             Dict{String,Any}("ip" => pip, "port" => pport); timeout = 15.0); catch; nothing; end;
         r !== nothing && (try; r.reachable === true; catch; false; end))
-    kind = lock(_PEER_ROUTE_LOCK) do; get(_PEER_ROUTE_CACHE, (sh, dh), nothing); end
-    if kind === nothing
-        if _probe(ip, port)                          # A's blob port open to B over the network
-            kind = :direct
-            _rlog("peer route $sh→$dh: blob $ip:$port reachable ⇒ direct")
-        elseif _probe(ip, 22)                         # firewalled blob, but A reachable on SSH — tunnel the
-            kind = :ssh                               # blob port over the existing 22 (no firewall opening,
-            _rlog("peer route $sh→$dh: blob $ip:$port firewalled; ssh $ip:22 reachable ⇒ ssh-bridge") # §4; needs §5 keys)
-        else
-            kind = :relay
-            _rlog("peer route $sh→$dh: blob $ip:$port + ssh $ip:22 unreachable ⇒ relay")
+    cached = _peer_route_lookup(sh, dh)              # in-memory → disk → nothing if absent/expired (TTL)
+    if cached === nothing
+        kind = :relay; ip = isempty(cands) ? "" : cands[1]
+        for c in cands                               # prefer a DIRECT blob dial on any candidate
+            _probe(c, port) && (kind = :direct; ip = c; break)
         end
-        lock(_PEER_ROUTE_LOCK) do; _PEER_ROUTE_CACHE[(sh, dh)] = kind; end
+        if kind === :relay                           # else the SSH bridge over any candidate reachable on :22
+            for c in cands
+                _probe(c, 22) && (kind = :ssh; ip = c; break)
+            end
+        end
+        cached = (kind, ip)
+        _peer_route_store!(sh, dh, kind, ip)         # persist (survives restart; a topology map + TTL'd)
+        candstr = join(cands, "/")
+        _rlog(kind === :direct ? "peer route $sh→$dh: blob $ip:$port reachable ⇒ direct" :
+              kind === :ssh    ? "peer route $sh→$dh: blob firewalled; ssh $ip:22 reachable ⇒ ssh-bridge (§4)" :
+                                 "peer route $sh→$dh: no candidate $candstr reachable on blob/:22 ⇒ relay")
     end
-    return PeerRoute(kind, ip, port, skey)
+    return PeerRoute(cached[1], cached[2], port, skey)
 end
 
 # Broker one direct B←A pull over the RESOLVED route (`route.{ip,port,server_key}` = A's blob endpoint in
@@ -2249,17 +2331,30 @@ function _ssh_user(host)
     return u
 end
 
-# Friend-group mesh key paths (§5) on a worker's host: its OWN private key `slate-<region>-<uuid8>` (it
-# ssh's OUT to peers with this; the peer's authorized_keys holds its PUBLIC half, permitopen-scoped), and
-# a slate-OWNED known_hosts (never the user's). `~` is expanded on the worker.
-_mesh_key_path(region) = "~/.ssh/slate-$(region)-$(first(region_uuid(region), 8))"
-_mesh_known_hosts()    = "~/.ssh/slate_known_hosts"
+# Friend-group mesh artifact naming (§5). Every peer-mesh artifact for a region derives from ONE
+# basename `slate-<foldedname>-<uuid8>` — the private key file on its host, the comment tag on an
+# authorized_keys line it authors, the tag on a host-key pin. Single-sourced here (folds the name and
+# self-heals the uuid) so the key path `_pull_ssh!` dials and the artifacts `peer_mesh.jl` installs can
+# never drift apart. `~` is expanded on the worker.
+function _mesh_basename(region)
+    r = region_get(region)
+    r === nothing && return "slate-$(_fold_region(region))-unknown"
+    "slate-$(r.name)-$(first(region_uuid(r.name), 8))"
+end
+_mesh_key_path(region) = "~/.ssh/" * _mesh_basename(region)   # a region's OWN private key (it ssh's OUT with this)
+_mesh_known_hosts()    = "~/.ssh/slate_known_hosts"           # slate-OWNED known_hosts (never the user's)
 
 # Broker one SSH-BRIDGED B←A pull (§4): authorise B on A's blob channel, have B open a worker-local
 # `ssh -N -L` forward to A (using B's own mesh key) and CURVE-pull through it, then revoke. `route.ip` is
 # A's peer SSH address, `route.port` its blob port. Needs the friend-group keys (§5) present on B — else
 # B's ssh forward fails and the caller (`:auto`) relays. THROWS on failure.
 function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
+    # A tunnel source's grant was installed with an inert placeholder permitopen; rewrite it to the LIVE
+    # blob port (route.port) before dialing, so the forward isn't administratively refused (§2). No-op for
+    # a :direct source (already the real port) or an un-introduced pair (nothing to touch).
+    try; _mesh_finalize_port!(String(src_k.target.region), String(dst_k.target.region), route.port); catch e
+        _rlog("mesh: permitopen finalize $(dst_k.target.region)←$(src_k.target.region) failed — $(first(sprint(showerror, e), 120))")
+    end
     bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
     bkerr = try; getproperty(bk, :error); catch; nothing; end
     bkerr === nothing || error("ssh: dest client key unavailable: $bkerr")
@@ -2320,7 +2415,10 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
                     _peer_bw_note!(src_k.target.ssh_host, dst_k.target.ssh_host, moved / _el)
             catch e
                 mode === :direct && rethrow()               # strict: surface the failure
-                _rlog("region transfer '$name': $(route.kind) failed, falling back to relay — " *
+                # Real-time DOWNGRADE: the cached path broke (topology likely changed under us) — forget this
+                # pair's verdict so the next transfer re-probes, and relay right now.
+                _peer_route_forget_pair!(String(src_k.target.ssh_host), String(dst_k.target.ssh_host))
+                _rlog("region transfer '$name': $(route.kind) failed, forgetting route + falling back to relay — " *
                       first(sprint(showerror, e), 160))
             end
         elseif mode === :direct
@@ -2449,6 +2547,7 @@ struct Region
     sysimage::Bool      # bake a PackageCompiler worker sysimage for this region's env (opt-in; default false)
     curve::Bool         # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
     uuid::String        # stable per-region id (minted at setup) — every peer-mesh artifact is named slate-<name>-<uuid8> (§5.5)
+    peer::String        # peer-reachable address OTHER regions dial to reach this one — its PUBLIC IP when cross-network (§5.6). "" = derive from the hub-facing IP (only valid when the hub shares a network with the peers). A region with no inbound reachability (localhost/NAT, outbound-only) leaves this "" and simply relays inbound transfers.
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -2463,11 +2562,12 @@ _region_from_dict(d::AbstractDict) = Region(
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
     _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
     String(get(d, "cache_root", "")), _asint(get(d, "warm", 0)), String(get(d, "threads", "")),
-    _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)), String(get(d, "uuid", "")))
+    _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)), String(get(d, "uuid", "")),
+    String(get(d, "peer", "")))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
-    "curve" => r.curve, "uuid" => r.uuid)
+    "curve" => r.curve, "uuid" => r.uuid, "peer" => r.peer)
 
 # ── Per-region UUID (mesh-artifact naming; PEER_TUNNEL_PLAN §5.5) ──────────────────────────────
 # A stable 128-bit id minted once at region setup and persisted in the region record. Every
@@ -2504,7 +2604,8 @@ function region_uuid(name)
     isempty(r.uuid) || return r.uuid
     region_set!(r.name; host = r.host, transport = r.transport, base_port = r.base_port,
                 preload = r.preload, data_root = r.data_root, cache_root = r.cache_root,
-                warm = r.warm, threads = r.threads, sysimage = r.sysimage, curve = r.curve).uuid
+                warm = r.warm, threads = r.threads, sysimage = r.sysimage, curve = r.curve,
+                peer = r.peer).uuid
 end
 
 function _write_regions!(list::AbstractVector{Region})
@@ -2517,7 +2618,7 @@ end
 # Create or update a region by name (upsert). Returns the stored Region.
 function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
                      data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
-                     curve = true, uuid = "")
+                     curve = true, uuid = "", peer = "")
     n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
     return lock(_REGIONS_LOCK) do
@@ -2528,9 +2629,12 @@ function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "
         # artifact keyed on `slate-<region>-<uuid8>` would orphan (PEER_TUNNEL_PLAN §5.5).
         u = !isempty(String(uuid)) ? String(uuid) :
             (i === nothing || isempty(list[i].uuid)) ? _mint_region_uuid() : list[i].uuid
+        # `peer` (§5.6 advertise addr) is likewise sticky across upserts: explicit arg wins, else keep
+        # the existing value, else "" (derive from the hub-facing IP).
+        pe = !isempty(String(peer)) ? String(peer) : (i === nothing ? "" : list[i].peer)
         r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
                    String(data_root), String(cache_root), Int(warm), String(threads),
-                   _asbool(sysimage), _asbool(curve), u)
+                   _asbool(sysimage), _asbool(curve), u, pe)
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
         r
@@ -2557,6 +2661,11 @@ function region_remove!(name)
         catch e
             _rlog("region[$(r.name)]: drain-on-delete failed ($(sprint(showerror, e)))")
         end
+    end
+    # Remove this region's peer-mesh artifacts (keypair, authorized_keys grants, host-key pins) BEFORE the
+    # record is dropped — teardown needs the host + uuid to enumerate them by tag (§5.5). Best-effort.
+    try; teardown_region_mesh!(name); catch e
+        _rlog("region[$(_fold_region(name))]: mesh teardown failed ($(first(sprint(showerror, e), 120)))")
     end
     region_delete!(name)
     delete!(_REGION_STATUS, _fold_region(name))   # status is keyed by the folded region name
@@ -2958,6 +3067,10 @@ function reap_remote_worker(host, port::Int)
     try; _evict_parked!(host; port = port); catch; end        # a parked wire to it must die too
     try; _evict_worker_conn!(host, port); catch; end          # …and any non-parked hub wire (warm/reconnect) — else a respawn on this port hits "Already connected"
     try; _peer_route_forget!(host); catch; end                # …and any cached peer-route verdict touching this host (topology changed)
+    # NOTE: the mesh-grant permitopen cache is deliberately NOT cleared here — `_mesh_finalize_port!`
+    # self-corrects (re-installs when the live blob port differs from the cached one), so a respawn on a
+    # new port is caught on the next transfer; clearing it would drop the "introduced" signal and skip the
+    # finalize. It's cleared only on region teardown.
     try; _evict_data_tunnels!(host; port = port + 2); catch; end
     try; _release_pool_claim!(host, port); catch; end
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a

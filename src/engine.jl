@@ -563,5 +563,6 @@ include(joinpath(@__DIR__, "deps.jl"))
 include(joinpath(@__DIR__, "bind.jl"))
 include(joinpath(@__DIR__, "gate_kernel.jl"))   # GateKernel (used when Main.Kaimon present)
 include(joinpath(@__DIR__, "remote.jl"))        # RunTarget + remote worker (provision/sync/CURVE); uses gate_kernel helpers
+include(joinpath(@__DIR__, "peer_mesh.jl"))     # friend-group SSH mesh (introduce/teardown/peer_plan) for the :ssh blob bridge
 
 end # module ReportEngine

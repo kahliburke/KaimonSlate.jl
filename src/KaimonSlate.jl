@@ -651,7 +651,7 @@ function create_tools(GateTool::Type)
     """
     function region(name::String; host::String = "", transport::String = "tunnel", base_port::Int = 0,
                     preload::String = "", data_root::String = "", cache_root::String = "", warm::Int = 0,
-                    threads::String = "", sysimage::Bool = false, curve::Bool = true,
+                    threads::String = "", sysimage::Bool = false, curve::Bool = true, peer::String = "",
                     delete::Bool = false)::String
         nm = strip(name); isempty(nm) && return "Give a region name."
         if delete
@@ -665,14 +665,67 @@ function create_tools(GateTool::Type)
                                      preload = isempty(pl) ? "" : abspath(expanduser(pl)),
                                      data_root = String(strip(data_root)), cache_root = String(strip(cache_root)),
                                      warm = max(0, warm), threads = String(strip(threads)), sysimage = sysimage,
-                                     curve = curve)
+                                     curve = curve, peer = String(strip(peer)))
         r.warm > 0 && Threads.@spawn try; ReportEngine.region_reconcile!(r.name); catch; end
         return "✅ region '$(r.name)' → $(isempty(r.host) ? "(no host)" : r.host) ($(r.transport))" *
                (r.warm > 0 ? ", warm=$(r.warm) (reconciling)" : "") *
                (r.sysimage ? ", sysimage=on" : "") *
                (r.curve ? "" : ", curve=off") *
+               (isempty(r.peer) ? "" : ", peer=$(r.peer)") *
                (isempty(r.data_root) ? "" : ", data_root=$(r.data_root)") *
                (isempty(r.cache_root) ? "" : ", cache_root=$(r.cache_root)")
+    end
+
+    """
+        peer_introduce(regions) -> String
+
+    Arm the friend-group SSH mesh across the named regions (comma-separated), so a cross-region value can
+    move worker→worker over an SSH-bridged CURVE pull when a blob port is firewalled (PEER_TUNNEL_PLAN §5).
+    For every CROSS-HOST pair it generates an on-host ed25519 key, installs a least-privilege
+    `authorized_keys` grant (`restrict` + `command="false"` + `permitopen` to the one blob port), and pins
+    the source's host key in a slate-owned `known_hosts` — all UUID-tagged and removable. Idempotent.
+    Directly-reachable pairs never use the bridge (the route resolver picks direct); this only ARMS it.
+    """
+    function peer_introduce(regions::String)::String
+        names = String[strip(s) for s in split(regions, ',') if !isempty(strip(s))]
+        length(names) < 2 && return "Give ≥2 region names (comma-separated)."
+        for n in names; ReportEngine.region_get(n) === nothing && return "No region '$n'."; end
+        installed = try; ReportEngine.introduce_group!(names)
+        catch e; return "❌ introduce failed: " * first(sprint(showerror, e), 200); end
+        isempty(installed) && return "No cross-host pairs to mesh among: $(join(names, ", "))."
+        return "✅ mesh armed ($(length(installed)) grant(s)):\n" * join(
+            ["  $(g.puller)←$(g.source)  permitopen 127.0.0.1:$(g.port)" *
+             (g.placeholder ? " (placeholder — finalized at first transfer)" : "") for g in installed], "\n")
+    end
+
+    """
+        peer_teardown(region) -> String
+
+    Remove every peer-mesh artifact naming `region` — its keypair, its `authorized_keys` grants across
+    peers, its host-key pins — all findable by the region's one UUID tag. Best-effort. Runs automatically
+    on region delete; call this to tear a mesh down without deleting the region.
+    """
+    function peer_teardown(region::String)::String
+        ReportEngine.region_get(region) === nothing && return "No region '$region'."
+        try; ReportEngine.teardown_region_mesh!(region)
+        catch e; return "❌ teardown failed: " * first(sprint(showerror, e), 200); end
+        return "🧹 mesh artifacts for '$region' removed."
+    end
+
+    """
+        peer_plan(regions) -> String
+
+    Dry-run the peer mesh for the named regions (comma-separated): the last-cached route verdict per pair,
+    the slate artifacts present on each host, and the exact `ssh -N -L` command each cross-host pull would
+    run. The mesh audit / ownership-reconciliation view (PEER_TUNNEL_PLAN §6.2). `refresh="1"` first clears
+    the cached route verdicts so the next transfer re-probes (the DAG "recalculate" action).
+    """
+    function peer_plan_tool(regions::String; refresh::String = "0")::String
+        names = String[strip(s) for s in split(regions, ',') if !isempty(strip(s))]
+        isempty(names) && return "Give region names (comma-separated)."
+        ref = lowercase(strip(refresh)) in ("1", "true", "yes", "on")
+        try; return ReportEngine.peer_plan(names; refresh = ref)
+        catch e; return "❌ peer_plan failed: " * first(sprint(showerror, e), 200); end
     end
 
     """
@@ -1493,6 +1546,9 @@ function create_tools(GateTool::Type)
         GateTool("reap_worker", reap_worker),
         GateTool("region", region),
         GateTool("regions", regions),
+        GateTool("peer_introduce", peer_introduce),
+        GateTool("peer_teardown", peer_teardown),
+        GateTool("peer_plan", peer_plan_tool),
         GateTool("whereis", whereis),
         GateTool("memo_trace", memo_trace),
         GateTool("read", read_cells),
