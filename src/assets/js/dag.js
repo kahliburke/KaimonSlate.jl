@@ -561,6 +561,21 @@ function _dagLayoutCached(m, w, h, dir) {
 // into a single row. Cells in the same grid row/column share width/height so the boxes line up clean.
 // Dragging a cell between zones moves it to that compute env; cross-zone edges are the boundary
 // transfers. Recomputed per render (dagre per env); notebooks with regions are modest.
+// Node-by-id index, memoized per layout object (the placement optimizer builds a fresh candidate layout
+// each try, so this is O(nodes) once per candidate instead of an O(nodes) `.find` on every edge lookup).
+const _dagNdxCache = new WeakMap();
+function _dagNdx(L) { let mp = _dagNdxCache.get(L); if (!mp) { mp = new Map(L.nodes.map(n => [n.c.id, n])); _dagNdxCache.set(L, mp); } return mp; }
+function _dagSegX(a, b) { const d = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]); const p1 = [a[0], a[1]], p2 = [a[2], a[3]], p3 = [b[0], b[1]], p4 = [b[2], b[3]]; const d1 = d(p3, p4, p1), d2 = d(p3, p4, p2), d3 = d(p1, p2, p3), d4 = d(p1, p2, p4); return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0)); }
+// Placement objective: crossings + total length of the CROSS-region straight segments (lower = cleaner).
+function _dagCrossMetric(L) {
+  const nd = id => _dagNdx(L).get(id);
+  const segs = L.links.map(l => { const a = nd(l.s), b = nd(l.t); if (!a || !b || _dagAssignedRegion(a.c) === _dagAssignedRegion(b.c)) return null; return [a.x, a.y, b.x, b.y]; }).filter(Boolean);
+  let len = 0; segs.forEach(s => len += Math.hypot(s[2] - s[0], s[3] - s[1]));
+  let cr = 0; for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) if (_dagSegX(segs[i], segs[j])) cr++;
+  return { crossings: cr, length: len };
+}
+let _dagPlaceCache = { key: null, place: null };   // memoized optimizer placement — invariant to pane size
+
 function _dagPartitionedLayout(m, w, h) {
   const assigned = m.nodes.map(_dagAssignedRegion).filter(Boolean);
   const sides = ['', ...new Set([..._dagDeclaredRegions().map(r => r.name), ...assigned])];   // local + declared ∪ assigned
@@ -596,24 +611,138 @@ function _dagPartitionedLayout(m, w, h) {
   const target = Math.max(0.2, (w || 1) / (h || 1));                  // desired grid aspect ≈ the pane's
   let best = gridFor(1);
   for (let G = 2; G <= K; G++) { const g = gridFor(G); if (Math.abs(Math.log(g.gw / g.gh / target)) < Math.abs(Math.log(best.gw / best.gh / target))) best = g; }
-  const { G, rows, colW, rowH, gw, gh } = best;
+  const G = best.G, rows = best.rows, S = G * rows, slots = [];
+  for (let i = 0; i < S; i++) slots.push({ col: i % G, row: (i / G) | 0 });
 
-  // 3. Place each env's block into its grid cell (same row → aligned height; same col → aligned width),
-  //    centered horizontally in its cell; translate its nodes/links into global layout coords.
-  const colX = [0]; for (let c = 1; c < G; c++) colX[c] = colX[c - 1] + colW[c - 1] + CELLGAP;
-  const rowY = [0]; for (let r = 1; r < rows; r++) rowY[r] = rowY[r - 1] + rowH[r - 1] + CELLGAP;
-  const nodes = [], parts = [], linkPts = {};
-  cells.forEach((cell, i) => {
-    const col = i % G, r = (i / G) | 0, x0 = colX[col], y0 = rowY[r], x1 = x0 + colW[col], y1 = y0 + rowH[r];
-    const tx = x0 + Math.max(PAD, (colW[col] - cell.pw) / 2 + PAD), ty = y0 + HEAD + PAD;   // center the block in its cell
-    cell.snodes.forEach(n => nodes.push({ c: n.c, b: n.b, x: n.x + tx, y: n.y + ty }));
-    for (const k in cell.slinks) linkPts[k] = cell.slinks[k].map(p => [p[0] + tx, p[1] + ty]);
-    parts.push({ side: cell.side, x0, y0, x1, y1, empty: cell.empty });
-  });
-  const links = m.links.map(l => ({ s: l.source, t: l.target, dim: l.dim, manual: l.manual,
-                                    pts: linkPts[l.source + '>' + l.target] || null }));   // cross-zone → null → routed straight
-  return { nodes, links, gw: Math.max(gw, MINW), gh: Math.max(gh, MINH), partitions: parts };
+  // 3. build(place): realise an env→slot placement into geometry (same row → aligned height; same col →
+  //    aligned width; empty rows/cols collapse; each block centered in its cell). Coords are global.
+  const mkLinks = linkPts => m.links.map(l => ({ s: l.source, t: l.target, dim: l.dim, manual: l.manual, pts: linkPts[l.source + '>' + l.target] || null }));
+  function build(place) {
+    const envAtSlot = {}; place.forEach((sl, ei) => envAtSlot[sl] = ei);
+    const colW = new Array(G).fill(0), rowH = new Array(rows).fill(0);
+    for (let sl = 0; sl < S; sl++) { const ei = envAtSlot[sl]; if (ei == null) continue; colW[slots[sl].col] = Math.max(colW[slots[sl].col], cells[ei].pw); rowH[slots[sl].row] = Math.max(rowH[slots[sl].row], cells[ei].ph); }
+    const colX = [0]; for (let c = 1; c < G; c++) colX[c] = colX[c - 1] + colW[c - 1] + (colW[c - 1] ? CELLGAP : 0);
+    const rowY = [0]; for (let r = 1; r < rows; r++) rowY[r] = rowY[r - 1] + rowH[r - 1] + (rowH[r - 1] ? CELLGAP : 0);
+    const nodes = [], parts = [], linkPts = {};
+    cells.forEach((cell, ei) => {
+      const sl = place[ei], col = slots[sl].col, r = slots[sl].row, x0 = colX[col], y0 = rowY[r], x1 = x0 + colW[col], y1 = y0 + rowH[r];
+      const tx = x0 + Math.max(PAD, (colW[col] - cell.pw) / 2 + PAD), ty = y0 + HEAD + PAD;
+      cell.snodes.forEach(n => nodes.push({ c: n.c, b: n.b, x: n.x + tx, y: n.y + ty }));
+      for (const k in cell.slinks) linkPts[k] = cell.slinks[k].map(p => [p[0] + tx, p[1] + ty]);
+      parts.push({ side: cell.side, x0, y0, x1, y1, empty: cell.empty });
+    });
+    return { nodes, parts, linkPts };
+  }
+
+  // 4. Choose placement: brute-force the env→slot assignment whose realised layout scores lowest —
+  //    crossings then length (pulls connected envs adjacent, so their boundary-transfer routes stay short).
+  //    Node-avoidance is the router's job, so it's off this hot path. Memoized by (envs, sizes, grid) —
+  //    invariant to pane size — so a resize reuses it; env count is tiny, so the search is exact + cheap.
+  let place = cells.map((_, i) => i);
+  const pk = sides.join('|') + '#' + G + 'x' + rows + '#' + cells.map(c => c.pw + ',' + c.ph).join(';');
+  if (_dagPlaceCache.key === pk) place = _dagPlaceCache.place;
+  else {
+    let arr = 1; for (let i = 0; i < K; i++) arr *= (S - i);
+    if (arr <= 40320) {
+      const scoreOf = pl => { const b = build(pl); const cm = _dagCrossMetric({ nodes: b.nodes, links: mkLinks(b.linkPts) }); return cm.crossings * 800 + cm.length + 0.01 * pl[0]; };
+      let bestS = Infinity, bestPl = place, idxs = slots.map((_, i) => i);
+      const rec = ch => { if (ch.length === K) { const s = scoreOf(ch); if (s < bestS) { bestS = s; bestPl = ch.slice(); } return; } for (let i = 0; i < idxs.length; i++) { if (ch.includes(idxs[i])) continue; ch.push(idxs[i]); rec(ch); ch.pop(); } };
+      rec([]); place = bestPl;
+    }
+    _dagPlaceCache = { key: pk, place };
+  }
+  const fin = build(place);
+  const gw = Math.max(...fin.parts.map(p => p.x1), MINW), gh = Math.max(...fin.parts.map(p => p.y1), MINH);
+  return { nodes: fin.nodes, links: mkLinks(fin.linkPts), gw, gh, partitions: fin.parts };
 }
+// ── Boundary-transfer edge routing ──────────────────────────────────────────────────────────────
+// Cross-zone edges are the data hand-offs between compute envs. Rather than cut straight across (over
+// node boxes + zone-header text), they're ROUTED: A* on a coarse grid where node boxes AND zone headers
+// are walls, with a clearance gradient (stay off boxes), a turn penalty (few, gentle bends), fan-out
+// attach points (a node's transfers leave its border as a fan, not all from its centre), and a used-cell
+// penalty (parallel transfers separate into lanes). Paths are string-pulled to drop grid staircases.
+// Routes live in LAYOUT coords and are cached — recomputed only when the layout changes, NOT on a plain
+// pane resize (which only rescales) — so they're off the reactive render hot path.
+const _DAG_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+function _dagAng(a, b) { const na = Math.hypot(a[0], a[1]), nb = Math.hypot(b[0], b[1]); return Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1]) / (na * nb)))) / Math.PI; }
+function _dagHPush(h, it) { h.push(it); let i = h.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (h[p][0] <= h[i][0]) break; const t = h[p]; h[p] = h[i]; h[i] = t; i = p; } }
+function _dagHPop(h) { const top = h[0], last = h.pop(); if (h.length) { h[0] = last; let i = 0, n = h.length; for (; ;) { let l = 2 * i + 1, r = l + 1, m = i; if (l < n && h[l][0] < h[m][0]) m = l; if (r < n && h[r][0] < h[m][0]) m = r; if (m === i) break; const t = h[m]; h[m] = h[i]; h[i] = t; i = m; } } return top; }
+function _dagAstar(cost, used, free, start, goal, cols, rowsG) {
+  const walk = (r, c) => free(r, c) || cost[r][c] > 0, mc = (r, c) => (free(r, c) ? 1 : cost[r][c]) + (used ? used[r][c] : 0);
+  const SK = (r, c, d) => (r * cols + c) * 9 + (d + 1), h = (r, c) => Math.hypot(r - goal[0], c - goal[1]);
+  const s0 = SK(start[0], start[1], -1), came = new Map(), gsc = new Map([[s0, 0]]), pos = { [s0]: [start[0], start[1], -1] }, closed = new Set(), heap = [];
+  _dagHPush(heap, [h(start[0], start[1]), s0]);
+  while (heap.length) {
+    const bk = _dagHPop(heap)[1]; if (closed.has(bk)) continue; closed.add(bk);
+    const [r, c, pd] = pos[bk];
+    if (r === goal[0] && c === goal[1]) { const path = [[r, c]]; let k = bk; while (came.has(k)) { k = came.get(k); path.push([pos[k][0], pos[k][1]]); } return path.reverse(); }
+    for (let di = 0; di < 8; di++) { const dr = _DAG_DIRS[di][0], dc = _DAG_DIRS[di][1], nr = r + dr, nc = c + dc; if (nr < 0 || nc < 0 || nr >= rowsG || nc >= cols || !walk(nr, nc)) continue;
+      const turn = (pd >= 0 && pd !== di) ? 0.8 + _dagAng(_DAG_DIRS[pd], _DAG_DIRS[di]) * 2.4 : 0;
+      const ng = gsc.get(bk) + ((dr && dc) ? 1.414 : 1) * mc(nr, nc) + turn, nk = SK(nr, nc, di);
+      if (ng < (gsc.has(nk) ? gsc.get(nk) : Infinity)) { came.set(nk, bk); gsc.set(nk, ng); pos[nk] = [nr, nc, di]; _dagHPush(heap, [ng + h(nr, nc), nk]); }
+    }
+  }
+  return null;
+}
+// A node's cross-edges leave/enter along its border on the side facing each target, ordered by direction.
+function _dagFanAttach(L) {
+  const nd = id => _dagNdx(L).get(id), byNode = new Map();
+  L.links.forEach(l => { const a = nd(l.s), b = nd(l.t); if (!a || !b || _dagAssignedRegion(a.c) === _dagAssignedRegion(b.c)) return;
+    for (const [self, other] of [[a, b], [b, a]]) { const k = self.c.id; (byNode.get(k) || byNode.set(k, []).get(k)).push({ key: l.s + '>' + l.t, self, other }); } });
+  const attach = {};
+  for (const [nid, arr] of byNode) {
+    const self = arr[0].self, k = arr.length;
+    arr.sort((p, q) => Math.atan2(p.other.y - p.self.y, p.other.x - p.self.x) - Math.atan2(q.other.y - q.self.y, q.other.x - q.self.x));
+    arr.forEach((e, idx) => {
+      const dx = e.other.x - self.x, dy = e.other.y - self.y, horiz = Math.abs(dx) >= Math.abs(dy);
+      const span = (horiz ? self.b.h : self.b.w) * 0.62, off = k > 1 ? (idx - (k - 1) / 2) * Math.min(span / k, 15) : 0;
+      attach[e.key + '@' + nid] = horiz ? [self.x + Math.sign(dx || 1) * self.b.w / 2, self.y + off] : [self.x + off, self.y + Math.sign(dy || 1) * self.b.h / 2];
+    });
+  }
+  return attach;
+}
+function _dagRouteEdges(L) {
+  const CELL = 18, MG = 8, CLEAR = 2, SOFT = 2.4, HEADER = 30, nd = id => _dagNdx(L).get(id);
+  const attach = _dagFanAttach(L);
+  let maxx = 0, maxy = 0;
+  L.nodes.forEach(n => { maxx = Math.max(maxx, n.x + n.b.w); maxy = Math.max(maxy, n.y + n.b.h); });
+  L.partitions.forEach(p => { maxx = Math.max(maxx, p.x1); maxy = Math.max(maxy, p.y1); });
+  const cols = ((maxx / CELL) | 0) + 3, rowsG = ((maxy / CELL) | 0) + 3;
+  const cellsOf = n => [Math.max(0, ((n.x - n.b.w / 2 - MG) / CELL) | 0), Math.max(0, ((n.y - n.b.h / 2 - MG) / CELL) | 0), Math.min(cols - 1, ((n.x + n.b.w / 2 + MG) / CELL) | 0), Math.min(rowsG - 1, ((n.y + n.b.h / 2 + MG) / CELL) | 0)];
+  const wall = Array.from({ length: rowsG }, () => new Uint8Array(cols));
+  const rect = (x0, y0, x1, y1) => { const c0 = Math.max(0, (x0 / CELL) | 0), c1 = Math.min(cols - 1, (x1 / CELL) | 0), r0 = Math.max(0, (y0 / CELL) | 0), r1 = Math.min(rowsG - 1, (y1 / CELL) | 0); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) wall[r][c] = 1; };
+  L.nodes.forEach(n => { const [c0, r0, c1, r1] = cellsOf(n); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) wall[r][c] = 1; });
+  L.partitions.forEach(p => rect(p.x0, p.y0, p.x1, p.y0 + HEADER));   // zone header bars (region label + status) are obstacles too
+  const dist = Array.from({ length: rowsG }, () => new Int16Array(cols).fill(99)); const q = [];
+  for (let r = 0; r < rowsG; r++) for (let c = 0; c < cols; c++) if (wall[r][c]) { dist[r][c] = 0; q.push([r, c]); }
+  for (let head = 0; head < q.length; head++) { const [r, c] = q[head]; if (dist[r][c] >= CLEAR) continue; for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nr = r + dr, nc = c + dc; if (nr < 0 || nc < 0 || nr >= rowsG || nc >= cols) continue; if (dist[nr][nc] > dist[r][c] + 1) { dist[nr][nc] = dist[r][c] + 1; q.push([nr, nc]); } } }
+  const cost = Array.from({ length: rowsG }, (_, r) => Float32Array.from({ length: cols }, (_, c) => wall[r][c] ? 0 : 1 + (dist[r][c] > 0 && dist[r][c] <= CLEAR ? (CLEAR - dist[r][c] + 1) * SOFT : 0)));
+  const losBlocked = (x0, y0, x1, y1, free) => { const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (CELL * 0.6)); for (let i = 1; i < steps; i++) { const t = i / steps, r = ((y0 + (y1 - y0) * t) / CELL) | 0, c = ((x0 + (x1 - x0) * t) / CELL) | 0; if (r < 0 || c < 0 || r >= rowsG || c >= cols) continue; if (wall[r][c] && !free(r, c)) return true; } return false; };
+  const used = Array.from({ length: rowsG }, () => new Float32Array(cols)), MARK = 3.2;
+  const stamp = pts => { for (let s = 0; s + 1 < pts.length; s++) { const steps = Math.ceil(Math.hypot(pts[s + 1][0] - pts[s][0], pts[s + 1][1] - pts[s][1]) / (CELL * 0.5)); for (let i = 0; i <= steps; i++) { const t = i / steps, r = ((pts[s][1] + (pts[s + 1][1] - pts[s][1]) * t) / CELL) | 0, c = ((pts[s][0] + (pts[s + 1][0] - pts[s][0]) * t) / CELL) | 0; for (const [dr, dc] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) { const rr = r + dr, cc = c + dc; if (rr >= 0 && cc >= 0 && rr < rowsG && cc < cols) used[rr][cc] += (dr || dc) ? MARK * 0.5 : MARK; } } } };
+  const xlinks = L.links.filter(l => { const a = nd(l.s), b = nd(l.t); return a && b && _dagAssignedRegion(a.c) !== _dagAssignedRegion(b.c); })
+    .sort((p, q2) => { const pa = nd(p.s), pb = nd(p.t), qa = nd(q2.s), qb = nd(q2.t); return Math.hypot(qb.x - qa.x, qb.y - qa.y) - Math.hypot(pb.x - pa.x, pb.y - pa.y); });   // longest first
+  const routes = {};
+  xlinks.forEach(l => {
+    const a = nd(l.s), b = nd(l.t);
+    const ap = attach[l.s + '>' + l.t + '@' + a.c.id] || [a.x, a.y], bp = attach[l.s + '>' + l.t + '@' + b.c.id] || [b.x, b.y];
+    const fa = cellsOf(a), fbx = cellsOf(b), free = (r, c) => (r >= fa[1] && r <= fa[3] && c >= fa[0] && c <= fa[2]) || (r >= fbx[1] && r <= fbx[3] && c >= fbx[0] && c <= fbx[2]);
+    const path = _dagAstar(cost, used, free, [(ap[1] / CELL) | 0, (ap[0] / CELL) | 0], [(bp[1] / CELL) | 0, (bp[0] / CELL) | 0], cols, rowsG);
+    if (!path) return;
+    const pts = path.map(([r, c]) => [c * CELL + CELL / 2, r * CELL + CELL / 2]); pts[0] = ap; pts[pts.length - 1] = bp;
+    const out = [pts[0]]; let i = 0;
+    while (i < pts.length - 1) { let j = pts.length - 1; while (j > i + 1 && losBlocked(pts[i][0], pts[i][1], pts[j][0], pts[j][1], free)) j--; out.push(pts[j]); i = j; }
+    routes[l.s + '>' + l.t] = out; stamp(out);
+  });
+  return routes;
+}
+let _dagRouteCache = { sig: null, routes: null };
+function _dagCachedRoutes(L) {
+  const sig = L.nodes.map(n => n.c.id + ':' + (n.x | 0) + ',' + (n.y | 0)).join('|') + '#' + L.partitions.map(p => (p.x0 | 0) + ',' + (p.y0 | 0) + ',' + (p.x1 | 0)).join('|');
+  if (_dagRouteCache.sig !== sig) _dagRouteCache = { sig, routes: _dagRouteEdges(L) };
+  return _dagRouteCache.routes;
+}
+
 // Partitions → zone rectangles for rendering + drop hit-testing. `local` is included (neutral tint);
 // dropping a cell there un-tags it.
 function _dagPartitionZones(parts) {
@@ -674,8 +803,14 @@ function _dagOption() {
   // segments — every VISIBLE dataflow edge carries dagre-routed waypoints.
   const tb = dir === 'TB';                           // edge tangents follow the flow axis
   const ndOf = {}; L.nodes.forEach(n => { ndOf[n.c.id] = n; });
+  // Cross-zone (boundary-transfer) edges carry no dagre waypoints; route them around the boxes + headers.
+  // The routed polyline becomes the edge's `pts`, which the edge renderItem already draws as a smooth
+  // spline — so no renderItem changes. Cached, so a plain pane resize doesn't re-route.
+  const _routes = _partitioned ? _dagCachedRoutes(L) : null;
   L.links.forEach(l => {
     if (l.pts) return;
+    const rt = _routes && _routes[l.s + '>' + l.t];
+    if (rt) { l.pts = rt; return; }
     const a = ndOf[l.s], z = ndOf[l.t];
     if (!a || !z) { l.pts = [[0, 0], [0, 0]]; return; }
     const dx = z.x - a.x, dy = z.y - a.y;
