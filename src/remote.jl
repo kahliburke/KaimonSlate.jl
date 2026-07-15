@@ -332,10 +332,37 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     catch; false; end
     rm(tmp; force = true)
     scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return (false, ""))
-    jcmd = _ssh(host, `julia --startup-file=no $remote`)
+    jcmd = _ssh(host, `$(_julia_sh("julia --startup-file=no $remote"))`)
     ok, out = stream ? _run_streamed(jcmd, what; online = online) : _run_logged(jcmd, what)
     try; run(pipeline(_ssh(host, `rm -f $remote`); stdout = devnull, stderr = devnull)); catch; end
     return (ok, out)
+end
+
+# Every remote `julia` call goes through this PATH prefix. juliaup installs its launcher shim at
+# `~/.juliaup/bin/julia`, which a NON-interactive `ssh host cmd` won't see on PATH under bash (bash
+# sources nothing non-interactively; zsh sources ~/.zshenv, which is why zsh hosts "just work"). Prepend
+# it so `julia` resolves regardless of the login shell; harmless when julia is a system binary already on
+# PATH. `\$HOME`/`\$PATH` stay unescaped for the REMOTE shell to expand.
+_julia_sh(cmd::AbstractString) = "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; $cmd"
+
+# Ensure a usable `julia` on `host`, installing juliaup UNATTENDED when it's missing. Linux/macOS only —
+# `uname -s` fails/empties on Windows, where we skip and leave it to a manual install (per the agreed
+# scope). Idempotent: a present julia (system or juliaup) short-circuits. Returns true iff julia is
+# available afterward. Run at the top of provisioning and the preflight Julia step.
+function _ensure_julia!(host)
+    have, _ = _ssh_capture(host, `$(_julia_sh("command -v julia"))`)
+    have && return true
+    uok, uname = _ssh_capture(host, `uname -s`)
+    (uok && !isempty(strip(uname))) ||
+        (_rlog("provision: no `julia` on $host and it isn't a Unix host — install Julia manually (juliaup)"); return false)
+    _rlog("provision: `julia` missing on $host ($(strip(uname))) — installing juliaup unattended (downloads Julia; a couple of minutes)…")
+    # NB: `sh -s` reads the installer SCRIPT from stdin (the curl pipe) — do NOT redirect stdin (a
+    # `< /dev/null` starves it and curl dies with a broken pipe). `--yes` runs it unattended.
+    _run_streamed(_ssh(host, `$("curl -fsSL https://install.julialang.org | sh -s -- --yes")`),
+                  "install juliaup on $host"; online = _bringup_note)
+    ok, _ = _ssh_capture(host, `$(_julia_sh("command -v julia"))`)
+    ok || _rlog("provision: juliaup install on $host did not yield a working `julia` (see remote.log)")
+    return ok
 end
 
 # Parse ~/.ssh/config for `Host` aliases (skipping wildcard patterns) — the candidate hosts the
@@ -423,6 +450,10 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     # host is a typo or your ssh config/key isn't set up.
     _ssh_test(host, `true`) ||
         error("Cannot reach '$host' over SSH — check the hostname and your ~/.ssh/config (key-based auth is required; try `ssh $host` in a terminal).")
+    # 0. Julia — a fresh box may have none; install juliaup unattended (Linux/macOS). Everything below
+    #    needs `julia`, so this gates the rest.
+    _ensure_julia!(host) ||
+        error("provision: no usable `julia` on '$host' (auto-install skipped/failed — Windows, or juliaup install error). Install Julia (juliaup) manually and retry.")
     # 1. worker payload
     srcdir = @__DIR__
     tmp = mktempdir()
@@ -655,7 +686,7 @@ function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; forc
     catch; false; end
     rm(tmp; force = true)
     ok || (_rlog("sysimg: scp build script → $host failed (skip)"); return nothing)
-    launch = "cd \$HOME && if command -v setsid >/dev/null 2>&1; then setsid nohup julia --startup-file=no $remote > $logf 2>&1 & else nohup julia --startup-file=no $remote > $logf 2>&1 & fi"
+    launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && if command -v setsid >/dev/null 2>&1; then setsid nohup julia --startup-file=no $remote > $logf 2>&1 & else nohup julia --startup-file=no $remote > $logf 2>&1 & fi"
     _rlog("sysimg: launching detached build on $host  (log: $host:$logf)")
     _ssh_ok(host, `$launch`) || _rlog("sysimg: build launch returned nonzero on $host (it may still be starting)")
     return nothing
@@ -1027,7 +1058,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
         "SI=\$(cat $sysreldir/current 2>/dev/null); JOPT=''; if [ -n \"\$SI\" ] && [ -f \"\$HOME/$sysreldir/\$SI.so\" ]; then JOPT=\"--sysimage=\$HOME/$sysreldir/\$SI.so\"; fi" :
         "JOPT=''"   # region didn't opt into a sysimage → always a plain boot
     jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $remote_script '$tag'"
-    launch = "cd \$HOME && export KAIMONSLATE_WORKER='$tag' && $siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
+    launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
     # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
     # (`sh -c $launch` would be re-flattened by ssh into separate tokens and mis-parsed.)
@@ -1504,9 +1535,10 @@ function preflight_remote(host::AbstractString; transport::Symbol = :tunnel, on_
     s.status == "ok" || return _pfresult(host, transport, steps)
 
     s = _pfstep!(steps, "Julia present", on_step) do
-        okj, out = _ssh_capture(host, `julia --version`)
-        okj ? ("ok", strip(out)) :
-            ("fail", "`julia` not on PATH on '$host' — install juliaup (`curl -fsSL https://install.julialang.org | sh`) or add it to the login PATH")
+        _ensure_julia!(host) ||
+            return ("fail", "no usable `julia` on '$host' and auto-install skipped/failed (Windows, or juliaup error) — install Julia (juliaup) manually")
+        okj, out = _ssh_capture(host, `$(_julia_sh("julia --version"))`)
+        okj ? ("ok", strip(out)) : ("fail", "`julia` resolved but `julia --version` failed on '$host'")
     end
     s.status == "ok" || return _pfresult(host, transport, steps)
 
