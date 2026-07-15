@@ -96,11 +96,15 @@
   }
   window.renderRunPill = renderPill;   // topbar chrome calls this after a delete / state pull, so a resolved error clears
 
+  // Tick the live elapsed time INTO THE TIME SLOT (.cdur), not the state badge — so there's one time
+  // display that counts up during the run and settles to the worker's final duration on celldone (the
+  // header re-renders only on state changes, so between them this owns .cdur). The badge stays the
+  // state word ("running"); progress % rides the floating chip. Formatted to match the final "N ms".
   function renderTimers() {
     if (!revealed) return;
     for (const [id, t] of running) {
-      const b = document.querySelector(`.cell[data-cid="${id}"] .badge`);
-      if (b) b.textContent = 'running ' + fmt(now() - t) + (id === activeCell() && prog.frac > 0 ? ' · ' + Math.round(prog.frac * 100) + '%' : '');
+      const d = document.querySelector(`.cell[data-cid="${id}"] .cdur`);
+      if (d) d.textContent = Math.round(now() - t) + ' ms';
     }
   }
 

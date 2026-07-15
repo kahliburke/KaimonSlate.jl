@@ -200,6 +200,17 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     }
     const badge = el.querySelector('.badge');     // header renders c.state; reflect the live state
     if (badge && badge.textContent !== state) badge.textContent = state;
+    // Durable-cache badge — the memo verdict arrives with a run (celldone), AFTER the header mounted,
+    // so patch it in place (like `.badge`) keyed on memo+reason rather than re-rendering the header.
+    const head = el.querySelector('.cellhead');
+    if (head) {
+      const mkey = (c.memo || '') + '\x1f' + (c.memoWhy || '');
+      if (head.dataset.memokey !== mkey) {
+        head.dataset.memokey = mkey;
+        const slot = head.querySelector('.memoslot');   // fixed-width slot rendered in the header; just refill it
+        if (slot) slot.innerHTML = window._memoBadge(c);
+      }
+    }
 
     if (c.kind === 'md') {
       const md = el.querySelector('.md'); const h = window.mdHtml(c);

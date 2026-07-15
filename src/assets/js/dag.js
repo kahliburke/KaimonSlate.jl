@@ -1076,7 +1076,7 @@ function _dagCard(id, cx, cy) {
   // Condensed stats — four chips carry what matters; the strip shows the shape.
   const st = c.stats;
   const chips = st ? [
-    ['last', _dagFmtMs(st.last_ms) + (st.memo ? ` ${st.memo === 'restored' ? '♻' : st.memo === 'handle' ? '🔌' : '💾'}` : '') + ` · ${_dagAgo(st.last_ts)}`],
+    ['last', _dagFmtMs(st.last_ms) + (st.memo ? ` ${window._memoGlyph(st.memo)}` : '') + ` · ${_dagAgo(st.last_ts)}`],
     ['typical', `${_dagFmtMs(st.mean_ms)} ± ${_dagFmtMs(st.std_ms)}`],
     ['total', `${_dagFmtMs(st.total_ms)} · ×${st.evals}${st.restores ? ` ♻${st.restores}` : ''}`],
     ['used downstream', `↓ ${st.pulls}`],
@@ -1094,7 +1094,7 @@ function _dagCard(id, cx, cy) {
       `<span class="dagcard-st" style="color:${_dagColor(P, s)}">${s}</span>` +
       `<span class="dagcard-kind" style="color:${K.hue}">${kind}</span></div>` +
     (c.opaque ? `<div class="dagcard-dim">⚠ this cell couldn’t be parsed — its dependencies are unknown, so the engine treats it as a barrier (everything below it is conservatively stale). Its graph edges are shown faded.</div>` : '') +
-    (st && st.memo === 'handle' ? `<div class="dagcard-dim">🔌 produces a LIVE HANDLE (a DB / socket / file) — it isn’t cached (a restore would hand back a dangling pointer) and it can’t cross a region boundary. Tag this cell <code>resource</code> so each side — and each restore — opens its own.</div>` : '') +
+    (st && st.memo === 'handle' ? `<div class="dagcard-dim">⚡ produces a LIVE HANDLE (a DB / socket / file) — it isn’t cached (a restore would hand back a dangling pointer) and it can’t cross a region boundary. Tag this cell <code>resource</code> so each side — and each restore — opens its own.</div>` : '') +
     (err ? `<pre class="dagcard-err">${_esc(err)}</pre>` : '') +
     (prev ? `<div class="dagcard-sec">output</div>${prev}` : '') +
     (chips.length

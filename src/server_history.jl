@@ -493,7 +493,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
                    nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
-                   bibctx = nothing, figidx = nothing,
+                   bibctx = nothing, figidx = nothing, report = nothing,
                    backref::Dict{String,Vector{String}} = Dict{String,Vector{String}}())
     fignums = figidx === nothing ? Dict{String,Int}() : figidx.numbers
     figrefs = figidx === nothing ? Dict{String,Tuple{Int,String}}() : figidx.labels
@@ -521,11 +521,26 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
         "defs"    => c.kind == CODE ? sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
-    # Durable-cache verdict for THIS run ("restored" = came back from the memo cache without recompute,
-    # "stored" = computed then persisted, "handle" = a live handle that can't be cached). Drives the
-    # run-status restore badge + "N restored" counter (a fast restore burst otherwise reads as a glitch),
-    # and mirrors the DAG's cache indicator. Only a code cell that actually ran carries a verdict.
-    (c.kind == CODE && c.output !== nothing && !isempty(c.output.memo)) && (d["memo"] = c.output.memo)
+    # Durable-cache badge. The RUNTIME verdict wins ("restored" = came back from the memo cache without
+    # recompute, "stored" = computed then persisted, "handle" = a live handle, "uncacheable" = keyed +
+    # expensive but the store failed — with a reason). When a cell has no runtime verdict (ran cheap, or
+    # not yet run), fall back to a STATIC classification (`_memo_status`, needs the dep graph) so a
+    # structurally-uncacheable cell (nocache/volatile/`using` barrier/impure upstream) still explains
+    # itself. "cacheable"/"" ⇒ no badge. Drives the cell cache badge + the run-status restore counter
+    # (a fast restore burst otherwise reads as a glitch), mirroring the DAG's cache indicator.
+    memostate = ""; memowhy = ""    # computed once, shared by the cell badge (here) AND the DAG stats card (below)
+    if c.kind == CODE
+        o = c.output
+        rt = o === nothing ? "" : o.memo
+        memostate, memowhy = rt in ("restored", "stored", "handle", "uncacheable") ? (rt, o.memo_why) :
+                             report !== nothing ? ReportEngine._memo_status(report, c) : ("", "")
+        (memostate == "handle" && isempty(memowhy)) && (memowhy = "produces a live handle (DB/socket/file) — tag `resource`")
+        memostate in ("restored", "stored", "handle", "uncacheable") || (memostate = "")   # "cacheable"/"" ⇒ no badge
+        if !isempty(memostate)
+            d["memo"] = memostate
+            isempty(memowhy) || (d["memoWhy"] = memowhy)
+        end
+    end
     if !isempty(c.controls)
         # resolve each column's names to (defining cell, spec); drop unknown names + empty columns
         cols = [[_control_spec(bindref[n]...) for n in col if haskey(bindref, n)] for col in c.controls]
@@ -569,7 +584,14 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # Only present once the cell has completed at least one run this session.
     if !isempty(nbid)
         st = _cell_stats_json(nbid, c.id)
-        st === nothing || (d["stats"] = st)
+        if st !== nothing
+            # Show the SAME durable-cache verdict on the DAG stats card as the cell badge — including the
+            # STATIC `uncacheable` cases that the runtime `last_memo` alone doesn't record (nocache/
+            # volatile/impure-upstream), so the two surfaces never disagree.
+            st["memo"] = memostate
+            isempty(memowhy) || (st["memoWhy"] = memowhy)
+            d["stats"] = st
+        end
     end
     if c.output !== nothing && c.output.exception !== nothing
         el = ReportRender._cell_error_line(c.output, c.id)   # offending cell line → editor highlight + jump
@@ -800,7 +822,7 @@ function state_json(nb::LiveNotebook)
     bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
     figidx = figure_index(nb.report)            # caption numbering + [@fig:] cross-ref labels
     meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibctx = bibctx, figidx = figidx, backref = br) for c in nb.report.cells]
+        cited = cited, bibctx = bibctx, figidx = figidx, backref = br, report = nb.report) for c in nb.report.cells]
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
     isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.

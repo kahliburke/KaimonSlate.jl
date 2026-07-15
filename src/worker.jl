@@ -703,7 +703,13 @@ function _eval_one(source::String, filename::String, memo_key::String,
     # A cell that writes a live handle can't be cached (and shouldn't cross a region) — surface it as a
     # `handle` memo status (reusing the existing memo field) so the UI can nudge the `resource` tag; the
     # binding name/type live in the memo trace (`slate_memo_trace`). This is the author-time advisory.
-    haskey(tr, "handle_hint") && return merge(r, (memo = "handle",))
+    haskey(tr, "handle_hint") && return merge(r, (memo = "handle", memo_why = String(get(tr, "store_fail", ""))))
+    # A keyed, expensive cell whose STORE failed for another reason (defines a notebook-local function,
+    # an unserializable global, a manifest write error) — surface it as `uncacheable` WITH the reason so
+    # the badge explains why it won't persist. `store_fail` is set only when a store was actually
+    # attempted (keyed + over threshold), so an unkeyed / below-threshold cell never lands here.
+    (haskey(tr, "store_fail") && !isempty(memo_key)) &&
+        return merge(r, (memo = "uncacheable", memo_why = String(tr["store_fail"])))
     return r
 end
 

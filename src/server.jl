@@ -328,7 +328,7 @@ function server_refresh(nb::LiveNotebook, vars)
         bindref, hostednames = _bind_index(nb.report)
         bibctx = _bib_link_ctx(nb)
         figidx = figure_index(nb.report)
-        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx) for c in nb.report.cells if c.id in changed]
+        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx, report = nb.report) for c in nb.report.cells if c.id in changed]
         msg = "refresh:" * JSON.json(Dict("cells" => cells))
     end
     isempty(msg) || _broadcast(nb, msg)
@@ -361,7 +361,7 @@ function server_asset_changed(nb::LiveNotebook, changed::Vector{String})
         bindref, hostednames = _bind_index(nb.report)
         bibctx = _bib_link_ctx(nb)
         figidx = figure_index(nb.report)
-        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx)
+        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx, report = nb.report)
                  for c in nb.report.cells if c.id in changedids]
         msg = "refresh:" * JSON.json(Dict("cells" => cells))
     end
@@ -382,7 +382,7 @@ function _broadcast_progress(nb::LiveNotebook, cell)
             bindref, hostednames = _bind_index(nb.report)
             bibctx = _bib_link_ctx(nb)
             figidx = figure_index(nb.report)
-            _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx)))
+            _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx, report = nb.report)))
         end
     catch
     end

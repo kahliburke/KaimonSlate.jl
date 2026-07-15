@@ -161,7 +161,7 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
         margin:14px 0; background:var(--bg2); overflow:hidden;
         scroll-margin-top:68px; }   /* jumps (DAG/TOC/nav) land the cell HEADER below the sticky topbar, with breathing room */
-.cell.state-fresh   { border-left-color:var(--accent); }
+.cell.state-fresh   { border-left-color:var(--green); }   /* settled / up-to-date → green */
 .cell.state-stale   { border-left-color:var(--gold); }
 .cell.state-edited  { border-left-color:var(--orange); }
 .cell.state-running { border-left-color:var(--accent); animation:pulse 1s infinite; }   /* executing → blue, pulsing */
@@ -171,16 +171,16 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .focusbar:hover { background:rgba(86,156,214,.22); }
 .cell.state-errored { border-left-color:var(--red); }
 @keyframes pulse { 50% { border-left-color:var(--bg2); } }
-.cellhead { display:flex; align-items:center; gap:8px; padding:3px 10px; background:var(--bg3);
-            border-bottom:1px solid var(--border); font-size:.74rem; min-height:27px; }
-.cellhead .run { padding:0 7px; font-size:.72rem; }
+.cellhead { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; padding:3px 10px; background:var(--bg3);
+            border-bottom:1px solid var(--border); font-size:.82rem; min-height:27px; }
+.cellhead .run { padding:0 7px; font-size:.80rem; }
 .cellhead .hspace { flex:1; }
 .cellacts { display:flex; gap:3px; align-items:center; opacity:0; transition:opacity .12s; }
 .cell:hover .cellacts, .cell.selected .cellacts { opacity:1; }
-.cellacts button { padding:0 6px; font-size:.7rem; }
-.cellhead .drag { cursor:grab; color:var(--dim); padding:0 4px 0 0; user-select:none; font-size:.9rem; }
+.cellacts button { padding:0 6px; font-size:.78rem; }
+.cellhead .drag { cursor:grab; color:var(--dim); padding:0 4px 0 0; user-select:none; font-size:.98rem; }
 .cellhead .drag:active { cursor:grabbing; } .cell:hover .cellhead .drag { color:var(--text); }
-.cellhead .collapse { background:none; border:none; color:var(--dim); cursor:pointer; padding:0 2px; font-size:.7rem; line-height:1; }
+.cellhead .collapse { background:none; border:none; color:var(--dim); cursor:pointer; padding:0 2px; font-size:.78rem; line-height:1; }
 .cellhead .collapse:hover { color:var(--accent); }
 .cell.collapsed > :not(.cellhead) { display:none; }                 /* fold to just the header */
 .cell.collapsed .cellhead { opacity:.78; }
@@ -263,12 +263,24 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
 .tvtab th { text-align:left; padding:1px 16px 4px 0; color:var(--dim); font-weight:500; white-space:nowrap; }
 .tvtab td { padding:1px 16px 1px 0; vertical-align:top; }
 .tvtab .tv-it { color:var(--dim); text-align:right; padding-right:12px; user-select:none; }
-.badge { text-transform:uppercase; letter-spacing:.04em; font-size:.68rem; min-width:52px; text-align:right; color:var(--dim); }
-.cell.state-fresh   .badge { color:var(--accent); }
+/* Fixed width sized to the longest state word (RUNNING / ERRORED) so a state change never resizes the
+   badge and bounces the run-info row to its left. */
+.badge { text-transform:uppercase; letter-spacing:.04em; font-size:.76rem; width:66px; text-align:right; color:var(--dim); flex:0 0 auto; }
+.cell.state-fresh   .badge { color:var(--green); }
 .cell.state-stale   .badge { color:var(--gold); }
 .cell.state-edited  .badge { color:var(--orange); }
 .cell.state-running .badge { color:var(--accent); }
 .cell.state-errored .badge { color:var(--red); }
+/* Durable-cache badge — sits with the run time (`.cdur`), before the action buttons. `.ok` =
+   persisted/restored (a stage that caches), `.warn` = won't cache (hover for why). Muted so it reads
+   as metadata, not an alert. Negative left margin snugs it to the time (tightening the header's 8px
+   flex gap); `.cellacts` gets extra left margin so the run-info group reads apart from the buttons. */
+/* Fixed-width slot right after the run time — reserved even when empty so times stay column-aligned. */
+.memoslot { display:inline-flex; justify-content:center; align-items:center; width:1.15em; margin-left:-4px; }
+.memobadge { font-size:.80rem; opacity:.82; cursor:default; user-select:none; }
+.memobadge.warn { opacity:.92; }
+.memobadge:hover { opacity:1; }
+.memobadge.memo-stored { color:var(--green); opacity:.95; }   /* cached — the green database cylinder */
 .cid { color:var(--dim); font-family:monospace; }
 /* Transient "restored to <age>" pill while ⌘Z steps a cell back through its snapshots. */
 .cellhead .histago {
@@ -508,6 +520,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md .katex-display { overflow-x:auto; overflow-y:hidden; }
 .md .katex-display .katex { font-size:1.3em; }
 .md { padding:12px 16px; }
+/* The CELL also carries a bare `md` class (`class="cell md …"`), so the rule above would pad the whole
+   cell too — insetting the header and double-padding the body. Scope the padding to the body by zeroing
+   it on the cell (the `.md` body div keeps its own). */
+.cell.md { padding:0; }
 /* Collapse the first/last block's OWN margin into the padding: a markdown cell that opens with a
    heading/paragraph otherwise stacks that element's default margin on top of the padding, doubling the
    space above (and below) the block — reads as too much air, worst in a reading pass. */
@@ -524,7 +540,10 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md .itable { margin:8px 0; display:block; }                                /* {{ slate_table(…) }} */
 .srcedit { padding:4px 6px; }
 .mdhint { color:var(--dim); font-size:.7rem; padding:3px 4px 0; }
-.cdur { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.7rem; }
+/* Reserve room for the run time up to a 6-digit "999999 ms" (9 monospace chars, right-aligned so the
+   number's right edge is fixed); a longer time overflows and pushes the buttons rather than clipping.
+   `nowrap` so the header never wraps. */
+.cdur { color:var(--dim); font-family:'Cascadia Code',monospace; font-size:.78rem; min-width:9ch; text-align:right; white-space:nowrap; flex:0 0 auto; }
 .hint { color:var(--dim); font-size:.72rem; }
 .addmenu { position:fixed; z-index:55; background:var(--bg2); border:1px solid var(--border); border-radius:8px;
            padding:4px; box-shadow:0 8px 24px rgba(0,0,0,.5); display:none; }

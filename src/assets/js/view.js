@@ -222,6 +222,27 @@ function cellRegionChip(c) {
 
 // One compact header line per cell: run + id (left), then duration, hover-revealed
 // actions, and the state badge (right). Replaces the old two-row bar+head.
+// Durable-cache badge for a code cell (mirrors the DAG's cache indicator). `c.memo` is the verdict
+// and `c.memoWhy` the reason (see cell_json / `_memo_status`): restored/stored come from a run,
+// handle/uncacheable explain why a stage WON'T persist — the signal a pipeline author wants at a
+// glance. Absent (cacheable-but-cheap / not-yet-run / markdown) ⇒ no badge.
+// Single source of truth for the durable-cache glyphs — shared by the cell badge (_memoBadge) and the
+// DAG stats card (dag.js `window._memoGlyph`). Change a glyph here and both surfaces update together.
+function _memoGlyph(state) {
+  return ({ restored: '♻', stored: '⛁', handle: '⚡', uncacheable: '👻' })[state] || '';
+}
+function _memoBadge(c) {
+  const meta = {
+    restored:    ['ok',   'restored from the durable cache — no recompute'],
+    stored:      ['ok',   'cached — computed this run, then persisted to the durable store'],
+    handle:      ['warn', 'live handle — not cached'],
+    uncacheable: ['warn', 'not cached'],
+  }[c.memo];
+  if (!meta) return '';
+  const [cls, base] = meta;
+  const tip = c.memoWhy ? base + ' — ' + c.memoWhy : base;
+  return `<span class="memobadge ${cls} memo-${c.memo}" title="${_esc(tip)}">${_memoGlyph(c.memo)}</span>`;
+}
 function cellHeaderInner(c) {
   const isCode = c.kind === 'code' && !hasBinds(c);
   const other = c.kind === 'md' ? 'code' : 'md';
@@ -251,7 +272,6 @@ function cellHeaderInner(c) {
         ? `<span class="dupwarn" title="needs= names no earlier code cell (deleted, moved below, or markdown) — this manual edge is inert">🔗⚠ ${bad.map(_esc).join(', ')}</span>` : '';
     })()) +
     '<span class="hspace"></span>' +
-    `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
     '<span class="cellacts">' +
       `<button class="askai" onclick="askCell('${c.id}')" title="ask the AI about this cell">✨</button>` +
       (c.kind === 'code' ? `<button onclick="toggleDeps('${c.id}')" title="focus: show only this cell's dependency chain (Esc to exit)">🔗</button>` : '') + autoctl +
@@ -265,6 +285,10 @@ function cellHeaderInner(c) {
       `<button class="addbtn" onclick="addCell('${c.id}','code')" oncontextmenu="addMenu(event,'${c.id}');return false" title="add below · right-click for type">＋</button>` +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
+    // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
+    // width) · cache verdict (fixed slot) · state badge (fixed width) — so nothing floats mid-header.
+    `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
+    `<span class="memoslot">${_memoBadge(c)}</span>` +
     `<span class="badge">${c.state}</span>`;
 }
 function cellHeader(c) { return '<div class="cellhead">' + cellHeaderInner(c) + '</div>'; }

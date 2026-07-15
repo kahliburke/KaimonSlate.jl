@@ -282,6 +282,20 @@ end
     @test (standalone!(m; dir = "/tmp"); Core.eval(m, :n)) == 42
 end
 
+@testset "memo status classifier (cache badge)" begin
+    src = "#%% code id=cheap\nx = 1 + 1\n#%% code id=nc nocache\ny = 2\n#%% code id=vol volatile\nz = 3\n" *
+          "#%% code id=downvol\nw = z + 1\n#%% code id=uses\nusing Statistics\n#%% md id=note\ntext"
+    r = parse_report(src)
+    build_dependencies!(r)
+    S = id -> ReportEngine._memo_status(r, r.cells[findfirst(c -> c.id == id, r.cells)])
+    @test S("cheap")[1] == "cacheable"                                    # pure, keyable → cacheable (no badge)
+    @test S("nc")[1] == "uncacheable" && occursin("nocache", S("nc")[2])  # explicit opt-out
+    @test S("vol")[1] == "uncacheable" && occursin("deterministic", S("vol")[2])   # volatile
+    @test S("downvol")[1] == "uncacheable" && occursin("upstream", S("downvol")[2]) # impure upstream poisons the key
+    @test S("uses") == ("", "")                                          # pure `using` → not a badge target
+    @test S("note") == ("", "")                                          # markdown → not a badge target
+end
+
 @testset "Slate.config footer — per-notebook settings round-trip" begin
     r = parse_report("#%% code id=a\nx = 1")
     r.meta["parallel"] = true

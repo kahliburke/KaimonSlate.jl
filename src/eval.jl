@@ -395,38 +395,41 @@ end
 # A total-ish cache key: this cell's source + the sources of its transitive upstream cells + the
 # values of any @bind variables in the read-closure. The worker folds in the Revise'd `src/` digest
 # and the resolved Manifest, completing the key so a src/dep/package change invalidates the entry.
-function _memo_key(report::Report, cell::Cell)
-    _memoizable(cell) || return ""
-    byid = report.byid
+# The transitive upstream-cell id closure of `cell` (its `deps`, followed to a fixpoint). Pure graph
+# walk (no I/O); shared by `_memo_key` and the badge classifier `_memo_status`.
+function _dep_closure(byid, cell::Cell)
     closure = Set{String}(); stack = collect(cell.deps)
     while !isempty(stack)
         id = pop!(stack); (id in closure || !haskey(byid, id)) && continue
         push!(closure, id); union!(stack, byid[id].deps)
     end
-    # Impurity propagates: the key digests upstream SOURCES, so it's only total if every upstream
-    # value is a function of its source. A `nocache`/`volatile` upstream (impure by declaration —
-    # re-runs produce fresh values from the same source) or an :opaque barrier (include(): effects
-    # from outside the source) breaks that — restoring downstream against a re-run impure producer
-    # would silently resurrect results computed from the PREVIOUS run's values. Unkeyable → no memo.
-    # EXCEPTION: an :opaque upstream that is PURELY `using`/`import` statements. Its effect is a
-    # function of (its source, the resolved environment) — the source is digested right here and
-    # the env by the worker's manifest digest — so it can't smuggle in outside state the way
-    # `include()` can. This matters at a very specific moment: a `using` cell is :opaque until its
-    # post-run macro refinement, and a kernel switch resets that — so at boot-memo-carry time EVERY
-    # downstream cell was transiently unkeyable and the carry shipped nothing (seen live). Judging
-    # by SOURCE keeps the key identical before and after refinement.
+    return closure
+end
+
+# True if any upstream cell in `closure` POISONS the memo key. Impurity propagates: the key digests
+# upstream SOURCES, so it's only total if every upstream value is a function of its source. A
+# `nocache`/`volatile` upstream (re-runs produce fresh values from the same source) or an :opaque
+# barrier (include(): effects from outside the source) breaks that — restoring downstream against a
+# re-run impure producer would silently resurrect the PREVIOUS run's values. EXCEPTION: an :opaque
+# upstream that is PURELY `using`/`import` — its effect is a function of (source, resolved env), both
+# already in the key. `:resource` is DETERMINISTIC-external (key-transparent: its source is still
+# digested, so an edit invalidates dependents). Shared cheap check (no I/O) for `_memo_key` (→
+# unkeyable) and `_memo_status` (→ the badge reason), so the two can't drift.
+function _key_poisoned(byid, closure)
     for id in closure
         f = byid[id].flags
-        # `:resource` — a user-asserted DETERMINISTIC external resource (a DB connection re-opened
-        # from a fixed file, etc.). Its handle is uncacheable so it re-runs every open, but its
-        # OUTPUT is a pure function of its reads + the resource, so it does NOT poison downstream:
-        # key-transparent, like the `_is_pure_using` exception (its source is still digested into
-        # `depsrc` below, so editing it invalidates dependents). The user owns the determinism
-        # claim — any TRULY external drift is pinned by pairing the tag with an `@asset` on the file.
         :resource in f && continue
-        (:nocache in f || :volatile in f) && return ""
-        (:opaque in f && !_is_pure_using(byid[id].source)) && return ""
+        (:nocache in f || :volatile in f) && return true
+        (:opaque in f && !_is_pure_using(byid[id].source)) && return true
     end
+    return false
+end
+
+function _memo_key(report::Report, cell::Cell)
+    _memoizable(cell) || return ""
+    byid = report.byid
+    closure = _dep_closure(byid, cell)
+    _key_poisoned(byid, closure) && return ""    # an impure upstream makes the key non-total
     depsrc = sort!([(id, byid[id].src_hash) for id in closure])
     readnames = copy(cell.reads); for id in closure; union!(readnames, byid[id].reads); end
     bvals = Tuple{String,Any}[]
@@ -449,6 +452,34 @@ function _memo_key(report::Report, cell::Cell)
     end
     core = (cell.source, (:trace in cell.flags), depsrc, bvals)
     return string(hash(isempty(assets) ? core : (core..., assets)); base = 16)   # asset-free cells keep their old key
+end
+
+# ── Memo status for the UI cache badge ─────────────────────────────────────────────────────────
+# A human-facing classification of a code cell's durable-cache disposition, for the notebook's cache
+# badge. Returns (state, why): state ∈ "cacheable" | "uncacheable" | "" (not a badge target —
+# markdown). Reuses the ACTUAL `_memoizable`/`_memo_key` decision so the badge can never disagree with
+# whether the cell truly caches; it only ADDS the reason text. A RUNTIME verdict (restored/stored/
+# handle from the run wire) takes precedence over this static view where present.
+function _memo_status(report::Report, cell::Cell)
+    cell.kind == CODE || return ("", "")
+    # A pure `using`/`import` cell is namespace plumbing, not a caching STAGE — no badge (it's
+    # transiently `:opaque` before macro refinement, so it would otherwise flip to a noisy reason).
+    _is_pure_using(cell.source) && return ("", "")
+    if _memoizable(cell)
+        # Memoizable by shape — but an impure UPSTREAM still poisons the key (→ never cached). Use the
+        # cheap poison check, NOT `_memo_key` (which hashes @asset files) — the badge runs per state push.
+        _key_poisoned(report.byid, _dep_closure(report.byid, cell)) &&
+            return ("uncacheable", "depends on an uncacheable upstream cell")
+        return ("cacheable", "")
+    end
+    # Not memoizable — surface WHICH of `_memoizable`'s conditions failed (message only; the decision
+    # already happened above, so this can't drift from it). Same order as `_memoizable`.
+    :nocache in cell.flags && return ("uncacheable", "opted out with the `nocache` tag")
+    :opaque in cell.flags && return ("uncacheable", "an unresolved `using`/macro barrier — its effects can't be tracked")
+    eff = _cell_effect(cell)
+    eff == VOLATILE && return ("uncacheable", "non-deterministic (e.g. `rand`/`time`) — a cached value would be stale")
+    eff == RESOURCE && return ("uncacheable", "opens a live handle (DB/socket/file) — tag it `resource`; it re-opens each run")
+    return ("uncacheable", "not a pure function of its source and inputs")
 end
 
 function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel())
