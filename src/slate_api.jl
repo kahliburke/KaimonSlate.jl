@@ -194,6 +194,16 @@ const SLATE_API = SlateApiEntry[
         stops the run at its next `pause`. `pause(0.1)`."""),
     SlateApiEntry("cancel", "Live", "cancel(:name)",
         """Cooperatively stop a running `@onclick` handler (it stops at its next `pause`). `cancel(:level)`."""),
+    SlateApiEntry("set_bind", "Live", "slate.set_bind(notebook, name; value=\"\")",
+        """A `slate.*` AGENT TOOL (not a cell helper) — DRIVE a `@bind` from OUTSIDE the browser, the
+        write-half of the reactive loop (`slate.read`/`slate.inspect` observe state; this CHANGES it).
+        Routes through the same path as a browser change: coerces `value` against the widget, updates
+        the registry, restales the reader cells, and fires any `@onclick`/`@onchange` handler — all
+        HEADLESS (no open tab needed). `name` is the bound variable (e.g. \"njobs\"), NOT a cell id;
+        `value` is JSON (a number \"42\", bool, string, or array). For a Button, OMIT `value`: a
+        valueless set is a CLICK — the server increments the click count and fires the handler, so you
+        never need to know (or race) it.
+        `slate.set_bind(nb, \"njobs\", value=\"50\")` then `slate.set_bind(nb, \"launch\")`  # set a slider, then click a button."""),
 
     # ── Tables ─────────────────────────────────────────────────────────────────────────────────────
     # Real exported functions — documented ONCE in their own docstrings (tables.jl / paged.jl).
@@ -485,6 +495,7 @@ Return the value to show — a number / String / DataFrame, a CairoMakie figure,
     level = reactive(:level, 0)        # level[] reads, level[] = v pushes to readers
     @onclick go (for v in 0:100; level[]=v; pause(0.1) end)   # pause = cancellable; cancel(:level) stops
     @onchange n (level[] = n)          # runs on change; cell does NOT recompute
+    # AGENT-side (drive a @bind headless): slate.set_bind(nb, "n", value="5"); omit value on a Button = a click
 
 ## Tables — `slate_table(df)`  (a bare DataFrame auto-renders; sortable/filterable/paged)
     slate_table(df; format=(Rev=:currency, Pct=(kind=:percent,digits=1)), align=(Name=:left,),
