@@ -310,7 +310,25 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
-  return html`${banner}${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`)}`;
+  const renderCell = c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`;
+  // Side-by-side columns: a `column=N` tag (N≥2) places a cell in the Nth slot of the row anchored by
+  // the preceding un-tagged (column 1, the default) cell — so you only tag the EXTRA columns. A plain
+  // cell always starts a fresh row; a lone row renders as a normal full-width cell (no wrapper).
+  const rows = [];
+  (cells || []).forEach(c => {
+    const col = _cellColumn(c);
+    if (col >= 2 && rows.length) rows[rows.length - 1].push(c);
+    else rows.push([c]);
+  });
+  return html`${banner}${rows.map(row => row.length === 1
+    ? renderCell(row[0])
+    : html`<div class="cell-row" key=${'row-' + row[0].id}>${row.map(renderCell)}</div>`)}`;
+}
+// The row column a cell sits in: `column=N` tag → N, default 1. Only N≥2 pulls a cell up beside its predecessor.
+function _cellColumn(c) {
+  const tags = (c && c.tags) || [];
+  for (const t of tags) { const m = /^column=(\d+)$/.exec(t); if (m) return Math.max(1, parseInt(m[1], 10) || 1); }
+  return 1;
 }
 
 // The floating "N cells selected" pill (top-left), shown only when a multi-selection is active.
