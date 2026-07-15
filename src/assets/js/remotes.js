@@ -20,6 +20,7 @@ const host = signal('');           // #rthost value
 const tr = signal('tunnel');       // transport radio
 const port = signal('');           // :direct main port (blank = auto)
 const stream = signal('');         // :direct stream port
+const rsyncPath = signal('');      // per-host rsync --rsync-path (advanced; '' = use PATH rsync)
 // Preflight stream state: { note, rows:[{name,status,ms,detail}], verdict:{ok,text}|null, err }.
 const steps = signal(null);
 let _es = null;                     // live preflight EventSource (closed on retest / modal close)
@@ -37,11 +38,31 @@ function commitXfer() {
     .then(r => r.json()).then(d => xfer.value = d).catch(() => {});
 }
 
+// ── per-host settings (rsync_path) ───────────────────────────────────────────────────────
+// Loaded when a host is picked/entered, saved before a preflight (so the dry-run uses it) and on edit.
+function loadHostSettings(h) {
+  if (!h) { rsyncPath.value = ''; return Promise.resolve(); }
+  return fetch('/api/host-settings?host=' + encodeURIComponent(h)).then(r => r.json())
+    .then(d => { rsyncPath.value = (d && d.rsync_path) || ''; }).catch(() => {});
+}
+function saveHostSettings() {
+  const h = (host.value || '').trim();
+  if (!h) return Promise.resolve();
+  return fetch('/api/host-settings', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: h, rsync_path: (rsyncPath.value || '').trim() }) })
+    .then(r => r.json()).then(d => { if (d && typeof d.rsync_path === 'string') rsyncPath.value = d.rsync_path; }).catch(() => {});
+}
+// Pick a host from the known list: set the input AND load its saved settings (module-scope so KnownHosts can call it).
+function pickHost(h) { host.value = h; loadHostSettings(h); }
+
 // ── preflight (SSE) ────────────────────────────────────────────────────────────────────
 // "host[,transport[,port,stream]]" — ports only for :direct, blank = auto. Remembered on success.
 function spec() { if (tr.value !== 'direct') return host.value; const p = (port.value || '').trim(), s = (stream.value || '').trim(); return p ? host.value + ',direct,' + p + (s ? ',' + s : '') : host.value + ',direct'; }
 function closeES() { if (_es) { try { _es.close(); } catch (_) {} _es = null; } }
-function runTest() {
+// Persist the per-host settings (rsync_path) FIRST — the server refreshes the live config synchronously —
+// then run the preflight so a first-time locked-down NAS provisions with the right rsync in the same click.
+function runTest() { saveHostSettings().then(_runTest); }
+function _runTest() {
   const h = (host.value || '').trim();
   if (!h) { steps.value = { note: null, rows: [], verdict: null, err: null, empty: 'Enter a host to test.' }; return; }
   const t = tr.value;
@@ -87,7 +108,7 @@ function KnownHosts() {
     ${all.map(h => {
       const isDef = h === glob, isCustom = ssh.indexOf(h) < 0, n = nreg(h);
       return html`<div class=${'rthrow' + (isDef ? ' isdef' : '')}>
-        <span class="rthname" role="button" title="use this remote" onClick=${() => host.value = h}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${isCustom ? html` <em>(custom)</em>` : null}${n ? html` <em>(${n} region${n > 1 ? 's' : ''})</em>` : null}</span>
+        <span class="rthname" role="button" title="use this remote" onClick=${() => pickHost(h)}>${isDef ? '★' : '🖧'} ${h}${isDef ? html` <em>(default)</em>` : null}${isCustom ? html` <em>(custom)</em>` : null}${n ? html` <em>(${n} region${n > 1 ? 's' : ''})</em>` : null}</span>
         <span class="rthbtns">
           <button class="rthexp" title="regions & live workers on this host" onClick=${() => { editRegion.value = null; focusHost.value = h; }}>Regions ›</button>
           ${isDef
@@ -126,7 +147,7 @@ function Modal() {
     <button class="modalx" title="Close (Esc)" onClick=${close}>✕</button>
     <div class="msg"><strong>Remote hosts</strong><span style="display:block;margin-top:3px;font-size:.78rem;color:#7a82a4;font-weight:400">Run notebooks on another machine. A remote is any SSH host you already reach with key auth (a <code>Host</code> in ~/.ssh/config).</span></div>
     <div class="imrow"><label>Host</label><input id="rthost" spellcheck="false" autocomplete="off" placeholder="ssh_host (or user@host)"
-      value=${host.value} onInput=${e => host.value = e.target.value} onKeyDown=${e => { if (e.key === 'Enter') { e.preventDefault(); runTest(); } }}/></div>
+      value=${host.value} onInput=${e => host.value = e.target.value} onBlur=${e => loadHostSettings((e.target.value || '').trim())} onKeyDown=${e => { if (e.key === 'Enter') { e.preventDefault(); runTest(); } }}/></div>
     <div class="imrow"><label>Transport</label>
       <span class="rttr">
         <label><input type="radio" name="rttr" value="tunnel" checked=${tr.value === 'tunnel'} onChange=${() => tr.value = 'tunnel'}/> SSH tunnel</label>
@@ -135,6 +156,9 @@ function Modal() {
       <span class="rttr"><input class="rtportin" type="number" min="1024" max="65535" placeholder="main" title="remote main/REP port — blank = auto (9100+)" value=${port.value} onInput=${e => port.value = e.target.value}/>
       <input class="rtportin" type="number" min="1024" max="65535" placeholder="stream" title="remote stream/PUB port — blank = main+1" value=${stream.value} onInput=${e => stream.value = e.target.value}/>
       <span class="pddim">blank = auto</span></span></div>` : null}
+    <div class="imrow"><label>rsync path <span class="pddim">(advanced)</span><span class="rthelp" tabindex="0">?<span class="rthelppop">Absolute path to a stock <code>rsync</code> binary on this host, passed as <code>rsync --rsync-path</code>.<br/><br/>Leave blank on a normal machine. Some NAS/appliance firmware ships a modified rsync that only accepts its shared folders and rejects your home dir with <code>invalid path</code> during "Provision env" — install a normal rsync on the host (e.g. <code>~/bin/rsync</code>) and point here.<br/><br/>Saved per host.</span></span></label>
+      <input class="runonsel" spellcheck="false" autocomplete="off" placeholder="blank = use PATH rsync; e.g. /home/you/bin/rsync (locked-down NAS)"
+        value=${rsyncPath.value} onInput=${e => rsyncPath.value = e.target.value} onChange=${saveHostSettings}/></div>
     <div class="rtactions"><button class="primary" onClick=${runTest}>🩺 Test & prime</button></div>
     <div class="rtsteps"><${TestSteps}/></div>
     <${KnownHosts}/>

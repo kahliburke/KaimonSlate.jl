@@ -1668,6 +1668,12 @@ end
 # which sets the live ReportEngine refs AND writes slate.json.
 const _XFER_PERSIST = Ref{Any}(nothing)
 
+# Persist hook for PER-HOST remote settings (currently rsync_path). KaimonSlate installs
+# `(host, rsync_path) -> nothing` which writes slate.json `remote.hosts.<host>.rsync_path` AND refreshes
+# the live `ReportEngine._REMOTE_CFG` so the next provision/preflight uses it. Same division of labor as
+# _XFER_PERSIST/_RUNON_PERSIST (NotebookServer owns no JSON config).
+const _HOST_CFG_PERSIST = Ref{Any}(nothing)
+
 # A layer value of "local" (case-insensitive) is an EXPLICIT local pick — it forces local even when a
 # lower layer (e.g. the global default) names a host. An empty value = "no override at this layer".
 _norm_runon(s) = lowercase(strip(String(s))) == "local" ? "" : String(strip(String(s)))

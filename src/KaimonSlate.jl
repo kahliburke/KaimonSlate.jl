@@ -393,6 +393,24 @@ function _load_slate_config!()
         mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
         return nothing
     end
+    # Persist hook for the Remotes modal's per-host settings (rsync_path). Writes
+    # remote.hosts.<host>.<key> in slate.json, prunes emptied entries, and refreshes the live config so a
+    # provision/preflight right after a save uses the new value. Empty rsync_path clears the override.
+    NotebookServer._HOST_CFG_PERSIST[] = function (host, rsync_path)
+        h = String(strip(String(host))); isempty(h) && return nothing
+        cfg = _slate_config()
+        remote = get(cfg, "remote", nothing); remote = remote isa AbstractDict ? Dict{String,Any}(remote) : Dict{String,Any}()
+        hosts  = get(remote, "hosts", nothing); hosts  = hosts  isa AbstractDict ? Dict{String,Any}(hosts)  : Dict{String,Any}()
+        hc     = get(hosts, h, nothing);        hc     = hc     isa AbstractDict ? Dict{String,Any}(hc)     : Dict{String,Any}()
+        rp = String(strip(String(rsync_path)))
+        isempty(rp) ? delete!(hc, "rsync_path") : (hc["rsync_path"] = rp)
+        isempty(hc)    ? delete!(hosts, h)        : (hosts[h] = hc)          # prune an emptied host record
+        isempty(hosts) ? delete!(remote, "hosts") : (remote["hosts"] = hosts)
+        isempty(remote) ? delete!(cfg, "remote")  : (cfg["remote"] = remote)
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+        ReportEngine._REMOTE_CFG[] = remote_config()   # live-refresh: next provision/preflight sees it
+        return nothing
+    end
     return nothing
 end
 
