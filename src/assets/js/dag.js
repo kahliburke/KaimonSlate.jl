@@ -333,10 +333,72 @@ function _dagWorkerStatus(w) { return w ? (w.status || (w.connected ? 'ok' : 'co
 function _dagRegionLegend() {
   const pane = document.getElementById('dagpane') || document.getElementById('dag');
   let el = document.getElementById('dagregleg');
-  if (!_dagRegionsOn || !pane) { if (el) el.remove(); return; }
+  if (!_dagRegionsOn || !pane) {
+    if (el) el.remove();
+    const p = document.getElementById('dagpeerpanel'); if (p) p.remove();   // panel rides the overlay
+    return;
+  }
   if (!el) { el = document.createElement('div'); el.id = 'dagregleg'; el.className = 'dagregleg'; pane.appendChild(el); }
+  const hasRemote = _dagRegionNamesAll().length > 0;
   el.innerHTML = `<span><i style="background:#3a3f55"></i>main (local)</span>` +
-    _dagRegionNamesAll().map(n => `<span><i style="background:${_dagRegionHue(n)}"></i>${n === 'default' ? 'remote' : n}</span>`).join('');
+    _dagRegionNamesAll().map(n => `<span><i style="background:${_dagRegionHue(n)}"></i>${n === 'default' ? 'remote' : n}</span>`).join('') +
+    (hasRemote ? `<button class="dagpeerbtn" onclick="_dagPeerPlan(false)" title="peer routing plan — how cross-region values move (direct / ssh-bridge / relay), the address each pair uses, and the mesh artifacts on each host">⇄ peer plan</button>` : '');
+}
+
+// ⇄ Peer routing plan — the DAG's window into how cross-region values actually move: the cached route
+// verdict per host-pair (direct / ssh-bridge / relay + the chosen address, with age), the mesh artifacts
+// present on each host, and the exact `ssh -L` each pull would run. `refresh` clears the cached verdicts
+// (the "recalculate" action) — the fresh verdict lands on the NEXT transfer, since probing needs live
+// workers. A plain click toggles the panel; recalculate re-fetches in place.
+async function _dagPeerPlan(refresh) {
+  const pane = document.getElementById('dagpane') || document.getElementById('dag');
+  if (!pane) return;
+  let el = document.getElementById('dagpeerpanel');
+  if (el && !refresh) { el.remove(); return; }                 // toggle off on a second plain click
+  if (!el) { el = document.createElement('div'); el.id = 'dagpeerpanel'; el.className = 'dagpeerpanel'; pane.appendChild(el); }
+  el.innerHTML =
+    `<div class="dagpeerhd"><b>⇄ peer routing plan</b><span>` +
+    `<button onclick="_dagPeerPlan(true)" title="recalculate — clear the cached route verdicts so the next transfer re-probes">↻ recalculate</button>` +
+    `<button onclick="{const p=document.getElementById('dagpeerpanel'); if(p) p.remove();}">✕</button>` +
+    `</span></div><div class="dagpeerbody">${refresh ? 'recalculating…' : 'loading…'}</div>`;
+  const body = el.querySelector('.dagpeerbody');
+  try {
+    const d = await (await fetch(_apipath('/api/peer-plan') + (refresh ? '?refresh=1' : ''))).json();
+    if (body) body.innerHTML = _dagRenderPeerPlan(d);
+  } catch (_) {
+    if (body) body.textContent = 'failed to load the peer plan';
+  }
+}
+window._dagPeerPlan = _dagPeerPlan;
+
+// How each route KIND paints: direct = fast green, ssh-bridge = blue, relay = amber (via hub), unresolved
+// = neutral (will probe on the next transfer). Mirrors the region hues' intent — a glance says the path.
+const _DAG_ROUTE_COL = { direct: '#3fb96e', ssh: '#4f7cf0', relay: '#e8a13f', unresolved: '#6a7183' };
+const _DAG_ROUTE_LBL = { direct: 'direct', ssh: 'ssh-bridge', relay: 'relay', unresolved: 'unresolved' };
+function _dagAge(s) { return s < 0 ? '' : s < 90 ? s + 's ago' : Math.round(s / 60) + 'm ago'; }
+function _dagEsc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+function _dagRenderPeerPlan(d) {
+  if (d && d.error) return `<div class="dagpp-empty">peer plan failed: ${_dagEsc(d.error)}</div>`;
+  const routes = (d && d.routes) || [], hosts = (d && d.hosts) || [];
+  let h = `<div class="dagpp-sec">routes${d && d.refreshed ? ' · <em>recalculated — resolves on next transfer</em>' : ''}</div>`;
+  if (!routes.length) h += `<div class="dagpp-empty">no cross-host region pairs — same-host regions move over loopback</div>`;
+  for (const r of routes) {
+    const col = _DAG_ROUTE_COL[r.kind] || '#6a7183';
+    h += `<div class="dagpp-route"><span class="dagpp-pair">${_dagEsc(r.dst)} <span class="dagpp-arrow">←</span> ${_dagEsc(r.src)}</span>` +
+      `<span class="dagpp-kind" style="background:${col}">${_DAG_ROUTE_LBL[r.kind] || _dagEsc(r.kind)}</span>` +
+      (r.addr ? `<span class="dagpp-addr">${_dagEsc(r.addr)}</span>` : '') +
+      (r.age_s >= 0 ? `<span class="dagpp-age">${_dagAge(r.age_s)}</span>` : '') + `</div>`;
+  }
+  h += `<div class="dagpp-sec">mesh</div>`;
+  if (!hosts.length) h += `<div class="dagpp-empty">—</div>`;
+  for (const hh of hosts) {
+    const g = hh.grants || [], p = hh.pins || [];
+    h += `<div class="dagpp-host">${_dagEsc(hh.host)}${hh.reachable ? '' : ' <em class="dagpp-warn">(unreachable)</em>'}</div>`;
+    if (!g.length && !p.length) { h += `<div class="dagpp-line dagpp-dim">no grants installed</div>`; continue; }
+    for (const gr of g) h += `<div class="dagpp-line">↳ <b>${_dagEsc(gr.puller)}</b> may pull from <b>${_dagEsc(gr.source)}</b> · port ${gr.port}${gr.placeholder ? ' <span class="dagpp-dim">(placeholder — finalized at transfer)</span>' : ''}</div>`;
+    for (const pn of p) h += `<div class="dagpp-line dagpp-dim">⚿ pins ${_dagEsc(pn.source)} @ ${_dagEsc((pn.addrs || []).join(', '))}</div>`;
+  }
+  return h;
 }
 
 function _dagState(c) { return _dagRunning.has(c.id) ? 'running' : (c.state || 'stale'); }

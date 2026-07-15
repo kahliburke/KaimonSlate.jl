@@ -242,6 +242,56 @@ function teardown_region_mesh!(region)
     return nothing
 end
 
+# ── Structured mesh state (for the UI) ───────────────────────────────────────────────────────────────
+# Parsed slate state on one host: the keypairs present, the authorized_keys grants (puller may pull from
+# source, at permitopen port), and the host-key pins (source, addresses). Hub-side regex over the grep
+# output — the region basename is `slate-<foldedname>-<uuid8>`, and folded names never contain '-'.
+function _mesh_host_state(host)
+    script = """
+    echo '@keys'; ls -1 "\$HOME/.ssh"/slate-*.pub 2>/dev/null | sed 's|.*/||;s|\\.pub\$||'
+    echo '@ak';   grep -F 'slate-' "\$HOME/.ssh/authorized_keys" 2>/dev/null
+    echo '@kh';   grep -F 'slate-mesh-pin' "\$HOME/.ssh/slate_known_hosts" 2>/dev/null
+    """
+    ok, out = _ssh_script(host, script)
+    keys = String[]; grants = Any[]; pins = Any[]; section = ""
+    for ln in split(out, '\n')
+        s = strip(ln); isempty(s) && continue
+        if s in ("@keys", "@ak", "@kh"); section = s; continue; end
+        if section == "@keys"
+            startswith(s, "slate-") && push!(keys, s)
+        elseif section == "@ak"
+            m = match(r"permitopen=\"127\.0\.0\.1:(\d+)\".*slate-([A-Za-z0-9_]+)-[0-9a-f]{8} from slate-([A-Za-z0-9_]+)-[0-9a-f]{8}", s)
+            m === nothing || push!(grants, Dict("puller" => m.captures[2], "source" => m.captures[3],
+                "port" => parse(Int, m.captures[1]), "placeholder" => m.captures[1] == "1"))
+        elseif section == "@kh"
+            m = match(r"^(\S+)\s.*slate-mesh-pin slate-([A-Za-z0-9_]+)-[0-9a-f]{8}", s)
+            m === nothing || push!(pins, Dict("source" => m.captures[2], "addrs" => String.(split(m.captures[1], ","))))
+        end
+    end
+    return Dict("host" => String(host), "reachable" => ok, "keys" => keys, "grants" => grants, "pins" => pins)
+end
+
+# The peer mesh for `names` as STRUCTURED data (for the DAG UI): the cached route verdict per cross-host
+# pair, and the parsed mesh state per host. `refresh` first forgets the cached verdicts (recalculate).
+function peer_plan_data(names::AbstractVector; refresh::Bool = false)
+    hosts = unique(String[region_get(n) === nothing ? "" : region_get(n).host for n in names])
+    filter!(!isempty, hosts)
+    refresh && for h in hosts; _peer_route_forget!(h); end
+    routes = Any[]
+    for a in names, b in names
+        a == b && continue
+        ra = region_get(a); rb = region_get(b)
+        (ra === nothing || rb === nothing || ra.host == rb.host) && continue
+        v = _peer_route_load(ra.host, rb.host)      # b pulls from a ⇒ keyed (a.host, b.host)
+        push!(routes, Dict("src" => String(a), "dst" => String(b),
+            "kind" => v === nothing ? "unresolved" : String(v[1]),
+            "addr" => v === nothing ? "" : v[2],
+            "age_s" => v === nothing ? -1 : round(Int, time() - v[3])))
+    end
+    return Dict("regions" => String.(collect(names)), "refreshed" => refresh,
+                "routes" => routes, "hosts" => [_mesh_host_state(h) for h in hosts])
+end
+
 # ── Dry-run diagnostic / audit (§6.2) ────────────────────────────────────────────────────────────────
 # Reconstruct and PRINT — without executing — what the mesh looks like for `names`: the last-cached route
 # verdict per ordered cross-host pair (the topology map), the slate artifacts actually present on each host,

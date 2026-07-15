@@ -931,6 +931,19 @@ function _make_router(h::Hub)
         set_notebook_regions!(nb, strip(String(get(_body(req), "regions", ""))))
         _json(state_json(nb))
     end))
+    # Peer-mesh plan for the DAG region-map view: the cached route verdict per cross-region pair, the
+    # on-host mesh artifacts, and the exact `ssh -N -L` each cross-host pull would run (PEER_TUNNEL_PLAN
+    # §6.2). `?refresh=1` first clears the cached verdicts so the next transfer re-probes (the DAG
+    # "recalculate" action — a fresh verdict lands on the next transfer, since probing needs live workers).
+    HTTP.register!(router, "GET", "/api/{id}/peer-plan", req -> _withnb(h, req, nb -> begin
+        names = _nb_region_names(nb)
+        ref = get(HTTP.queryparams(HTTP.URI(req.target)), "refresh", "0") == "1"
+        isempty(names) && return _json(Dict("regions" => String[], "routes" => [], "hosts" => [], "refreshed" => ref))
+        data = try; ReportEngine.peer_plan_data(names; refresh = ref)
+               catch e; Dict("regions" => names, "routes" => [], "hosts" => [],
+                             "error" => first(sprint(showerror, e), 200)); end
+        _json(data)
+    end))
     # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`
     # hides code; `?theme=light|dark`; `?code=normal|small|smaller|tiny|hidden` sizes/hides listings.
     # No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.

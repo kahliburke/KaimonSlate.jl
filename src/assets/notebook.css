@@ -161,6 +161,10 @@ body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-even
 .cell { border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px;
         margin:14px 0; background:var(--bg2); overflow:hidden;
         scroll-margin-top:68px; }   /* jumps (DAG/TOC/nav) land the cell HEADER below the sticky topbar, with breathing room */
+/* Side-by-side cells: a `column=N` (N≥2) tag rows a cell beside its predecessor (grouping in notebook.js).
+   Equal-width flex columns so paired figures (e.g. an ECharts + a Makie plot) render at the same size. */
+.cell-row { display:flex; gap:16px; align-items:flex-start; }
+.cell-row > .cell { flex:1 1 0; min-width:0; }
 .cell.state-fresh   { border-left-color:var(--green); }   /* settled / up-to-date → green */
 .cell.state-stale   { border-left-color:var(--gold); }
 .cell.state-edited  { border-left-color:var(--orange); }
@@ -1019,6 +1023,33 @@ body.modkey .cm-content { cursor: pointer; }
   border-radius:8px; padding:5px 10px; font-size:.72rem; color:var(--text); pointer-events:none; }
 .dagregleg span { display:inline-flex; align-items:center; gap:5px; }
 .dagregleg i { width:10px; height:10px; border-radius:3px; display:inline-block; }
+/* ⇄ peer routing plan — a button on the region legend, opening a panel of route verdicts + mesh artifacts */
+.dagpeerbtn { pointer-events:auto; cursor:pointer; border:1px solid var(--border); border-radius:6px; padding:2px 8px;
+  background:color-mix(in srgb, var(--bg) 70%, transparent); color:var(--text); font-size:.72rem; }
+.dagpeerbtn:hover { background:var(--accent); color:#fff; }
+.dagpeerpanel { position:absolute; left:10px; bottom:46px; z-index:8; width:min(600px, calc(100% - 20px)); max-height:62%;
+  overflow:auto; background:color-mix(in srgb, var(--bg) 94%, transparent); border:1px solid var(--border);
+  border-radius:8px; padding:8px 10px; box-shadow:0 6px 24px rgba(0,0,0,.4); }
+.dagpeerhd { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:.8rem; color:var(--text); }
+.dagpeerhd button { cursor:pointer; border:1px solid var(--border); background:transparent; color:var(--text);
+  border-radius:5px; padding:1px 7px; font-size:.72rem; margin-left:6px; }
+.dagpeerhd button:hover { background:var(--accent); color:#fff; }
+.dagpeerbody { font-size:.72rem; line-height:1.5; color:var(--text); }
+.dagpp-sec { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted, #8a91ab);
+  margin:8px 0 3px; }
+.dagpp-sec:first-child { margin-top:0; }
+.dagpp-sec em { text-transform:none; letter-spacing:0; color:var(--accent); font-style:normal; }
+.dagpp-empty { color:var(--muted, #8a91ab); font-size:.7rem; padding:2px 0; }
+.dagpp-route { display:flex; align-items:center; gap:8px; padding:2px 0; flex-wrap:wrap; }
+.dagpp-pair { font-weight:600; }
+.dagpp-arrow { color:var(--muted, #8a91ab); }
+.dagpp-kind { color:#fff; border-radius:4px; padding:0 6px; font-size:.64rem; font-weight:600; }
+.dagpp-addr { font-family:var(--mono, ui-monospace, monospace); font-size:.66rem; color:var(--muted, #8a91ab); }
+.dagpp-age { margin-left:auto; font-size:.64rem; color:var(--muted, #8a91ab); }
+.dagpp-host { font-weight:600; margin:6px 0 1px; }
+.dagpp-line { padding-left:10px; font-size:.7rem; }
+.dagpp-dim { color:var(--muted, #8a91ab); }
+.dagpp-warn { color:#e0596a; font-style:normal; }
 /* ⚙ graph display settings — click popover with checkboxes */
 .daggear { position:relative; cursor:pointer; }
 .daggearpop { display:none; position:absolute; right:-6px; top:calc(100% + 8px); width:280px; z-index:7;
