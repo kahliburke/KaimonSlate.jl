@@ -300,6 +300,21 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
+// Inter-cell insert affordance: a thin hover zone in the gap between cells (and above the first / below
+// the last) that reveals a "+" to insert a cell RIGHT THERE. `afterId` = insert after that
+// cell; the top gap has no `afterId`, so it inserts BEFORE `firstId`. Left-click = code cell (in edit
+// mode); right-click = the code/markdown chooser (reuses addMenu, which inserts below `afterId`).
+function CellGap({ afterId, firstId }) {
+  const insert = (kind) => afterId
+    ? window.addCell(afterId, kind, false, true)     // between afterId and the next cell
+    : window.addCell(firstId, kind, true, true);     // top gap → before the first cell (firstId='' ⇒ append)
+  const onMenu = (e) => { e.preventDefault(); if (afterId && window.addMenu) window.addMenu(e, afterId); else insert('code'); };
+  return html`<div class="cellgap">
+    <button class="cellgap-add" onClick=${() => insert('code')} oncontextmenu=${onMenu}
+      title="insert a cell here — right-click for markdown">＋</button>
+  </div>`;
+}
+
 function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
@@ -309,8 +324,18 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   const coneCount = cone ? cone.size : (cells || []).length;
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
+  const list = cells || [];
+  const firstId = list.length ? list[0].id : '';
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
-  return html`${banner}${(cells || []).map(c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`)}`;
+  // Interleave a CellGap before the first cell and after each one — EXCEPT in dep-focus, where the view
+  // is read-only-ish and gaps between collapsed cells would just be noise.
+  const rows = [];
+  if (!focusId) rows.push(html`<${CellGap} key="gap-top" afterId=${''} firstId=${firstId} />`);
+  list.forEach(c => {
+    rows.push(html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`);
+    if (!focusId) rows.push(html`<${CellGap} key=${'gap-' + c.id} afterId=${c.id} firstId=${firstId} />`);
+  });
+  return html`${banner}${rows}`;
 }
 
 // The floating "N cells selected" pill (top-left), shown only when a multi-selection is active.
