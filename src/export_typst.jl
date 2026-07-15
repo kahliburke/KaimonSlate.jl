@@ -321,19 +321,34 @@ function _rewrite_citations(md::AbstractString, citekeys = Set{String}(); emit =
     return String(take!(out))
 end
 
-# Markdown source with `{{ expr }}` interpolations resolved to their scalar values (the only interp
-# kind embeddable as text in v1) and citations rewritten to sentinels for the preamble's cite rule.
+# Bare text of a `{{ expr }}` interpolation for the Typst export — mirrors the live renderer's
+# `_math_value`: a scalar's text, else a `text/latex` chunk's TeX with its `$`/`$$` delimiters
+# stripped. So a `{{ giac_expr }}` sitting inside `$$…$$` splices its LaTeX straight in and mitex
+# typesets it in the PDF, exactly as KaTeX does live (before this it resolved to nothing).
+function _interp_typst_text(o)
+    o === nothing && return ""
+    o.exception === nothing || return ""
+    isempty(o.value_repr) || return ReportRender._interp_scalar(o.value_repr)
+    for ch in o.display
+        if ch.mime == "text/latex"
+            t = strip(String(copy(ch.data)))
+            startswith(t, "\$\$") && endswith(t, "\$\$") && length(t) >= 4 && return t[3:end-2]
+            startswith(t, "\$")  && endswith(t, "\$")  && length(t) >= 2 && return t[2:end-1]
+            return t
+        end
+    end
+    return ""
+end
+
+# Markdown source with `{{ expr }}` interpolations resolved (scalars, or a text/latex value's TeX)
+# and citations rewritten to sentinels for the preamble's cite rule.
 function _md_for_typst(c::Cell, src::AbstractString = c.source; citekeys = Set{String}(),
                        figrefs = Dict{String,Tuple{Int,String}}())
     tmpl, exprs = ReportEngine._md_template(src)
     s = tmpl
     for i in 1:length(exprs)
         o = i <= length(c.interp) ? c.interp[i] : nothing
-        # `_interp_scalar` matches the live renderer: a String's repr is quoted (`"January"`), but
-        # `{{ }}` is a presentation context — splice the bare content, like Julia's `$(…)`.
-        val = (o === nothing || o.exception !== nothing || isempty(o.value_repr)) ? "" :
-              ReportRender._interp_scalar(o.value_repr)
-        s = replace(s, ReportEngine._interp_token(i) => val)
+        s = replace(s, ReportEngine._interp_token(i) => _interp_typst_text(o))
     end
     return _rewrite_citations(s, citekeys; figrefs = figrefs)
 end
