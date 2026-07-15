@@ -166,6 +166,21 @@ const ECHARTS_OPTION_DOCS = EchartsDoc[
         form: `echart(:candlestick, dates, ohlc)` where `ohlc[i]=[open,close,low,high]`."""),
     EchartsDoc("series.boxplot", """Box plot: each datum `[min, Q1, median, Q3, max]`. Slate:
         `echart(:boxplot, categories, data)` — pass 5-number arrays OR raw samples (auto-summarised)."""),
+    EchartsDoc("series.sankey", """Sankey flow diagram: nodes + weighted links. Slate ergonomic form:
+        `echart(:sankey, [(source, target, value), …])` (nodes auto-derived) or `echart(:sankey, nodes, links)`;
+        a link may also be `src => tgt => val`. Style via `nodeGap`, `nodeWidth`, `lineStyle=(color="gradient",)`."""),
+    EchartsDoc("series.graph", """Network/graph: nodes + edges, force-directed + roamable by default. Slate:
+        `echart(:graph, [(source, target), …])` (nodes auto-derived) or `echart(:graph, nodes, edges)`; an edge
+        may be `src => tgt`. Override `layout="circular"|"none"`, `force=(repulsion=…, edgeLength=…)`, node `symbolSize`."""),
+    EchartsDoc("series.treemap", """Treemap hierarchy. Slate: `echart(:treemap, tree)` where a node is
+        `name => value` (leaf), `name => [children…]` (branch), or a NamedTuple/Dict; one root or a vector of roots.
+        `:sunburst` takes the SAME data shape (radial hierarchy). Style via `levels`, `visibleMin`, `leafDepth`."""),
+    EchartsDoc("series.lines.geo", """Geo trajectories/flows: `type="lines"`, `coordinateSystem="geo"`, each
+        datum `{coords:[[lon,lat],[lon,lat]]}`. Slate: `echart(:lines, from, to; geo=(map="world",…), registerMap=…)`
+        — coords are `(lon,lat)`. Add `effect=(show=true, symbol="arrow")` for animated flow; `lineStyle=(curveness=0.2,)`."""),
+    EchartsDoc("series.calendar", """Calendar heatmap: a heatmap series on `coordinateSystem="calendar"`, each
+        datum `[date, value]`, plus a `calendar` component (range) + `visualMap`. Slate: `echart(:calendar, dates, values)`
+        — dates are `Date`s or `"YYYY-MM-DD"`; the year range is auto-spanned. Style the `calendar=(cellSize=…, …)`."""),
 
     # ── whole-chart ──────────────────────────────────────────────────────────────────────────────
     EchartsDoc("color", """The series colour cycle: a list of colours applied in order. Slate:

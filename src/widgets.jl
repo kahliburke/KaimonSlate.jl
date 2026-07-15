@@ -451,6 +451,8 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const EChart = $EChart))
     Core.eval(m, :(const WebPage = $WebPage))     # compose a self-contained HTML page (CSS/HTML/JS)
     Core.eval(m, :(const series = $series))       # ECharts DSL series builder (echarts_dsl.jl)
+    Core.eval(m, :(const slate_theme = $slate_theme))             # shared ECharts/Makie look → a Makie Theme (slate_look.jl)
+    Core.eval(m, :(const use_slate_theme! = $use_slate_theme!))   # apply it globally (needs Makie loaded)
     Core.eval(m, :(const animate = $animate))     # animate(frames;…) → Animation (animation.jl)
     Core.eval(m, :(const slate_table = $slate_table))
     Core.eval(m, :(const SlateTable = $SlateTable))

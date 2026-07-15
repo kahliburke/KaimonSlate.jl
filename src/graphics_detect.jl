@@ -23,10 +23,10 @@
 # High-signal tokens — scene/figure/theme constructors + display, and the `!` plotting verbs
 # (rarely variable names) — each as a CALL `(`.
 const _GRAPHICS_SENTINEL = Symbol("##slate_graphics##")
-const _GRAPHICS_RE = r"\b(?:Figure|Axis3?|LScene|Scene|PolarAxis|Colorbar|Legend|set_theme!|update_theme!|with_theme|set_window_config!|record|current_figure|current_axis|display|(?:lines|scatter|scatterlines|heatmap|surface|contour|contourf|band|poly|mesh|meshscatter|image|barplot|hist|density|arrows|series|stairs|stem|errorbars|boxplot|violin|hlines|vlines|ablines|text|wireframe|streamplot|spy|volume|voronoiplot|rangebars|annotations)!)\s*\("
+const _GRAPHICS_RE = r"\b(?:Figure|Axis3?|LScene|Scene|PolarAxis|Colorbar|Legend|set_theme!|update_theme!|use_slate_theme!|with_theme|set_window_config!|record|current_figure|current_axis|display|(?:lines|scatter|scatterlines|heatmap|surface|contour|contourf|band|poly|mesh|meshscatter|image|barplot|hist|density|arrows|series|stairs|stem|errorbars|boxplot|violin|hlines|vlines|ablines|text|wireframe|streamplot|spy|volume|voronoiplot|rangebars|annotations)!)\s*\("
 _uses_shared_graphics(src::AbstractString) = occursin(_GRAPHICS_RE, src)
 
 # GLOBAL theme mutators only — `with_theme` is scoped to its block and mutates nothing global.
 const _THEME_SENTINEL = Symbol("##makie_theme##")
-const _THEME_SET_RE = r"\b(?:set_theme!|update_theme!)\s*\("
+const _THEME_SET_RE = r"\b(?:set_theme!|update_theme!|use_slate_theme!)\s*\("
 _sets_global_theme(src::AbstractString) = occursin(_THEME_SET_RE, src)
