@@ -50,10 +50,17 @@ export serve_notebook, LiveNotebook, expand, standalone!, register_extension
 # launches Kaimon and opens the browser. No hand-editing of config, no manual
 # `serve_notebook`. Detection is simply "Kaimon's config dir exists".
 
-# Kaimon's config dir. Mirrors Kaimon's own `kaimon_config_dir()` — respects `XDG_CONFIG_HOME` so a
-# notebook launched with an isolated config (e.g. a headless "run this live" instance) registers into
-# THAT config, not the user's real `~/.config/kaimon`. A function (not a const) so it re-reads ENV.
-_kaimon_dir() = joinpath(get(ENV, "XDG_CONFIG_HOME", joinpath(homedir(), ".config")), "kaimon")
+# Kaimon's config dir. Mirrors Kaimon's own `kaimon_config_dir()`: `%APPDATA%\Kaimon` on Windows,
+# `~/.config/kaimon` elsewhere. An explicit `XDG_CONFIG_HOME` takes precedence on every platform so a
+# notebook launched with an isolated config (e.g. a headless "run this live" instance, or the test
+# suite) registers into THAT config, not the user's real one. A function (not a const) so it re-reads ENV.
+function _kaimon_dir()
+    xdg = get(ENV, "XDG_CONFIG_HOME", "")
+    isempty(xdg) || return joinpath(xdg, "kaimon")
+    Sys.iswindows() &&
+        return joinpath(get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")), "Kaimon")
+    return joinpath(homedir(), ".config", "kaimon")
+end
 
 # Is `path` a KaimonSlate package checkout? Used to dedup extension entries by IDENTITY rather than
 # by exact path, so a second checkout / git worktree / packaged copy doesn't add a duplicate hub.
@@ -67,7 +74,8 @@ end
 """
     register_extension(; auto_start=true, enabled=true, force=false, project_path=pkgdir(KaimonSlate)) -> Bool
 
-Add this package to Kaimon's extension registry (`~/.config/kaimon/extensions.json`) so Kaimon
+Add this package to Kaimon's extension registry (`extensions.json` in Kaimon's config dir —
+`%APPDATA%\\Kaimon` on Windows, `~/.config/kaimon` elsewhere) so Kaimon
 loads the `slate.*` tools automatically — no hand-wiring. **Idempotent**: returns `false`
 (nothing written) if Kaimon isn't installed here or the entry already exists, and `true` when an
 entry is added. Registration is consented: the `slate` app prompts on first run (see app.jl), and
