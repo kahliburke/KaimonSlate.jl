@@ -2227,6 +2227,7 @@ struct Region
     threads::String     # worker "<compute>,<interactive>" ("" = global default)
     sysimage::Bool      # bake a PackageCompiler worker sysimage for this region's env (opt-in; default false)
     curve::Bool         # CURVE-encrypt this region's data channel (default true; false = plaintext, for the §7 bench)
+    uuid::String        # stable per-region id (minted at setup) — every peer-mesh artifact is named slate-<name>-<uuid8> (§5.5)
 end
 
 const _REGIONS_LOCK = ReentrantLock()   # serialize read-modify-write; reads are lock-free (writes are atomic mv)
@@ -2241,11 +2242,20 @@ _region_from_dict(d::AbstractDict) = Region(
     Symbol(let t = String(get(d, "transport", "tunnel")); isempty(t) ? "tunnel" : t end),
     _asint(get(d, "base_port", 0)), String(get(d, "preload", "")), String(get(d, "data_root", "")),
     String(get(d, "cache_root", "")), _asint(get(d, "warm", 0)), String(get(d, "threads", "")),
-    _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)))
+    _asbool(get(d, "sysimage", false)), _asbool(get(d, "curve", true)), String(get(d, "uuid", "")))
 _region_to_dict(r::Region) = Dict("name" => r.name, "host" => r.host, "transport" => String(r.transport),
     "base_port" => r.base_port, "preload" => r.preload, "data_root" => r.data_root,
     "cache_root" => r.cache_root, "warm" => r.warm, "threads" => r.threads, "sysimage" => r.sysimage,
-    "curve" => r.curve)
+    "curve" => r.curve, "uuid" => r.uuid)
+
+# ── Per-region UUID (mesh-artifact naming; PEER_TUNNEL_PLAN §5.5) ──────────────────────────────
+# A stable 128-bit id minted once at region setup and persisted in the region record. Every
+# peer-mesh artifact (ssh keypair, authorized_keys line, slate_known_hosts pin) is named
+# `slate-<region>-<uuid8>`, so teardown can enumerate + prove ownership of exactly ours and nothing
+# a human added. Random hex — no UUIDs dep, and a name no human would ever type.
+_mint_region_uuid() = bytes2hex(rand(UInt8, 16))
+region_uuid8(r::Region) = first(r.uuid, 8)
+region_artifact_name(r::Region) = "slate-$(r.name)-$(region_uuid8(r))"
 
 # Every configured region (sorted by name). Lock-free: a concurrent writer swaps the file atomically, so a
 # reader sees either the old or the new complete file, never a torn one.
@@ -2264,6 +2274,18 @@ function regions()
 end
 region_get(name) = (n = _fold_region(name); for r in regions(); r.name == n && return r; end; nothing)
 
+# The region's stable UUID, self-healing an older record that predates the field by minting +
+# persisting one on first request (a no-op once set). Returns "" for an unknown region. Peer-mesh
+# code calls this — never `region_get(...).uuid` directly — so a pre-UUID region can't slip through
+# with a blank id.
+function region_uuid(name)
+    r = region_get(name); r === nothing && return ""
+    isempty(r.uuid) || return r.uuid
+    region_set!(r.name; host = r.host, transport = r.transport, base_port = r.base_port,
+                preload = r.preload, data_root = r.data_root, cache_root = r.cache_root,
+                warm = r.warm, threads = r.threads, sysimage = r.sysimage, curve = r.curve).uuid
+end
+
 function _write_regions!(list::AbstractVector{Region})
     mkpath(_slate_config_dir())
     p = _regions_path(); tmp = p * ".tmp"
@@ -2274,19 +2296,24 @@ end
 # Create or update a region by name (upsert). Returns the stored Region.
 function region_set!(name; host, transport = :tunnel, base_port = 0, preload = "",
                      data_root = "", cache_root = "", warm = 0, threads = "", sysimage = false,
-                     curve = true)
+                     curve = true, uuid = "")
     n = _fold_region(name)   # tag-safe id — MUST match region_get/region_delete! + a cell's `region=` tag
     isempty(n) && error("region name required")
-    r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
-               String(data_root), String(cache_root), Int(warm), String(threads), _asbool(sysimage),
-               _asbool(curve))
-    lock(_REGIONS_LOCK) do
+    return lock(_REGIONS_LOCK) do
         list = regions()
-        i = findfirst(x -> x.name == r.name, list)
+        i = findfirst(x -> x.name == n, list)
+        # The UUID is STABLE across upserts: an explicit arg wins, else keep the existing region's,
+        # else mint one. Editing a region (warm count, ports, …) must never rotate it — every mesh
+        # artifact keyed on `slate-<region>-<uuid8>` would orphan (PEER_TUNNEL_PLAN §5.5).
+        u = !isempty(String(uuid)) ? String(uuid) :
+            (i === nothing || isempty(list[i].uuid)) ? _mint_region_uuid() : list[i].uuid
+        r = Region(String(n), String(host), Symbol(transport), Int(base_port), String(preload),
+                   String(data_root), String(cache_root), Int(warm), String(threads),
+                   _asbool(sysimage), _asbool(curve), u)
         i === nothing ? push!(list, r) : (list[i] = r)
         _write_regions!(list)
+        r
     end
-    return r
 end
 
 function region_delete!(name)
