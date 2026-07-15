@@ -506,7 +506,7 @@ end
 function _connect!(k::GateKernel)
     K = _kaimon()
     mgr = _manager()
-    deadline = time() + 90             # worker Julia startup + KaimonGate load is slow
+    deadline = time() + _connect_deadline_local()   # worker Julia startup + KaimonGate load is slow
     last = ""
     while time() < deadline
         try
@@ -630,6 +630,31 @@ end
 # frees eventually; the worker-restart escape hatch remains), overridable via env. Interactive tool
 # calls (complete / table-page / docs) keep the short default.
 _eval_timeout() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_EVAL_TIMEOUT", "")), 3600.0)
+
+# ── Remote/connect timing config ──────────────────────────────────────────────────────────────
+# The SSH/connect/tunnel/transfer timings scattered through gate_kernel.jl + remote.jl default to
+# values that are fine on a LAN but can be too tight for a slow-auth, high-latency, or cold
+# (heavy-precompile) host. They're tunable WITHOUT a rebuild via a `"remote"` object in slate.json —
+# e.g. {"remote": {"dial_deadline_cold": 300, "ssh_connect_timeout": 30}} — which KaimonSlate installs
+# here at init (it reads slate.json; ReportEngine loads before it, so the table is pushed IN, exactly
+# as RUNON_DEFAULT / the transfer refs are). Precedence per key: slate.json value → KAIMONSLATE_<ENV>
+# env var → the hardcoded default. Values are SECONDS unless the name says otherwise. Every key/env/
+# default is tabulated over the helpers in remote.jl (the `_ssh_*`/`_dial_*`/… cluster); the two below
+# live here because their call sites do.
+const _REMOTE_CFG = Ref{Dict{String,Any}}(Dict{String,Any}())
+function _rcfg(key::AbstractString, env::AbstractString, default::Real)
+    v = get(_REMOTE_CFG[], key, nothing)
+    if v !== nothing
+        fv = tryparse(Float64, string(v)); fv !== nothing && return fv
+    end
+    something(tryparse(Float64, get(ENV, env, "")), Float64(default))
+end
+# Local (127.0.0.1) worker connect deadline — worker Julia startup + KaimonGate load is slow.
+_connect_deadline_local() = _rcfg("connect_deadline_local", "KAIMONSLATE_CONNECT_DEADLINE_LOCAL", 90.0)
+# Gate timeout for a package op (add/rm/reconstruct) — a heavy stack's resolve + precompile is minutes.
+_pkg_op_timeout()         = _rcfg("pkg_op_timeout",         "KAIMONSLATE_PKG_OP_TIMEOUT",         900.0)
+# Gate timeout for a parent-project /src sync.
+_sync_parent_timeout()    = _rcfg("sync_parent_timeout",    "KAIMONSLATE_SYNC_PARENT_TIMEOUT",    600.0)
 
 # Synchronous gate tool call → the tool's raw return value (binary wire-form).
 function _tool(k::GateKernel, name::String, args::Dict; timeout::Float64 = 120.0)
@@ -905,7 +930,7 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
     if String(target) == "project"
         isempty(k.parent) && return Dict{String,Any}("ok" => false, "message" => "this notebook has no parent project")
         r = try
-            _tool(k, "__slate_pkg_parent", Dict{String,Any}("op" => String(op), "name" => String(name), "parent" => k.parent); timeout = 900.0)
+            _tool(k, "__slate_pkg_parent", Dict{String,Any}("op" => String(op), "name" => String(name), "parent" => k.parent); timeout = _pkg_op_timeout())
         catch e
             return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
         end
@@ -925,8 +950,8 @@ function pkg_op(k::GateKernel, report::Report, op::AbstractString, name::Abstrac
     end
     try
         # Generous timeout — Pkg.add of a heavy package (a full Makie stack, etc.) resolves + precompiles
-        # well past the 120s default, especially on a fresh remote env.
-        r = _tool(k, "__slate_pkg", Dict{String,Any}("op" => String(op), "name" => String(name)); timeout = 900.0)
+        # well past the 120s default, especially on a fresh remote env. Tunable via _pkg_op_timeout().
+        r = _tool(k, "__slate_pkg", Dict{String,Any}("op" => String(op), "name" => String(name)); timeout = _pkg_op_timeout())
         r === nothing && return Dict{String,Any}("ok" => false, "message" => "no response from worker")
         return Dict{String,Any}(String(kk) => v for (kk, v) in r)
     catch e
@@ -952,7 +977,7 @@ function _reconstruct_env!(k::GateKernel)
     try
         _tool(k, "__slate_reconstruct",
               Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending);
-              timeout = 900.0)
+              timeout = _pkg_op_timeout())
         _write_parent_marker!(k)
     catch
     end
@@ -969,7 +994,7 @@ function _maybe_sync_parent!(k::GateKernel)
     prev = try; isfile(_parent_marker_path(k)) ? read(_parent_marker_path(k), String) : ""; catch; ""; end
     cur == prev && return
     try
-        _tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent); timeout = 600.0)
+        _tool(k, "__slate_sync_parent", Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent); timeout = _sync_parent_timeout())
         _write_parent_marker!(k)
     catch
     end

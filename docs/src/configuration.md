@@ -56,6 +56,49 @@ notebook behaving exactly as if local. Set hosts up on the front page's **🖧 R
 place a whole notebook with **Run on**, or route individual cells to a named
 [region](regions.md) (kept warm for instant startup). See [Remotes](remotes.md).
 
+## Remote worker timing
+
+The SSH/connect/tunnel/transfer timeouts used when a worker runs on [another
+machine](remotes.md) default to values tuned for a LAN. A slow-auth, high-latency, or cold
+(heavy-precompile) host can legitimately exceed them — a cold cloud VM's first spawn, say,
+outrunning the 120 s dial deadline. Rather than rebuild, override any of them per machine in a
+`"remote"` object in `slate.json` (in your config home — `$XDG_CONFIG_HOME/kaimonslate/`, changes
+apply on the next hub start):
+
+```json
+{
+  "remote": {
+    "dial_deadline_cold": 300,
+    "ssh_connect_timeout": 30,
+    "pkg_op_timeout": 1800
+  }
+}
+```
+
+Each key also has a `KAIMONSLATE_*` environment-variable equivalent (handy for a one-off run or a
+test); precedence is **`slate.json` → env var → built-in default**. Values are **seconds** unless
+noted.
+
+| `slate.json` key | Env var | Default | Governs |
+| --- | --- | --- | --- |
+| `dial_deadline_cold` | `KAIMONSLATE_DIAL_DEADLINE_COLD` | `120` | Cold-spawn dial — covers remote Julia boot + KaimonGate load. |
+| `dial_deadline_probe` | `KAIMONSLATE_DIAL_DEADLINE_PROBE` | `15` | Reattach-probe / warm-pool-adopt dial. |
+| `dial_deadline_record` | `KAIMONSLATE_DIAL_DEADLINE_RECORD` | `5` | Record-first dial (a live worker answers in well under a second). |
+| `connect_deadline_local` | `KAIMONSLATE_CONNECT_DEADLINE_LOCAL` | `90` | Local (`127.0.0.1`) worker connect deadline. |
+| `ssh_connect_timeout` | `KAIMONSLATE_SSH_CONNECT_TIMEOUT` | `15` | `ConnectTimeout` for every ssh/scp/rsync op. |
+| `ssh_control_persist` | `KAIMONSLATE_SSH_CONTROL_PERSIST` | `120` | SSH connection-mux master warm-hold past the last op. |
+| `tunnel_alive_interval` | `KAIMONSLATE_TUNNEL_ALIVE_INTERVAL` | `5` | Supervised tunnel `ServerAliveInterval`. |
+| `tunnel_alive_count` | `KAIMONSLATE_TUNNEL_ALIVE_COUNT` | `3` | Supervised tunnel `ServerAliveCountMax`. |
+| `tunnel_respawn_backoff` | `KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF` | `1` | Backoff after a dropped forward before respawning it. |
+| `probe_timeout` | `KAIMONSLATE_PROBE_TIMEOUT` | `4` | `:direct` TCP port-open probe. |
+| `firewall_giveup` | `KAIMONSLATE_FIREWALL_GIVEUP` | `10` | Sustained SYN-drop ⇒ declare a firewall and fail fast. |
+| `pkg_op_timeout` | `KAIMONSLATE_PKG_OP_TIMEOUT` | `900` | Package add/rm/reconstruct — a heavy stack's resolve + precompile. |
+| `sync_parent_timeout` | `KAIMONSLATE_SYNC_PARENT_TIMEOUT` | `600` | Parent-project `/src` sync. |
+| `blob_xfer_timeout` | `KAIMONSLATE_BLOB_XFER_TIMEOUT` | `600` | Whole-binding / direct-blob boundary move. |
+| `blob_chunk_timeout` | `KAIMONSLATE_BLOB_CHUNK_TIMEOUT` | `20` | Per-chunk ZMQ recv/send timeout on a transfer. |
+| `sysimage_lock_stale` | `KAIMONSLATE_SYSIMAGE_LOCK_STALE` | `1800` | Concurrent sysimage-build lock staleness window. |
+| `peer_bw_mbps` | `KAIMONSLATE_PEER_BW_MBPS` | `30` | Assumed rate (MB/s) for an unmeasured worker→worker link. |
+
 ## Ollama (local models)
 
 The agent model dropdown lists models from your local Ollama install, queried from its HTTP

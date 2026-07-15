@@ -294,6 +294,17 @@ carry_max_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(),
 "Configured transfer-preview threshold (s); -1 = unset (env / 15s default), 0 = previews off."
 xfer_confirm_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "xfer_confirm_s", ""))), -1.0)
 
+"""
+    remote_config() -> Dict{String,Any}
+
+The optional `"remote"` object in slate.json — per-host overrides for SSH/connect/tunnel/transfer
+timing (dial deadlines, ssh ConnectTimeout, tunnel keepalive, blob timeouts, …). Edited by hand;
+installed into the engine at init. See the `_ssh_*`/`_dial_*`/… helpers in remote.jl for every key,
+its `KAIMONSLATE_*` env equivalent, and its default. Empty ⇒ every timing keeps its built-in default.
+"""
+remote_config()::Dict{String,Any} =
+    (r = get(_slate_config(), "remote", nothing); r isa AbstractDict ? Dict{String,Any}(r) : Dict{String,Any}())
+
 "Persist the transfer-preview threshold and apply it live. -1 clears to default; 0 disables."
 function set_xfer_confirm_s!(s::Real)
     v = Float64(s) < 0 ? -1.0 : Float64(s)
@@ -369,6 +380,7 @@ function _load_slate_config!()
     ReportEngine.XFER_CONFIRM_S[] = xfer_confirm_s()
     NotebookServer.PARALLEL_DEFAULT[] = parallel_default()
     NotebookServer.RUNON_DEFAULT[] = run_location_default()
+    ReportEngine._REMOTE_CFG[] = remote_config()   # SSH/connect/tunnel/transfer timing overrides (slate.json "remote")
     # Persist hook for the browser Settings panel's transfer knobs (route in server_complete.jl —
     # NotebookServer has no JSON-config ownership, same pattern as _RUNON_PERSIST).
     NotebookServer._XFER_PERSIST[] = function (chunk_mb, carry_s, confirm_s)

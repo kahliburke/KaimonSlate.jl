@@ -130,6 +130,40 @@ const _REMOTE_SYSIMG    = "$_REMOTE_ROOT/sysimg"      # baked worker sysimages, 
 const _REMOTE_SYSIMG_BUILDER = "$_REMOTE_ROOT/sysimg-builder"  # env holding PackageCompiler (kept OFF the worker env)
 const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 
+# ── Remote timing knobs ───────────────────────────────────────────────────────────────────────
+# Every value below shipped as a hardcoded literal; each is now overridable per host/deployment
+# WITHOUT a rebuild, via the `"remote"` object in slate.json (installed at init) → the KAIMONSLATE_<ENV>
+# env var → the default. See `_rcfg` in gate_kernel.jl for the precedence + install mechanism. Values
+# are SECONDS unless noted. slate.json key / env var / default / what it governs:
+#   ssh_connect_timeout     KAIMONSLATE_SSH_CONNECT_TIMEOUT     15    ConnectTimeout for every ssh/scp/rsync op
+#   ssh_control_persist     KAIMONSLATE_SSH_CONTROL_PERSIST     120   mux master warm-hold past the last op
+#   tunnel_alive_interval   KAIMONSLATE_TUNNEL_ALIVE_INTERVAL   5     supervised tunnel ServerAliveInterval
+#   tunnel_alive_count      KAIMONSLATE_TUNNEL_ALIVE_COUNT      3     supervised tunnel ServerAliveCountMax
+#   tunnel_respawn_backoff  KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF  1     backoff after a dropped forward before respawn
+#   probe_timeout           KAIMONSLATE_PROBE_TIMEOUT           4     :direct TCP port-open probe
+#   firewall_giveup         KAIMONSLATE_FIREWALL_GIVEUP         10    sustained SYN-drop ⇒ declare firewall, fail fast
+#   dial_deadline_cold      KAIMONSLATE_DIAL_DEADLINE_COLD      120   cold-spawn dial (covers remote boot + KaimonGate load)
+#   dial_deadline_probe     KAIMONSLATE_DIAL_DEADLINE_PROBE     15    reattach-probe / pool-adopt dial
+#   dial_deadline_record    KAIMONSLATE_DIAL_DEADLINE_RECORD    5     record-first dial (a live worker answers <1s)
+#   blob_chunk_timeout      KAIMONSLATE_BLOB_CHUNK_TIMEOUT      20    per-chunk ZMQ recv/send timeout (applied as ms)
+#   blob_xfer_timeout       KAIMONSLATE_BLOB_XFER_TIMEOUT       600   whole-binding / direct-blob move gate timeout
+#   sysimage_lock_stale     KAIMONSLATE_SYSIMAGE_LOCK_STALE     1800  concurrent sysimage-build lock staleness window
+#   peer_bw_mbps            KAIMONSLATE_PEER_BW_MBPS            30    assumed rate (MB/s) for an unmeasured peer link
+_ssh_connect_timeout()    = round(Int, _rcfg("ssh_connect_timeout",    "KAIMONSLATE_SSH_CONNECT_TIMEOUT",    15))
+_ssh_control_persist()    = round(Int, _rcfg("ssh_control_persist",    "KAIMONSLATE_SSH_CONTROL_PERSIST",    120))
+_tunnel_alive_interval()  = round(Int, _rcfg("tunnel_alive_interval",  "KAIMONSLATE_TUNNEL_ALIVE_INTERVAL",  5))
+_tunnel_alive_count()     = round(Int, _rcfg("tunnel_alive_count",     "KAIMONSLATE_TUNNEL_ALIVE_COUNT",     3))
+_tunnel_respawn_backoff() = _rcfg("tunnel_respawn_backoff", "KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF", 1.0)
+_probe_timeout()          = _rcfg("probe_timeout",          "KAIMONSLATE_PROBE_TIMEOUT",          4.0)
+_firewall_giveup()        = _rcfg("firewall_giveup",        "KAIMONSLATE_FIREWALL_GIVEUP",        10.0)
+_dial_deadline_cold()     = _rcfg("dial_deadline_cold",     "KAIMONSLATE_DIAL_DEADLINE_COLD",     120.0)
+_dial_deadline_probe()    = _rcfg("dial_deadline_probe",    "KAIMONSLATE_DIAL_DEADLINE_PROBE",    15.0)
+_dial_deadline_record()   = _rcfg("dial_deadline_record",   "KAIMONSLATE_DIAL_DEADLINE_RECORD",   5.0)
+_blob_chunk_timeout_ms()  = round(Int, _rcfg("blob_chunk_timeout", "KAIMONSLATE_BLOB_CHUNK_TIMEOUT", 20.0) * 1000)
+_blob_xfer_timeout()      = _rcfg("blob_xfer_timeout",      "KAIMONSLATE_BLOB_XFER_TIMEOUT",      600.0)
+_sysimage_lock_stale()    = round(Int, _rcfg("sysimage_lock_stale", "KAIMONSLATE_SYSIMAGE_LOCK_STALE", 1800))
+_peer_bw_default()        = _rcfg("peer_bw_mbps",          "KAIMONSLATE_PEER_BW_MBPS",           30.0) * 1.0e6
+
 # ── Supervised SSH tunnel (lifted from TachiRei/tunnel.jl; migrate to KaimonGate later) ──
 "An OS-assigned free local TCP port (bind :0, read it, release — small race window)."
 function _free_local_port()
@@ -183,7 +217,7 @@ function _run_tunnel!(t::Tunnel)
         # Dedicated connection; ServerAlive* makes ssh notice a dead link in ~15s and exit →
         # we respawn on the SAME local ports. stdin=devnull so background `ssh -N` doesn't exit
         # on inherited-stdin EOF.
-        cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 $lflags $(t.host)`
+        cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=$(_tunnel_alive_interval()) -o ServerAliveCountMax=$(_tunnel_alive_count()) $lflags $(t.host)`
         try
             t.proc = Base.run(pipeline(cmd; stdin = devnull, stdout = devnull, stderr = devnull); wait = false)
             wait(t.proc)
@@ -191,7 +225,7 @@ function _run_tunnel!(t::Tunnel)
         end
         t.proc = nothing
         t.running || break
-        sleep(1.0)
+        sleep(_tunnel_respawn_backoff())
     end
     return nothing
 end
@@ -225,7 +259,7 @@ function _ssh_mux_opts()
     get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
     d = joinpath(_slate_cache_dir(), "mux")
     try; mkpath(d); catch; return String[]; end
-    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=120"]
+    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=$(_ssh_control_persist())"]
 end
 
 # rsync's `-e` value is whitespace-tokenized by rsync itself, so a mux path containing a space
@@ -236,7 +270,7 @@ function _rsync_ssh_opt()
     return ["-e", "ssh -o BatchMode=yes " * join(opts, " ")]
 end
 
-_ssh(host, argv::Cmd) = `ssh -o BatchMode=yes -o ConnectTimeout=15 $(_ssh_mux_opts()) $host $argv`
+_ssh(host, argv::Cmd) = `ssh -o BatchMode=yes -o ConnectTimeout=$(_ssh_connect_timeout()) $(_ssh_mux_opts()) $host $argv`
 
 # Run `cmd`, merging stdout+stderr; on failure, @warn the command + captured output. Returns (ok, output).
 function _run_logged(cmd::Cmd, what::AbstractString)
@@ -568,7 +602,7 @@ function _sysimage_build_script(projrel::AbstractString, sysreldir::AbstractStri
     P("if isfile(curf); prev = strip(read(curf, String)); rm(curf; force = true); println(\"[sysimg] payload/env drift (\$prev → \$key) — invalidated; rebuilding\"); end")
     # concurrent-build lock (stale after 30 min)
     P("lk = joinpath(sysdir, \".building\")")
-    P("if isfile(lk) && (time() - mtime(lk)) < 1800; println(\"[sysimg] another build in progress — skip\"); exit(0); end")
+    P("if isfile(lk) && (time() - mtime(lk)) < $(_sysimage_lock_stale()); println(\"[sysimg] another build in progress — skip\"); exit(0); end")
     P("write(lk, key)")
     P("try")
     P("  builder = joinpath(home, raw\"$_REMOTE_SYSIMG_BUILDER\"); Pkg.activate(builder)")
@@ -1112,12 +1146,12 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             # message instead of waiting out the whole deadline.
             if t.transport === :direct
                 _pt = time()
-                pr = _probe_tcp(connect_host, connect_port; timeout = 4.0)
+                pr = _probe_tcp(connect_host, connect_port; timeout = _probe_timeout())
                 _rlog("  dial try $tries: probe=$pr in $(round(time() - _pt; digits = 2))s (elapsed $(round(time() - t0; digits = 1))s)")
                 if pr === :unreachable
                     firewall_since == 0.0 && (firewall_since = time())
                     last = "port $connect_port on $host is not reachable — open $(connect_port)-$(connect_port + 2) in the host's firewall, or use transport=:tunnel"
-                    (time() - firewall_since > 10.0) && break        # sustained DROP ⇒ firewall, not a slow boot — stop early
+                    (time() - firewall_since > _firewall_giveup()) && break   # sustained DROP ⇒ firewall, not a slow boot — stop early
                     sleep(0.5); continue
                 end
                 firewall_since = 0.0                                  # refused/open ⇒ host reachable; normal boot/ready path
@@ -1174,7 +1208,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                           _next_ports(floor = try; _port_floor(host); catch; 0; end)
         k.port = port; k.stream_port = stream_port
         _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, region = t.region)
-        r = dial(port, stream_port; deadline = 120.0)   # deadline covers remote Julia boot + KaimonGate load (~90s)
+        r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
         _attach_record!(host, k.label; port = port, stream_port = stream_port,
@@ -1244,7 +1278,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     rec = _attach_lookup(host, k.label)
     if rec !== nothing
         k.port = rec.port; k.stream_port = rec.stream_port
-        r = dial(rec.port, rec.stream_port; deadline = 5.0,
+        r = dial(rec.port, rec.stream_port; deadline = _dial_deadline_record(),
                  server_key = String(rec.server_key), remote_ip = String(rec.remote_ip))
         r.conn !== nothing && return attached!(r, "record")
         _attach_clear!(host, k.label)
@@ -1262,7 +1296,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     if reattach !== nothing
         k.port = reattach.port; k.stream_port = reattach.stream_port
         _rlog("reconnect: probe found live worker-$(k.port) on $host (notebook=$(k.label)) — skipping spawn + provision")
-        r = dial(k.port, k.stream_port; deadline = 15.0)
+        r = dial(k.port, k.stream_port; deadline = _dial_deadline_probe())
         r.conn !== nothing && return attached!(r, "probe")
         # It answered the probe but not a 15s dial: wedged/half-dead (a merely-busy worker answers on its
         # interactive thread). We're about to redo its work on a fresh worker, so REAP the superseded one
@@ -1285,7 +1319,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     if pool !== nothing
         k.port = pool.port; k.stream_port = pool.stream_port
         _rlog("adopt: warm worker-$(pool.port) on $host for region '$(t.region)' — adopting for '$(k.label)'")
-        r = dial(pool.port, pool.stream_port; deadline = 15.0)
+        r = dial(pool.port, pool.stream_port; deadline = _dial_deadline_probe())
         adopted = false
         if r.conn !== nothing
             adopted = try
@@ -1630,7 +1664,7 @@ end
 # actually seconds. Recorded from completed direct pulls, keyed per (src_host → dst_host); co-located
 # peers share the same host (loopback rate). Unmeasured ⇒ a FAST default: direct is fast, so bias
 # AWAY from a needless confirm (the opposite of the uplink's conservative 1 MB/s recompute-bias).
-const PEER_BW_DEFAULT = 30.0e6                 # 30 MB/s assumed for an unmeasured peer link
+# The unmeasured default is `_peer_bw_default()` (slate.json `peer_bw_mbps` / KAIMONSLATE_PEER_BW_MBPS; 30 MB/s).
 _peer_bw_path(a, b) = joinpath(_slate_cache_dir(), "bw", "peer",
     replace("$(a)__$(b)", r"[^A-Za-z0-9._-]" => "_") * ".json")
 function _peer_bw_get(a, b)
@@ -1654,7 +1688,7 @@ end
 function _plan_rate(src_k, dst_k, mode::Symbol)
     if (mode === :direct || mode === :auto) && _direct_viable(src_k, dst_k)
         pb = _peer_bw_get(src_k.target.ssh_host, dst_k.target.ssh_host)
-        return pb > 0 ? pb : PEER_BW_DEFAULT
+        return pb > 0 ? pb : _peer_bw_default()
     end
     host = dst_k.target isa RemoteTarget ? dst_k.target.ssh_host :
            (src_k.target isa RemoteTarget ? src_k.target.ssh_host : "")
@@ -1662,7 +1696,7 @@ function _plan_rate(src_k, dst_k, mode::Symbol)
 end
 
 function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String};
-                          timeout_ms::Int = 20_000, server_key::AbstractString = "",
+                          timeout_ms::Int = _blob_chunk_timeout_ms(), server_key::AbstractString = "",
                           max_transfer_s::Float64 = 0.0, bw_key::AbstractString = host_ip)
     kg = getfield(_kaimon(), :KaimonGate)
     Z = kg.ZMQ
@@ -1808,7 +1842,7 @@ Ship ONE blob from the LOCAL CAS to a worker's store over its data channel (dedu
 half; `pull_blob!` is the reverse. Returns bytes actually sent (0 = deduped).
 """
 function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
-                    server_key::AbstractString = "", timeout_ms::Int = 20_000,
+                    server_key::AbstractString = "", timeout_ms::Int = _blob_chunk_timeout_ms(),
                     on_plan = nothing, meta = nothing, on_progress = nothing)
     root = joinpath(_slate_cache_dir(), "memo")
     p = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
@@ -1847,7 +1881,7 @@ against the address, atomic-renames — a truncated/corrupt transfer never lands
 an already-present blob costs nothing. Returns bytes moved over the network (0 = deduped).
 """
 function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractString;
-                    server_key::AbstractString = "", timeout_ms::Int = 20_000, on_progress = nothing)
+                    server_key::AbstractString = "", timeout_ms::Int = _blob_chunk_timeout_ms(), on_progress = nothing)
     root = joinpath(_slate_cache_dir(), "memo")
     dest = joinpath(root, "blobs", "sha256", hash[1:2], String(hash))
     isfile(dest) && return 0                              # dedup: already here — nothing moved
@@ -2063,7 +2097,7 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta)
     end
     try
         pr = _tool(dst_k, "__slate_pull_blob", Dict{String,Any}(
-            "ip" => epA.ip, "port" => epA.port, "server_key" => epA.server_key, "hash" => h); timeout = 600.0)
+            "ip" => epA.ip, "port" => epA.port, "server_key" => epA.server_key, "hash" => h); timeout = _blob_xfer_timeout())
         perr = try; getproperty(pr, :error); catch; nothing; end
         perr === nothing || error("direct pull on dest failed: $perr")
         return Int(pr.bytes)
@@ -2077,7 +2111,7 @@ end
 
 function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, mode::Symbol = :relay,
                            on_plan = nothing, on_progress = nothing)
-    meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = 600.0)
+    meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = _blob_xfer_timeout())
     err = try; getproperty(meta, :error); catch; nothing; end
     err === nothing || error("transfer '$name': $err")
     h = String(meta.hash); codec = String(meta.codec)
@@ -2128,7 +2162,7 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     end
 
     r = _tool(dst_k, "__slate_bind_blob", Dict{String,Any}(
-        "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = 600.0)
+        "name" => String(name), "hash" => h, "codec" => codec, "zc" => zc); timeout = _blob_xfer_timeout())
     rerr = try; getproperty(r, :error); catch; nothing; end
     rerr === nothing || error("transfer '$name' (bind): $rerr")
     return (; bytes = moved, codec = codec, mode = used)

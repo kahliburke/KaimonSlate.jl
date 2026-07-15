@@ -174,4 +174,53 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         @test !occursin("sources", s0) && !occursin("parsefile", s0)
         @test occursin("Pkg.instantiate()", s0)
     end
+
+    @testset "remote timing config: default → env → slate.json precedence" begin
+        saved = copy(RE._REMOTE_CFG[])
+        try
+            RE._REMOTE_CFG[] = Dict{String,Any}()
+            # 1. defaults (no config, no env) — the exact literals that used to be hardcoded
+            withenv("KAIMONSLATE_DIAL_DEADLINE_COLD" => nothing,
+                    "KAIMONSLATE_SSH_CONNECT_TIMEOUT" => nothing,
+                    "KAIMONSLATE_BLOB_CHUNK_TIMEOUT" => nothing,
+                    "KAIMONSLATE_PEER_BW_MBPS" => nothing,
+                    "KAIMONSLATE_SYSIMAGE_LOCK_STALE" => nothing) do
+                @test RE._dial_deadline_cold() == 120.0
+                @test RE._dial_deadline_probe() == 15.0
+                @test RE._dial_deadline_record() == 5.0
+                @test RE._ssh_connect_timeout() == 15 && RE._ssh_connect_timeout() isa Int
+                @test RE._ssh_control_persist() == 120
+                @test RE._tunnel_alive_interval() == 5 && RE._tunnel_alive_count() == 3
+                @test RE._firewall_giveup() == 10.0
+                @test RE._connect_deadline_local() == 90.0
+                @test RE._pkg_op_timeout() == 900.0 && RE._sync_parent_timeout() == 600.0
+                @test RE._blob_xfer_timeout() == 600.0
+                @test RE._blob_chunk_timeout_ms() == 20_000       # 20s → ms
+                @test RE._peer_bw_default() == 30.0e6             # 30 MB/s → bytes/s
+                @test RE._sysimage_lock_stale() == 1800 && RE._sysimage_lock_stale() isa Int
+
+                # 2. env override applies when no config key is present
+                withenv("KAIMONSLATE_DIAL_DEADLINE_COLD" => "250") do
+                    @test RE._dial_deadline_cold() == 250.0
+                    # 3. slate.json ("remote" table) wins over the env — number OR string form both parse
+                    RE._REMOTE_CFG[] = Dict{String,Any}("dial_deadline_cold" => 300)
+                    @test RE._dial_deadline_cold() == 300.0
+                    RE._REMOTE_CFG[] = Dict{String,Any}("dial_deadline_cold" => "175")
+                    @test RE._dial_deadline_cold() == 175.0
+                    RE._REMOTE_CFG[] = Dict{String,Any}()
+                end
+                # transforms honor the config value too
+                RE._REMOTE_CFG[] = Dict{String,Any}("blob_chunk_timeout" => 45, "peer_bw_mbps" => 12)
+                @test RE._blob_chunk_timeout_ms() == 45_000
+                @test RE._peer_bw_default() == 12.0e6
+                RE._REMOTE_CFG[] = Dict{String,Any}()
+            end
+            # the sysimage build lock window is interpolated (tunable) into the generated remote script
+            script = RE._sysimage_build_script("proj", "sysdir", 5.0)
+            @test occursin("< $(RE._sysimage_lock_stale())", script)
+            @test !any(a -> a isa Expr && a.head === :error, Meta.parseall(script).args)   # still valid Julia
+        finally
+            RE._REMOTE_CFG[] = saved
+        end
+    end
 end
