@@ -1972,6 +1972,49 @@ function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
     end
 end
 
+# ── Transfer-control plane client (TRANSFER_CONTROL_PLAN Mode A) ───────────────────────────────────────
+# One REQ/REP round-trip to a worker's blob channel carrying a NON-data control verb (`X` transfer request
+# / `S` status) — reuses the exact CURVE+REQ setup as pull_blob!, so it rides the same reachability + auth
+# the relay already has (no new port/socket). Returns the reply string.
+function _xfer_ctl_call(host_ip::AbstractString, data_port::Int, msg::AbstractString;
+                        server_key::AbstractString = "", timeout_ms::Int = 15_000)
+    kg = getfield(_kaimon(), :KaimonGate); Z = kg.ZMQ
+    sock = Z.Socket(Z.REQ)
+    try
+        sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
+        if !isempty(server_key)
+            cpub, csec = kg._load_or_create_client_keypair()
+            kg.make_curve_client!(sock, String(server_key), cpub, csec)
+        end
+        Z.connect(sock, "tcp://$host_ip:$data_port")
+        Z.send(sock, String(msg))
+        return String(Z.recv(sock))
+    finally
+        try; Z.close(sock); catch; end
+    end
+end
+
+# Drive a peer pull on `dst_k` OVER ITS BLOB CHANNEL (not the gate): send the `X` request to the dst's
+# blob endpoint (hub-vantage — reuses the relay reach), then poll `S` to completion. The actual pull runs
+# on the dst's dedicated executor task, so the gate loop never blocks. `spec` is the newline-framed body
+# after the verb (see `_xfer_control`). Returns (bytes, via). THROWS on failure (caller decides fallback).
+function _xfer_ctl_pull(dst_k, spec::AbstractString; timeout::Float64 = _blob_xfer_timeout())
+    ep = _data_endpoint!(dst_k.target, dst_k)              # the DST's blob channel, reachable from the hub
+    jid = _xfer_ctl_call(ep.ip, ep.port, "X" * spec; server_key = ep.server_key)
+    (isempty(jid) || startswith(jid, "err")) && error("xfer request rejected: $jid")
+    deadline = time() + timeout
+    while time() < deadline
+        st = _xfer_ctl_call(ep.ip, ep.port, "S" * jid; server_key = ep.server_key)
+        if startswith(st, "done ")
+            p = split(st); return (something(tryparse(Int, p[2]), 0), length(p) >= 3 ? String(p[3]) : "direct")
+        elseif startswith(st, "err")
+            error("xfer $jid: $st")
+        end
+        sleep(0.2)                                         # "running" — poll (control round-trips are cheap)
+    end
+    error("xfer $jid: timed out after $(round(Int, timeout))s")
+end
+
 # The carry's transfer-vs-recompute decision: ship an entry only when moving its bytes beats
 # recomputing it. Estimated transfer = bytes/bw; ship when that stays under BOTH 2× the entry's
 # recorded compute cost (0.5s floor — trivial entries always ship, so a warm reattach isn't
@@ -2302,11 +2345,10 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
         akerr === nothing || error("direct: authorise on source failed: $akerr")
     end
     try
-        pr = _tool(dst_k, "__slate_pull_blob", Dict{String,Any}(
-            "ip" => route.ip, "port" => route.port, "server_key" => route.server_key, "hash" => h); timeout = _blob_xfer_timeout())
-        perr = try; getproperty(pr, :error); catch; nothing; end
-        perr === nothing || error("direct pull on dest failed: $perr")
-        return Int(pr.bytes)
+        # Drive the pull over the DST's BLOB CHANNEL (transfer-control plane), NOT a gate :tool_call — so it
+        # runs on the dst's executor task and never starves gate liveness (TRANSFER_CONTROL_PLAN Mode A).
+        bytes, _ = _xfer_ctl_pull(dst_k, "$(h)\ndirect\n$(route.ip)\n$(route.port)\n$(route.server_key)")
+        return bytes
     finally
         authed && try
             _tool(src_k, "__slate_revoke_client", Dict{String,Any}("pubkey" => bpub); timeout = 30.0)
@@ -2368,13 +2410,12 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     a_user = _ssh_user(src_k.target.ssh_host)
     ssh_target = isempty(a_user) ? route.ip : "$(a_user)@$(route.ip)"
     try
-        pr = _tool(dst_k, "__slate_pull_blob_ssh", Dict{String,Any}(
-            "ssh_target" => ssh_target, "key_path" => _mesh_key_path(String(dst_k.target.region)),
-            "known_hosts" => _mesh_known_hosts(), "blob_port" => route.port,
-            "server_key" => route.server_key, "hash" => h); timeout = _blob_xfer_timeout())
-        perr = try; getproperty(pr, :error); catch; nothing; end
-        perr === nothing || error("ssh-bridged pull on dest failed: $perr")
-        return Int(pr.bytes)
+        # Over the DST's blob channel (transfer-control plane), off the gate — the ssh forward + CURVE pull
+        # run on the dst's executor task (TRANSFER_CONTROL_PLAN Mode A).
+        spec = "$(h)\nssh\n$(ssh_target)\n$(_mesh_key_path(String(dst_k.target.region)))\n" *
+               "$(_mesh_known_hosts())\n$(route.port)\n$(route.server_key)"
+        bytes, _ = _xfer_ctl_pull(dst_k, spec)
+        return bytes
     finally
         authed && try
             _tool(src_k, "__slate_revoke_client", Dict{String,Any}("pubkey" => bpub); timeout = 30.0)

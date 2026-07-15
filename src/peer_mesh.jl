@@ -283,10 +283,12 @@ function peer_plan_data(names::AbstractVector; refresh::Bool = false)
         ra = region_get(a); rb = region_get(b)
         (ra === nothing || rb === nothing || ra.host == rb.host) && continue
         v = _peer_route_load(ra.host, rb.host)      # b pulls from a ⇒ keyed (a.host, b.host)
+        bw = _peer_bw_get(ra.host, rb.host)         # measured peer rate (bytes/s) for this direction, 0 = unmeasured
         push!(routes, Dict("src" => String(a), "dst" => String(b),
             "kind" => v === nothing ? "unresolved" : String(v[1]),
             "addr" => v === nothing ? "" : v[2],
-            "age_s" => v === nothing ? -1 : round(Int, time() - v[3])))
+            "age_s" => v === nothing ? -1 : round(Int, time() - v[3]),
+            "mbps" => bw > 0 ? round(bw / 1e6; digits = 1) : 0.0))
     end
     return Dict("regions" => String.(collect(names)), "refreshed" => refresh,
                 "routes" => routes, "hosts" => [_mesh_host_state(h) for h in hosts])

@@ -997,6 +997,13 @@ function __slate_revoke_client(pubkey::String)
     end
 end
 
+# Peer-pull tuning for potentially-SLOW links (cross-cloud direct, or the ssh bridge). The default 8 MB
+# chunk × 20 s recv timeout fails below ~400 KB/s — a real cross-cloud rate. A smaller chunk bounds the
+# time each REQ/REP round-trip needs (so a thin link doesn't blow the recv timeout AND progress is visible
+# more often), and a generous per-chunk timeout tolerates a slow-but-progressing transfer. Env-overridable.
+_peer_pull_chunk()      = max(65_536, round(Int, 2^20 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_PULL_CHUNK_MB", "")), 4.0)))
+_peer_pull_timeout_ms() = round(Int, 1000 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_PULL_TIMEOUT_S", "")), 120.0))
+
 "PULL the content-addressed blob `hash` DIRECTLY from a peer worker's blob server at `ip:port` into THIS
 worker's CAS (the direct-transport data leg). CURVE is used when `server_key` is non-empty — this worker
 presents its client keypair, which the hub must have authorised on the peer (`__slate_authorize_client`).
@@ -1008,7 +1015,8 @@ function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::Stri
         KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
     end
     try
-        moved = pull_blob_into!(KaimonGate.ZMQ, ip, port, _memo_dir(), hash; configure! = configure!)
+        moved = pull_blob_into!(KaimonGate.ZMQ, ip, port, _memo_dir(), hash; configure! = configure!,
+                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms())
         return (; bytes = moved)
     catch e
         return (; error = first(sprint(showerror, e), 200))
@@ -1082,13 +1090,77 @@ function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts
             cpub, csec = KaimonGate._load_or_create_client_keypair()
             KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
         end
-        moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", lport, _memo_dir(), hash; configure! = configure!)
+        moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", lport, _memo_dir(), hash; configure! = configure!,
+                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms())
         return (; bytes = moved, via = "ssh")
     catch e
         return (; error = first(sprint(showerror, e), 200))
     finally
         try; kill(proc); catch; end
     end
+end
+
+# ── Transfer-control plane (peer-to-peer pulls, OFF the gate) — TRANSFER_CONTROL_PLAN Mode A ──────────
+# The hub (or, later, a peer) sends a transfer REQUEST over the blob channel (verb `X`) instead of a gate
+# `:tool_call`. We mint a job id, enqueue it, and reply immediately; a dedicated executor task pumps the
+# pull (reusing __slate_pull_blob[_ssh]) on a DEFAULT-pool thread — off the gate loop (so liveness never
+# starves) AND off the blob serve loop (so peers keep getting served). Status is polled with verb `S`.
+struct _XferJob
+    id::String
+    run::Function      # () -> NamedTuple: the pull, returning (; bytes[, via]) or (; error)
+end
+const _XFER_QUEUE = Channel{_XferJob}(256)
+const _XFER_JOBS  = Dict{String,Any}()   # id → :running | (:done, bytes, via) | (:err, msg)
+const _XFER_LOCK  = ReentrantLock()
+const _XFER_SEQ   = Threads.Atomic{Int}(0)
+
+# Dedicated executor: one at a time here (serial per worker); concurrency = more executor tasks later.
+function _xfer_executor!()
+    for job in _XFER_QUEUE
+        res = try; job.run(); catch e; (; error = first(sprint(showerror, e), 200)); end
+        err = try; getproperty(res, :error); catch; nothing; end
+        lock(_XFER_LOCK) do
+            _XFER_JOBS[job.id] = err === nothing ?
+                (:done, Int(getproperty(res, :bytes)), String(try; getproperty(res, :via); catch; "direct"; end)) :
+                (:err, String(err))
+        end
+    end
+end
+
+# The blob-channel control handler (injected into blob_server!). FAST — mint id + enqueue (`X`), or read
+# status (`S`); never runs the transfer inline. Request framing (newline-separated after the verb byte):
+#   X<hash>\ndirect\n<ip>\n<port>\n<server_key>
+#   X<hash>\nssh\n<ssh_target>\n<key_path>\n<known_hosts>\n<blob_port>\n<server_key>
+# `S<jobid>` → "running" | "done <bytes> <via>" | "err <msg>" (terminal read frees the entry).
+function _xfer_control(cmd::Char, data::Vector{UInt8})
+    _MEMO_OK || return "err: memo/blob layer disabled"
+    if cmd == 'X'
+        lines = split(String(data)[2:end], '\n')
+        length(lines) >= 2 || return "err: bad X request"
+        hash = String(lines[1]); kind = String(lines[2])
+        run = if kind == "direct" && length(lines) >= 5
+            ip = String(lines[3]); port = something(tryparse(Int, lines[4]), 0); skey = String(lines[5])
+            () -> __slate_pull_blob(ip, port, skey, hash)
+        elseif kind == "ssh" && length(lines) >= 7
+            tgt = String(lines[3]); kp = String(lines[4]); kh = String(lines[5])
+            bp = something(tryparse(Int, lines[6]), 0); skey = String(lines[7])
+            () -> __slate_pull_blob_ssh(tgt, kp, kh, bp, skey, hash)
+        else
+            return "err: bad X spec"
+        end
+        id = "x" * string(Threads.atomic_add!(_XFER_SEQ, 1))
+        lock(_XFER_LOCK) do; _XFER_JOBS[id] = :running; end
+        try; put!(_XFER_QUEUE, _XferJob(id, run)); catch; return "err: queue closed"; end
+        return id
+    elseif cmd == 'S'
+        id = String(data)[2:end]
+        st = lock(_XFER_LOCK) do; s = get(_XFER_JOBS, id, nothing); s === :running || delete!(_XFER_JOBS, id); s; end
+        st === nothing && return "err: no job $id"
+        st === :running && return "running"
+        (st isa Tuple && st[1] === :done) && return "done $(st[2]) $(st[3])"
+        return "err: $(st isa Tuple ? st[2] : st)"
+    end
+    return "err: unknown control cmd '$cmd'"
 end
 
 "Cheap size estimate for the namespace global `name` — `(; bytes, type)` via Base.summarysize
@@ -1938,6 +2010,7 @@ function _blob_server!(host::String, port::Int; curve::Bool = true)
         enforce && KaimonGate._setsockopt_str(sock, KaimonGate._ZMQ_ZAP_DOMAIN, _BLOB_ZAP_DOMAIN)
     end : nothing
     blob_server!(KaimonGate.ZMQ, host, port, _memo_dir(); ctx = ctx, configure! = configure!,
+                 control_handler = _xfer_control,   # transfer-control plane rides the blob channel (X/S verbs)
                  on_ready = () -> @info "slate worker: blob data channel listening" port = port curve = curve allowlist = enforce)
     return nothing
 end
@@ -2144,6 +2217,11 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         _blob_server!(isempty(blob_bind) ? host : blob_bind, data_port; curve = blob_curve)
     catch e
         @warn "slate worker: blob channel died" port = data_port exception = e
+    end
+    # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on a default-pool thread, off the
+    # gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
+    data_port > 0 && _MEMO_OK && Threads.@spawn try; _xfer_executor!(); catch e
+        @warn "slate worker: transfer executor died" exception = e
     end
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
     # A memo-off worker used to be SILENT (every store/restore just returned early) — the single

@@ -55,7 +55,7 @@ socket is bound (a test can then connect without racing the bind). `Z` is the ZM
 """
 function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractString;
                       ctx = nothing, configure! = nothing,
-                      running::Ref{Bool} = Ref(true), on_ready = nothing)
+                      running::Ref{Bool} = Ref(true), on_ready = nothing, control_handler = nothing)
     sock = ctx === nothing ? Z.Socket(Z.REP) : Z.Socket(ctx, Z.REP)
     configure! === nothing || configure!(sock)     # CURVE/ZAP applied by the caller BEFORE bind
     Z.bind(sock, "tcp://$host:$port")
@@ -132,6 +132,11 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
                     mkpath(dirname(p))
                     tmp = p * ".tmp"; write(tmp, s[nl+1:end]); mv(tmp, p; force = true)
                     "ok"
+                elseif control_handler !== nothing
+                    # Non-data verbs (transfer-control plane, e.g. X/S) → the injected handler, which must
+                    # answer FAST (enqueue/lookup only — the actual transfer runs on a separate task) so the
+                    # serve loop keeps servicing peers. Keeps this transport dep-light; logic lives upstream.
+                    control_handler(cmd, copy(data))
                 else
                     "err: unknown cmd"
                 end
