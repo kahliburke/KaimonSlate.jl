@@ -350,16 +350,25 @@ _julia_sh(cmd::AbstractString) = "export PATH=\"\$HOME/.juliaup/bin:\$PATH\"; $c
 # scope). Idempotent: a present julia (system or juliaup) short-circuits. Returns true iff julia is
 # available afterward. Run at the top of provisioning and the preflight Julia step.
 function _ensure_julia!(host)
-    have, _ = _ssh_capture(host, `$(_julia_sh("command -v julia"))`)
-    have && return true
+    ver = "$(VERSION.major).$(VERSION.minor).$(VERSION.patch)"   # match the HUB's Julia
+    have, out = _ssh_capture(host, `$(_julia_sh("julia --version"))`)
+    if have
+        # Present already — flag a version skew (non-fatal): Serialization (the jls codec across the
+        # gate) and Manifest resolution can differ across Julia versions. `juliaup add $ver` fixes it.
+        m = match(r"(\d+\.\d+\.\d+)", out)
+        m !== nothing && m.captures[1] != ver &&
+            _rlog("provision: $host runs Julia $(m.captures[1]) but the hub runs $ver — version skew (Serialization/Manifest may differ); run `juliaup add $ver && juliaup default $ver` on $host to match")
+        return true
+    end
     uok, uname = _ssh_capture(host, `uname -s`)
     (uok && !isempty(strip(uname))) ||
         (_rlog("provision: no `julia` on $host and it isn't a Unix host — install Julia manually (juliaup)"); return false)
-    _rlog("provision: `julia` missing on $host ($(strip(uname))) — installing juliaup unattended (downloads Julia; a couple of minutes)…")
-    # NB: `sh -s` reads the installer SCRIPT from stdin (the curl pipe) — do NOT redirect stdin (a
-    # `< /dev/null` starves it and curl dies with a broken pipe). `--yes` runs it unattended.
-    _run_streamed(_ssh(host, `$("curl -fsSL https://install.julialang.org | sh -s -- --yes")`),
-                  "install juliaup on $host"; online = _bringup_note)
+    # Pin the install to the HUB's version (`--default-channel $ver`) — not "latest" — so hub↔worker
+    # Serialization + Manifest stay compatible. NB: `sh -s` reads the installer SCRIPT from stdin (the
+    # curl pipe), so do NOT redirect stdin (a `< /dev/null` starves it → curl broken pipe). `--yes` is unattended.
+    _rlog("provision: `julia` missing on $host ($(strip(uname))) — installing juliaup + Julia $ver unattended (a couple of minutes)…")
+    _run_streamed(_ssh(host, `$("curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel $ver")`),
+                  "install juliaup ($ver) on $host"; online = _bringup_note)
     ok, _ = _ssh_capture(host, `$(_julia_sh("command -v julia"))`)
     ok || _rlog("provision: juliaup install on $host did not yield a working `julia` (see remote.log)")
     return ok
