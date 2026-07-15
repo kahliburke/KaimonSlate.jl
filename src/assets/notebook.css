@@ -534,6 +534,7 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md code { background:var(--bg3); padding:1px 5px; border-radius:4px; }
 .md .phantom { color:var(--dim); }
 .md .ival { color:var(--val); font-family:'Cascadia Code',monospace; }   /* {{ }} scalar */
+.md .ival .katex { color:var(--text); }   /* but a rendered-math value keeps prose colour (match $…$), not the scalar tint */
 .md .interr { color:var(--red); font-family:'Cascadia Code',monospace; }   /* {{ }} error */
 .md .disp.img img { max-width:min(100%, var(--fig-max, 980px)); height:auto; border-radius:4px; }       /* {{ plot }} */
 .md .ichart { height:300px; margin:8px 0; }                                 /* {{ echart(…) }} */
