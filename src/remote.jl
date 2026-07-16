@@ -1675,11 +1675,11 @@ _carry_ceiling_s() = CARRY_MAX_S[] > 0 ? CARRY_MAX_S[] :
 
 # Region-boundary transfer preview threshold (seconds): a cell whose pending boundary transfer
 # is estimated to take longer than this ERRORS with the preview (what/size/ETA) on its first
-# run; running the cell again proceeds — approve-by-rerun. 15s default; 0 disables previews.
+# run; running the cell again proceeds — approve-by-rerun. 60s default; 0 disables previews.
 # Same precedence tiers as the other transfer knobs.
 const XFER_CONFIRM_S = Ref{Float64}(-1.0)  # <0 = unset (env / default applies); 0 = disabled
 _xfer_confirm_s() = XFER_CONFIRM_S[] >= 0 ? XFER_CONFIRM_S[] :
-    something(tryparse(Float64, get(ENV, "KAIMONSLATE_XFER_CONFIRM_S", "")), 15.0)
+    something(tryparse(Float64, get(ENV, "KAIMONSLATE_XFER_CONFIRM_S", "")), 60.0)
 
 # ── Per-host upstream-bandwidth memory (the transfer-vs-recompute input) ─────────────────────
 # Every push measures its own rate over 8 MiB chunks and stamps it here (EMA so one anomalous
