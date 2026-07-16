@@ -1684,6 +1684,61 @@ function _dagPreview(c, kind) {
   return '';
 }
 
+// Bytes → compact human string (the card's transfer rows; the dash has its own inline copy).
+function _dagBytes(b) {
+  return b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB'
+    : b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+}
+
+// Boundary transfers touching THIS cell, from the live trace ring (/api/transfer-stats). OUTBOUND =
+// a value this cell DEFINES shipped to another region (matched by def name). INBOUND = a value this
+// cell READS pulled into its region (an upstream cell's def landing in this cell's region). Repeated
+// ships (a watcher loop re-sending the same name) collapse per (dir, peer, name) to one row with a
+// ×count, carrying the LATEST size/route/rate. Newest first, capped.
+function _dagXferRows(traces, c, curReg) {
+  const defs = new Set(c.defs || []);
+  const byId = (_dagCtx && _dagCtx.m.byId) || {};
+  const upstream = new Set();
+  (c.needs || []).forEach(nid => ((byId[nid] && byId[nid].defs) || []).forEach(d => upstream.add(d)));
+  const agg = new Map();
+  for (const t of traces) {
+    if (t.err || !(t.total > 0)) continue;
+    let dir = null, peer = null;
+    if (defs.has(t.name)) { dir = 'out'; peer = t.dst || 'local'; }                 // this cell's value shipped out
+    else if (upstream.has(t.name) && t.dst === curReg) { dir = 'in'; peer = t.src || 'local'; }  // an input pulled in
+    if (!dir) continue;
+    const sec = (t.finished || 0) - (t.started || 0);
+    const rec = { dir, peer, name: t.name, via: t.via, bytes: t.total,
+                  rate: sec > 0 ? t.total / sec / 1e6 : 0, ts: t.finished || t.started || 0, n: 1 };
+    const key = dir + '|' + peer + '|' + t.name, prev = agg.get(key);
+    if (!prev) agg.set(key, rec);
+    else { prev.n++; if (rec.ts >= prev.ts) { prev.via = rec.via; prev.bytes = rec.bytes; prev.rate = rec.rate; prev.ts = rec.ts; } }
+  }
+  return [...agg.values()].sort((a, b) => b.ts - a.ts).slice(0, 8);
+}
+
+function _dagXferRowHtml(r, P) {
+  const col = _DAG_ROUTE_COL[r.via] || '#6a7183', lbl = _DAG_ROUTE_LBL[r.via] || r.via || '?';
+  const arrow = r.dir === 'out' ? '↗' : '↙', peerc = r.dir === 'out' ? P.fresh : P.text;
+  const rate = r.rate > 0 ? ` · ${r.rate.toFixed(1)} MB/s` : '';
+  const times = r.n > 1 ? ` <span style="color:${P.dim}">×${r.n}</span>` : '';
+  return `<div class="dagxfer-row"><span class="dagxfer-dir" style="color:${peerc}" title="${r.dir === 'out' ? 'shipped to' : 'pulled from'} ${_esc(r.peer)}">${arrow} ${_esc(r.peer)}</span>` +
+    `<code>${_esc(r.name)}</code><span class="dagxfer-meta">${_dagBytes(r.bytes)} · ` +
+    `<span style="color:${col}">${lbl}</span>${rate}${times}</span></div>`;
+}
+
+// Fill the card's transfer slot from the live trace ring (async — the card opens instantly on the
+// cell's own stats; the boundary detail arrives a beat later). Replaces the server's single lastXfer
+// line with the enriched both-directions list once traces exist for this cell.
+async function _dagCardXfers(c, curReg) {
+  let d; try { d = await (await fetch(_apipath('/api/transfer-stats'))).json(); } catch (_) { return; }
+  const slot = _dagCardEl() && _dagCardEl().querySelector('#dagcard-xfers'); if (!slot) return;
+  const rows = _dagXferRows((d && d.traces) || [], c, curReg);
+  if (!rows.length) return;                                    // no cell-specific traces → keep the lastXfer fallback
+  const P = _dagCtx ? _dagCtx.P : _dagPalette();
+  slot.innerHTML = `<div class="dagcard-sec">region transfers</div>` + rows.map(r => _dagXferRowHtml(r, P)).join('');
+}
+
 function _dagCard(id, cx, cy) {
   _dagCardClose();
   const c = _dagCtx && _dagCtx.m.byId[id]; if (!c) return;
@@ -1727,7 +1782,9 @@ function _dagCard(id, cx, cy) {
           `<div class="dagchip"><span>${k}</span><b>${_esc(String(v))}</b></div>`).join('') + '</div>'
       : `<div class="dagcard-dim">no runs recorded this session yet</div>`) +
     (st ? _dagSpark(st.recent, P) : '') +
-    (st && st.lastXfer ? `<div class="dagcard-sec">boundary transfer</div><div class="dagcard-defs">⇄ ${_esc(st.lastXfer)}</div>` : '') +
+    `<div id="dagcard-xfers">` +
+      (st && st.lastXfer ? `<div class="dagcard-sec">boundary transfer</div><div class="dagcard-defs">⇄ ${_esc(st.lastXfer)}</div>` : '') +
+    `</div>` +
     (defs.length ? `<div class="dagcard-sec">defines (${defs.length})</div><div class="dagcard-defs">` +
       `${_esc(defs.slice(0, 12).join(', '))}${defs.length > 12 ? ` … +${defs.length - 12} more` : ''}</div>` : '') +
     ((c.tags || []).length ? `<div class="dagcard-sec">tags</div><div class="dagcard-defs">🏷 ${_esc(c.tags.join(', '))}</div>` : '') +
@@ -1740,6 +1797,7 @@ function _dagCard(id, cx, cy) {
       `<button data-act="cache" title="${cache ? 'stop persisting this cell’s result' : 'always persist this cell’s result (pipeline stage)'}">${cache ? '💾 Uncache' : '💾 Cache'}</button>` +
     '</div>';
   document.body.appendChild(card);   // viewport-centered (CSS) — big enough to read, above the pane
+  _dagCardXfers(c, curReg);                                  // enrich boundary transfers from the live trace ring (async)
   const _ro = card.querySelector('.dagrunon');               // "run on" → retag the cell to a region
   if (_ro) _ro.addEventListener('change', async () => { const v = _ro.value; _dagCardClose(); await setCellRegion(c.id, v); });
   if (_dagChart) { try { _dagChart.dispatchAction({ type: 'hideTip' }); } catch (_) {} }

@@ -299,7 +299,7 @@ end
 "Configured boot-carry per-entry ceiling in seconds; 0.0 = unset (env / 30s default applies)."
 carry_max_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "carry_max_s", ""))), 0.0)
 
-"Configured transfer-preview threshold (s); -1 = unset (env / 15s default), 0 = previews off."
+"Configured transfer-preview threshold (s); -1 = unset (env / 60s default), 0 = previews off."
 xfer_confirm_s()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "xfer_confirm_s", ""))), -1.0)
 
 """
