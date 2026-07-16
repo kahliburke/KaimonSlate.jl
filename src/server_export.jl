@@ -78,6 +78,10 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-tblnote{color:var(--dim);font-size:.74rem;margin-top:3px;font-style:italic;}
 .exp-md code{background:var(--bg3);padding:1px 5px;border-radius:4px;}
 .exp-code{margin:14px 0;border:1px solid var(--border);border-radius:8px;background:var(--bg2);overflow:hidden;}
+/* Side-by-side cells (a `column=N` tag): equal-width flex columns, stacking on a narrow screen. */
+.exp-row{display:flex;gap:16px;align-items:flex-start;}
+.exp-row>section{flex:1 1 0;min-width:0;}
+@media(max-width:640px){.exp-row{flex-direction:column;}}
 .exp-src{margin:0;padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border);overflow-x:auto;}
 .exp-src code{font-family:'Cascadia Code','Fira Code',monospace;font-size:$(_export_code_size(code));color:var(--text);white-space:pre;}
 .exp-src $(t.hl)
@@ -88,6 +92,36 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .disp.latex{padding:6px 14px;overflow-x:auto;} .katex{font-size:1.1em;}
 @media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
 """
+end
+
+# The row column a cell sits in: a `column=N` header tag → N (default 1). Only N≥2 pulls a cell up
+# beside its predecessor into a side-by-side row (HTML flex / Typst grid). Mirrors `_cellColumn` in
+# notebook.js. Shared by the HTML and Typst exporters.
+function _cell_column(c)::Int
+    for f in c.flags
+        m = match(r"^column=(\d+)$", String(f))
+        m === nothing || return max(1, parse(Int, m.captures[1]))
+    end
+    return 1
+end
+
+# Describe the MULTI-cell side-by-side rows over the cells that will actually be emitted (given a
+# `visible` predicate that mirrors the export's skip rules). Returns `(opens, closes, members)`:
+# `opens` maps a row's FIRST cell id → the row's cell count (for a Typst `grid` / an HTML wrapper open),
+# `closes` is the set of last-cell ids (wrapper close), `members` is every cell inside a multi-cell row
+# (each needs its own grid slot). Single-cell rows are omitted — they render normally, full-width.
+function _column_row_brackets(cells, visible)
+    rows = Vector{Vector{String}}()
+    for c in cells
+        visible(c) || continue
+        (_cell_column(c) >= 2 && !isempty(rows)) ? push!(rows[end], c.id) : push!(rows, String[c.id])
+    end
+    opens, closes, members = Dict{String,Int}(), Set{String}(), Set{String}()
+    for r in rows
+        length(r) > 1 || continue
+        opens[first(r)] = length(r); push!(closes, last(r)); union!(members, r)
+    end
+    return opens, closes, members
 end
 
 # Self-contained (no CDN, no server) enhancer for the static export's `.exp-table`s: it hydrates each
@@ -330,6 +364,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         end
         runnable && print(io, "<div class=\"exp-run\"><button id=\"exp-run-btn\">▶ Run this notebook live</button></div>")
         print(io, "</header>")
+        # Side-by-side rows (`column=N`): wrap a multi-cell run in a flex `.exp-row`. The visibility
+        # predicate mirrors the per-cell skips below so the grouping matches what's actually emitted.
+        rowopen, rowclose, _ = _column_row_brackets(nb.report.cells,
+            c -> !(:collapsed in c.flags) && !(:docindex in c.flags) && !(c.id in fm.skip) && !(:bibliography in c.flags))
         for c in nb.report.cells
             # A collapsed (folded ▸) cell is tucked away entirely in the notebook — omit it from
             # the export too (both code and output), for markdown and code alike.
@@ -342,6 +380,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             end
             c.id in fm.skip && continue              # hoisted into the title block above
             (:bibliography in c.flags) && continue   # raw BibTeX isn't shown (HTML has no CSL engine yet)
+            haskey(rowopen, c.id) && print(io, "<div class=\"exp-row\">")   # open a side-by-side row
             if c.kind == MARKDOWN
                 mdsrc = rw(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source)   # citations/refs + hoisted H1
                 if haskey(figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
@@ -376,6 +415,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 end
                 print(io, "</section>")
             end
+            c.id in rowclose && print(io, "</div>")   # close a side-by-side row
         end
         # References — as HTML with per-entry `id="ref-<key>"` anchors, so the inline citation links
         # (emit_html) jump to them. (The raw BibTeX cell itself is skipped above.)

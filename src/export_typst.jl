@@ -1022,21 +1022,31 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")
         end
         cols == 2 && print(io, "#columns(2)[\n")
+        # Side-by-side rows (`column=N`): wrap a multi-cell run in a Typst `grid`, each cell a `[…]` slot.
+        rowopen, rowclose, rowmembers = _column_row_brackets(cells,
+            c -> !(:collapsed in c.flags) && !(c.id in fm.skip) && !(:bibliography in c.flags))
         for (k, c) in enumerate(cells)
             base = "c$(k)"
             (:collapsed in c.flags) && continue       # folded cell → omit from the export entirely
             c.id in fm.skip && continue               # hoisted into the title block above
             (:bibliography in c.flags) && continue    # rendered as #bibliography at the end, not raw
+            inrow = c.id in rowmembers
+            haskey(rowopen, c.id) &&                  # first cell of a multi-cell row → open the grid
+                print(io, "#grid(columns: (", join(fill("1fr", rowopen[c.id]), ", "), "), column-gutter: 1.2em, align: top,\n")
+            inrow && print(io, "[")                   # each row cell is one grid slot
             if c.kind == MARKDOWN
                 src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
                 md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels)
-                isempty(strip(md)) && continue       # empty markdown cell leaves nothing to render
-                write(joinpath(dir, base * ".md"), md)
-                if haskey(figidx.numbers, c.id)      # a caption cell → numbered "Figure N." block
-                    print(io, "#figcaption(\"Figure ", figidx.numbers[c.id],
-                          "\", cmarker.render(read(\"", base, ".md\"), math: mathfn))\n\n")
+                if isempty(strip(md))
+                    inrow || continue                # empty markdown: standalone → skip; in a row → empty slot
                 else
-                    print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
+                    write(joinpath(dir, base * ".md"), md)
+                    if haskey(figidx.numbers, c.id)  # a caption cell → numbered "Figure N." block
+                        print(io, "#figcaption(\"Figure ", figidx.numbers[c.id],
+                              "\", cmarker.render(read(\"", base, ".md\"), math: mathfn))\n\n")
+                    else
+                        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
+                    end
                 end
             else
                 # Match the browser: `show_source` is the global toggle; also hide source for the
@@ -1048,6 +1058,10 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                 include_params && print(io, _emit_controls(c))   # frozen @bind controls — off by default
                 _emit_output!(io, dir, base, nb, c; theme = theme, outputs = outputs)
                 print(io, "\n")
+            end
+            if inrow                                  # close this grid slot; the row's last cell closes the grid
+                print(io, "],\n")
+                c.id in rowclose && print(io, ")\n\n")
             end
         end
         # References — `:bibliography` cells (embedded + external .bib), rendered via Typst's CSL.
@@ -1108,11 +1122,27 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
             frags = [f for f in seg.frags if !(f[1].id in fm.skip) && !(:bibliography in f[1].flags)]
             isempty(frags) && continue
             print(io, "#slide[\n")
-            for (fi, frag) in enumerate(frags)
-                # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body slide.
-                f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
-                _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
-                                  show_source = show_source, include_params = include_params, citekeys = citekeys, outputs = outputs)
+            # Group consecutive `column=N` frags into side-by-side rows (anchored by the preceding
+            # untagged frag), each rendered as a Typst `grid` slot — same layout as the doc flow.
+            fragrows = Vector{Vector{Int}}()
+            for fi in 1:length(frags)
+                (_cell_column(frags[fi][1]) >= 2 && !isempty(fragrows)) ?
+                    push!(fragrows[end], fi) : push!(fragrows, Int[fi])
+            end
+            for row in fragrows
+                multi = length(row) > 1
+                multi && print(io, "#grid(columns: (", join(fill("1fr", length(row)), ", "),
+                                   "), column-gutter: 1.2em, align: top,\n")
+                for fi in row
+                    frag = frags[fi]
+                    # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body slide.
+                    f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
+                    multi && print(io, "[")
+                    _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
+                                      show_source = show_source, include_params = include_params, citekeys = citekeys, outputs = outputs)
+                    multi && print(io, "],\n")
+                end
+                multi && print(io, ")\n\n")
             end
             print(io, "]\n\n")
         end
