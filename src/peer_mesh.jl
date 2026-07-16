@@ -132,16 +132,46 @@ end
 const _MESH_GRANT_PORT = Dict{Tuple{String,String},Int}()   # (source, puller) → permitopen port on source
 const _MESH_GRANT_LOCK = ReentrantLock()
 
+# Cheap in-place permitopen rewrite: on the source's EXISTING grant line only, swap `permitopen`'s port to
+# `port` — ONE ssh, sed-in-place, keeping the scoped key intact. Unlike `_mesh_install_grant!` (a full
+# re-install: keygen-check on the puller + host-key read + authorized_keys AND known_hosts rewrites = 3–4
+# ssh round-trips), this touches the source host once. `grep -qF` first, so a missing grant (un-introduced
+# pair, or torn down) is a clean no-op that NEVER creates one — consent's job, not the fast path's. Returns
+# whether it rewrote (⇒ the port cache is refreshed). The tag is a unique per-grant marker with no regex
+# metacharacters (region names are [A-Za-z0-9_], the uuid is hex), so it's safe as a sed address.
+function _mesh_rewrite_permitopen!(source, puller, port::Integer)
+    src = region_get(source); pul = region_get(puller)
+    (src === nothing || pul === nothing || src.host == pul.host) && return false
+    p = Int(port); p > 0 || return false
+    tag = "$(_mesh_basename(pul.name)) from $(_mesh_basename(src.name))"
+    ok = false
+    lock(_mesh_host_lock(src.host)) do
+        script = """
+        f="\$HOME/.ssh/authorized_keys"
+        { [ -f "\$f" ] && grep -qF $(_shq(tag)) "\$f"; } || exit 3
+        t=\$(mktemp "\$HOME/.ssh/.slmesh.XXXXXX") || exit 1
+        sed $(_shq("/$tag/s|permitopen=\"127\\.0\\.0\\.1:[0-9]*\"|permitopen=\"127.0.0.1:$p\"|")) "\$f" > "\$t" || exit 1
+        mv "\$t" "\$f"; chmod 600 "\$f"
+        """
+        okk, _ = _ssh_script(src.host, script)
+        ok = okk
+    end
+    ok && lock(_MESH_GRANT_LOCK) do; _MESH_GRANT_PORT[(src.name, pul.name)] = p; end
+    return ok
+end
+
 # Just-in-time permitopen finalize (§2): before an :ssh pull, rewrite the source's grant line's permitopen
-# to the LIVE blob `port`. No-op when the pair was never introduced (no consented grant to touch — we do
-# NOT auto-create one, that's consent's job) or the port is unchanged (:direct source, or already
-# finalized). One ssh edit, only when the port actually moved.
+# to the LIVE blob `port`. No-op when the port is unchanged (:direct source, or already finalized this
+# lifetime) — the hot path pays NOTHING. Otherwise ONE cheap in-place rewrite (see above), NOT a full
+# grant re-install — this was the ~10s+ tax on the first ssh transfer after an introduction / hub restart.
+# A cold cache (`cur === nothing`, e.g. post-restart) still rewrites: the grep guard keeps an un-introduced
+# pair a no-op, so this self-heals a stale/placeholder on-host port instead of silently leaving it wrong.
 function _mesh_finalize_port!(source, puller, port::Integer)
     p = Int(port); p > 1 || return nothing
     key = (String(source), String(puller))
     cur = lock(_MESH_GRANT_LOCK) do; get(_MESH_GRANT_PORT, key, nothing); end
-    (cur === nothing || cur == p) && return nothing
-    _mesh_install_grant!(source, puller; port = p)     # rewrites the one line (idempotent) + refreshes the cache
+    cur == p && return nothing
+    _mesh_rewrite_permitopen!(source, puller, p)
     return nothing
 end
 
