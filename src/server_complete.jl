@@ -920,8 +920,10 @@ function _make_router(h::Hub)
     # cells so a `trace` toggle takes effect in one round-trip.
     HTTP.register!(router, "POST", "/api/{id}/tags/{cid}", req -> _withnb(h, req, nb -> begin
         tags = get(_body(req), "tags", String[])
+        before = _mesh_group_sig(_nb_defined_regions(nb))
         set_cell_tags!(nb, HTTP.getparam(req, "cid"), tags isa AbstractVector ? tags : String[])
         _eval!(nb)
+        _mesh_group_sig(_nb_defined_regions(nb)) == before || _mesh_consent_check!(nb)  # tag added a region (§5.1)
         _json(state_json(nb))
     end))
     # Set which named regions this notebook uses — a comma-separated list of names from the global
@@ -930,6 +932,31 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/regions", req -> _withnb(h, req, nb -> begin
         set_notebook_regions!(nb, strip(String(get(_body(req), "regions", ""))))
         _json(state_json(nb))
+    end))
+    # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ──────────────────────────────────
+    # GET the pending mesh consent (a fresh tab checks this on load; live tabs also get an SSE
+    # `mesh-consent:` push). POST introduce ARMS the whole-group mesh (installs SSH keys/grants — the one
+    # place that touches ~/.ssh, only on the user's explicit grant). POST dismiss records "not now" so the
+    # popup won't re-nag until the region set changes again.
+    HTTP.register!(router, "GET", "/api/{id}/mesh-consent", req -> _withnb(h, req, nb -> begin
+        p = _mesh_pending(nb.id)
+        _json(p === nothing ? Dict("pending" => false) : merge(Dict("pending" => true), p))
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/mesh-introduce", req -> _withnb(h, req, nb -> begin
+        names = _nb_defined_regions(nb)
+        r = try
+            installed = ReportEngine.introduce_group!(names)     # idempotent; whole group (§5.1)
+            _mesh_resolve!(nb.id); _mesh_broadcast_clear!(nb)
+            Dict("ok" => true, "installed" => length(installed), "plan" => ReportEngine.peer_plan_data(names))
+        catch e
+            Dict("ok" => false, "error" => first(sprint(showerror, e), 300))
+        end
+        _json(r)
+    end))
+    HTTP.register!(router, "POST", "/api/{id}/mesh-dismiss", req -> _withnb(h, req, nb -> begin
+        _mesh_dismiss!(nb)
+        _mesh_broadcast_clear!(nb)
+        _json(Dict("ok" => true))
     end))
     # Peer-mesh plan for the DAG region-map view: the cached route verdict per cross-region pair, the
     # on-host mesh artifacts, and the exact `ssh -N -L` each cross-host pull would run (PEER_TUNNEL_PLAN
