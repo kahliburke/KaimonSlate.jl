@@ -2015,6 +2015,28 @@ function xfer_views()
     end
 end
 
+# Retained progress TRACE of a recent transfer for the summary dashboard: metadata + a (t, cumulative-
+# bytes) series sampled at each control poll (~5 Hz), from which instantaneous throughput is derived. Kept
+# in a capped ring (NOT the 60 s-pruned live view) so the dashboard's timelines/distributions have history.
+struct XferTrace
+    src::String; dst::String; name::String; via::String
+    started::Float64; finished::Float64; total::Int; err::String
+    ts::Vector{Float64}     # sample wall-times
+    bs::Vector{Int}         # cumulative bytes at each ts
+end
+const _XFER_TRACES = XferTrace[]
+const _XFER_TRACE_CAP = 400
+const _XFER_TRACE_LOCK = ReentrantLock()
+function _xfer_trace_push!(meta, started, total, ts, bs, err)
+    meta === nothing && return
+    lock(_XFER_TRACE_LOCK) do
+        push!(_XFER_TRACES, XferTrace(String(meta.src), String(meta.dst), String(meta.name), String(meta.via),
+                                      started, time(), total, String(err), copy(ts), copy(bs)))
+        length(_XFER_TRACES) > _XFER_TRACE_CAP && popfirst!(_XFER_TRACES)
+    end
+end
+xfer_traces() = lock(_XFER_TRACE_LOCK) do; copy(_XFER_TRACES); end
+
 # Drive a peer pull on `dst_k` OVER ITS BLOB CHANNEL (not the gate): send the `X` request to the dst's
 # blob endpoint (hub-vantage — reuses the relay reach), then poll `S` to completion. The actual pull runs
 # on the dst's dedicated executor task, so the gate loop never blocks. `spec` is the newline-framed body
@@ -2022,11 +2044,14 @@ end
 # (bytes, via). THROWS on failure (caller decides fallback).
 function _xfer_ctl_pull(dst_k, spec::AbstractString; timeout::Float64 = _blob_xfer_timeout(), meta = nothing)
     vid = Threads.atomic_add!(_XFER_VIEW_SEQ, 1)
+    t0 = time()
+    trT = Float64[]; trB = Int[]; total = -1; traced = false   # per-poll progress series → dashboard trace
+    fin = err -> (traced || (traced = true; _xfer_trace_push!(meta, t0, total, trT, trB, err)))
     if meta !== nothing
         _xfer_view_prune!()
         lock(_XFER_VIEW_LOCK) do
             _XFER_VIEWS[vid] = XferView(String(meta.dst), String(meta.src), String(meta.name),
-                                        String(meta.via), 0, -1, time(), 0.0, "")
+                                        String(meta.via), 0, -1, t0, 0.0, "")
         end
     end
     _upd!(f) = meta === nothing || lock(_XFER_VIEW_LOCK) do; v = get(_XFER_VIEWS, vid, nothing); v === nothing || f(v); end
@@ -2034,25 +2059,36 @@ function _xfer_ctl_pull(dst_k, spec::AbstractString; timeout::Float64 = _blob_xf
         ep = _data_endpoint!(dst_k.target, dst_k)          # the DST's blob channel, reachable from the hub
         jid = _xfer_ctl_call(ep.ip, ep.port, "X" * spec; server_key = ep.server_key)
         (isempty(jid) || startswith(jid, "err")) && error("xfer request rejected: $jid")
-        deadline = time() + timeout
+        deadline = time() + timeout; polls = 0
         while time() < deadline
             st = _xfer_ctl_call(ep.ip, ep.port, "S" * jid; server_key = ep.server_key)
             if startswith(st, "running")
-                p = split(st); length(p) >= 3 && _upd!(v -> (v.done = something(tryparse(Int, p[2]), v.done); v.total = something(tryparse(Int, p[3]), v.total)))
+                p = split(st)
+                if length(p) >= 3
+                    d = something(tryparse(Int, p[2]), 0); total = something(tryparse(Int, p[3]), total)
+                    _upd!(v -> (v.done = d; v.total = total))
+                    push!(trT, time()); push!(trB, d)      # granular sample for the throughput trace
+                end
             elseif startswith(st, "done ")
-                p = split(st); b = something(tryparse(Int, p[2]), 0)
+                p = split(st); b = something(tryparse(Int, p[2]), 0); total = b
+                push!(trT, time()); push!(trB, b)
                 _upd!(v -> (v.done = b; v.total = b; v.finished = time()))
+                fin("")
                 return (b, length(p) >= 3 ? String(p[3]) : "direct")
             elseif startswith(st, "err")
                 _upd!(v -> (v.finished = time(); v.err = String(st)))
+                fin(String(st))
                 error("xfer $jid: $st")
             end
-            sleep(0.2)                                     # "running" — poll (control round-trips are cheap)
+            polls += 1                                      # adaptive: quick early polls catch small/fast
+            sleep(polls < 8 ? 0.025 : polls < 20 ? 0.08 : 0.2)   # transfers; back off for long ones
         end
         _upd!(v -> (v.finished = time(); v.err = "timeout"))
+        fin("timeout")
         error("xfer $jid: timed out after $(round(Int, timeout))s")
     catch e
         _upd!(v -> v.finished == 0.0 && (v.finished = time(); v.err = first(sprint(showerror, e), 100)))
+        fin(first(sprint(showerror, e), 100))
         rethrow()
     end
 end
@@ -2371,32 +2407,47 @@ function _resolve_peer_route(src_k, dst_k)
     return PeerRoute(cached[1], cached[2], port, skey)
 end
 
+# ── Standing mesh authorization (PEER_TUNNEL_PLAN Part 4) ──────────────────────────────────────────
+# A dest's blob CLIENT KEY must sit on the source's blob allow-list before the dest can pull. Authorizing
+# it PER TRANSFER (authorize → pull → revoke) cost TWO gate round-trips on every move — a dominant overhead
+# for small/rapid transfers. Instead authorize ONCE per (source kernel, dest key) and cache it; never
+# revoke (the allow-list persists). Keyed by the source kernel's objectid, so a worker SWAP (fresh
+# GateKernel, possibly a reset allow-list) re-authorizes; a transfer FAILURE also forgets the entry so the
+# retry re-authorizes — self-healing if the allow-list ever drifts out from under us.
+const _AUTHED = Set{Tuple{UInt,String}}()
+const _AUTHED_LOCK = ReentrantLock()
+_authed_key(src_k, bpub) = (objectid(src_k), String(bpub))
+function _ensure_authed!(src_k, bpub)
+    key = _authed_key(src_k, bpub)
+    lock(_AUTHED_LOCK) do; key in _AUTHED; end && return nothing
+    ak = _tool(src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => String(bpub)); timeout = 60.0)
+    akerr = try; getproperty(ak, :error); catch; nothing; end
+    akerr === nothing || error("authorise on source failed: $akerr")
+    lock(_AUTHED_LOCK) do; push!(_AUTHED, key); end
+    return nothing
+end
+_forget_authed!(src_k, bpub) = lock(_AUTHED_LOCK) do; delete!(_AUTHED, _authed_key(src_k, bpub)); end
+
 # Broker one direct B←A pull over the RESOLVED route (`route.{ip,port,server_key}` = A's blob endpoint in
-# B's OWN vantage — co-located loopback already applied by `_resolve_peer_route`): authorise B's client
-# key on A's blob channel, have B pull straight into its CAS, then revoke. Returns bytes moved (0 =
-# deduped). THROWS on any failure — the caller (`:auto`) decides whether to fall back to relay.
+# B's OWN vantage — co-located loopback already applied by `_resolve_peer_route`): ensure B's client key is
+# on A's blob allow-list (standing auth — authorized once, cached), then have B pull straight into its CAS.
+# Returns bytes moved (0 = deduped). THROWS on any failure — the caller (`:auto`) decides whether to relay.
 function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
     bkerr = try; getproperty(bk, :error); catch; nothing; end
     bkerr === nothing || error("direct: dest client key unavailable: $bkerr")
     bpub = String(bk.key)
     authed = !isempty(route.server_key)                    # allow-list gate only exists under CURVE
-    if authed
-        ak = _tool(src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => bpub); timeout = 60.0)
-        akerr = try; getproperty(ak, :error); catch; nothing; end
-        akerr === nothing || error("direct: authorise on source failed: $akerr")
-    end
+    authed && _ensure_authed!(src_k, bpub)                 # standing auth: authorize once, cached (no revoke)
     try
         # Drive the pull over the DST's BLOB CHANNEL (transfer-control plane), NOT a gate :tool_call — so it
         # runs on the dst's executor task and never starves gate liveness (TRANSFER_CONTROL_PLAN Mode A).
         bytes, _ = _xfer_ctl_pull(dst_k, "$(h)\ndirect\n$(route.ip)\n$(route.port)\n$(route.server_key)";
             meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "direct"))
         return bytes
-    finally
-        authed && try
-            _tool(src_k, "__slate_revoke_client", Dict{String,Any}("pubkey" => bpub); timeout = 30.0)
-        catch
-        end
+    catch
+        authed && _forget_authed!(src_k, bpub)             # failure → drop the cache so a retry re-authorizes
+        rethrow()
     end
 end
 
@@ -2445,11 +2496,7 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     bkerr === nothing || error("ssh: dest client key unavailable: $bkerr")
     bpub = String(bk.key)
     authed = !isempty(route.server_key)
-    if authed
-        ak = _tool(src_k, "__slate_authorize_client", Dict{String,Any}("pubkey" => bpub); timeout = 60.0)
-        akerr = try; getproperty(ak, :error); catch; nothing; end
-        akerr === nothing || error("ssh: authorise on source failed: $akerr")
-    end
+    authed && _ensure_authed!(src_k, bpub)                 # standing auth: authorize once, cached (no revoke)
     a_user = _ssh_user(src_k.target.ssh_host)
     ssh_target = isempty(a_user) ? route.ip : "$(a_user)@$(route.ip)"
     try
@@ -2460,11 +2507,9 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
         bytes, _ = _xfer_ctl_pull(dst_k, spec;
             meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "ssh"))
         return bytes
-    finally
-        authed && try
-            _tool(src_k, "__slate_revoke_client", Dict{String,Any}("pubkey" => bpub); timeout = 30.0)
-        catch
-        end
+    catch
+        authed && _forget_authed!(src_k, bpub)             # failure → drop the cache so a retry re-authorizes
+        rethrow()
     end
 end
 

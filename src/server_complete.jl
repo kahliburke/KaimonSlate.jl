@@ -977,6 +977,18 @@ function _make_router(h::Hub)
         end
         _json(Dict("probed" => results))
     end))
+    # Retained transfer TRACES for the summary dashboard: each recent region→region transfer with its
+    # per-poll (t, cumulative-bytes) series → the frontend derives instantaneous throughput, timelines, the
+    # peer-to-peer grid, and the distribution. Filtered to the notebook's regions; `now` anchors relative time.
+    HTTP.register!(router, "GET", "/api/{id}/transfer-stats", req -> _withnb(h, req, nb -> begin
+        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
+        filter!(!isempty, names); rset = Set(names)
+        traces = [Dict("src" => t.src, "dst" => t.dst, "name" => t.name, "via" => t.via,
+                       "started" => t.started, "finished" => t.finished, "total" => t.total, "err" => t.err,
+                       "ts" => t.ts, "bs" => t.bs)
+                  for t in ReportEngine.xfer_traces() if (t.src in rset || t.dst in rset)]
+        _json(Dict("traces" => traces, "now" => time()))
+    end))
     # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`
     # hides code; `?theme=light|dark`; `?code=normal|small|smaller|tiny|hidden` sizes/hides listings.
     # No scripts/server needed; KaTeX (CDN) typesets math, figures are embedded.
