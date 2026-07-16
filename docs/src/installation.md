@@ -50,9 +50,10 @@ Kaimon extension:
 Register Slate as a Kaimon extension now?  [Y]es · [n]o · [d]on't ask again
 ```
 
-Say **yes** and (re)start Kaimon. Now your agents have the `slate.*` tools and **Kaimon serves
-your notebooks from its own hub — no extra process** — and running `slate` again **attaches** to
-that hub as a live status viewer.
+Say **yes** — Kaimon scans for extensions dynamically, so it's picked up without a restart. `slate`
+stays open and **attaches the moment Kaimon brings the hub up**. Now your agents have the `slate.*`
+tools and **Kaimon serves your notebooks from its own hub — no extra process** — and running `slate`
+again **attaches** to that hub as a live status viewer.
 
 !!! tip "Consented, not automatic"
     Registration is a one-time prompt you approve — it replaces the old silent auto-register on

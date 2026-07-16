@@ -36,10 +36,10 @@ import Tachikoma
 # registered, or stdin isn't a terminal (CI/pipe). A REMOVED entry is respected as a
 # choice, not damage: even after a prior Yes the prompt comes back rather than the
 # entry being silently repaired (nothing re-registers behind the user's back).
-# Returns `true` when it JUST WROTE a registration — Kaimon only reads
-# extensions.json at startup (no watcher / message path), so the caller must tell
-# the user to (re)start Kaimon and exit rather than sit in a waiting mode that can't
-# ever connect. `input`/`output` are injectable for tests.
+# Returns `true` when it JUST WROTE a registration — Kaimon scans for extensions
+# dynamically, so no restart is needed: the caller falls through to the waiting TUI,
+# which attaches the moment Kaimon brings the extension's hub up. `input`/`output`
+# are injectable for tests.
 function _maybe_onboard!(; input::IO = stdin, output::IO = stdout)::Bool
     isdir(_kaimon_dir()) || return false
     _slate_registered() && return false
@@ -695,19 +695,12 @@ function _app_main(args::Vector{String})::Int
         end
     end
     if _maybe_onboard!()
-        # Kaimon loads extensions.json only at startup — a running Kaimon can't see the
-        # entry we just wrote, so waiting for its hub would hang forever. Hand the next
-        # step to the user instead of guessing at Kaimon's process state.
+        # Kaimon scans for extensions dynamically, so the entry we just wrote is picked up
+        # without a restart. Don't exit — fall through to `:waiting`, where the TUI polls for
+        # Kaimon's hub and attaches the moment it answers (or press [s] to own a local hub).
         println()
-        printstyled("  ✓ Registered as a Kaimon extension\n"; color = :green, bold = true)
+        printstyled("  ✓ Registered as a Kaimon extension — attaching to its hub…\n"; color = :green, bold = true)
         println()
-        println("  Kaimon picks up extensions when it starts:")
-        printstyled("    1. "; color = :cyan); println("(re)start Kaimon")
-        printstyled("    2. "; color = :cyan); println("run `slate` again — it attaches to the extension's notebook hub")
-        println()
-        printstyled("  `slate --own` runs standalone, without Kaimon.\n"; color = :light_black)
-        println()
-        return 0
     end
     mode = _startup_mode(_hub_running(), _ext_autostarts(), own)
     if mode == :owner
