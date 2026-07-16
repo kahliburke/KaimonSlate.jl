@@ -558,6 +558,66 @@ const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "side:nam
 const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel objectid) → signature of primed `using` cells
 const _REGION_LOCK = ReentrantLock()
 
+# ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ─────────────────────────────────────
+# When a notebook's region set changes (via `region_on` OR a cell `region=` tag, UI or MCP alike), a new
+# cross-host pair may need an SSH-bridged transfer route that isn't armed yet. Rather than install SSH keys
+# silently, we stash the pending introduction and PUSH a consent popup to the browser; the mesh is armed
+# only on the user's grant. Whole-group: adding one region makes it eligible to talk to every other remote,
+# so one consent covers every cross-host pair. Declining leaves transfers on the hub relay (correctness never
+# depends on the mesh — it's a speed path). Nothing here touches SSH; that waits for `/api/{id}/mesh-introduce`.
+const _MESH_PENDING = Dict{String,Any}()        # nb id → consent payload awaiting the user (mesh_consent_status)
+const _MESH_DISMISSED = Dict{String,String}()    # nb id → group signature the user said "not now" to
+const _MESH_CONSENT_LOCK = ReentrantLock()
+
+_mesh_group_sig(names) = join(sort(String[String(n) for n in names]), ",")
+# The DEFINED region names a notebook uses (footer ∪ cell tags), resolved against the registry.
+_nb_defined_regions(nb::LiveNotebook) =
+    String[String(get(d, "name", "")) for d in _regions_json(nb) if get(d, "defined", false) === true]
+
+_mesh_pending(nbid) = lock(_MESH_CONSENT_LOCK) do; get(_MESH_PENDING, String(nbid), nothing); end
+# The unconnected episode ended (armed, or the group dropped below two hosts): forget both the pending
+# payload and the "not now" — so a genuinely NEW disconnect on the same group later re-prompts.
+_mesh_resolve!(nbid) = lock(_MESH_CONSENT_LOCK) do
+    delete!(_MESH_PENDING, String(nbid)); delete!(_MESH_DISMISSED, String(nbid))
+end
+function _mesh_dismiss!(nb::LiveNotebook)
+    sig = _mesh_group_sig(_nb_defined_regions(nb))
+    lock(_MESH_CONSENT_LOCK) do; _MESH_DISMISSED[nb.id] = sig; delete!(_MESH_PENDING, nb.id); end
+    return nothing
+end
+# Close the consent popup on EVERY open tab (a `connected` status makes the component unmount) — after the
+# mesh is armed or dismissed from one tab, the others shouldn't keep offering it.
+_mesh_broadcast_clear!(nb::LiveNotebook) =
+    _broadcast(nb, "mesh-consent:" * JSON.json(Dict("connected" => true, "pairs" => Any[])))
+
+# Off the request path: probe the live mesh and, if a cross-host pair is unconnected AND the user hasn't
+# already dismissed THIS exact group, stash the consent payload + push the popup to open tabs. Adding a
+# region changes the group signature, so a prior "not now" no longer suppresses (the new region genuinely
+# needs a decision). Clears stale pending when the set becomes connected or drops below two hosts.
+function _mesh_consent_check!(nb::LiveNotebook)
+    names = _nb_defined_regions(nb)
+    sig = _mesh_group_sig(names)
+    @async try
+        hosts = unique(String[ReportEngine.region_get(n).host for n in names])
+        if length(hosts) < 2
+            _mesh_resolve!(nb.id); return          # no cross-host pair — clear any stale pending/dismissal
+        end
+        status = ReportEngine.mesh_consent_status(names)
+        if status["connected"]
+            _mesh_resolve!(nb.id); return          # episode over — a fresh disconnect later re-prompts
+        end
+        raise = lock(_MESH_CONSENT_LOCK) do
+            get(_MESH_DISMISSED, nb.id, "") == sig && return false
+            _MESH_PENDING[nb.id] = status
+            true
+        end
+        raise && _broadcast(nb, "mesh-consent:" * JSON.json(status))
+    catch e
+        @warn "mesh consent check failed" nb = nb.id exception = e
+    end
+    return nothing
+end
+
 # The region NAMES this notebook uses — a comma-separated list in the durable footer (`regions` meta).
 # Each name references a GLOBAL region definition (the registry, remote.jl); the notebook stores only
 # the reference, resolved at spawn time. Deduped, order-preserved.
@@ -587,6 +647,7 @@ function set_notebook_regions!(nb::LiveNotebook, csv::AbstractString)
         isempty(joined) ? delete!(nb.report.meta, "regions") : (nb.report.meta["regions"] = joined)
         _persist!(nb; label = isempty(joined) ? "cleared regions" : "regions · $joined")
     end
+    _mesh_consent_check!(nb)   # a new cross-host pair may need a consented SSH mesh (§5.1)
     return names
 end
 

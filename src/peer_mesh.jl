@@ -252,7 +252,15 @@ function _mesh_host_state(host)
     echo '@ak';   grep -F 'slate-' "\$HOME/.ssh/authorized_keys" 2>/dev/null
     echo '@kh';   grep -F 'slate-mesh-pin' "\$HOME/.ssh/slate_known_hosts" 2>/dev/null
     """
-    ok, out = _ssh_script(host, script)
+    # A single ssh failure here means "unreachable" to the caller (which then can't tell connected from not),
+    # but a burst of mesh ops (teardown + worker spawn + probe) transiently starves ssh — so retry a couple
+    # times with a short backoff before concluding a host is actually down.
+    ok = false; out = ""
+    for attempt in 1:3
+        ok, out = _ssh_script(host, script)
+        ok && break
+        attempt < 3 && sleep(0.6)
+    end
     keys = String[]; grants = Any[]; pins = Any[]; section = ""
     for ln in split(out, '\n')
         s = strip(ln); isempty(s) && continue
@@ -292,6 +300,39 @@ function peer_plan_data(names::AbstractVector; refresh::Bool = false)
     end
     return Dict("regions" => String.(collect(names)), "refreshed" => refresh,
                 "routes" => routes, "hosts" => [_mesh_host_state(h) for h in hosts])
+end
+
+# ── Consent-gated introduction (§5.1): what a popup must cover ─────────────────────────────────────────
+# The cross-host ordered pairs among `names` that have NO grant installed yet — read from LIVE on-host
+# state, so it is authoritative and self-heals across a hub restart or a manual `~/.ssh` edit (the grants
+# ARE the record of "already connected"; no separate ledger). Adding a region makes it eligible to talk to
+# EVERY other remote, so one consent covers the whole group. Same-host pairs never mesh (loopback direct).
+# Returns Dict(connected, pairs[{source,puller,source_host,puller_host,port,placeholder}], hosts,
+# unreachable, regions) — the payload the notebook layer stashes + pushes to the browser popup.
+function mesh_consent_status(names::AbstractVector)
+    defined = String[String(n) for n in names if region_get(n) !== nothing]
+    hosts = unique(String[region_get(n).host for n in defined])
+    installed = Set{Tuple{String,String}}(); unreachable = String[]
+    for h in hosts
+        st = _mesh_host_state(h)          # one ssh (with retry) per host — run me off the request path (async)
+        st["reachable"] || push!(unreachable, h)
+        for g in st["grants"]; push!(installed, (String(g["source"]), String(g["puller"]))); end
+    end
+    pairs = Any[]
+    for a in defined, b in defined
+        a == b && continue
+        ra = region_get(a); rb = region_get(b)
+        ra.host == rb.host && continue                       # same host ⇒ no mesh
+        (a, b) in installed && continue                      # grant already present ⇒ connected
+        # An unreachable host reads as "no grants" — we can't PROVE the pair is armed, so we surface it as
+        # needing connection (with the `unreachable` warning) rather than silently skipping it: a false
+        # "connect?" is a harmless idempotent re-arm, but a silently-missed mesh leaves transfers on the relay.
+        p = _region_blob_port(a)
+        push!(pairs, Dict("source" => a, "puller" => b, "source_host" => ra.host,
+                          "puller_host" => rb.host, "port" => p > 0 ? p : 1, "placeholder" => p <= 0))
+    end
+    return Dict("connected" => isempty(pairs), "pairs" => pairs, "hosts" => sort(collect(hosts)),
+                "unreachable" => unreachable, "regions" => defined)
 end
 
 # ── Dry-run diagnostic / audit (§6.2) ────────────────────────────────────────────────────────────────
