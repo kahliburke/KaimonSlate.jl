@@ -20,12 +20,20 @@ _field(x, k) = x isa AbstractDict ? get(x, k, get(x, Symbol(k), nothing)) :
 _embed(text::AbstractString) = Float64[Float64(x) for x in
     _kt_json(_kt(:ollama_embed, Dict("text" => String(text), "model" => _DOCS_MODEL)))]
 
-function _ensure_docs_collection()
-    ex = _kt_json(_kt(:qdrant_collection_exists, Dict("collection" => _DOCS_COLLECTION)))
-    (ex === true || ex == "true") && return
+# Ensure the docs collection exists. Returns `true` when the collection is ready to
+# index into, `false` when Qdrant is unreachable (so callers skip quietly).
+# `qdrant_collection_exists` returns a native Bool over the service endpoint when Qdrant
+# is up; when it's DOWN the tool returns a human-readable error STRING ("Qdrant is not
+# reachable…"). Read the result directly (no `_kt_json`) — parsing that error text as
+# JSON is what threw the confusing `invalid JSON at byte position 1` crash. Any answer
+# that isn't a clear true/false ⇒ backend unavailable ⇒ don't create/index against it.
+function _ensure_docs_collection()::Bool
+    ex = _kt(:qdrant_collection_exists, Dict("collection" => _DOCS_COLLECTION))
+    (ex === true || ex == "true") && return true       # already exists
+    (ex === false || ex == "false") || return false    # non-boolean ⇒ Qdrant down ⇒ skip
     _kt(:qdrant_create_collection, Dict("collection" => _DOCS_COLLECTION,
                                         "vector_size" => _DOCS_DIM, "distance" => "Cosine"))
-    return
+    return true
 end
 
 # Stable positive id for a doc record (first 60 bits of its SHA-256 → fits Int).
