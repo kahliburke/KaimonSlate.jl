@@ -1056,47 +1056,139 @@ function _free_local_port()
     return p
 end
 
+# A local TCP connect probe — is `127.0.0.1:port` accepting? Used to confirm an ssh forward's local end
+# is live before pulling (and before reusing a pooled one).
+_port_open(port::Int) = (try; s = Sockets.connect("127.0.0.1", port); close(s); true; catch; false; end)
+
+# ── Standing ssh-forward pool (peer-transfer overhead cut) ─────────────────────────────────────────
+# Launching an `ssh -N -L` forward costs an SSH connect + handshake (~0.3-0.5s, up to a 5s worst case) —
+# the dominant per-pull overhead when a region pulls the SAME peer repeatedly (small/rapid transfers).
+# So keep the forward STANDING, keyed by (ssh_target, blob_port), and reuse it across pulls; relaunch
+# only when it died (source reaped / link dropped). `busy` guards a forward from the idle reaper mid-pull
+# (a slow transfer can outlast the idle window); the reaper releases idle forwards so a pair that stops
+# transferring doesn't hold an SSH connection open forever. Serial with the transfer executor (one puller
+# at a time), so the lock is uncontended — held across a launch (≤5s) only blocks the background reaper.
+mutable struct _SshFwd
+    proc::Base.Process
+    lport::Int
+    last::Float64        # last-use wall time (idle reaping)
+    busy::Bool           # a pull is using it right now — never reap
+end
+const _SSH_FWDS = Dict{Tuple{String,Int},_SshFwd}()
+const _SSH_FWD_LOCK = ReentrantLock()
+_ssh_fwd_idle_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SSH_FWD_IDLE_S", "")), 90.0)
+
+# Get (or launch) the standing forward for (ssh_target → 127.0.0.1:blob_port) and MARK it busy. Returns
+# (; lport, err): lport>0 and empty err on success. The caller MUST `_ssh_fwd_release!` when done.
+function _ensure_ssh_fwd(ssh_target::String, key_path::String, known_hosts::String, blob_port::Int)
+    key = (ssh_target, blob_port)
+    lock(_SSH_FWD_LOCK) do
+        f = get(_SSH_FWDS, key, nothing)
+        if f !== nothing
+            if !process_exited(f.proc) && _port_open(f.lport)
+                f.busy = true; f.last = time()             # reuse — the whole point
+                return (; lport = f.lport, err = "")
+            end
+            try; kill(f.proc); catch; end                  # dead/stale forward — drop and relaunch
+            delete!(_SSH_FWDS, key)
+        end
+        lport = _free_local_port()
+        kp = expanduser(key_path); kh = expanduser(known_hosts)
+        # -L lport → (from A) 127.0.0.1:blob_port (A binds 0.0.0.0, so its loopback works). ExitOnForwardFailure
+        # so a blocked permitopen/auth fails fast instead of hanging; least-privilege key is `permitopen`-scoped.
+        cmd = `ssh -i $kp -o IdentitiesOnly=yes -o UserKnownHostsFile=$kh -o StrictHostKeyChecking=yes
+                  -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ConnectTimeout=10 -o BatchMode=yes
+                  -N -L $(lport):127.0.0.1:$(blob_port) $ssh_target`
+        proc = try
+            run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
+        catch e
+            return (; lport = 0, err = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
+        end
+        up = false
+        for _ in 1:100                                     # wait ≤5s for the forward to accept
+            process_exited(proc) && break
+            if _port_open(lport); up = true; break; end
+            sleep(0.05)
+        end
+        if !up
+            exited = process_exited(proc)
+            try; kill(proc); catch; end
+            return (; lport = 0, err = exited ?
+                "ssh forward exited before coming up (auth / host key / permitopen?)" :
+                "ssh forward did not come up on 127.0.0.1:$lport within 5s")
+        end
+        _SSH_FWDS[key] = _SshFwd(proc, lport, time(), true)
+        return (; lport = lport, err = "")
+    end
+end
+
+# Release a forward after a pull. `drop=true` (the pull errored) tears it down unconditionally: a failed
+# pull can mean a forward that's "up" (proc alive, local port binds) yet useless — e.g. it authenticated
+# under a since-changed grant, so its channel-opens are refused. Dropping guarantees the next pull relaunches
+# a fresh one (deterministic recovery, matching the old per-pull teardown). A clean pull keeps it for reuse,
+# still dropping if the tunnel silently died.
+function _ssh_fwd_release!(ssh_target::String, blob_port::Int; drop::Bool = false)
+    key = (ssh_target, blob_port)
+    lock(_SSH_FWD_LOCK) do
+        f = get(_SSH_FWDS, key, nothing); f === nothing && return
+        if drop || process_exited(f.proc) || !_port_open(f.lport)
+            try; kill(f.proc); catch; end
+            delete!(_SSH_FWDS, key)
+        else
+            f.busy = false; f.last = time()
+        end
+    end
+    return nothing
+end
+
+# Reap forwards that are idle (not busy, unused past the idle window) or dead. Runs on a background timer
+# (started in `start`) so a pair that stops transferring releases its held SSH connection.
+function _ssh_fwd_reap_idle!()
+    idle = _ssh_fwd_idle_s()
+    lock(_SSH_FWD_LOCK) do
+        for (k, f) in collect(_SSH_FWDS)
+            if !f.busy && (process_exited(f.proc) || time() - f.last > idle)
+                try; kill(f.proc); catch; end
+                delete!(_SSH_FWDS, k)
+            end
+        end
+    end
+    return nothing
+end
+
+# Kill every pooled forward — atexit hook (registered in `start`) so worker shutdown doesn't orphan the
+# standing ssh child processes.
+_ssh_fwd_killall!() = lock(_SSH_FWD_LOCK) do
+    for (_, f) in _SSH_FWDS; try; kill(f.proc); catch; end; end
+    empty!(_SSH_FWDS)
+end
+
 "SSH-BRIDGED pull (PEER_TUNNEL_PLAN §4): A's blob port is firewalled from THIS worker, but A is reachable
-on SSH — so tunnel the blob port over our OWN `ssh -N -L` forward and CURVE-pull through the local end.
-The forward is WORKER-LOCAL (its lifecycle rides this worker — no orphaned forward to reap across the
-network). Explicit flags, no ~/.ssh/config dependency: `key_path` + slate-owned `known_hosts` come from
-the friend-group intro (§5); `ssh_target` = A's `user@peer-ip`. Never throws. Returns (; bytes, via) or (; error)."
+on SSH — so tunnel the blob port over a worker-local `ssh -N -L` forward and CURVE-pull through the local
+end. The forward is POOLED and STANDING (`_ensure_ssh_fwd`): launched once per (ssh_target, blob_port) and
+reused across pulls — relaunched only if it died — so a rapid stream of pulls to the same peer pays the
+SSH connect once, not every time. Explicit flags, no ~/.ssh/config dependency: `key_path` + slate-owned
+`known_hosts` come from the friend-group intro (§5); `ssh_target` = A's `user@peer-ip`. Never throws.
+Returns (; bytes, via) or (; error)."
 function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts::String,
                                blob_port::Int, server_key::String, hash::String; on_progress = nothing)
     _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
-    lport = _free_local_port()
-    kp = expanduser(key_path); kh = expanduser(known_hosts)
-    # -L lport → (from A) 127.0.0.1:blob_port (A binds 0.0.0.0, so its loopback works). ExitOnForwardFailure
-    # so a blocked permitopen/auth fails fast instead of hanging; least-privilege key is `permitopen`-scoped.
-    cmd = `ssh -i $kp -o IdentitiesOnly=yes -o UserKnownHostsFile=$kh -o StrictHostKeyChecking=yes
-              -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ConnectTimeout=10 -o BatchMode=yes
-              -N -L $(lport):127.0.0.1:$(blob_port) $ssh_target`
-    proc = try
-        run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
-    catch e
-        return (; error = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
-    end
+    fw = _ensure_ssh_fwd(ssh_target, key_path, known_hosts, blob_port)
+    isempty(fw.err) || return (; error = fw.err)
+    ok = false
     try
-        up = false
-        for _ in 1:100                                   # wait ≤5s for the forward to accept
-            process_exited(proc) && return (; error = "ssh forward exited before coming up (auth / host key / permitopen?)")
-            if (try; s = Sockets.connect("127.0.0.1", lport); close(s); true; catch; false; end)
-                up = true; break
-            end
-            sleep(0.05)
-        end
-        up || return (; error = "ssh forward did not come up on 127.0.0.1:$lport within 5s")
         configure! = isempty(server_key) ? nothing : function (sock)
             cpub, csec = KaimonGate._load_or_create_client_keypair()
             KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
         end
-        moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", lport, _memo_dir(), hash; configure! = configure!,
+        moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", fw.lport, _memo_dir(), hash; configure! = configure!,
                                 chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(), on_progress = on_progress)
+        ok = true
         return (; bytes = moved, via = "ssh")
     catch e
         return (; error = first(sprint(showerror, e), 200))
     finally
-        try; kill(proc); catch; end
+        _ssh_fwd_release!(ssh_target, blob_port; drop = !ok)   # keep it for reuse on success; drop it on any error
     end
 end
 
@@ -2277,6 +2369,16 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
     data_port > 0 && _MEMO_OK && Threads.@spawn try; _xfer_executor!(); catch e
         @warn "slate worker: transfer executor died" exception = e
+    end
+    # Reap idle/dead pooled ssh forwards so a peer pair that stops transferring releases its held SSH
+    # connection; kill them all on shutdown so exit never orphans the standing ssh children.
+    if data_port > 0 && _MEMO_OK
+        atexit(_ssh_fwd_killall!)
+        Threads.@spawn try
+            while true; sleep(30); _ssh_fwd_reap_idle!(); end
+        catch e
+            @warn "slate worker: ssh-forward reaper died" exception = e
+        end
     end
     @info "slate worker: ready" port = port tools = length(tools()) revise = isdefined(Main, :Revise)
     # A memo-off worker used to be SILENT (every store/restore just returned early) — the single
