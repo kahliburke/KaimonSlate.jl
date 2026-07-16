@@ -365,7 +365,7 @@ async function _dagPeerPlan(refresh) {
   if (!el) { el = document.createElement('div'); el.id = 'dagpeerpanel'; el.className = 'dagpeerpanel'; pane.appendChild(el); }
   el.innerHTML =
     `<div class="dagpeerhd"><b>⇄ peer routing plan</b><span>` +
-    `<button onclick="_dagPeerPlan(true)" title="recalculate — clear the cached route verdicts so the next transfer re-probes">↻ recalculate</button>` +
+    `<button onclick="_dagProbeTransfers()" title="recalculate — run a test transfer on every region route now and measure the live throughput">↻ recalculate</button>` +
     `<button onclick="{const p=document.getElementById('dagpeerpanel'); if(p) p.remove();}">✕</button>` +
     `</span></div><div class="dagpeerbody">${refresh ? 'recalculating…' : 'loading…'}</div>`;
   const body = el.querySelector('.dagpeerbody');
@@ -377,6 +377,22 @@ async function _dagPeerPlan(refresh) {
   }
 }
 window._dagPeerPlan = _dagPeerPlan;
+
+// "recalculate" → actively probe every region route NOW with a throwaway measured transfer (random bytes,
+// never memo-cached), instead of just clearing verdicts and waiting for a cell to drive one. Then reload
+// the plan panel + repaint the overlay with the freshly measured verdicts/throughput.
+async function _dagProbeTransfers() {
+  const el = document.getElementById('dagpeerpanel'); if (!el) return;
+  const body = el.querySelector('.dagpeerbody');
+  if (body) body.innerHTML = 'running test transfers on every route…';
+  try { await fetch(_apipath('/api/probe'), { method: 'POST' }); } catch (_) {}
+  try {
+    const d = await (await fetch(_apipath('/api/peer-plan'))).json();   // no refresh — keep the fresh verdicts
+    if (body) body.innerHTML = _dagRenderPeerPlan(d);
+  } catch (_) { if (body) body.textContent = 'probe finished, but the plan failed to reload'; }
+  _dagFetchRoutes();                                     // repaint the region overlay with measured throughput
+}
+window._dagProbeTransfers = _dagProbeTransfers;
 
 // How each route KIND paints: direct = fast green, ssh-bridge = blue, relay = amber (via hub), unresolved
 // = neutral (will probe on the next transfer). Mirrors the region hues' intent — a glance says the path.
@@ -868,6 +884,63 @@ function _dagCachedRoutes(L) {
   return _dagRouteCache.routes;
 }
 
+// ── Region→region overlay routing (side-channel bus) ──────────────────────────────────────────────
+// Region mode dims the cells and makes the REGION hand-offs the story, so the edges route as an orthogonal
+// BUS in the margins beside the panels — never over the cells or the header text. Each edge attaches to a
+// panel's left/right EDGE at a flexible height, runs a vertical lane in the side channel, and enters the
+// target square-on. Edges split across the two side channels (balances width); within a channel, edges with
+// overlapping vertical spans get separate lanes (interval partitioning) so no two runs coincide.
+function _dagRegionRoutes(L, regEdges) {
+  if (!regEdges.length) return {};
+  const HEADER = 30, PAD = 14, LANE_GAP = 24, CH_OFF = 24;   // header keep-out · panel inset · lane pitch · channel gap
+  const zx0 = Math.min(...L.partitions.map(p => p.x0)), zx1 = Math.max(...L.partitions.map(p => p.x1));
+  const zkey = z => (z.isLocal ? '' : z.name);
+  const cenY = z => (z.y0 + z.y1) / 2;
+  // Longest vertical span first → outer lanes; shorter spans nest inside.
+  const items = regEdges.map((e, i) => {
+    const lo = Math.min(cenY(e.zs), cenY(e.zt)), hi = Math.max(cenY(e.zs), cenY(e.zt));
+    return { i, e, lo, hi, lane: 0, right: true };
+  }).sort((a, b) => (b.hi - b.lo) - (a.hi - a.lo));
+  items.forEach((it, idx) => { it.right = idx % 2 === 0; });   // alternate sides → balance the two channels
+  // Lane assignment per channel: interval partitioning on the y-span so vertical runs never overlap.
+  [true, false].forEach(right => {
+    const side = items.filter(it => it.right === right).sort((a, b) => a.lo - b.lo);
+    const laneHi = [];
+    side.forEach(it => {
+      let lane = laneHi.findIndex(hi => hi <= it.lo + 0.5);
+      if (lane === -1) { lane = laneHi.length; laneHi.push(it.hi); } else laneHi[lane] = it.hi;
+      it.lane = lane;
+    });
+  });
+  // Flexible attach heights: fan the endpoints sharing one panel side (ordered by lane so tails/heads line
+  // up with their lanes), kept below the header bar and inside the panel.
+  const ends = new Map();
+  items.forEach(it => { for (const [z, role] of [[it.e.zs, 's'], [it.e.zt, 't']]) {
+    const k = zkey(z) + '|' + it.right; (ends.get(k) || ends.set(k, []).get(k)).push({ it, role, z }); } });
+  const yOf = {};
+  for (const arr of ends.values()) {
+    const z = arr[0].z, ylo = z.y0 + HEADER + PAD, yhi = z.y1 - PAD;
+    arr.sort((p, q) => p.it.lane - q.it.lane);
+    arr.forEach((en, idx) => { yOf[en.it.i + ':' + en.role] = arr.length === 1 ? (ylo + yhi) / 2 : ylo + (yhi - ylo) * (idx + 1) / (arr.length + 1); });
+  }
+  const routes = {};
+  items.forEach(it => {
+    const e = it.e, laneX = it.right ? (zx1 + CH_OFF + it.lane * LANE_GAP) : (zx0 - CH_OFF - it.lane * LANE_GAP);
+    const ax = it.right ? e.zs.x1 : e.zs.x0, bx = it.right ? e.zt.x1 : e.zt.x0;
+    const yA = yOf[it.i + ':s'], yB = yOf[it.i + ':t'];
+    routes[e.src + '>' + e.dst] = [[ax, yA], [laneX, yA], [laneX, yB], [bx, yB]];   // out → down/up the lane → in
+  });
+  return routes;
+}
+let _dagRegionRouteCache = { sig: null, routes: null };
+function _dagCachedRegionRoutes(L, regEdges) {
+  const sig = L.nodes.map(n => (n.x | 0) + ',' + (n.y | 0)).join(';') + '#'
+    + L.partitions.map(p => p.side + ':' + (p.x0 | 0) + ',' + (p.y0 | 0) + ',' + (p.x1 | 0) + ',' + (p.y1 | 0)).join('|') + '#'
+    + regEdges.map(e => e.src + '>' + e.dst).sort().join(',');
+  if (_dagRegionRouteCache.sig !== sig) _dagRegionRouteCache = { sig, routes: _dagRegionRoutes(L, regEdges) };
+  return _dagRegionRouteCache.routes;
+}
+
 // Partitions → zone rectangles for rendering + drop hit-testing. `local` is included (neutral tint);
 // dropping a cell there un-tags it.
 function _dagPartitionZones(parts) {
@@ -993,32 +1066,9 @@ function _dagOption() {
   // Then add SLACK beyond the fit window on every side — inside-dataZoom clamps its window
   // to the axis extent, so without slack there is nothing to pan at full fit. The initial
   // dataZoom start/end percentages select exactly the centered fit window.
-  let bx0 = 0, by0 = 0, bx1 = L.gw, by1 = L.gh;
-  L.nodes.forEach(n => {
-    bx0 = Math.min(bx0, n.x - n.b.w / 2 - 6); bx1 = Math.max(bx1, n.x + n.b.w / 2 + 6);
-    by0 = Math.min(by0, n.y - n.b.h / 2 - 6); by1 = Math.max(by1, n.y + n.b.h / 2 + 6);
-  });
-  L.links.forEach(l => (l.pts || []).forEach(p => {
-    bx0 = Math.min(bx0, p[0] - 6); bx1 = Math.max(bx1, p[0] + 6);
-    by0 = Math.min(by0, p[1] - 6); by1 = Math.max(by1, p[1] + 6);
-  }));
-  zones.forEach(zn => {                              // empty zones live in the right margin — keep them in the fit window
-    bx0 = Math.min(bx0, zn.x0 - 6); bx1 = Math.max(bx1, zn.x1 + 6);   // same breathing room as nodes/links so a zone box isn't flush to the pane edge
-    by0 = Math.min(by0, zn.y0 - 6); by1 = Math.max(by1, zn.y1 + 6);
-  });
-  const bw = bx1 - bx0, bh = by1 - by0;
-  const u = Math.max(bw / w, bh / h, 0.0001);
-  const exX = (w * u - bw) / 2, exY = (h * u - bh) / 2;
-  const mX = 0.6 * w * u, mY = 0.6 * h * u;                    // pan slack (60% of a viewport per side)
-  const totX = bw + 2 * exX + 2 * mX, totY = bh + 2 * exY + 2 * mY;
-  const zx = [mX / totX * 100, (mX + bw + 2 * exX) / totX * 100];
-  const zy = [mY / totY * 100, (mY + bh + 2 * exY) / totY * 100];
-
-  // ── Region→region transfer edges (overlay) ──────────────────────────────────────────────────────
-  // Collapse the cross-zone CELL edges into ONE edge per (source region → dest region) pair — the data
-  // hand-offs the region view is about. Each carries its route verdict + measured throughput (from
-  // _dagRouteData). Built only while the overlay is on; endpoints connect the zones' facing edges so the
-  // line runs in the gutter, not through cell boxes.
+  // Region→region hand-offs (overlay): one edge per (src region → dst region) pair, routed as a
+  // side-channel BUS. Built + routed HERE — before the fit window — so the bus lanes, which sit in the
+  // margins beyond the panels, are included in the initial view instead of being clipped/panned off.
   const _regEdges = [];
   if (_dagRegionsOn && zones.length) {
     const zoneOf = {}; zones.forEach(z => { zoneOf[z.isLocal ? '' : z.name] = z; });
@@ -1035,6 +1085,33 @@ function _dagOption() {
       const zs = zoneOf[e.src], zt = zoneOf[e.dst]; if (zs && zt) _regEdges.push({ ...e, zs, zt });
     }
   }
+  const _regRoutes = (_dagRegionsOn && _regEdges.length) ? _dagCachedRegionRoutes(L, _regEdges) : null;
+
+  let bx0 = 0, by0 = 0, bx1 = L.gw, by1 = L.gh;
+  L.nodes.forEach(n => {
+    bx0 = Math.min(bx0, n.x - n.b.w / 2 - 6); bx1 = Math.max(bx1, n.x + n.b.w / 2 + 6);
+    by0 = Math.min(by0, n.y - n.b.h / 2 - 6); by1 = Math.max(by1, n.y + n.b.h / 2 + 6);
+  });
+  L.links.forEach(l => (l.pts || []).forEach(p => {
+    bx0 = Math.min(bx0, p[0] - 6); bx1 = Math.max(bx1, p[0] + 6);
+    by0 = Math.min(by0, p[1] - 6); by1 = Math.max(by1, p[1] + 6);
+  }));
+  zones.forEach(zn => {                              // empty zones live in the right margin — keep them in the fit window
+    bx0 = Math.min(bx0, zn.x0 - 6); bx1 = Math.max(bx1, zn.x1 + 6);   // same breathing room as nodes/links so a zone box isn't flush to the pane edge
+    by0 = Math.min(by0, zn.y0 - 6); by1 = Math.max(by1, zn.y1 + 6);
+  });
+  if (_regRoutes) for (const rt of Object.values(_regRoutes)) for (const p of rt) {   // bus lanes sit beyond the panels
+    bx0 = Math.min(bx0, p[0] - 10); bx1 = Math.max(bx1, p[0] + 10);
+    by0 = Math.min(by0, p[1] - 6); by1 = Math.max(by1, p[1] + 6);
+  }
+  const bw = bx1 - bx0, bh = by1 - by0;
+  const u = Math.max(bw / w, bh / h, 0.0001);
+  const exX = (w * u - bw) / 2, exY = (h * u - bh) / 2;
+  const mX = 0.6 * w * u, mY = 0.6 * h * u;                    // pan slack (60% of a viewport per side)
+  const totX = bw + 2 * exX + 2 * mX, totY = bh + 2 * exY + 2 * mY;
+  const zx = [mX / totX * 100, (mX + bw + 2 * exX) / totX * 100];
+  const zy = [mY / totY * 100, (mY + bh + 2 * exY) / totY * 100];
+
   const regionEdgeTip = i => {
     const e = _regEdges[i]; if (!e) return '';
     const r = _dagRouteFor(e.src, e.dst), kind = r ? r.kind : 'unresolved';
@@ -1113,33 +1190,58 @@ function _dagOption() {
         data: _regEdges.map((_, i) => [i]),
         renderItem: (params, api) => {
           const e = _regEdges[params.dataIndex]; if (!e) return null;
-          const zs = e.zs, zt = e.zt;
-          let a, b;
-          if (zt.x0 >= zs.x1)      { a = [zs.x1, (zs.y0 + zs.y1) / 2]; b = [zt.x0, (zt.y0 + zt.y1) / 2]; }
-          else if (zs.x0 >= zt.x1) { a = [zs.x0, (zs.y0 + zs.y1) / 2]; b = [zt.x1, (zt.y0 + zt.y1) / 2]; }
-          else                     { a = [(zs.x0 + zs.x1) / 2, zs.y0]; b = [(zt.x0 + zt.x1) / 2, zt.y0]; }
-          const A = api.coord(a), B = api.coord(b);
           const r = _dagRouteFor(e.src, e.dst), kind = r ? r.kind : 'unresolved';
           const col = _DAG_ROUTE_COL[kind] || '#6a7183';
           const lw = _dagThroughputWidth(r ? r.mbps : 0);
-          const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
-          const cp = [mx, my - Math.abs(0.16 * (B[0] - A[0])) - 16];        // bow up so ↔ pairs don't overlap
-          const dl = Math.hypot(B[0] - cp[0], B[1] - cp[1]) || 1, ux = (B[0] - cp[0]) / dl, uy = (B[1] - cp[1]) / dl;
-          const ah = 11, hbx = B[0] - ux * ah, hby = B[1] - uy * ah;
           const dash = kind === 'relay' ? [9, 6] : kind === 'unresolved' ? [3, 5] : null;
           const spd = _dagSpeed(r ? r.mbps : 0);
           const lbl = (_DAG_ROUTE_LBL[kind] || kind) + (spd ? ' · ' + spd : '');
-          const curve = { x1: A[0], y1: A[1], cpx1: cp[0], cpy1: cp[1], x2: hbx, y2: hby };
-          return { type: 'group', children: [
-            { type: 'bezierCurve', style: { fill: 'none', stroke: col, lineWidth: Math.max(14, lw + 12), opacity: 0.001 },
-              shape: { x1: A[0], y1: A[1], cpx1: cp[0], cpy1: cp[1], x2: B[0], y2: B[1] } },   // wide hover target
-            { type: 'bezierCurve', silent: true, shape: curve,
-              style: { fill: 'none', stroke: col, lineWidth: lw, opacity: 0.92, lineDash: dash, shadowBlur: 7, shadowColor: col } },
-            { type: 'polygon', silent: true, style: { fill: col, opacity: 0.95 },
-              shape: { points: [[B[0], B[1]], [hbx - uy * 5, hby + ux * 5], [hbx + uy * 5, hby - ux * 5]] } },
-            { type: 'text', silent: true, style: { x: cp[0], y: cp[1] - 3, text: lbl, fill: col,
-              font: '600 11px sans-serif', textAlign: 'center', textVerticalAlign: 'bottom', stroke: P.bg, lineWidth: 3 } },
-          ] };
+          // Routed polyline (LAYOUT coords → pixels), decimated then splined like cell edges. Fallback to a
+          // straight facing-border line if routing produced nothing (no path / overlay just toggled).
+          const route = _regRoutes && _regRoutes[e.src + '>' + e.dst];
+          let pts;
+          if (route && route.length >= 2) pts = _dagRdpStubs(route.map(p => api.coord(p)), 18);
+          else {
+            const zs = e.zs, zt = e.zt; let a, b;
+            if (zt.y0 >= zs.y1)      { a = [(zs.x0 + zs.x1) / 2, zs.y1]; b = [(zt.x0 + zt.x1) / 2, zt.y0]; }
+            else if (zs.y0 >= zt.y1) { a = [(zs.x0 + zs.x1) / 2, zs.y0]; b = [(zt.x0 + zt.x1) / 2, zt.y1]; }
+            else if (zt.x0 >= zs.x1) { a = [zs.x1, (zs.y0 + zs.y1) / 2]; b = [zt.x0, (zt.y0 + zt.y1) / 2]; }
+            else                     { a = [zs.x0, (zs.y0 + zs.y1) / 2]; b = [zt.x1, (zt.y0 + zt.y1) / 2]; }
+            pts = [api.coord(a), api.coord(b)];
+          }
+          const n = pts.length, tip = pts[n - 1], prev = pts[n - 2];
+          const _o0 = api.coord([0, 0]);
+          const _sc = Math.max(0.85, Math.min(3.2, ((Math.abs(api.coord([1, 0])[0] - _o0[0]) + Math.abs(api.coord([0, 1])[1] - _o0[1])) / 2) || 1));
+          const ah = 9 * _sc, aw = 4.2 * _sc;
+          const dl = Math.hypot(tip[0] - prev[0], tip[1] - prev[1]) || 1, ux = (tip[0] - prev[0]) / dl, uy = (tip[1] - prev[1]) / dl;
+          const bx = tip[0] - ux * ah, by = tip[1] - uy * ah;
+          const line = { fill: 'none', stroke: col, lineWidth: lw, opacity: 0.92, lineDash: dash, shadowBlur: 7, shadowColor: col };
+          const kids = [
+            { type: 'polyline', style: { fill: 'none', stroke: col, lineWidth: Math.max(14, lw + 12), opacity: 0.001 }, shape: { points: pts } },   // wide hover target (whole polyline)
+          ];
+          // Smooth the routed polyline: a Catmull-Rom bezier chain (mirrors the cell-edge spline), stopping
+          // at the arrowhead base so the semi-transparent stroke doesn't bleed through the head.
+          if (n === 2) {
+            kids.push({ type: 'line', silent: true, style: line, shape: { x1: pts[0][0], y1: pts[0][1], x2: bx, y2: by } });
+          } else {
+            const cpts = pts.slice(0, n - 1); cpts.push([bx, by]);
+            const m2 = cpts.length, Pp = [cpts[0], cpts[0], ...cpts, cpts[m2 - 1], cpts[m2 - 1]];
+            for (let i = 0; i + 3 < Pp.length; i++) {
+              const a1 = Pp[i + 1], a2 = Pp[i + 2], a3 = Pp[i + 3];
+              const sx2 = (a1[0] + 4 * a2[0] + a3[0]) / 6, sy2 = (a1[1] + 4 * a2[1] + a3[1]) / 6;
+              const px2 = i === 0 ? cpts[0][0] : (Pp[i][0] + 4 * a1[0] + a2[0]) / 6;
+              const py2 = i === 0 ? cpts[0][1] : (Pp[i][1] + 4 * a1[1] + a2[1]) / 6;
+              kids.push({ type: 'bezierCurve', silent: true, style: line, shape: {
+                x1: px2, y1: py2, cpx1: (2 * a1[0] + a2[0]) / 3, cpy1: (2 * a1[1] + a2[1]) / 3,
+                cpx2: (a1[0] + 2 * a2[0]) / 3, cpy2: (a1[1] + 2 * a2[1]) / 3, x2: sx2, y2: sy2 } });
+            }
+          }
+          kids.push({ type: 'polygon', silent: true, style: { fill: col, opacity: 0.95 },
+            shape: { points: [[tip[0], tip[1]], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] } });
+          const mp = pts[Math.max(1, Math.floor(n / 2))] || tip;
+          kids.push({ type: 'text', silent: true, style: { x: mp[0], y: mp[1] - 6, text: lbl, fill: col,
+            font: '600 11px sans-serif', textAlign: 'center', textVerticalAlign: 'bottom', stroke: P.bg, lineWidth: 3 } });
+          return { type: 'group', children: kids };
         },
       },
       { // edges under nodes — routed/S-curve waypoints, smoothed, arrowhead at the target border
@@ -1165,9 +1267,9 @@ function _dagOption() {
           let op = del ? 1
                  : hv ? (hv.d === 1 ? 0.98 : Math.max(0.3, 0.62 - 0.12 * (hv.d - 2)))
                  : faded ? (l.dim ? 0.04 : 0.15) : l.dim ? 0.12 : hot ? 0.95 : 0.6;
-          // Region overlay: the region→region edges carry the story, so recede the cell-level edges (unless
-          // hovered/hot/being-deleted — those still need to read).
-          if (_dagRegionsOn && !hv && !del && !hot) op *= 0.28;
+          // Region overlay: the region→region edges carry the story, so recede the cell-level edges HARD
+          // (unless hovered/hot/being-deleted — those still need to read).
+          if (_dagRegionsOn && !hv && !del && !hot) op *= 0.14;
           // Decimate waypoints (Douglas-Peucker): keep endpoints + genuine detours, drop
           // micro-wiggles — the spline relaxes into longer arcs but still dodges nodes.
           const pts = _dagRdpStubs(l.pts.map(p => api.coord(p)), 18);
@@ -1311,6 +1413,10 @@ function _dagOption() {
               style: { image: b.thumb, x: p[0] - iw / 2, y: p[1] + ph / 2 - bandH - 3 * kz,
                        width: iw, height: bandH } });
           }
+          // Region overlay focuses on the region hand-offs — recede the cell cards hard so they read as
+          // faint context (running/selected cells stay bright: they're what's triggering the transfers).
+          const regDim = _dagRegionsOn && !sel && !running ? 0.3 : 1;
+          if (regDim !== 1) children.forEach(ch => { if (ch.style) ch.style.opacity = (ch.style.opacity == null ? 1 : ch.style.opacity) * regDim; });
           return { type: 'group', children };
         },
       },
