@@ -53,14 +53,14 @@ function addMenu(e, cellId, before = false) {
   const where = before ? 'above' : 'below';
   [['code', '＋ code ' + where], ['md', '＋ markdown ' + where]].forEach(([k, label]) => {
     const b = document.createElement('button'); b.textContent = label;
-    b.onclick = () => { hideAddMenu(); addCell(cellId, k, before, true); }; m.appendChild(b);
+    b.onclick = () => { hideAddMenu(); addCell(cellId, k, before); }; m.appendChild(b);
   });
   m.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
   m.style.top = Math.min(e.clientY, window.innerHeight - 80) + 'px';
   m.classList.add('show');
 }
 function hideAddMenu() { document.getElementById('addmenu').classList.remove('show'); }
-document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') && !e.target.closest('.addbtn')) hideAddMenu(); });
+document.addEventListener('mousedown', e => { if (!e.target.closest('#addmenu') && !e.target.closest('.cellgap-add')) hideAddMenu(); });
 document.addEventListener('mousedown', e => { if (!e.target.closest('#ctlpop') && !e.target.closest('.autoctl')) hideControlPicker(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') hideControlPicker(); });
 // Split a code cell at the editor cursor into two cells.

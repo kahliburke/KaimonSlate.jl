@@ -302,12 +302,13 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
 
 // Inter-cell insert affordance: a thin hover zone in the gap between rows (and above the first / below
 // the last) that reveals a "+" to insert a cell RIGHT THERE. `afterId` = insert after that cell; the
-// top gap has no `afterId`, so it inserts BEFORE `firstId`. Left-click = code cell (in edit mode);
-// right-click = the code/markdown chooser (reuses addMenu, which inserts below `afterId`).
+// top gap has no `afterId`, so it inserts BEFORE `firstId`. Left-click = code cell; right-click =
+// the code/markdown chooser (reuses addMenu, which inserts below `afterId`). Like the other add-cell
+// affordances, a fresh cell is NOT put into edit mode — so it can be flipped to markdown first.
 function CellGap({ afterId, firstId }) {
   const insert = (kind) => afterId
-    ? window.addCell(afterId, kind, false, true)     // after afterId (last cell of the row above)
-    : window.addCell(firstId, kind, true, true);     // top gap → before the first cell (firstId='' ⇒ append)
+    ? window.addCell(afterId, kind, false)           // after afterId (last cell of the row above)
+    : window.addCell(firstId, kind, true);           // top gap → before the first cell (firstId='' ⇒ append)
   // Right-click → chooser. Below a cell: insert after `afterId`. Top gap: insert before `firstId`.
   const onMenu = (e) => {
     e.preventDefault();

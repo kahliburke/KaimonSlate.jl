@@ -282,7 +282,6 @@ function cellHeaderInner(c) {
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
       `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
-      `<button class="addbtn" onclick="addCell('${c.id}','code')" oncontextmenu="addMenu(event,'${c.id}');return false" title="add below · right-click for type">＋</button>` +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
