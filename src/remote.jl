@@ -2025,14 +2025,18 @@ struct XferTrace
     bs::Vector{Int}         # cumulative bytes at each ts
 end
 const _XFER_TRACES = XferTrace[]
-const _XFER_TRACE_CAP = 400
+# Ring depth — GLOBAL across every notebook's transfers (the dashboard filters to its own regions), so a
+# busy notebook shouldn't evict another's history. Env-tunable for long observation runs; loops on pop so
+# a lowered cap trims immediately.
+_xfer_trace_cap() = max(1, something(tryparse(Int, get(ENV, "KAIMONSLATE_XFER_TRACE_CAP", "")), 4000))
 const _XFER_TRACE_LOCK = ReentrantLock()
 function _xfer_trace_push!(meta, started, total, ts, bs, err)
     meta === nothing && return
     lock(_XFER_TRACE_LOCK) do
         push!(_XFER_TRACES, XferTrace(String(meta.src), String(meta.dst), String(meta.name), String(meta.via),
                                       started, time(), total, String(err), copy(ts), copy(bs)))
-        length(_XFER_TRACES) > _XFER_TRACE_CAP && popfirst!(_XFER_TRACES)
+        cap = _xfer_trace_cap()
+        while length(_XFER_TRACES) > cap; popfirst!(_XFER_TRACES); end
     end
 end
 xfer_traces() = lock(_XFER_TRACE_LOCK) do; copy(_XFER_TRACES); end
@@ -2428,15 +2432,31 @@ function _ensure_authed!(src_k, bpub)
 end
 _forget_authed!(src_k, bpub) = lock(_AUTHED_LOCK) do; delete!(_AUTHED, _authed_key(src_k, bpub)); end
 
+# A dest's blob CLIENT pubkey is stable for the worker's lifetime — the keypair is persisted to disk, so
+# it survives even a respawn — yet `_pull_*!` fetched it over the gate on EVERY pull. Cache it per dest
+# kernel (keyed by objectid, like the standing-auth cache: a worker SWAP → fresh GateKernel → refetch),
+# and drop it on a pull failure so a genuinely-swapped worker re-fetches. One fewer gate round-trip per move.
+const _DEST_CKEY = Dict{UInt,String}()
+const _DEST_CKEY_LOCK = ReentrantLock()
+function _dest_client_key(dst_k)
+    oid = objectid(dst_k)
+    hit = lock(_DEST_CKEY_LOCK) do; get(_DEST_CKEY, oid, nothing); end
+    hit === nothing || return hit
+    bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
+    bkerr = try; getproperty(bk, :error); catch; nothing; end
+    bkerr === nothing || error("dest client key unavailable: $bkerr")
+    bpub = String(bk.key)
+    lock(_DEST_CKEY_LOCK) do; _DEST_CKEY[oid] = bpub; end
+    return bpub
+end
+_forget_dest_client_key!(dst_k) = lock(_DEST_CKEY_LOCK) do; delete!(_DEST_CKEY, objectid(dst_k)); end
+
 # Broker one direct B←A pull over the RESOLVED route (`route.{ip,port,server_key}` = A's blob endpoint in
 # B's OWN vantage — co-located loopback already applied by `_resolve_peer_route`): ensure B's client key is
 # on A's blob allow-list (standing auth — authorized once, cached), then have B pull straight into its CAS.
 # Returns bytes moved (0 = deduped). THROWS on any failure — the caller (`:auto`) decides whether to relay.
 function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
-    bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
-    bkerr = try; getproperty(bk, :error); catch; nothing; end
-    bkerr === nothing || error("direct: dest client key unavailable: $bkerr")
-    bpub = String(bk.key)
+    bpub = _dest_client_key(dst_k)                         # cached per dest kernel — no gate round-trip on reuse
     authed = !isempty(route.server_key)                    # allow-list gate only exists under CURVE
     authed && _ensure_authed!(src_k, bpub)                 # standing auth: authorize once, cached (no revoke)
     try
@@ -2446,7 +2466,8 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
             meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "direct"))
         return bytes
     catch
-        authed && _forget_authed!(src_k, bpub)             # failure → drop the cache so a retry re-authorizes
+        authed && _forget_authed!(src_k, bpub)             # failure → drop the caches so a retry re-authorizes
+        _forget_dest_client_key!(dst_k)                    # (a swapped worker gets both refreshed)
         rethrow()
     end
 end
@@ -2491,10 +2512,7 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     try; _mesh_finalize_port!(String(src_k.target.region), String(dst_k.target.region), route.port); catch e
         _rlog("mesh: permitopen finalize $(dst_k.target.region)←$(src_k.target.region) failed — $(first(sprint(showerror, e), 120))")
     end
-    bk = _tool(dst_k, "__slate_client_key", Dict{String,Any}(); timeout = 60.0)
-    bkerr = try; getproperty(bk, :error); catch; nothing; end
-    bkerr === nothing || error("ssh: dest client key unavailable: $bkerr")
-    bpub = String(bk.key)
+    bpub = _dest_client_key(dst_k)                         # cached per dest kernel — no gate round-trip on reuse
     authed = !isempty(route.server_key)
     authed && _ensure_authed!(src_k, bpub)                 # standing auth: authorize once, cached (no revoke)
     a_user = _ssh_user(src_k.target.ssh_host)
@@ -2508,7 +2526,8 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
             meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "ssh"))
         return bytes
     catch
-        authed && _forget_authed!(src_k, bpub)             # failure → drop the cache so a retry re-authorizes
+        authed && _forget_authed!(src_k, bpub)             # failure → drop the caches so a retry re-authorizes
+        _forget_dest_client_key!(dst_k)                    # (a swapped worker gets both refreshed)
         rethrow()
     end
 end
