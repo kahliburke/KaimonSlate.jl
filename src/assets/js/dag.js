@@ -342,14 +342,16 @@ function _dagRegionLegend() {
   let el = document.getElementById('dagregleg');
   if (!_dagRegionsOn || !pane) {
     if (el) el.remove();
-    const p = document.getElementById('dagpeerpanel'); if (p) p.remove();   // panel rides the overlay
+    const p = document.getElementById('dagpeerpanel'); if (p) p.remove();   // panels ride the overlay
+    const x = document.getElementById('dagxferdash'); if (x) { _dagXferDashDispose(); x.remove(); }
     return;
   }
   if (!el) { el = document.createElement('div'); el.id = 'dagregleg'; el.className = 'dagregleg'; pane.appendChild(el); }
   const hasRemote = _dagRegionNamesAll().length > 0;
   el.innerHTML = `<span><i style="background:#3a3f55"></i>main (local)</span>` +
     _dagRegionNamesAll().map(n => `<span><i style="background:${_dagRegionHue(n)}"></i>${n === 'default' ? 'remote' : n}</span>`).join('') +
-    (hasRemote ? `<button class="dagpeerbtn" onclick="_dagPeerPlan(false)" title="peer routing plan — how cross-region values move (direct / ssh-bridge / relay), the address each pair uses, and the mesh artifacts on each host">⇄ peer plan</button>` : '');
+    (hasRemote ? `<button class="dagpeerbtn" onclick="_dagPeerPlan(false)" title="peer routing plan — how cross-region values move (direct / ssh-bridge / relay), the address each pair uses, and the mesh artifacts on each host">⇄ peer plan</button>` +
+      `<button class="dagpeerbtn" onclick="_dagXferDash()" title="transfer summary — totals, throughput-over-time, the region peer-to-peer grid, and the rate distribution">📊 transfers</button>` : '');
 }
 
 // ⇄ Peer routing plan — the DAG's window into how cross-region values actually move: the cached route
@@ -393,6 +395,113 @@ async function _dagProbeTransfers() {
   _dagFetchRoutes();                                     // repaint the region overlay with measured throughput
 }
 window._dagProbeTransfers = _dagProbeTransfers;
+
+// ── Transfer summary dashboard ────────────────────────────────────────────────────────────────────
+// A stat + viz panel over the region overlay: totals, a throughput-over-time timeline (per transfer,
+// coloured by route), the region peer-to-peer grid (avg MB/s heatmap), and the instantaneous-rate
+// distribution (KDE). Fed by /api/transfer-stats (per-transfer progress traces). Live-refreshes while open.
+let _dagXferTimer = 0, _dagXferCharts = {};
+function _dagXferDashDispose() {
+  if (_dagXferTimer) { clearInterval(_dagXferTimer); _dagXferTimer = 0; }
+  for (const k in _dagXferCharts) { try { _dagXferCharts[k].dispose(); } catch (_) {} }
+  _dagXferCharts = {};
+}
+function _dagXferChart(id) {
+  const el = document.getElementById(id); if (!el) return null;
+  if (!_dagXferCharts[id]) { try { _dagXferCharts[id] = echarts.init(el, 'slate'); } catch (_) { _dagXferCharts[id] = echarts.init(el); } }
+  return _dagXferCharts[id];
+}
+// Gaussian KDE (Silverman bandwidth) of `vals`, sampled at `n` points over [lo,hi].
+function _dagKde(vals, lo, hi, n) {
+  const m = vals.length; if (!m) return [];
+  const mean = vals.reduce((a, b) => a + b, 0) / m;
+  const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) * (b - mean), 0) / Math.max(1, m - 1)) || ((hi - lo) / 6) || 1;
+  const h = (1.06 * sd * Math.pow(m, -0.2)) || 1;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const x = lo + (hi - lo) * i / (n - 1); let s = 0;
+    for (const v of vals) { const u = (x - v) / h; s += Math.exp(-0.5 * u * u); }
+    out.push([+x.toFixed(2), s / (m * h * Math.sqrt(2 * Math.PI))]);
+  }
+  return out;
+}
+async function _dagXferDash() {
+  const pane = document.getElementById('dagpane') || document.getElementById('dag'); if (!pane) return;
+  let el = document.getElementById('dagxferdash');
+  if (el) { _dagXferDashDispose(); el.remove(); return; }          // toggle off
+  el = document.createElement('div'); el.id = 'dagxferdash'; el.className = 'dagxferdash';
+  el.innerHTML =
+    `<div class="dagxd-h"><b>📊 transfer summary</b><button onclick="_dagXferDash()" title="close">✕</button></div>` +
+    `<div class="dagxd-tiles" id="dagxd-tiles"></div>` +
+    `<div class="dagxd-body">` +
+      `<div class="dagxd-cell dagxd-wide"><div class="dagxd-ct">throughput over time</div><div id="dagxd-time" class="dagxd-ec"></div></div>` +
+      `<div class="dagxd-cell"><div class="dagxd-ct">region peer-to-peer · MB/s</div><div id="dagxd-grid" class="dagxd-ec"></div></div>` +
+      `<div class="dagxd-cell"><div class="dagxd-ct">rate distribution</div><div id="dagxd-kde" class="dagxd-ec"></div></div>` +
+    `</div>`;
+  pane.appendChild(el);
+  await _dagXferDashRefresh();
+  _dagXferTimer = setInterval(_dagXferDashRefresh, 3000);
+}
+window._dagXferDash = _dagXferDash;
+
+async function _dagXferDashRefresh() {
+  if (!document.getElementById('dagxferdash')) return;
+  let d; try { d = await (await fetch(_apipath('/api/transfer-stats'))).json(); } catch (_) { return; }
+  const P = _dagPalette();
+  const traces = (d && d.traces) || [], now = (d && d.now) || (Date.now() / 1000);
+  // Derive per-transfer instantaneous rate series (Δbytes/Δt at each granular sample) + summary numbers.
+  const T = traces.map(t => {
+    const ts = t.ts || [], bs = t.bs || [], pts = []; let peak = 0;
+    for (let i = 1; i < ts.length; i++) { const dt = ts[i] - ts[i - 1]; if (dt <= 0) continue; const r = (bs[i] - bs[i - 1]) / dt / 1e6; pts.push([+(ts[i] - now).toFixed(2), +r.toFixed(2)]); if (r > peak) peak = r; }
+    const sec = (t.finished || ts[ts.length - 1] || 0) - (t.started || ts[0] || 0);
+    const bytes = t.total > 0 ? t.total : (bs[bs.length - 1] || 0);
+    return { src: t.src || 'local', dst: t.dst || 'local', via: t.via, pts, peak, sec, bytes, avg: sec > 0 ? bytes / sec / 1e6 : 0 };
+  });
+  const totalBytes = T.reduce((a, t) => a + t.bytes, 0);
+  const allRates = T.flatMap(t => t.pts.map(p => p[1])).filter(r => r > 0);
+  const avg = T.length ? T.reduce((a, t) => a + t.avg, 0) / T.length : 0;
+  const peak = T.reduce((a, t) => Math.max(a, t.peak), 0);
+  const hum = b => b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : b < 1073741824 ? (b / 1048576).toFixed(1) + ' MB' : (b / 1073741824).toFixed(2) + ' GB';
+  const tiles = document.getElementById('dagxd-tiles');
+  if (tiles) tiles.innerHTML = [
+    ['total moved', hum(totalBytes)], ['transfers', String(T.length)],
+    ['avg', avg.toFixed(1) + ' MB/s'], ['peak', peak.toFixed(1) + ' MB/s'],
+  ].map(([k, v]) => `<div class="dagxd-tile"><span>${k}</span><b>${v}</b></div>`).join('');
+  const axisc = P.dim, gridc = { lineStyle: { color: P.border, opacity: 0.3 } };
+  const tip = { backgroundColor: P.bg, borderColor: P.border, textStyle: { color: P.text, fontSize: 11 } };
+
+  // Timeline — per-transfer instantaneous rate, coloured by route.
+  const tc = _dagXferChart('dagxd-time');
+  if (tc) { tc.resize(); tc.setOption({ animation: false, grid: { left: 46, right: 12, top: 10, bottom: 26 },
+    tooltip: Object.assign({ trigger: 'item', formatter: p => `${p.seriesName}<br><b>${(+p.data[1]).toFixed(2)} MB/s</b> · ${Math.round(-p.data[0])}s ago` }, tip),
+    xAxis: { type: 'value', name: 's ago', nameTextStyle: { color: axisc }, max: 0, axisLabel: { color: axisc, formatter: v => Math.round(-v) + 's' }, splitLine: gridc },
+    yAxis: { type: 'value', name: 'MB/s', nameTextStyle: { color: axisc }, axisLabel: { color: axisc }, splitLine: gridc },
+    series: T.filter(t => t.pts.length).map(t => ({ type: 'line', name: `${t.src}→${t.dst}`, showSymbol: false, smooth: true,
+      data: t.pts, lineStyle: { width: 1.6, opacity: 0.85, color: _DAG_ROUTE_COL[t.via] || '#6a7183' }, emphasis: { lineStyle: { width: 3 } } })) }, true); }
+
+  // Region peer-to-peer grid — avg MB/s heatmap (from → to).
+  const regions = [...new Set(traces.flatMap(t => [t.src || 'local', t.dst || 'local']))].sort();
+  const pair = {}; T.forEach(t => { const k = t.src + '|' + t.dst, o = pair[k] || (pair[k] = { n: 0, bytes: 0, sec: 0 }); o.n++; o.bytes += t.bytes; o.sec += t.sec; });
+  const gdata = []; let mx = 0;
+  regions.forEach((s, si) => regions.forEach((dd, di) => { const o = pair[s + '|' + dd]; if (!o) return; const rate = o.sec > 0 ? o.bytes / o.sec / 1e6 : 0; mx = Math.max(mx, rate); gdata.push([di, si, +rate.toFixed(1), o.n]); }));
+  const gc = _dagXferChart('dagxd-grid');
+  if (gc) { gc.resize(); gc.setOption({ animation: false, grid: { left: 58, right: 14, top: 10, bottom: 54 },
+    tooltip: Object.assign({ formatter: p => `${regions[p.value[1]]} → ${regions[p.value[0]]}<br><b>${p.value[2]} MB/s</b> · ×${p.value[3]}` }, tip),
+    xAxis: { type: 'category', data: regions, name: 'to', nameTextStyle: { color: axisc }, axisLabel: { color: axisc }, splitArea: { show: true } },
+    yAxis: { type: 'category', data: regions, name: 'from', nameTextStyle: { color: axisc }, axisLabel: { color: axisc }, splitArea: { show: true } },
+    visualMap: { min: 0, max: +(mx || 1).toFixed(1), calculable: true, orient: 'horizontal', left: 'center', bottom: 2, itemWidth: 12, itemHeight: 70, textStyle: { color: axisc, fontSize: 10 }, inRange: { color: ['#1b2233', '#4f7cf0', '#3fb96e'] } },
+    series: [{ type: 'heatmap', data: gdata, label: { show: true, formatter: p => p.value[2], color: '#e6e9f2', fontSize: 10 }, itemStyle: { borderColor: P.bg, borderWidth: 2 }, emphasis: { itemStyle: { shadowBlur: 8, shadowColor: 'rgba(0,0,0,.5)' } } }] }, true); }
+
+  // Instantaneous-rate distribution (KDE).
+  const kc = _dagXferChart('dagxd-kde');
+  if (kc) { const hi = allRates.length ? Math.max(...allRates) * 1.1 : 1, dens = _dagKde(allRates, 0, hi, 64);
+    kc.resize(); kc.setOption({ animation: false, grid: { left: 40, right: 12, top: 10, bottom: 26 },
+    tooltip: Object.assign({ trigger: 'axis', formatter: p => { const a = p && p[0]; const x = a ? (a.data ? a.data[0] : a.axisValue) : 0; return `≈ ${(+x).toFixed(2)} MB/s`; } }, tip),
+    xAxis: { type: 'value', name: 'MB/s', nameLocation: 'middle', nameGap: 20, min: 0, max: +hi.toFixed(1), nameTextStyle: { color: axisc }, axisLabel: { color: axisc, formatter: v => (+v).toFixed(1) }, splitLine: { show: false } },
+    yAxis: { type: 'value', axisLabel: { show: false }, splitLine: { lineStyle: { color: P.border, opacity: 0.25 } } },
+    series: [{ type: 'line', smooth: true, showSymbol: false, data: dens, lineStyle: { color: '#7c9cf0', width: 2 }, areaStyle: { opacity: 0.22, color: '#4f7cf0' } }] }, true); }
+}
+window._dagXferDashRefresh = _dagXferDashRefresh;
 
 // How each route KIND paints: direct = fast green, ssh-bridge = blue, relay = amber (via hub), unresolved
 // = neutral (will probe on the next transfer). Mirrors the region hues' intent — a glance says the path.
