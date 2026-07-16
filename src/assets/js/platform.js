@@ -22,7 +22,9 @@
   //   ⌘K → Ctrl+K   ⌘⇧P → Ctrl+⇧+P   ⇧⏎ → ⇧+⏎   (a lone "hold ⌘" → "hold Ctrl")
   function kbd(s) {
     if (isMac || !s) return s;
-    return s.replace(/[⌘⌥⇧]+[^\s]?/g, chord => {
+    // [^\s+]? (not [^\s]?): never swallow a `+` a prior pass already inserted —
+    // re-running kbd() on already-converted text must be a true no-op.
+    return s.replace(/[⌘⌥⇧]+[^\s+]?/g, chord => {
       const parts = []; let key = '';
       for (const c of chord) { if (NAME[c]) parts.push(NAME[c]); else key += c; }
       if (key) parts.push(key);
@@ -48,12 +50,25 @@
     const hits = [];
     for (let n = walk.nextNode(); n; n = walk.nextNode())
       if (GLYPH.test(n.nodeValue) && !inUserContent(n)) hits.push(n);
-    hits.forEach(n => { n.nodeValue = kbd(n.nodeValue); });
+    // Only touch nodeValue when the conversion actually changes something — ⇧ is
+    // deliberately kept as-is (see NAME above), so a converted node still matches
+    // GLYPH and gets revisited on every rescan. An unconditional reassignment here
+    // is itself a text mutation, which re-fires the MutationObserver below,
+    // scheduling another rescan of the same node forever — and each pass's regex
+    // can re-swallow the very "+" it just inserted, corrupting the string further
+    // (the "Ctrl+⇧+++…" runaway). Skipping no-op writes breaks that feedback loop.
+    hits.forEach(n => {
+      const next = kbd(n.nodeValue);
+      if (next !== n.nodeValue) n.nodeValue = next;
+    });
     // title / placeholder are always UI chrome, so rewrite them everywhere.
     root.querySelectorAll('[title],[placeholder]').forEach(el => {
       for (const a of ['title', 'placeholder']) {
         const v = el.getAttribute(a);
-        if (v && GLYPH.test(v)) el.setAttribute(a, kbd(v));
+        if (v && GLYPH.test(v)) {
+          const next = kbd(v);
+          if (next !== v) el.setAttribute(a, next);
+        }
       }
     });
   }
