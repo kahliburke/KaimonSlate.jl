@@ -300,6 +300,21 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
+// Inter-cell insert affordance: a thin hover zone in the gap between cells (and above the first / below
+// the last) that reveals a "+" to insert a cell RIGHT THERE. `afterId` = insert after that
+// cell; the top gap has no `afterId`, so it inserts BEFORE `firstId`. Left-click = code cell (in edit
+// mode); right-click = the code/markdown chooser (reuses addMenu, which inserts below `afterId`).
+function CellGap({ afterId, firstId }) {
+  const insert = (kind) => afterId
+    ? window.addCell(afterId, kind, false, true)     // between afterId and the next cell
+    : window.addCell(firstId, kind, true, true);     // top gap → before the first cell (firstId='' ⇒ append)
+  const onMenu = (e) => { e.preventDefault(); if (afterId && window.addMenu) window.addMenu(e, afterId); else insert('code'); };
+  return html`<div class="cellgap">
+    <button class="cellgap-add" onClick=${() => insert('code')} oncontextmenu=${onMenu}
+      title="insert a cell here — right-click for markdown">＋</button>
+  </div>`;
+}
+
 function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   useEffect(() => {
     window.renderPalette && window.renderPalette();
@@ -309,6 +324,8 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   const coneCount = cone ? cone.size : (cells || []).length;
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
+  const list = cells || [];
+  const firstId = list.length ? list[0].id : '';
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
   const renderCell = c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`;
   // Side-by-side columns: a `column=N` tag (N≥2) places a cell in the Nth slot of the row anchored by
@@ -320,9 +337,19 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
     if (col >= 2 && rows.length) rows[rows.length - 1].push(c);
     else rows.push([c]);
   });
-  return html`${banner}${rows.map(row => row.length === 1
+  const renderRow = row => row.length === 1
     ? renderCell(row[0])
-    : html`<div class="cell-row" key=${'row-' + row[0].id}>${row.map(renderCell)}</div>`)}`;
+    : html`<div class="cell-row" key=${'row-' + row[0].id}>${row.map(renderCell)}</div>`;
+  // Interleave a CellGap before the first row and after each one — EXCEPT in dep-focus (a read-oriented
+  // view where gaps between collapsed cells would just be noise). A row's trailing gap is anchored to
+  // its LAST cell, so an insert lands after the whole row as a new full-width cell.
+  const out = [];
+  if (!focusId) out.push(html`<${CellGap} key="gap-top" afterId=${''} firstId=${firstId} />`);
+  rows.forEach(row => {
+    out.push(renderRow(row));
+    if (!focusId) out.push(html`<${CellGap} key=${'gap-' + row[row.length - 1].id} afterId=${row[row.length - 1].id} firstId=${firstId} />`);
+  });
+  return html`${banner}${out}`;
 }
 // The row column a cell sits in: `column=N` tag → N, default 1. Only N≥2 pulls a cell up beside its predecessor.
 function _cellColumn(c) {
