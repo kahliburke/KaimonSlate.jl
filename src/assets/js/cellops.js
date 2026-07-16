@@ -45,13 +45,15 @@ async function addCell(after, kind, before, edit) {
 // cell below and drop into it — the keyboard-driven "next cell" flow.
 async function runAndAddBelow(id)    { await runCell(id);       await addCell(id, 'code', false, true); }
 async function commitAndAddBelow(id) { await commitSource(id);  await addCell(id, 'code', false, true); }
-// Right-click on a ＋ add button → a tiny code/markdown chooser at the cursor.
-function addMenu(e, cellId) {
+// Right-click on a ＋ add button → a tiny code/markdown chooser at the cursor. `before` inserts
+// ABOVE the reference cell (the top inter-cell gap) instead of below it (the default).
+function addMenu(e, cellId, before = false) {
   const m = document.getElementById('addmenu');
   m.innerHTML = '';
-  [['code', '＋ code below'], ['md', '＋ markdown below']].forEach(([k, label]) => {
+  const where = before ? 'above' : 'below';
+  [['code', '＋ code ' + where], ['md', '＋ markdown ' + where]].forEach(([k, label]) => {
     const b = document.createElement('button'); b.textContent = label;
-    b.onclick = () => { hideAddMenu(); addCell(cellId, k); }; m.appendChild(b);
+    b.onclick = () => { hideAddMenu(); addCell(cellId, k, before, true); }; m.appendChild(b);
   });
   m.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
   m.style.top = Math.min(e.clientY, window.innerHeight - 80) + 'px';

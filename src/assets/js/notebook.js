@@ -300,15 +300,20 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
 
-// Inter-cell insert affordance: a thin hover zone in the gap between cells (and above the first / below
-// the last) that reveals a "+" to insert a cell RIGHT THERE. `afterId` = insert after that
-// cell; the top gap has no `afterId`, so it inserts BEFORE `firstId`. Left-click = code cell (in edit
-// mode); right-click = the code/markdown chooser (reuses addMenu, which inserts below `afterId`).
+// Inter-cell insert affordance: a thin hover zone in the gap between rows (and above the first / below
+// the last) that reveals a "+" to insert a cell RIGHT THERE. `afterId` = insert after that cell; the
+// top gap has no `afterId`, so it inserts BEFORE `firstId`. Left-click = code cell (in edit mode);
+// right-click = the code/markdown chooser (reuses addMenu, which inserts below `afterId`).
 function CellGap({ afterId, firstId }) {
   const insert = (kind) => afterId
-    ? window.addCell(afterId, kind, false, true)     // between afterId and the next cell
+    ? window.addCell(afterId, kind, false, true)     // after afterId (last cell of the row above)
     : window.addCell(firstId, kind, true, true);     // top gap → before the first cell (firstId='' ⇒ append)
-  const onMenu = (e) => { e.preventDefault(); if (afterId && window.addMenu) window.addMenu(e, afterId); else insert('code'); };
+  // Right-click → chooser. Below a cell: insert after `afterId`. Top gap: insert before `firstId`.
+  const onMenu = (e) => {
+    e.preventDefault();
+    if (!window.addMenu) return insert('code');
+    afterId ? window.addMenu(e, afterId, false) : window.addMenu(e, firstId, true);
+  };
   return html`<div class="cellgap">
     <button class="cellgap-add" onClick=${() => insert('code')} oncontextmenu=${onMenu}
       title="insert a cell here — right-click for markdown">＋</button>
@@ -324,8 +329,6 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   const coneCount = cone ? cone.size : (cells || []).length;
   const banner = focusId ? html`<div class="focusbar" onClick=${() => window.slateStore.setFocus(focusId)}
       title="click or press Esc to exit focus">🔗 Dependency chain of <b>${focusId}</b> · ${coneCount} cell${coneCount === 1 ? '' : 's'} — click to exit</div>` : null;
-  const list = cells || [];
-  const firstId = list.length ? list[0].id : '';
   // Render EVERY cell always; cells outside the cone collapse (see <Cell>) instead of unmounting.
   const renderCell = c => html`<${Cell} key=${c.id} cell=${c} selectedId=${selectedId} selSet=${selSet} live=${live} focusId=${focusId} collapsed=${!!(cone && !cone.has(c.id))} />`;
   // Side-by-side columns: a `column=N` tag (N≥2) places a cell in the Nth slot of the row anchored by
@@ -343,6 +346,7 @@ function Notebook({ cells, selectedId, selSet, live, focusId, cone }) {
   // Interleave a CellGap before the first row and after each one — EXCEPT in dep-focus (a read-oriented
   // view where gaps between collapsed cells would just be noise). A row's trailing gap is anchored to
   // its LAST cell, so an insert lands after the whole row as a new full-width cell.
+  const firstId = (cells && cells.length) ? cells[0].id : '';
   const out = [];
   if (!focusId) out.push(html`<${CellGap} key="gap-top" afterId=${''} firstId=${firstId} />`);
   rows.forEach(row => {
