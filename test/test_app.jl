@@ -29,6 +29,21 @@ _onboard(input::String) = begin
     (ret, String(take!(out)))
 end
 
+@testset "_kaimon_dir platform resolution" begin
+    # explicit XDG_CONFIG_HOME wins on every platform (test isolation depends on this)
+    withenv("XDG_CONFIG_HOME" => "/tmp/xdg-kaimon-test") do
+        @test KS._kaimon_dir() == joinpath("/tmp/xdg-kaimon-test", "kaimon")
+    end
+    # platform default: %APPDATA%\Kaimon on Windows (matching Kaimon's kaimon_config_dir()),
+    # ~/.config/kaimon elsewhere
+    withenv("XDG_CONFIG_HOME" => nothing) do
+        expected = Sys.iswindows() ?
+            joinpath(get(ENV, "APPDATA", joinpath(homedir(), "AppData", "Roaming")), "Kaimon") :
+            joinpath(homedir(), ".config", "kaimon")
+        @test KS._kaimon_dir() == expected
+    end
+end
+
 @testset "slateapp onboarding" begin
     @testset "no Kaimon dir → silent no-op" begin
         _with_isolated_config() do tmp
