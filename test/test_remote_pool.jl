@@ -82,6 +82,9 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
     end
 
     @testset "parked wires: park on detach, unpark once, evict by port/label" begin
+      # Redirect the durable orchestration log to a throwaway file so park/evict lines don't land in the
+      # user's real ~/.cache/kaimonslate/remote.log (which a running hub tails).
+      withenv("KAIMONSLATE_REMOTE_LOG" => joinpath(mktempdir(), "remote.log")) do
         t = RE.RemoteTarget("__parktest__")
         mkk(label, port) = (k = RE.GateKernel("~/proj"; label = label, target = t);
                             k.conn = :fake_conn; k.port = port; k.stream_port = port + 1; k)
@@ -106,6 +109,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         @test RE.park_remote!(k3)
         RE._evict_parked!("__parktest__"; label = "c.jl")
         @test isempty([w for w in RE.parked_wires() if w.host == "__parktest__"])
+      end
     end
 
     @testset "carry cost gate: ship iff transfer beats recompute (with floors + ceiling)" begin
