@@ -252,6 +252,25 @@ function _dropline() {
 }
 function clearDrop() { if (dropline) dropline.style.display = 'none'; }
 function clearCtrlDrop() { nbEl.querySelectorAll('.cdrop, .cdup').forEach(x => x.classList.remove('cdrop', 'cdup')); }
+// Edge auto-scroll: when a drag nears the viewport top/bottom, scroll the page so a cell can be
+// dropped anywhere in a long notebook. `dragover` only fires on pointer MOVE, so a rAF loop reads
+// the last pointer Y and keeps scrolling while the cursor sits in the edge band. Runs for both cell
+// reorders and control hosting; self-terminates once the drag ends (dragId/ctrlDrag cleared).
+let _dragY = 0, _autoRaf = 0;
+const _EDGE = 90;   // px band at top/bottom that triggers scroll
+const _MAXV = 24;   // px/frame at the very edge, easing to 0 at the band's inner edge
+function _autoScrollTick() {
+  _autoRaf = 0;
+  if (!dragId && !ctrlDrag) return;                       // drag ended → stop the loop
+  const h = window.innerHeight;
+  let v = 0;
+  if (_dragY < _EDGE) v = -_MAXV * (1 - _dragY / _EDGE);            // near top → scroll up
+  else if (_dragY > h - _EDGE) v = _MAXV * (1 - (h - _dragY) / _EDGE);   // near bottom → scroll down
+  if (v) window.scrollBy(0, v);
+  _autoRaf = requestAnimationFrame(_autoScrollTick);
+}
+function _autoScrollStart() { if (!_autoRaf) _autoRaf = requestAnimationFrame(_autoScrollTick); }
+function _autoScrollStop() { if (_autoRaf) cancelAnimationFrame(_autoRaf); _autoRaf = 0; }
 function startControlDrag(e, name, fromCell) {
   ctrlDrag = { name, fromCell: fromCell || null };
   e.dataTransfer.effectAllowed = 'copyMove';   // allow either dropEffect, so duplicate (move) drops aren't rejected
@@ -274,6 +293,7 @@ nbEl.addEventListener('dragstart', e => {
   setTimeout(() => { if (dragId) document.body.classList.add('celldnd'); }, 0);
 });
 nbEl.addEventListener('dragover', e => {
+  _dragY = e.clientY; _autoScrollStart();          // edge auto-scroll (cell reorder + control hosting)
   if (ctrlDrag) {                                  // hosting a control
     clearCtrlDrop();
     const cell = e.target.closest('.cell.code');
@@ -320,7 +340,7 @@ nbEl.addEventListener('drop', e => {
   dragId = dropTarget = null;
   if (dt && id) moveCellRel(id, dt.id, dt.before);
 });
-nbEl.addEventListener('dragend', () => { clearDrop(); clearCtrlDrop(); dragId = dropTarget = ctrlDrag = null; document.body.classList.remove('cdnd'); document.body.classList.remove('celldnd'); });
+nbEl.addEventListener('dragend', () => { _autoScrollStop(); clearDrop(); clearCtrlDrop(); dragId = dropTarget = ctrlDrag = null; document.body.classList.remove('cdnd'); document.body.classList.remove('celldnd'); });
 // ✕ on a strip control → remove this instance (other hosts, if any, remain).
 nbEl.addEventListener('click', e => {
   const del = e.target.closest('.cdel');
