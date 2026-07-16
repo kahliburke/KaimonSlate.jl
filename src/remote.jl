@@ -44,11 +44,15 @@ import SHA as _SHA
 _slate_cache_dir() = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")), "kaimonslate")
 
 const _REMOTE_LOG = joinpath(_slate_cache_dir(), "remote.log")
+# Resolved at write time so a test (or a sandboxed run) can redirect the durable log to a throwaway path
+# via `KAIMONSLATE_REMOTE_LOG` — otherwise a test process shares the running hub's real remote.log.
+_remote_log_path() = get(ENV, "KAIMONSLATE_REMOTE_LOG", _REMOTE_LOG)
 
 function _rlog(msg::AbstractString)
+    path = _remote_log_path()
     try
-        mkpath(dirname(_REMOTE_LOG))
-        open(_REMOTE_LOG, "a") do io
+        mkpath(dirname(path))
+        open(path, "a") do io
             # ms resolution: the reattach path is timed in tens of ms now — whole-second
             # timestamps couldn't distinguish "instant" from "1.9s" (both printed as :01→:02).
             println(io, "[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS.sss"), "] ", msg)
