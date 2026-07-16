@@ -2562,8 +2562,11 @@ function probe_transfer!(src_k, dst_k; bytes::Int = _probe_bytes())
 end
 
 function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false, mode::Symbol = :relay,
-                           on_plan = nothing, on_progress = nothing)
-    meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name)); timeout = _blob_xfer_timeout())
+                           on_plan = nothing, on_progress = nothing, cellkey::AbstractString = "")
+    # `cellkey` (the producing cell's memo key) lets the source memo-RESTORE the value if its live global
+    # is gone (a swapped worker) instead of failing "no global named" — the source persists the memo store
+    # across the swap even though its namespace was reset. Empty ⇒ no fallback (caller can't name the cell).
+    meta = _tool(src_k, "__slate_blob_of", Dict{String,Any}("name" => String(name), "cellkey" => String(cellkey)); timeout = _blob_xfer_timeout())
     err = try; getproperty(meta, :error); catch; nothing; end
     err === nothing || error("transfer '$name': $err")
     h = String(meta.hash); codec = String(meta.codec)

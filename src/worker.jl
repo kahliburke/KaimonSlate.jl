@@ -900,11 +900,21 @@ address — `(; hash, codec, bytes)` (or `(; error)`). One half of cross-kernel 
 (region runner): the hub moves the blob to the other worker's CAS over the data channel (or the
 filesystem, when that worker is local) and calls `__slate_bind_blob` there. Codec-picked like
 the memo store (arrow/raw/jls), so a DataFrame crosses as mmap-ready Arrow IPC."
-function __slate_blob_of(name::String)
+function __slate_blob_of(name::String; cellkey::String = "")
     _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
     m = _NS[]
     s = Symbol(name)
-    Base.invokelatest(isdefined, m, s) || return (; error = "no global named '$name'")
+    if !Base.invokelatest(isdefined, m, s)
+        # The live global is gone — this worker was SWAPPED (fresh namespace) after the value was produced,
+        # yet the producing cell's result is durable in the memo store. Restore it from there so the
+        # cross-region transfer succeeds instead of erroring "no global named". The hub supplies the
+        # producing cell's `cellkey` (the worker's own name→cell index doesn't survive the swap that caused
+        # this). A non-memoized producer has no entry to restore → the cell must re-run on its side first.
+        restored = !isempty(cellkey) && (try; _memo_restore(cellkey) !== nothing; catch; false; end)
+        m = _NS[]
+        (restored && Base.invokelatest(isdefined, m, s)) || return (; error = "no global named '$name'" *
+            (isempty(cellkey) ? "" : " (absent from the live namespace and no memo entry restores it — its cell must re-run on its side)"))
+    end
     v = Base.invokelatest(getglobal, m, s)
     codec = try; _codec_pick(v); catch; "jls"; end
     h, n = try
