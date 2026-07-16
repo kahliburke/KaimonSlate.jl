@@ -1994,25 +1994,67 @@ function _xfer_ctl_call(host_ip::AbstractString, data_port::Int, msg::AbstractSt
     end
 end
 
+# Hub-side view of the transfers it's orchestrating (Mode A), for the `transfers` introspection tool: a
+# live row per pull with dst←src, size, bytes-so-far, throughput, route. Finished rows linger briefly.
+mutable struct XferView
+    dst::String; src::String; name::String; via::String
+    done::Int; total::Int; started::Float64; finished::Float64; err::String
+end
+const _XFER_VIEWS = Dict{Int,XferView}()
+const _XFER_VIEW_LOCK = ReentrantLock()
+const _XFER_VIEW_SEQ  = Threads.Atomic{Int}(0)
+_xfer_view_prune!() = lock(_XFER_VIEW_LOCK) do
+    for (k, v) in collect(_XFER_VIEWS)
+        (v.finished > 0 && time() - v.finished > 60) && delete!(_XFER_VIEWS, k)
+    end
+end
+# Every transfer the hub is running or recently ran (active first, then recent), for the tool.
+function xfer_views()
+    lock(_XFER_VIEW_LOCK) do
+        sort(collect(values(_XFER_VIEWS)); by = v -> (v.finished > 0, -v.started))
+    end
+end
+
 # Drive a peer pull on `dst_k` OVER ITS BLOB CHANNEL (not the gate): send the `X` request to the dst's
 # blob endpoint (hub-vantage — reuses the relay reach), then poll `S` to completion. The actual pull runs
 # on the dst's dedicated executor task, so the gate loop never blocks. `spec` is the newline-framed body
-# after the verb (see `_xfer_control`). Returns (bytes, via). THROWS on failure (caller decides fallback).
-function _xfer_ctl_pull(dst_k, spec::AbstractString; timeout::Float64 = _blob_xfer_timeout())
-    ep = _data_endpoint!(dst_k.target, dst_k)              # the DST's blob channel, reachable from the hub
-    jid = _xfer_ctl_call(ep.ip, ep.port, "X" * spec; server_key = ep.server_key)
-    (isempty(jid) || startswith(jid, "err")) && error("xfer request rejected: $jid")
-    deadline = time() + timeout
-    while time() < deadline
-        st = _xfer_ctl_call(ep.ip, ep.port, "S" * jid; server_key = ep.server_key)
-        if startswith(st, "done ")
-            p = split(st); return (something(tryparse(Int, p[2]), 0), length(p) >= 3 ? String(p[3]) : "direct")
-        elseif startswith(st, "err")
-            error("xfer $jid: $st")
+# after the verb (see `_xfer_control`); `meta` (dst/src/name/via) drives the `transfers` view. Returns
+# (bytes, via). THROWS on failure (caller decides fallback).
+function _xfer_ctl_pull(dst_k, spec::AbstractString; timeout::Float64 = _blob_xfer_timeout(), meta = nothing)
+    vid = Threads.atomic_add!(_XFER_VIEW_SEQ, 1)
+    if meta !== nothing
+        _xfer_view_prune!()
+        lock(_XFER_VIEW_LOCK) do
+            _XFER_VIEWS[vid] = XferView(String(meta.dst), String(meta.src), String(meta.name),
+                                        String(meta.via), 0, -1, time(), 0.0, "")
         end
-        sleep(0.2)                                         # "running" — poll (control round-trips are cheap)
     end
-    error("xfer $jid: timed out after $(round(Int, timeout))s")
+    _upd!(f) = meta === nothing || lock(_XFER_VIEW_LOCK) do; v = get(_XFER_VIEWS, vid, nothing); v === nothing || f(v); end
+    try
+        ep = _data_endpoint!(dst_k.target, dst_k)          # the DST's blob channel, reachable from the hub
+        jid = _xfer_ctl_call(ep.ip, ep.port, "X" * spec; server_key = ep.server_key)
+        (isempty(jid) || startswith(jid, "err")) && error("xfer request rejected: $jid")
+        deadline = time() + timeout
+        while time() < deadline
+            st = _xfer_ctl_call(ep.ip, ep.port, "S" * jid; server_key = ep.server_key)
+            if startswith(st, "running")
+                p = split(st); length(p) >= 3 && _upd!(v -> (v.done = something(tryparse(Int, p[2]), v.done); v.total = something(tryparse(Int, p[3]), v.total)))
+            elseif startswith(st, "done ")
+                p = split(st); b = something(tryparse(Int, p[2]), 0)
+                _upd!(v -> (v.done = b; v.total = b; v.finished = time()))
+                return (b, length(p) >= 3 ? String(p[3]) : "direct")
+            elseif startswith(st, "err")
+                _upd!(v -> (v.finished = time(); v.err = String(st)))
+                error("xfer $jid: $st")
+            end
+            sleep(0.2)                                     # "running" — poll (control round-trips are cheap)
+        end
+        _upd!(v -> (v.finished = time(); v.err = "timeout"))
+        error("xfer $jid: timed out after $(round(Int, timeout))s")
+    catch e
+        _upd!(v -> v.finished == 0.0 && (v.finished = time(); v.err = first(sprint(showerror, e), 100)))
+        rethrow()
+    end
 end
 
 # The carry's transfer-vs-recompute decision: ship an entry only when moving its bytes beats
@@ -2347,7 +2389,8 @@ function _pull_direct!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
     try
         # Drive the pull over the DST's BLOB CHANNEL (transfer-control plane), NOT a gate :tool_call — so it
         # runs on the dst's executor task and never starves gate liveness (TRANSFER_CONTROL_PLAN Mode A).
-        bytes, _ = _xfer_ctl_pull(dst_k, "$(h)\ndirect\n$(route.ip)\n$(route.port)\n$(route.server_key)")
+        bytes, _ = _xfer_ctl_pull(dst_k, "$(h)\ndirect\n$(route.ip)\n$(route.port)\n$(route.server_key)";
+            meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "direct"))
         return bytes
     finally
         authed && try
@@ -2414,13 +2457,43 @@ function _pull_ssh!(src_k, dst_k, name, h::String, meta, route::PeerRoute)
         # run on the dst's executor task (TRANSFER_CONTROL_PLAN Mode A).
         spec = "$(h)\nssh\n$(ssh_target)\n$(_mesh_key_path(String(dst_k.target.region)))\n" *
                "$(_mesh_known_hosts())\n$(route.port)\n$(route.server_key)"
-        bytes, _ = _xfer_ctl_pull(dst_k, spec)
+        bytes, _ = _xfer_ctl_pull(dst_k, spec;
+            meta = (dst = String(dst_k.target.region), src = String(src_k.target.region), name = String(name), via = "ssh"))
         return bytes
     finally
         authed && try
             _tool(src_k, "__slate_revoke_client", Dict{String,Any}("pubkey" => bpub); timeout = 30.0)
         catch
         end
+    end
+end
+
+# ── On-demand transfer probe (DAG "recalculate") ───────────────────────────────────────────────────
+# Measure the live peer route + throughput between two region workers WITHOUT a notebook value driving it:
+# resolve the route (caching the verdict), mint a THROWAWAY random blob on the source CAS (no manifest → it
+# is never a memo value), pull it to the dest over the SAME peer path a real transfer uses (feeding the
+# peer-rate memory + the live `transfers` view), then drop the blob on BOTH ends. Returns
+# (; kind, bytes, seconds, mbps); kind = :direct | :ssh | :relay | :local.
+_probe_bytes() = round(Int, 1e6 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_PROBE_MB", "")), 8.0))
+function probe_transfer!(src_k, dst_k; bytes::Int = _probe_bytes())
+    (src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget && src_k !== dst_k) ||
+        return (; kind = :local, bytes = 0, seconds = 0.0, mbps = 0.0)
+    route = _resolve_peer_route(src_k, dst_k)               # probe B→A + cache the verdict
+    route.kind in (:direct, :ssh) || return (; kind = route.kind, bytes = 0, seconds = 0.0, mbps = 0.0)
+    mk = _tool(src_k, "__slate_make_probe_blob", Dict{String,Any}("bytes" => bytes); timeout = 60.0)
+    mkerr = try; getproperty(mk, :error); catch; nothing; end
+    mkerr === nothing || error("probe: source blob failed: $mkerr")
+    h = String(mk.hash)
+    try
+        t0 = time()
+        moved = route.kind === :direct ? _pull_direct!(src_k, dst_k, "·probe", h, mk, route) :
+                                         _pull_ssh!(src_k, dst_k, "·probe", h, mk, route)
+        el = time() - t0
+        (moved > 0 && el > 0) && _peer_bw_note!(String(src_k.target.ssh_host), String(dst_k.target.ssh_host), moved / el)
+        return (; kind = route.kind, bytes = moved, seconds = el, mbps = el > 0 ? moved / el / 1e6 : 0.0)
+    finally
+        try; _tool(src_k, "__slate_drop_blob", Dict{String,Any}("hash" => h); timeout = 20.0); catch; end
+        try; _tool(dst_k, "__slate_drop_blob", Dict{String,Any}("hash" => h); timeout = 20.0); catch; end
     end
 end
 

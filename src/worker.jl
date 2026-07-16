@@ -1008,7 +1008,7 @@ _peer_pull_timeout_ms() = round(Int, 1000 * something(tryparse(Float64, get(ENV,
 worker's CAS (the direct-transport data leg). CURVE is used when `server_key` is non-empty — this worker
 presents its client keypair, which the hub must have authorised on the peer (`__slate_authorize_client`).
 Streams, sha-verifies, atomic-lands; an already-present blob returns 0. Returns (; bytes) or (; error)."
-function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::String)
+function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::String; on_progress = nothing)
     _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
     configure! = isempty(server_key) ? nothing : function (sock)
         cpub, csec = KaimonGate._load_or_create_client_keypair()
@@ -1016,7 +1016,7 @@ function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::Stri
     end
     try
         moved = pull_blob_into!(KaimonGate.ZMQ, ip, port, _memo_dir(), hash; configure! = configure!,
-                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms())
+                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(), on_progress = on_progress)
         return (; bytes = moved)
     catch e
         return (; error = first(sprint(showerror, e), 200))
@@ -1062,7 +1062,7 @@ The forward is WORKER-LOCAL (its lifecycle rides this worker — no orphaned for
 network). Explicit flags, no ~/.ssh/config dependency: `key_path` + slate-owned `known_hosts` come from
 the friend-group intro (§5); `ssh_target` = A's `user@peer-ip`. Never throws. Returns (; bytes, via) or (; error)."
 function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts::String,
-                               blob_port::Int, server_key::String, hash::String)
+                               blob_port::Int, server_key::String, hash::String; on_progress = nothing)
     _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
     lport = _free_local_port()
     kp = expanduser(key_path); kh = expanduser(known_hosts)
@@ -1091,7 +1091,7 @@ function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts
             KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
         end
         moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", lport, _memo_dir(), hash; configure! = configure!,
-                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms())
+                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(), on_progress = on_progress)
         return (; bytes = moved, via = "ssh")
     catch e
         return (; error = first(sprint(showerror, e), 200))
@@ -1107,31 +1107,50 @@ end
 # starves) AND off the blob serve loop (so peers keep getting served). Status is polled with verb `S`.
 struct _XferJob
     id::String
-    run::Function      # () -> NamedTuple: the pull, returning (; bytes[, via]) or (; error)
+    run::Function      # (on_progress) -> NamedTuple: the pull, (; bytes[, via]) or (; error)
+end
+mutable struct _XferRec
+    via::String        # "direct" | "ssh"
+    hash::String       # short blob id
+    done::Int          # bytes pulled so far (fed by on_progress)
+    total::Int         # blob size (known once the first chunk lands; -1 until then)
+    started::Float64
+    result::Any        # nothing = running | (:done, bytes) | (:err, msg)
 end
 const _XFER_QUEUE = Channel{_XferJob}(256)
-const _XFER_JOBS  = Dict{String,Any}()   # id → :running | (:done, bytes, via) | (:err, msg)
+const _XFER_JOBS  = Dict{String,_XferRec}()
 const _XFER_LOCK  = ReentrantLock()
 const _XFER_SEQ   = Threads.Atomic{Int}(0)
 
-# Dedicated executor: one at a time here (serial per worker); concurrency = more executor tasks later.
+# Drop terminal jobs started >120s ago — keep recent ones for the `transfers` view, bound memory.
+_xfer_prune!() = lock(_XFER_LOCK) do
+    for (id, r) in collect(_XFER_JOBS)
+        (r.result !== nothing && time() - r.started > 120) && delete!(_XFER_JOBS, id)
+    end
+end
+
+# Dedicated executor: serial per worker (concurrency = more executor tasks later). Wires an on_progress
+# callback into the pull so `S`/`Q` report live bytes-moved (→ throughput).
 function _xfer_executor!()
     for job in _XFER_QUEUE
-        res = try; job.run(); catch e; (; error = first(sprint(showerror, e), 200)); end
+        rec = lock(_XFER_LOCK) do; get(_XFER_JOBS, job.id, nothing); end
+        rec === nothing && continue
+        prog = (off, total) -> lock(_XFER_LOCK) do; rec.done = off; rec.total = total; end
+        res = try; job.run(prog); catch e; (; error = first(sprint(showerror, e), 200)); end
         err = try; getproperty(res, :error); catch; nothing; end
         lock(_XFER_LOCK) do
-            _XFER_JOBS[job.id] = err === nothing ?
-                (:done, Int(getproperty(res, :bytes)), String(try; getproperty(res, :via); catch; "direct"; end)) :
-                (:err, String(err))
+            rec.result = err === nothing ? (:done, Int(getproperty(res, :bytes))) : (:err, String(err))
         end
     end
 end
 
-# The blob-channel control handler (injected into blob_server!). FAST — mint id + enqueue (`X`), or read
-# status (`S`); never runs the transfer inline. Request framing (newline-separated after the verb byte):
+# The blob-channel control handler (injected into blob_server!). FAST — mint id + enqueue (`X`), read
+# status (`S`), or list all transfers (`Q`); never runs the transfer inline. Framing (newline-separated
+# after the verb byte):
 #   X<hash>\ndirect\n<ip>\n<port>\n<server_key>
 #   X<hash>\nssh\n<ssh_target>\n<key_path>\n<known_hosts>\n<blob_port>\n<server_key>
-# `S<jobid>` → "running" | "done <bytes> <via>" | "err <msg>" (terminal read frees the entry).
+# `S<jobid>` → "running <done> <total>" | "done <bytes> <via>" | "err <msg>".
+# `Q`        → one `\x1f`-delimited record per line: id·via·hash·done·total·elapsed_ms·state.
 function _xfer_control(cmd::Char, data::Vector{UInt8})
     _MEMO_OK || return "err: memo/blob layer disabled"
     if cmd == 'X'
@@ -1140,25 +1159,32 @@ function _xfer_control(cmd::Char, data::Vector{UInt8})
         hash = String(lines[1]); kind = String(lines[2])
         run = if kind == "direct" && length(lines) >= 5
             ip = String(lines[3]); port = something(tryparse(Int, lines[4]), 0); skey = String(lines[5])
-            () -> __slate_pull_blob(ip, port, skey, hash)
+            (prog) -> __slate_pull_blob(ip, port, skey, hash; on_progress = prog)
         elseif kind == "ssh" && length(lines) >= 7
             tgt = String(lines[3]); kp = String(lines[4]); kh = String(lines[5])
             bp = something(tryparse(Int, lines[6]), 0); skey = String(lines[7])
-            () -> __slate_pull_blob_ssh(tgt, kp, kh, bp, skey, hash)
+            (prog) -> __slate_pull_blob_ssh(tgt, kp, kh, bp, skey, hash; on_progress = prog)
         else
             return "err: bad X spec"
         end
+        _xfer_prune!()
         id = "x" * string(Threads.atomic_add!(_XFER_SEQ, 1))
-        lock(_XFER_LOCK) do; _XFER_JOBS[id] = :running; end
+        lock(_XFER_LOCK) do; _XFER_JOBS[id] = _XferRec(kind, first(hash, 12), 0, -1, time(), nothing); end
         try; put!(_XFER_QUEUE, _XferJob(id, run)); catch; return "err: queue closed"; end
         return id
     elseif cmd == 'S'
         id = String(data)[2:end]
-        st = lock(_XFER_LOCK) do; s = get(_XFER_JOBS, id, nothing); s === :running || delete!(_XFER_JOBS, id); s; end
-        st === nothing && return "err: no job $id"
-        st === :running && return "running"
-        (st isa Tuple && st[1] === :done) && return "done $(st[2]) $(st[3])"
-        return "err: $(st isa Tuple ? st[2] : st)"
+        r = lock(_XFER_LOCK) do; get(_XFER_JOBS, id, nothing); end
+        r === nothing && return "err: no job $id"
+        r.result === nothing && return "running $(r.done) $(r.total)"
+        r.result[1] === :done && return "done $(r.result[2]) $(r.via)"
+        return "err: $(r.result[2])"
+    elseif cmd == 'Q'
+        return lock(_XFER_LOCK) do
+            join([let state = r.result === nothing ? "running" : (r.result[1] === :done ? "done" : "err")
+                      "$(id)\x1f$(r.via)\x1f$(r.hash)\x1f$(r.done)\x1f$(r.total)\x1f$(round(Int, (time() - r.started) * 1000))\x1f$(state)"
+                  end for (id, r) in _XFER_JOBS], "\n")
+        end
     end
     return "err: unknown control cmd '$cmd'"
 end
@@ -1833,6 +1859,33 @@ function __slate_materialize_datadir(; files = Any[])
     return (; materialized = n)
 end
 
+# Make a THROWAWAY random blob in the CAS (content-addressed, NO manifest → never a memo value): a probe
+# payload for measuring peer transfer rate on demand. Random bytes ⇒ a unique hash that never dedups
+# against a real value; the caller drops it right after the pull (`__slate_drop_blob`). Returns (; hash, bytes).
+function __slate_make_probe_blob(bytes::Int)
+    _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
+    n = clamp(bytes, 1, 1 << 30)
+    try
+        h, moved = MemoStore.put_blob(io -> write(io, rand(UInt8, n)), _memo_dir())
+        return (; hash = String(h), bytes = Int(moved))
+    catch e
+        return (; error = first(sprint(showerror, e), 200))
+    end
+end
+
+# Delete a blob from this worker's CAS by hash (probe cleanup — a throwaway probe blob must never linger).
+# Best-effort; a missing blob counts as success. Returns (; ok).
+function __slate_drop_blob(hash::String)
+    _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
+    try
+        p = MemoStore.blob_path(_memo_dir(), String(hash))
+        isfile(p) && rm(p; force = true)
+        return (; ok = true)
+    catch e
+        return (; error = first(sprint(showerror, e), 200))
+    end
+end
+
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
@@ -1855,6 +1908,8 @@ function tools()
         KaimonGate.GateTool("__slate_pull_blob", __slate_pull_blob),
         KaimonGate.GateTool("__slate_probe_peer", __slate_probe_peer),
         KaimonGate.GateTool("__slate_pull_blob_ssh", __slate_pull_blob_ssh),
+        KaimonGate.GateTool("__slate_make_probe_blob", __slate_make_probe_blob),
+        KaimonGate.GateTool("__slate_drop_blob", __slate_drop_blob),
         KaimonGate.GateTool("__slate_materialize_datadir", __slate_materialize_datadir),
         KaimonGate.GateTool("__slate_sizeof", __slate_sizeof),
         KaimonGate.GateTool("__slate_portable", __slate_portable),

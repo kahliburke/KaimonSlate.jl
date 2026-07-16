@@ -729,6 +729,32 @@ function create_tools(GateTool::Type)
     end
 
     """
+        transfers() -> String
+
+    Live view of region→region blob transfers the hub is orchestrating (or recently ran) over the
+    transfer-control plane: each row is `dst ← src`, the value name, size, progress + %, measured
+    throughput, and route (direct / ssh-bridge). Active first, then recently completed. The data moves
+    worker→worker OFF the MCP gate — this reads the hub's live view.
+    """
+    function transfers()::String
+        vs = ReportEngine.xfer_views()
+        isempty(vs) && return "No transfers active or recent."
+        hum(b) = b < 0 ? "?" : b < 1024 ? "$(b) B" : b < 2^20 ? "$(round(b / 1024; digits = 1)) KB" :
+                 b < 2^30 ? "$(round(b / 2^20; digits = 1)) MB" : "$(round(b / 2^30; digits = 2)) GB"
+        io = IOBuffer()
+        for v in vs
+            el = (v.finished > 0 ? v.finished : time()) - v.started
+            rate = (el > 0 && v.done > 0) ? v.done / el : 0.0
+            state = !isempty(v.err) ? "❌ " * first(v.err, 60) : v.finished > 0 ? "✓ done" : "▶ running"
+            pct = v.total > 0 ? " ($(round(Int, 100 * v.done / v.total))%)" : ""
+            println(io, "$(v.dst) ← $(v.src)  ·  $(v.name)  [$(v.via)]")
+            println(io, "   $(hum(v.done))$(v.total > 0 ? " / " * hum(v.total) : "")$(pct)  ·  " *
+                        "$(rate > 0 ? hum(round(Int, rate)) * "/s" : "—")  ·  $(round(el; digits = 1))s  ·  $(state)")
+        end
+        return String(take!(io))
+    end
+
+    """
         region_on(notebook, regions) -> String
 
     Choose which named regions this notebook uses — a comma-separated list of names from the global
@@ -1549,6 +1575,7 @@ function create_tools(GateTool::Type)
         GateTool("peer_introduce", peer_introduce),
         GateTool("peer_teardown", peer_teardown),
         GateTool("peer_plan", peer_plan_tool),
+        GateTool("transfers", transfers),
         GateTool("whereis", whereis),
         GateTool("memo_trace", memo_trace),
         GateTool("read", read_cells),

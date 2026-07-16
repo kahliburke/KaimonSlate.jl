@@ -945,7 +945,37 @@ function _make_router(h::Hub)
         data = try; ReportEngine.peer_plan_data(names; refresh = ref)
                catch e; Dict("regions" => names, "routes" => [], "hosts" => [],
                              "error" => first(sprint(showerror, e), 200)); end
+        # LIVE transfers touching this notebook's regions (active first, then recent) — drives the DAG's
+        # animated region edges. Off the gate; this reads the hub's orchestration view.
+        rset = Set(names); now = time()
+        data["transfers"] = [begin
+            el = (v.finished > 0 ? v.finished : now) - v.started
+            Dict("src" => v.src, "dst" => v.dst, "name" => v.name, "via" => v.via,
+                 "done" => v.done, "total" => v.total, "active" => (v.finished == 0.0), "err" => v.err,
+                 "mbps" => (el > 0 && v.done > 0) ? round(v.done / el / 1e6; digits = 1) : 0.0)
+        end for v in ReportEngine.xfer_views() if (v.src in rset || v.dst in rset)]
         _json(data)
+    end))
+    # On-demand transfer PROBE (the DAG "recalculate" action): for every ordered cross-region pair, run a
+    # throwaway measured transfer (random bytes, never memo-cached) so the route verdict + throughput are
+    # measured NOW instead of waiting for a cell to drive one. Reuses the region kernels + the peer transport;
+    # results also land in the peer-rate memory and the live `transfers` view. Returns per-pair kind/bytes/mbps.
+    HTTP.register!(router, "POST", "/api/{id}/probe", req -> _withnb(h, req, nb -> begin
+        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
+        filter!(!isempty, names)
+        results = Any[]
+        for a in names, b in names
+            a == b && continue
+            ka = try; _region_kernel!(nb, a); catch; nothing; end
+            kb = try; _region_kernel!(nb, b); catch; nothing; end
+            (ka === nothing || kb === nothing) && continue
+            r = try; ReportEngine.probe_transfer!(ka, kb)
+                catch e; (; kind = :error, bytes = 0, seconds = 0.0, mbps = 0.0, err = first(sprint(showerror, e), 160)); end
+            String(r.kind) == "local" && continue          # same host with no wire — nothing to measure
+            push!(results, Dict("src" => a, "dst" => b, "kind" => String(r.kind), "bytes" => r.bytes,
+                                "mbps" => round(r.mbps; digits = 1), "err" => hasproperty(r, :err) ? String(r.err) : ""))
+        end
+        _json(Dict("probed" => results))
     end))
     # Static export: a self-contained HTML document of the notebook. `?dl=1` downloads; `?source=0`
     # hides code; `?theme=light|dark`; `?code=normal|small|smaller|tiny|hidden` sizes/hides listings.
