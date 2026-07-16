@@ -7,18 +7,21 @@ using KaimonSlate
 
 const KS = KaimonSlate
 
-# Isolate BOTH config surfaces in a temp dir: Kaimon's registry (~/.config/kaimon via
-# XDG_CONFIG_HOME) and Slate's own slate.json (SlateHome, same XDG root). KAIMONSLATE_HOME /
-# KAIMONSLATE_CONFIG_HOME are cleared so XDG_CONFIG_HOME is what resolves.
+# Isolate BOTH config surfaces in a temp dir: Kaimon's registry and Slate's own slate.json
+# (SlateHome). SlateHome (and Kaimon's dir off Windows) resolve off XDG_CONFIG_HOME; Kaimon's dir
+# on Windows resolves off APPDATA instead (it never consults XDG_CONFIG_HOME there — see
+# `_kaimon_dir`), so both vars are sandboxed here; the one this platform doesn't use is inert.
+# KAIMONSLATE_HOME / KAIMONSLATE_CONFIG_HOME are cleared so XDG_CONFIG_HOME is what SlateHome uses.
 _with_isolated_config(f) = mktempdir() do tmp
-    withenv("XDG_CONFIG_HOME" => tmp, "KAIMONSLATE_HOME" => nothing,
+    withenv("XDG_CONFIG_HOME" => tmp, "APPDATA" => tmp, "KAIMONSLATE_HOME" => nothing,
             "KAIMONSLATE_CONFIG_HOME" => nothing) do
         f(tmp)
     end
 end
 
 _ext_entries(tmp) = begin
-    file = joinpath(tmp, "kaimon", "extensions.json")
+    sub = Sys.iswindows() ? "Kaimon" : "kaimon"   # matches _kaimon_dir's per-platform subdir name/case
+    file = joinpath(tmp, sub, "extensions.json")
     isfile(file) ? get(JSON.parsefile(file), "extensions", Any[]) : Any[]
 end
 
@@ -27,6 +30,27 @@ _onboard(input::String) = begin
     out = IOBuffer()
     ret = KS._maybe_onboard!(input = IOBuffer(input), output = out)
     (ret, String(take!(out)))
+end
+
+@testset "_kaimon_dir platform resolution" begin
+    # Byte-for-byte mirror of Kaimon's own kaimon_config_dir(): OS-first. On Windows, APPDATA
+    # decides and XDG_CONFIG_HOME is NOT consulted — even if set (e.g. by Git Bash/MSYS2/Cygwin),
+    # it must not redirect KaimonSlate away from the real %APPDATA%\Kaimon that Kaimon itself uses.
+    if Sys.iswindows()
+        withenv("APPDATA" => "C:\\tmp\\appdata-kaimon-test", "XDG_CONFIG_HOME" => "C:\\tmp\\xdg-kaimon-test") do
+            @test KS._kaimon_dir() == joinpath("C:\\tmp\\appdata-kaimon-test", "Kaimon")
+        end
+        withenv("APPDATA" => nothing, "XDG_CONFIG_HOME" => nothing) do
+            @test KS._kaimon_dir() == joinpath(homedir(), "AppData", "Roaming", "Kaimon")
+        end
+    else
+        withenv("XDG_CONFIG_HOME" => "/tmp/xdg-kaimon-test") do
+            @test KS._kaimon_dir() == joinpath("/tmp/xdg-kaimon-test", "kaimon")
+        end
+        withenv("XDG_CONFIG_HOME" => nothing) do
+            @test KS._kaimon_dir() == joinpath(homedir(), ".config", "kaimon")
+        end
+    end
 end
 
 @testset "slateapp onboarding" begin
