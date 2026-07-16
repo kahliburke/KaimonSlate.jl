@@ -1003,6 +1003,10 @@ end
 # more often), and a generous per-chunk timeout tolerates a slow-but-progressing transfer. Env-overridable.
 _peer_pull_chunk()      = max(65_536, round(Int, 2^20 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_PULL_CHUNK_MB", "")), 4.0)))
 _peer_pull_timeout_ms() = round(Int, 1000 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_PULL_TIMEOUT_S", "")), 120.0))
+# Max time a pull may make NO progress before failing fast (vs. burning the whole pull timeout on a wedged
+# link — e.g. an ssh forward stuck on a since-changed grant). Generous enough for one slow chunk to land;
+# a failure drops the forward so the next attempt relaunches clean. Env-overridable.
+_peer_pull_stall_ms()   = round(Int, 1000 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_PULL_STALL_S", "")), 20.0))
 
 "PULL the content-addressed blob `hash` DIRECTLY from a peer worker's blob server at `ip:port` into THIS
 worker's CAS (the direct-transport data leg). CURVE is used when `server_key` is non-empty — this worker
@@ -1016,7 +1020,8 @@ function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::Stri
     end
     try
         moved = pull_blob_into!(KaimonGate.ZMQ, ip, port, _memo_dir(), hash; configure! = configure!,
-                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(), on_progress = on_progress)
+                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(),
+                                stall_ms = _peer_pull_stall_ms(), on_progress = on_progress)
         return (; bytes = moved)
     catch e
         return (; error = first(sprint(showerror, e), 200))
@@ -1182,7 +1187,8 @@ function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts
             KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
         end
         moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", fw.lport, _memo_dir(), hash; configure! = configure!,
-                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(), on_progress = on_progress)
+                                chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(),
+                                stall_ms = _peer_pull_stall_ms(), on_progress = on_progress)
         ok = true
         return (; bytes = moved, via = "ssh")
     catch e

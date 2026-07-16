@@ -172,21 +172,42 @@ an already-present blob returns 0 without touching the network. Returns bytes mo
 """
 function pull_blob_into!(Z, ip::AbstractString, port::Integer, root::AbstractString, hash::AbstractString;
                          configure! = nothing, chunk::Integer = _default_blob_chunk(),
-                         timeout_ms::Integer = 20_000, on_progress = nothing)
+                         timeout_ms::Integer = 20_000, on_progress = nothing, stall_ms::Integer = 0)
     dest = MemoStore.blob_path(root, hash)
     isfile(dest) && return 0                              # dedup: already here — nothing moved
-    sock = Z.Socket(Z.REQ)
+    # Stall detection (opt-in, stall_ms>0): a recv that times out with NO progress for `stall_ms` FAILS
+    # FAST — a wedged link (e.g. an ssh forward stuck on a since-changed permitopen grant) otherwise burns
+    # the whole `timeout_ms` before erroring. A timeout while bytes are still flowing instead RESETS the
+    # REQ socket (a REQ can't re-send after a missed reply) and re-requests from `off` — the ranged `G`
+    # protocol is stateless, so the resume is exact, and a transient hiccup on a slow link recovers rather
+    # than aborting. stall_ms<=0 preserves the old single-budget behaviour (each recv waits `timeout_ms`).
+    recvto = stall_ms > 0 ? min(Int(timeout_ms), Int(stall_ms)) : Int(timeout_ms)
+    newsock = function ()
+        s = Z.Socket(Z.REQ)
+        s.rcvtimeo = recvto; s.sndtimeo = recvto
+        configure! === nothing || configure!(s)          # CURVE client applied BEFORE connect
+        Z.connect(s, "tcp://$ip:$port")
+        s
+    end
+    sock = newsock()
     try
-        sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
-        configure! === nothing || configure!(sock)       # CURVE client applied BEFORE connect
-        Z.connect(sock, "tcp://$ip:$port")
         mkpath(dirname(dest))
         tmp = tempname(dirname(dest))
         total = -1; off = 0
         open(tmp, "w") do io
+            last_progress = time()
             while total < 0 || off < total
                 Z.send(sock, "G$(hash):$(off):$(chunk)")
-                frames = Z.recv_multipart(sock)
+                frames = try
+                    Z.recv_multipart(sock)
+                catch e
+                    (_is_zmq_timeout(Z, e) && stall_ms > 0) || rethrow()
+                    (time() - last_progress) * 1000 >= stall_ms &&
+                        error("pull $hash: no progress for $(round(Int, stall_ms / 1000))s at $off/$total (link stalled)")
+                    try; Z.close(sock); catch; end        # transient timeout, progress was recent → reset + resume from off
+                    sock = newsock()
+                    continue
+                end
                 meta = String(copy(frames[1]))
                 startswith(meta, "err") && error("pull $hash: $meta")
                 total = parse(Int, split(meta)[2])
@@ -194,6 +215,7 @@ function pull_blob_into!(Z, ip::AbstractString, port::Integer, root::AbstractStr
                 payload = frames[2]
                 GC.@preserve payload unsafe_write(io, pointer(payload), length(payload))
                 off += length(payload)
+                last_progress = time()
                 on_progress === nothing || on_progress(off, total)
                 length(payload) == 0 && off < total && error("pull $hash: empty chunk at $off/$total")
             end
