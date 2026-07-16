@@ -1424,7 +1424,8 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
         t0 = time()
         t = ReportEngine.transfer_binding!(src_k, dst_k, string(r); zc = zc, mode = _region_xfer_mode(),
                                            on_plan = _xfer_plan_gate(nb, cell, whost, r, token),
-                                           on_progress = onprog)
+                                           on_progress = onprog,
+                                           cellkey = ReportEngine._memo_key(nb.report, writer))   # lets the source restore from memo if its worker swapped
         secs = round(time() - t0; digits = 1)
         ReportEngine._rlog("region: '$(r)' → $(_side_label(nb, dst_side)) " *
             (t.bytes == 0 ? "(deduped — already in the destination CAS via $(t.mode), 0 bytes moved) " :
