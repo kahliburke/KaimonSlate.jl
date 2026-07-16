@@ -61,8 +61,8 @@ your open notebooks. `↑↓`/`enter` opens one, `o` the hub index, `q` quits.*
 
 The full experience — per-notebook gate workers **and** the AI agent. The first time you run `slate`
 with [Kaimon](https://github.com/…/Kaimon.jl) installed, it offers to register itself as a Kaimon
-extension — a one-time **consented** prompt (no longer automatic on package load). Say yes and
-restart Kaimon: your agents get the `slate.*` tools (`slate.open` / `slate.list` / `slate.close` / …),
+extension — a one-time **consented** prompt (no longer automatic on package load). Say yes (Kaimon
+picks it up dynamically — no restart): your agents get the `slate.*` tools (`slate.open` / `slate.list` / `slate.close` / …),
 Kaimon serves your notebooks from its own hub — each in its own gate worker, pinned to the notebook's
 Julia project — and running `slate` again **attaches** as a live status viewer. See the
 [installation guide](https://kahliburke.github.io/KaimonSlate.jl/dev/installation).

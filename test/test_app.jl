@@ -66,7 +66,7 @@ end
         _with_isolated_config() do tmp
             mkpath(joinpath(tmp, "kaimon"))
             ret, out = _onboard("y\n")
-            @test ret                                            # just registered → caller must say "restart Kaimon" + exit
+            @test ret                                            # just registered → caller falls through to the waiting TUI
             @test occursin("Register Slate", out)
             entries = _ext_entries(tmp)
             @test length(entries) == 1
