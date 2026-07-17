@@ -250,6 +250,36 @@ function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
     return s
 end
 
+"Current extra Julia flags appended to every spawned worker (e.g. \"--gcthreads=4,1\"); \"\" means none."
+worker_extra_flags()::String = String(get(_slate_config(), "worker_extra_flags", ""))
+
+"""
+    set_worker_extra_flags!(spec; respawn=true) -> String
+
+Persist extra Julia command-line flags appended to every spawned worker (e.g.
+`"--gcthreads=4,1 --heap-size-hint=4G"`), apply it to future worker spawns, and — by default —
+respawn every running notebook's worker so it takes effect immediately. Returns the stored spec.
+Called by the Kaimon TUI panel via `ctx.eval`, same pattern as `set_worker_threads!`.
+"""
+function set_worker_extra_flags!(spec::AbstractString; respawn::Bool = true)
+    s = strip(String(spec))
+    ReportEngine.WORKER_EXTRA_FLAGS[] = s
+    cfg = _slate_config(); cfg["worker_extra_flags"] = s
+    try
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+    catch e
+        @warn "slate: could not persist worker-extra-flags setting" exception = e
+    end
+    if respawn && _HUB[] !== nothing
+        nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
+        for nb in nbs
+            try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
+        end
+    end
+    @info "slate: worker extra flags set" spec = s respawned = respawn
+    return s
+end
+
 "Configured durable memo-store cap in GB; 0.0 means unset (worker env / adaptive default applies)."
 memo_cap_gb()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "memo_cap_gb", ""))), 0.0)
 
@@ -383,6 +413,8 @@ set_run_location_default!(spec::AbstractString) = NotebookServer.set_runon_defau
 function _load_slate_config!()
     s = worker_threads()
     isempty(s) || (ReportEngine.WORKER_THREADS[] = s)
+    ef = worker_extra_flags()
+    isempty(ef) || (ReportEngine.WORKER_EXTRA_FLAGS[] = ef)
     ReportEngine.MEMO_CAP_GB[] = memo_cap_gb()
     ReportEngine.BLOB_CHUNK_MB[] = blob_chunk_mb()
     ReportEngine.CARRY_MAX_S[] = carry_max_s()
