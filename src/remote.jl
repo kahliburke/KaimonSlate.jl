@@ -154,10 +154,11 @@ const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 #   sysimage_lock_stale     KAIMONSLATE_SYSIMAGE_LOCK_STALE     1800  concurrent sysimage-build lock staleness window
 #   peer_bw_mbps            KAIMONSLATE_PEER_BW_MBPS            30    assumed rate (MB/s) for an unmeasured peer link
 _ssh_connect_timeout()    = round(Int, _rcfg("ssh_connect_timeout",    "KAIMONSLATE_SSH_CONNECT_TIMEOUT",    15))
-_ssh_control_persist()    = round(Int, _rcfg("ssh_control_persist",    "KAIMONSLATE_SSH_CONTROL_PERSIST",    120))
+_ssh_control_persist()    = round(Int, _rcfg("ssh_control_persist",    "KAIMONSLATE_SSH_CONTROL_PERSIST",    600))
 _tunnel_alive_interval()  = round(Int, _rcfg("tunnel_alive_interval",  "KAIMONSLATE_TUNNEL_ALIVE_INTERVAL",  5))
 _tunnel_alive_count()     = round(Int, _rcfg("tunnel_alive_count",     "KAIMONSLATE_TUNNEL_ALIVE_COUNT",     3))
 _tunnel_respawn_backoff() = _rcfg("tunnel_respawn_backoff", "KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF", 1.0)
+_fwd_ready_wait()         = _rcfg("fwd_ready_wait",         "KAIMONSLATE_FWD_READY_WAIT",         8.0)   # bounded wait for an async ssh -L local port to accept before the first connect
 _probe_timeout()          = _rcfg("probe_timeout",          "KAIMONSLATE_PROBE_TIMEOUT",          4.0)
 _firewall_giveup()        = _rcfg("firewall_giveup",        "KAIMONSLATE_FIREWALL_GIVEUP",        10.0)
 _dial_deadline_cold()     = _rcfg("dial_deadline_cold",     "KAIMONSLATE_DIAL_DEADLINE_COLD",     120.0)
@@ -218,10 +219,16 @@ function _run_tunnel!(t::Tunnel)
         for (lp, rp) in t.forwards
             push!(lflags, "-L", "$(lp):127.0.0.1:$(rp)")
         end
-        # Dedicated connection; ServerAlive* makes ssh notice a dead link in ~15s and exit →
-        # we respawn on the SAME local ports. stdin=devnull so background `ssh -N` doesn't exit
-        # on inherited-stdin EOF.
-        cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=$(_tunnel_alive_interval()) -o ServerAliveCountMax=$(_tunnel_alive_count()) $lflags $(t.host)`
+        # Multiplex the forward over the shared per-host ControlMaster: a warm master makes this a ~10ms
+        # slave instead of a fresh TCP+SSH handshake+auth (~5s on a WAN — the dominant warm-worker ADOPT
+        # cost). The mux opts carry ServerAlive so the master (whoever it is) notices a dead link and exits,
+        # dropping this slave → we respawn on the SAME local ports and the ZMQ client reconnects. When mux
+        # is OFF (kill switch), fall back to a dedicated connection with its own ServerAlive (prior behaviour).
+        # stdin=devnull so background `ssh -N` doesn't exit on inherited-stdin EOF.
+        mux = _ssh_mux_opts()
+        alive = isempty(mux) ? ["-o", "ServerAliveInterval=$(_tunnel_alive_interval())",
+                                "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"] : String[]
+        cmd = `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes $mux $alive $lflags $(t.host)`
         try
             t.proc = Base.run(pipeline(cmd; stdin = devnull, stdout = devnull, stderr = devnull); wait = false)
             wait(t.proc)
@@ -254,16 +261,19 @@ end
 # SSH connection multiplexing: every remote op here is a separate ssh/scp/rsync exec, each paying
 # a full connection setup (key exchange + auth — hundreds of ms on a LAN, seconds on a WAN)
 # before doing any work. ControlMaster makes the first connection per host the master and every
-# later exec a ~10ms slave through its socket — compounding across the many round-trips of
-# provision/spawn/probe/detach. `auto` self-heals (a dead socket falls back to a fresh
-# connection); ControlPersist keeps the master warm 2min past the last op. The supervised TUNNEL
-# deliberately does NOT use it — it needs a dedicated connection for its ServerAlive liveness.
-# Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
+# later exec/forward a ~10ms slave through its socket — compounding across the many round-trips of
+# provision/spawn/probe/detach AND the gate/stream/data FORWARDS. `auto` self-heals (a dead socket
+# falls back to a fresh connection); ControlPersist keeps the master warm past the last session so a
+# detach→reattach or a warm-worker ADOPT rides it instantly instead of a fresh ~5s WAN handshake (the
+# measured adopt-latency cost). ServerAlive here so WHOEVER wins master election still notices a dead
+# link and exits (its slaves then reconnect) — the liveness the supervised TUNNEL used to get from its
+# own dedicated connection, now provided by the shared master. Kill switch: KAIMONSLATE_NO_SSH_MUX=1.
 function _ssh_mux_opts()
     get(ENV, "KAIMONSLATE_NO_SSH_MUX", "") == "1" && return String[]
     d = joinpath(_slate_cache_dir(), "mux")
     try; mkpath(d); catch; return String[]; end
-    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=$(_ssh_control_persist())"]
+    return ["-o", "ControlMaster=auto", "-o", "ControlPath=$d/%C", "-o", "ControlPersist=$(_ssh_control_persist())",
+            "-o", "ServerAliveInterval=$(_tunnel_alive_interval())", "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"]
 end
 
 # rsync's `-e` value is whitespace-tokenized by rsync itself, so a mux path containing a space
@@ -1187,6 +1197,19 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
         end
         _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
+        # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
+        # port isn't listening the instant we dial — a bare connect_tcp! then burns its full ~1.5s
+        # _tcp_port_open timeout on the not-yet-ready forward before the first retry. Tight-poll the local
+        # port first (loopback "refused" is instant), so the first real connect lands the moment the forward
+        # comes up — the dominant warm-worker ADOPT latency once the ssh master is warm. Bounded; on timeout
+        # we fall through and let the connect loop's own deadline handle a genuinely-stuck forward.
+        if tunnel !== nothing
+            fw0 = time()
+            while time() - fw0 < min(deadline, _fwd_ready_wait()) &&
+                  _probe_tcp(connect_host, connect_port; timeout = 0.5) !== :open
+                sleep(0.05)
+            end
+        end
         t0 = time(); last = ""; conn = nothing; tries = 0
         firewall_since = 0.0   # :direct — first time the port looked firewalled (SYN dropped) with no refuse/open since
         while time() - t0 < deadline
@@ -2767,6 +2790,24 @@ end
 
 _attach_clear!(host, label) = (try; rm(_attach_path(host, label); force = true); catch; end; nothing)
 
+# Drop any attach record pointing at (host, port) — the manual reap path only knows the port, and records
+# are keyed by hash(host,label) with no port index, so scan. Without this, reaping a worker leaves its
+# notebook's record behind; the next open of that notebook tries the record FIRST and burns ~9s dialing the
+# corpse (measured) before demoting to probe/adopt. `teardown_remote!`'s kill path clears by label; this
+# covers `reap_remote_worker`.
+function _attach_clear_port!(host, port::Int)
+    h = String(host)
+    isdir(_ATTACH_DIR) || return nothing
+    for f in readdir(_ATTACH_DIR)
+        endswith(f, ".json") || continue
+        p = joinpath(_ATTACH_DIR, f)
+        s = try; read(p, String); catch; continue; end
+        (_manifest_get(s, "host") == h && tryparse(Int, _manifest_get(s, "port")) == port) &&
+            (try; rm(p; force = true); catch; end)
+    end
+    return nothing
+end
+
 # ── Warm worker pool (Phase B) ───────────────────────────────────────────────────────────────
 # `warm_pool!(host; n, preload)` keeps `n` notebook-less workers running warm on the host —
 # process up, gate serving, eval path prewarmed, and (with `preload`) the env's packages already
@@ -3332,6 +3373,7 @@ function reap_remote_worker(host, port::Int)
     # finalize. It's cleared only on region teardown.
     try; _evict_data_tunnels!(host; port = _blob_data_port_cached(host, port)); catch; end   # real port — a relocated tunnel worker's data forward isn't at gate+2
     try; _blob_dport_forget!(host, port); catch; end          # …and drop its discovered-port cache (topology changed)
+    try; _attach_clear_port!(host, port); catch; end          # …and its notebook's attach record, so the next open skips a ~9s dial into the corpse
     try; _release_pool_claim!(host, port); catch; end
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
     # supersede-reap targets — never processes SIGTERM (a stopped process queues it; a signal-ignoring one
