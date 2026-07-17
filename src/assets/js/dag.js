@@ -371,7 +371,8 @@ async function _dagPeerPlan(refresh) {
     `<button onclick="_dagDisconnectMesh()" title="disconnect — revoke the SSH mesh: remove this notebook's regions' keys, scoped grants, and host-key pins from every host; cross-region transfers fall back to the hub relay">⇄ disconnect…</button>` +
     `<button onclick="_dagProbeTransfers()" title="recalculate — run a test transfer on every region route now and measure the live throughput">↻ recalculate</button>` +
     `<button onclick="{const p=document.getElementById('dagpeerpanel'); if(p) p.remove();}">✕</button>` +
-    `</span></div><div class="dagpeerbody">${refresh ? 'recalculating…' : 'loading…'}</div>`;
+    `</span></div><div class="dagppstatus" id="dagppstatus" style="display:none"></div>` +
+    `<div class="dagpeerbody">${refresh ? 'recalculating…' : 'loading…'}</div>`;
   const body = el.querySelector('.dagpeerbody');
   try {
     const d = await (await fetch(_apipath('/api/peer-plan') + (refresh ? '?refresh=1' : ''))).json();
@@ -382,34 +383,47 @@ async function _dagPeerPlan(refresh) {
 }
 window._dagPeerPlan = _dagPeerPlan;
 
+// In-panel action status — a spinner + message shown right where the user is looking (the peer-routing panel),
+// instead of a toast in the far corner. `busy` shows the spinner and keeps the line up; call with '' to clear.
+// A non-busy message auto-clears after a few seconds so it doesn't linger.
+let _dagPeerStatusT = 0;
+function _dagPeerSay(msg, busy) {
+  const s = document.getElementById('dagppstatus'); if (!s) return;
+  if (_dagPeerStatusT) { clearTimeout(_dagPeerStatusT); _dagPeerStatusT = 0; }
+  if (!msg) { s.style.display = 'none'; s.innerHTML = ''; return; }
+  s.innerHTML = (busy ? '<span class="dagppspin"></span>' : '') + msg;
+  s.style.display = 'flex';
+  if (!busy) _dagPeerStatusT = setTimeout(() => { const e = document.getElementById('dagppstatus'); if (e) { e.style.display = 'none'; e.innerHTML = ''; } }, 4500);
+}
+
 // "⇄ connect…" → re-summon the mesh consent dialog on demand (even after a prior "Not now"), fulfilling the
 // popup's "connect later from the peer routing plan" promise. `?force=1` recomputes the consent server-side,
-// bypassing the dismissal; shows the dialog if any cross-host pair is still un-armed, else a reassuring toast.
+// bypassing the dismissal; shows the dialog if a cross-host pair is un-armed, else says so IN the panel.
 async function _dagConnectMesh() {
+  _dagPeerSay('checking regions…', true);
   try {
     const d = await (await fetch(_apipath('/api/mesh-consent') + '?force=1')).json();
-    if (d && d.pairs && d.pairs.length) window.onMeshConsent && window.onMeshConsent(d);
-    else window.toast && window.toast('All cross-host regions are already connected.', 3500, 'ok');
-  } catch (_) { window.toast && window.toast('Could not load the mesh consent.', 4000, 'err'); }
+    if (d && d.pairs && d.pairs.length) { _dagPeerSay('', false); window.onMeshConsent && window.onMeshConsent(d); }
+    else _dagPeerSay('✓ all cross-host regions are already connected', false);
+  } catch (_) { _dagPeerSay('⚠ could not load the mesh consent', false); }
 }
 window._dagConnectMesh = _dagConnectMesh;
 
 // "⇄ disconnect…" → revoke the SSH mesh for this notebook's regions (the inverse of connect). Confirms first
 // (it removes real ~/.ssh artifacts across hosts), POSTs the teardown, then reloads the plan + overlay so the
-// verdicts flip back to relay. Reversible — ⇄ connect… re-installs.
+// verdicts flip back to relay. Reversible — ⇄ connect… re-installs. Progress shows in the panel status line.
 async function _dagDisconnectMesh() {
   const msg = "Revoke the SSH mesh for this notebook's regions?\n\nThis removes their slate ed25519 keys, the " +
     "scoped authorized_keys grants on peer hosts, and the host-key pins — everywhere. Cross-region transfers " +
     "then fall back to the hub relay. You can reconnect anytime.";
   if (!await confirmDark(msg, 'Disconnect & revoke', 'danger')) return;
-  const el = document.getElementById('dagpeerpanel'), body = el && el.querySelector('.dagpeerbody');
-  if (body) body.innerHTML = 'revoking mesh…';
+  _dagPeerSay('revoking mesh across hosts…', true);
   try {
     const r = await (await fetch(_apipath('/api/mesh-teardown'), { method: 'POST' })).json();
-    if (r && r.ok) window.toast && window.toast('Mesh revoked for ' + ((r.torn_down || []).join(', ') || 'these regions'), 4500, 'ok');
-    else window.toast && window.toast('Teardown failed: ' + ((r && r.error) || 'unknown error'), 7000, 'err');
-  } catch (_) { window.toast && window.toast('Could not reach the hub to revoke the mesh.', 6000, 'err'); }
-  try { const d = await (await fetch(_apipath('/api/peer-plan'))).json(); if (body) body.innerHTML = _dagRenderPeerPlan(d); } catch (_) {}
+    _dagPeerSay(r && r.ok ? ('✓ mesh revoked for ' + ((r.torn_down || []).join(', ') || 'these regions'))
+                          : ('⚠ teardown failed: ' + ((r && r.error) || 'unknown error')), false);
+  } catch (_) { _dagPeerSay('⚠ could not reach the hub to revoke the mesh', false); }
+  try { const d = await (await fetch(_apipath('/api/peer-plan'))).json(); const body = document.querySelector('#dagpeerpanel .dagpeerbody'); if (body) body.innerHTML = _dagRenderPeerPlan(d); } catch (_) {}
   try { _dagFetchRoutes(); } catch (_) {}
 }
 window._dagDisconnectMesh = _dagDisconnectMesh;
@@ -420,15 +434,25 @@ window._dagDisconnectMesh = _dagDisconnectMesh;
 async function _dagProbeTransfers() {
   const el = document.getElementById('dagpeerpanel'); if (!el) return;
   const body = el.querySelector('.dagpeerbody');
-  if (body) body.innerHTML = 'running test transfers on every route…';
+  _dagPeerSay('starting test transfers…', true);   // per-pair "testing src → dst (i/n)" then streams in over SSE
   try { await fetch(_apipath('/api/probe'), { method: 'POST' }); } catch (_) {}
   try {
     const d = await (await fetch(_apipath('/api/peer-plan'))).json();   // no refresh — keep the fresh verdicts
     if (body) body.innerHTML = _dagRenderPeerPlan(d);
-  } catch (_) { if (body) body.textContent = 'probe finished, but the plan failed to reload'; }
+    _dagPeerSay('✓ routes re-measured', false);
+  } catch (_) { _dagPeerSay('⚠ probe finished, but the plan failed to reload', false); }
   _dagFetchRoutes();                                     // repaint the region overlay with measured throughput
 }
 window._dagProbeTransfers = _dagProbeTransfers;
+
+// Live per-pair probe progress, pushed over SSE (panels.js) as "recalculate" measures each route server-side.
+// Shows WHICH connection is being tested and how far along (i/n) in the panel status line — the final
+// "✓ re-measured" summary comes from _dagProbeTransfers when the POST returns and reloads the plan.
+window.onProbeProgress = p => {
+  if (!p || !p.phase) return;
+  if (p.phase === 'run') _dagPeerSay(`testing ${p.src} → ${p.dst}  (${p.i}/${p.n})…`, true);
+  else if (p.phase === 'done' && p.kind) _dagPeerSay(`${p.src} → ${p.dst}: ${p.kind}${p.mbps ? ' · ' + p.mbps + ' MB/s' : ''}  (${p.i}/${p.n})`, true);
+};
 
 // ── Transfer summary dashboard ────────────────────────────────────────────────────────────────────
 // A stat + viz panel over the region overlay: totals, a throughput-over-time timeline (per transfer,

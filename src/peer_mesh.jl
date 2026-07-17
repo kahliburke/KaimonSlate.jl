@@ -246,13 +246,24 @@ end
 # pull over loopback, no mesh). Idempotent. Returns the list of installed grants. NOTE (Phase 1): this
 # installs for all cross-host pairs unconditionally; the consent flow (§5.1, later) restricts it to pairs
 # a reachability probe says actually need the bridge.
-function introduce_group!(names::AbstractVector)
+function introduce_group!(names::AbstractVector; on_progress = nothing)
     for n in names
         region_get(n) === nothing && error("mesh: unknown region '$n'")
     end
-    installed = Any[]
+    # Only CROSS-HOST ordered pairs actually get a grant (same-host pairs loop back — no mesh). Count them up
+    # front so `on_progress(i, n, source, puller)` can report "i/n" as each grant installs — the per-pair SSH
+    # keygen + authorized_keys/known_hosts edits are the slow part of a build, so this is the long operation.
+    todo = Tuple{Any,Any}[]
     for a in names, b in names
         a == b && continue
+        ra = region_get(a); rb = region_get(b)
+        (ra === nothing || rb === nothing || ra.host == rb.host) && continue
+        push!(todo, (a, b))
+    end
+    n = length(todo)
+    installed = Any[]
+    for (i, (a, b)) in enumerate(todo)
+        on_progress === nothing || (try; on_progress(i, n, String(a), String(b)); catch; end)
         g = _mesh_install_grant!(a, b; port = _region_blob_port(a))   # a = source, b = puller
         g === nothing || push!(installed, g)
     end

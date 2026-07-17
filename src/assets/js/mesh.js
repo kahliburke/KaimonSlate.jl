@@ -14,6 +14,7 @@ import { signal, effect } from '@preact/signals';
 
 const consent = signal(null);      // mesh_consent_status payload while the popup is up, else null
 const busy = signal(false);        // true while arming (POST mesh-introduce in flight)
+const buildStatus = signal('');    // live "i/n" keygen/grant progress pushed over SSE while arming
 
 // ── styles (injected once so notebook.css stays untouched — same pattern as health.js) ──────────────────
 const style = document.createElement('style');
@@ -36,6 +37,9 @@ style.textContent = `
   .meshwarn{margin:10px 0 0;font-size:.78rem;color:#e8a13f;background:rgba(232,161,63,.1);
     border:1px solid rgba(232,161,63,.28);border-radius:8px;padding:7px 10px;}
   .meshdim{font-size:.76rem;color:#7a8098;line-height:1.4;margin:12px 0 0;}
+  .meshbuild{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:.8rem;color:#c9d0e6;
+    font-family:Menlo,ui-monospace,monospace;background:rgba(43,108,255,.10);border:1px solid rgba(43,108,255,.30);
+    border-radius:8px;padding:7px 10px;}
   .meshacts{display:flex;justify-content:flex-end;gap:9px;margin-top:16px;}
   .meshbtn{font-size:.82rem;padding:7px 15px;border-radius:9px;cursor:pointer;border:1px solid #2f3550;
     background:#1c2136;color:#c6ccdd;}
@@ -62,6 +66,7 @@ function pairRows(pairs) {
 async function arm() {
   if (busy.value) return;
   busy.value = true;
+  buildStatus.value = 'starting key exchange…';
   try {
     const r = await window.api('POST', '/api/mesh-introduce', {});
     if (r && r.ok) {
@@ -73,7 +78,7 @@ async function arm() {
     }
   } catch (_) {
     window.toast && window.toast('Could not reach the hub to connect the regions.', 6000, 'err');
-  } finally { busy.value = false; }
+  } finally { busy.value = false; buildStatus.value = ''; }
 }
 
 async function dismiss() {
@@ -106,9 +111,10 @@ function MeshConsent() {
       ${unreachable.length ? html`<div class="meshwarn">⚠ currently unreachable over SSH: ${unreachable.join(', ')} — arming will fail until it's back.</div>` : null}
       <p class="meshdim">Decline and transfers still work — they route through the hub relay, just slower. You can
         connect later from the DAG's <b>⇄ peer routing plan</b>.</p>
+      ${b ? html`<div class="meshbuild"><span class="meshspin"></span>${buildStatus.value || 'connecting…'}</div>` : null}
       <div class="meshacts">
         <button class="meshbtn" disabled=${b} onClick=${dismiss}>Not now</button>
-        <button class="meshbtn primary" disabled=${b} onClick=${arm}>${b ? html`<span class="meshspin"></span>Connecting…` : 'Connect & exchange keys'}</button>
+        <button class="meshbtn primary" disabled=${b} onClick=${arm}>${b ? 'Connecting…' : 'Connect & exchange keys'}</button>
       </div>
     </div></div>`;
 }
@@ -126,6 +132,14 @@ document.addEventListener('keydown', e => {
 
 // Live push from the hub (panels.js SSE dispatch).
 window.onMeshConsent = status => { consent.value = status; };
+
+// Live per-pair keygen/grant progress while arming (panels.js SSE dispatch) — drives the popup status line so
+// the slowest step (SSH key exchange + scoped grants across every host-pair) shows which pair + how far along.
+window.onMeshBuild = m => {
+  if (!m || !m.phase) return;
+  buildStatus.value = m.phase === 'run' ? `exchanging keys · ${m.src} → ${m.puller}  (${m.i}/${m.n})`
+                    : m.phase === 'complete' ? 'finishing up…' : buildStatus.value;
+};
 
 // A tab that loaded AFTER the hub raised a pending consent (missed the live SSE) still shows it.
 setTimeout(async () => {
