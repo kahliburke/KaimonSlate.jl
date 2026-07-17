@@ -20,13 +20,16 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
 @testset "remote pool + park bookkeeping" begin
 
     @testset "_next_ports: 3-port stride, floor pushes past a live roster" begin
-        base, bstream = RE._next_ports()
-        nxt, _ = RE._next_ports()
+        # reserve=3: the :direct-transport stride (blob pinned at gate+2, so the NEXT worker's
+        # gate must clear it). The default (reserve=2) is for local/:tunnel workers, whose blob
+        # never lands at a fixed offset — see the reserve= doc at gate_kernel.jl's _next_ports.
+        base, bstream = RE._next_ports(reserve = 3)
+        nxt, _ = RE._next_ports(reserve = 3)
         @test nxt - base == 3                               # main/stream/data → stride 3, not 2
         @test bstream == base + 1
-        floored, _ = RE._next_ports(floor = nxt + 100)
+        floored, _ = RE._next_ports(floor = nxt + 100, reserve = 3)
         @test floored == nxt + 100
-        @test first(RE._next_ports()) == floored + 3        # counter advanced FROM the floor
+        @test first(RE._next_ports(reserve = 3)) == floored + 3   # counter advanced FROM the floor
         @test first(RE._next_ports(floor = 1)) > 9100       # a low floor never rewinds the counter
     end
 
@@ -193,7 +196,7 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
                 @test RE._dial_deadline_probe() == 15.0
                 @test RE._dial_deadline_record() == 5.0
                 @test RE._ssh_connect_timeout() == 15 && RE._ssh_connect_timeout() isa Int
-                @test RE._ssh_control_persist() == 120
+                @test RE._ssh_control_persist() == 600
                 @test RE._tunnel_alive_interval() == 5 && RE._tunnel_alive_count() == 3
                 @test RE._firewall_giveup() == 10.0
                 @test RE._connect_deadline_local() == 90.0
