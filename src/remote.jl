@@ -2383,6 +2383,15 @@ function _resolve_peer_route(src_k, dst_k)
     colocated = src_k.target.ssh_host == dst_k.target.ssh_host
     skey = _peer_server_key(src_k)
     sh, dh = String(src_k.target.ssh_host), String(dst_k.target.ssh_host)
+    # A source on the HUB itself (localhost) has NO peer-reachable address for a REMOTE puller: 127.0.0.1 is
+    # the puller's OWN box (a probe there hits its own sshd — a false positive that mis-resolves to a bridge
+    # that then dials nowhere useful), and the hub is typically un-sshable back (NAT). So a hub-local source
+    # relays for any remote puller (plan §2: "one side is the local hub worker → relay"). A co-located puller
+    # (same host) still loops back over 127.0.0.1, handled by the `colocated` branch below.
+    if !colocated && (sh == "localhost" || sh == "127.0.0.1")
+        _peer_route_store!(sh, dh, :relay, "")
+        return PeerRoute(:relay, "", port, skey)
+    end
     # Candidate A-addresses B might reach, in PREFERENCE order (probing picks the first that answers, so B's
     # own vantage decides — no static "which network are they on?" guess): co-located ⇒ loopback; else the
     # hub-facing interface IP first (the fast path when B shares A's network — e.g. a private subnet the hub
@@ -2400,7 +2409,14 @@ function _resolve_peer_route(src_k, dst_k)
         for c in cands                               # prefer a DIRECT blob dial on any candidate
             _probe(c, port) && (kind = :direct; ip = c; break)
         end
-        if kind === :relay                           # else the SSH bridge over any candidate reachable on :22
+        # A responding :22 means sshd is up — NOT that our least-privilege forward key is authorized. So the
+        # SSH bridge is a candidate ONLY when a mesh grant is actually armed for this pull (dst pulls from
+        # src); otherwise a declined / un-installed mesh would resolve :ssh and every transfer would dial a
+        # doomed forward before relaying (log spam + a per-pull latency tax + sshd connection pressure).
+        # Route on installed CAPABILITY. Arming the mesh installs the grant AND forgets this verdict, so the
+        # pair flips to :ssh on its next transfer.
+        armed = _mesh_grant_armed(src_k.target.region, dst_k.target.region)
+        if kind === :relay && armed                  # else the SSH bridge over any candidate reachable on :22
             for c in cands
                 _probe(c, 22) && (kind = :ssh; ip = c; break)
             end
@@ -2410,7 +2426,8 @@ function _resolve_peer_route(src_k, dst_k)
         candstr = join(cands, "/")
         _rlog(kind === :direct ? "peer route $sh→$dh: blob $ip:$port reachable ⇒ direct" :
               kind === :ssh    ? "peer route $sh→$dh: blob firewalled; ssh $ip:22 reachable ⇒ ssh-bridge (§4)" :
-                                 "peer route $sh→$dh: no candidate $candstr reachable on blob/:22 ⇒ relay")
+              armed            ? "peer route $sh→$dh: no candidate $candstr reachable on blob/:22 ⇒ relay" :
+                                 "peer route $sh→$dh: blob unreachable + no mesh grant armed ⇒ relay (arm the mesh to bridge)")
     end
     return PeerRoute(cached[1], cached[2], port, skey)
 end
@@ -2587,6 +2604,7 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
 
     moved = 0
     used = :relay
+    fellback = false                                        # a peer attempt was tried and failed → we're rescuing via relay
     if mode === :direct || mode === :auto
         route = _resolve_peer_route(src_k, dst_k)           # probe B→A: :direct / :ssh (bridge) / :relay
         if route.kind === :direct || route.kind === :ssh
@@ -2602,6 +2620,7 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
                 mode === :direct && rethrow()               # strict: surface the failure
                 # Real-time DOWNGRADE: the cached path broke (topology likely changed under us) — forget this
                 # pair's verdict so the next transfer re-probes, and relay right now.
+                fellback = true
                 _peer_route_forget_pair!(String(src_k.target.ssh_host), String(dst_k.target.ssh_host))
                 _rlog("region transfer '$name': $(route.kind) failed, forgetting route + falling back to relay — " *
                       first(sprint(showerror, e), 160))
@@ -2613,6 +2632,7 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
     end
 
     if used === :relay                                      # neither direct nor ssh took it
+        relay_t0 = time()
         root = joinpath(_slate_cache_dir(), "memo")
         if src_k.target isa RemoteTarget                   # remote source → land the blob locally
             ep = _data_endpoint!(src_k.target, src_k)
@@ -2622,6 +2642,16 @@ function transfer_binding!(src_k, dst_k, name::AbstractString; zc::Bool = false,
             ep = _data_endpoint!(dst_k.target, dst_k)
             moved += push_blob!(ep.ip, ep.port, h; server_key = ep.server_key,
                                 on_plan = nothing, meta = meta, on_progress = on_progress)
+        end
+        # When this relay RESCUED a failed peer attempt, post a ✓ relay row: otherwise the only trace left in
+        # the transfers view is the ❌ direct/ssh try, which reads as a dead transfer though the value arrived.
+        # (A pure-relay move — never a peer attempt — stays unlisted, as before: it's the hub-mediated floor.)
+        if fellback && (src_k.target isa RemoteTarget || dst_k.target isa RemoteTarget)
+            lock(_XFER_VIEW_LOCK) do
+                vid = Threads.atomic_add!(_XFER_VIEW_SEQ, 1)
+                _XFER_VIEWS[vid] = XferView(String(dst_k.target.region), String(src_k.target.region),
+                                            String(name), "relay", moved, moved, relay_t0, time(), "")
+            end
         end
     end
 

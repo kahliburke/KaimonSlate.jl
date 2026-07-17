@@ -132,6 +132,18 @@ end
 const _MESH_GRANT_PORT = Dict{Tuple{String,String},Int}()   # (source, puller) → permitopen port on source
 const _MESH_GRANT_LOCK = ReentrantLock()
 
+# Is a mesh bridge armed for this pull (puller may forward into source's blob port)? The route resolver
+# (`_resolve_peer_route`) consults this so it picks :ssh ONLY when the grant is actually installed — a
+# DECLINED / un-armed mesh then resolves straight to :relay instead of dialing a doomed forward on every
+# transfer (the log-spam + per-pull latency tax). A placeholder grant (tunnel source, port 1) still counts
+# as armed: the KEY is installed; only the permitopen port is finalized just-in-time. Populated by
+# `_mesh_install_grant!` (arm) and reconciled from live on-host state by `_mesh_host_state`; cleared on
+# teardown. Cold after a hub restart until a state read repopulates it — the persisted route verdict (disk,
+# TTL'd) covers that window for a pair that already resolved :ssh, so the cold gap never regresses a live one.
+_mesh_grant_armed(source, puller) = lock(_MESH_GRANT_LOCK) do
+    haskey(_MESH_GRANT_PORT, (String(source), String(puller)))
+end
+
 # Cheap in-place permitopen rewrite: on the source's EXISTING grant line only, swap `permitopen`'s port to
 # `port` — ONE ssh, sed-in-place, keeping the scoped key intact. Unlike `_mesh_install_grant!` (a full
 # re-install: keygen-check on the puller + host-key read + authorized_keys AND known_hosts rewrites = 3–4
@@ -244,6 +256,13 @@ function introduce_group!(names::AbstractVector)
         g = _mesh_install_grant!(a, b; port = _region_blob_port(a))   # a = source, b = puller
         g === nothing || push!(installed, g)
     end
+    # Arming changes the topology: a pair that previously resolved :relay (bridge not armed → grant-aware
+    # routing declined :ssh) can now go over the bridge. Drop those cached verdicts so the NEXT transfer
+    # re-probes and picks up the fresh grant, rather than waiting out the route TTL on the relay.
+    for g in installed
+        s = region_get(g.source); p = region_get(g.puller)
+        (s === nothing || p === nothing) || _peer_route_forget_pair!(s.host, p.host)
+    end
     return installed
 end
 
@@ -257,6 +276,8 @@ function teardown_region_mesh!(region)
     r = region_get(region)
     r === nothing && return nothing
     _mesh_grant_forget_region!(r.name)   # its on-host grants are about to go — drop the port cache too
+    _peer_route_forget!(r.host)          # and the cached route verdicts touching its host — the next transfer
+                                         # re-probes (grant-aware routing now resolves :relay, no armed bridge)
     tag = _mesh_basename(r.name)
     hosts = unique(String[r.host; [x.host for x in regions()]...])
     for h in hosts
@@ -281,7 +302,13 @@ function _mesh_host_state(host)
     echo '@keys'; ls -1 "\$HOME/.ssh"/slate-*.pub 2>/dev/null | sed 's|.*/||;s|\\.pub\$||'
     echo '@ak';   grep -F 'slate-' "\$HOME/.ssh/authorized_keys" 2>/dev/null
     echo '@kh';   grep -F 'slate-mesh-pin' "\$HOME/.ssh/slate_known_hosts" 2>/dev/null
+    true
     """
+    # ^ The trailing `true` is load-bearing: a host with NO slate artifacts makes the final grep/ls exit
+    # non-zero, and the script's exit is its last command's — so WITHOUT it, `sh -s` returns non-zero on a
+    # perfectly-reachable but un-meshed host, and `_ssh_script` misreads that as "ssh FAILED / unreachable"
+    # (empty stderr, since we 2>/dev/null the greps). We want the exit to reflect the SSH CONNECTION only: a
+    # real connect failure makes `ssh` itself exit 255 (still caught); an empty grep must read as reachable.
     # A single ssh failure here means "unreachable" to the caller (which then can't tell connected from not),
     # but a burst of mesh ops (teardown + worker spawn + probe) transiently starves ssh — so retry a couple
     # times with a short backoff before concluding a host is actually down.
@@ -305,6 +332,12 @@ function _mesh_host_state(host)
             m = match(r"^(\S+)\s.*slate-mesh-pin slate-([A-Za-z0-9_]+)-[0-9a-f]{8}", s)
             m === nothing || push!(pins, Dict("source" => m.captures[2], "addrs" => String.(split(m.captures[1], ","))))
         end
+    end
+    # Reconcile the hub-side grant cache from ground truth: any grant present on-host is armed, so the route
+    # resolver may pick :ssh for it. Only ADDS what we actually saw — an unreachable host reads as no grants,
+    # and we must NOT infer teardown from a failed read (a bridge-pull failure self-heals a truly-stale entry).
+    ok && for g in grants
+        lock(_MESH_GRANT_LOCK) do; _MESH_GRANT_PORT[(String(g["source"]), String(g["puller"]))] = Int(g["port"]); end
     end
     return Dict("host" => String(host), "reachable" => ok, "keys" => keys, "grants" => grants, "pins" => pins)
 end
