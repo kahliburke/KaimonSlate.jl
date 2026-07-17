@@ -60,6 +60,10 @@ function blob_server!(Z, host::AbstractString, port::Integer, root::AbstractStri
     configure! === nothing || configure!(sock)     # CURVE/ZAP applied by the caller BEFORE bind
     Z.bind(sock, "tcp://$host:$port")
     sock.rcvtimeo = 500                             # wake periodically to re-check `running`
+    sock.linger = 0                                 # release the bound port IMMEDIATELY on close — no lingering
+                                                    # socket, so a fast worker respawn onto the SAME data_port
+                                                    # doesn't hit "Address already in use" (the collision the
+                                                    # blob-bind retry in worker.jl backstops; this removes its cause)
     on_ready === nothing || on_ready()
     open_tmps = Dict{String,Tuple{IOStream,String}}()   # hash → (io, tmppath)
     # One put chunk (either framing): append to the blob's tmp; on the last chunk verify the sha
