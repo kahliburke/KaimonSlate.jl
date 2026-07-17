@@ -11,6 +11,11 @@ export GateKernel
 # Worker Julia-thread spec ("<compute>,<interactive>"), set by the server from persisted config /
 # the Kaimon TUI panel. Empty → fall back to env / the adaptive default. Read at each worker spawn.
 const WORKER_THREADS = Ref{String}("")
+# Extra Julia flags appended to every spawned worker's command line (e.g. "--gcthreads=4,1
+# --heap-size-hint=4G") — anything `julia` accepts that isn't already covered by a dedicated
+# setting (--project/--threads are derived elsewhere and can't be overridden this way). Same
+# tiering as WORKER_THREADS: per-notebook override → this global (panel/slate.json) → env → none.
+const WORKER_EXTRA_FLAGS = Ref{String}("")
 # Durable memo-store cap in GB (panel/slate.json → here → worker env at spawn). 0 = unset:
 # the worker falls back to KAIMONSLATE_MEMO_CAP_GB from ITS env, else an adaptive default
 # (a quarter of free disk, clamped 2–20 GB — see worker.jl `_memo_cap`).
@@ -29,6 +34,14 @@ function effective_worker_threads(kthreads::AbstractString)
     !isempty(kthreads)        && return String(kthreads)
     !isempty(WORKER_THREADS[]) && return WORKER_THREADS[]
     return get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
+end
+
+# The extra-flags string a worker would actually spawn with, given a per-kernel override
+# `kflags`: per-kernel override → global setting → env → "" (none). Mirrors `effective_worker_threads`.
+function effective_worker_extra_flags(kflags::AbstractString)
+    !isempty(kflags)              && return String(kflags)
+    !isempty(WORKER_EXTRA_FLAGS[]) && return WORKER_EXTRA_FLAGS[]
+    return get(ENV, "KAIMONSLATE_JULIA_EXTRA_FLAGS", "")
 end
 
 # Self-identifying process tag for `ps` — "slate:<region>@<notebook>:<port>". Either part may be absent:
@@ -155,6 +168,7 @@ mutable struct GateKernel <: Kernel
     logpath::String  # worker stdout/stderr log
     lock::ReentrantLock   # serializes prepare!/respawn so concurrent callers can't double-spawn
     threads::String  # per-notebook worker thread override ("<compute>,<interactive>"); "" = use the global
+    extra_flags::String  # per-notebook extra Julia flags (e.g. "--gcthreads=4,1"); "" = use the global
     remote::Bool     # attached to a PRE-RUNNING worker (e.g. remote, forwarded to 127.0.0.1:port over
                      # an SSH tunnel) — `prepare!` CONNECTS, never spawns/reconstructs locally.
     label::String    # gate-session display label (the notebook's filename) — names the session in `ping`/TUI
@@ -174,9 +188,9 @@ mutable struct GateKernel <: Kernel
                      # so a slow first-run precompile narrates itself into the UI instead of looking hung.
                      # `nothing` (the default) skips the callback entirely; the log file write is unaffected.
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
-               pending::Vector = Any[], threads::AbstractString = "", label::AbstractString = "",
-               target = nothing, online = nothing) =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing, 0, false, online)
+               pending::Vector = Any[], threads::AbstractString = "", extra_flags::AbstractString = "",
+               label::AbstractString = "", target = nothing, online = nothing) =
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), String(extra_flags), false, String(label), target, nothing, 0, false, online)
 end
 
 """
@@ -471,7 +485,12 @@ function _spawn_worker!(k::GateKernel)
     jthreads = !isempty(k.threads)         ? k.threads :
                !isempty(WORKER_THREADS[])  ? WORKER_THREADS[] :
                get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
-    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads -e $(_worker_script(port, stream_port, k.parent))`
+    # Extra Julia flags (e.g. "--gcthreads=4,1 --heap-size-hint=4G") — same tiering as threads above,
+    # via `effective_worker_extra_flags`. Shell-split so multiple flags/values become separate argv
+    # entries (a raw string interpolated into a backtick would land as ONE mangled argument). Must
+    # precede `-e` — Julia stops parsing its own flags there.
+    extra_args = Base.shell_split(effective_worker_extra_flags(k.extra_flags))
+    cmd = `$(Base.julia_cmd()) --project=$(k.project) --startup-file=no --threads=$jthreads $extra_args -e $(_worker_script(port, stream_port, k.parent))`
     cmd = addenv(cmd, "OPENBLAS_NUM_THREADS" => blas, "OMP_NUM_THREADS" => blas,
                  "KAIMON_SESSION_LABEL" => k.label,   # worker reports this as its gate-session name (notebook filename)
                  # Self-identifying process tag (see the remote path) — in `ps e` / /proc/<pid>/environ.

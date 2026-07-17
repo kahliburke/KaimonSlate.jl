@@ -134,6 +134,8 @@ const _CONFIG_UI = (
      choices = String[], global_default = nothing, restart = false),
     (key = "threads", group = "Execution", label = "Worker threads", type = :string, default = "",
      choices = String[], global_default = () -> ReportEngine.WORKER_THREADS[], restart = true),
+    (key = "juliaflags", group = "Execution", label = "Extra Julia flags", type = :string, default = "",
+     choices = String[], global_default = () -> ReportEngine.WORKER_EXTRA_FLAGS[], restart = true),
     (key = "parallel", group = "Execution", label = "Parallel cells", type = :bool, default = true,
      choices = String[], global_default = () -> PARALLEL_DEFAULT[], restart = false),
     (key = "hotreload", group = "Execution", label = "Hot-reload /src edits", type = :bool, default = true,
@@ -185,6 +187,8 @@ function set_notebook_config!(nb::LiveNotebook, key::AbstractString, value; clea
     end
     it.key == "threads" && nb.kernel isa ReportEngine.GateKernel &&
         (nb.kernel.threads = get(nb.report.meta, "threads", ""))
+    it.key == "juliaflags" && nb.kernel isa ReportEngine.GateKernel &&
+        (nb.kernel.extra_flags = get(nb.report.meta, "juliaflags", ""))
     _persist!(nb)
     it.restart && restart_kernel!(nb)
     return Dict{String,Any}("ok" => true)

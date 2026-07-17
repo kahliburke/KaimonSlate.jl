@@ -1038,8 +1038,8 @@ end
 # pays the preload env's package loads while nobody is attached).
 function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
                          label::AbstractString, parent::AbstractString,
-                         threads::AbstractString = "", warm::Bool = false,
-                         region::AbstractString = "", warm_deps::Bool = false)
+                         threads::AbstractString = "", extra_flags::AbstractString = "",
+                         warm::Bool = false, region::AbstractString = "", warm_deps::Bool = false)
     host = t.ssh_host
     hubkey = _hub_client_pubkey()
     script = _remote_worker_script(t, port, stream_port, t.project, hubkey; warm_deps = warm_deps)
@@ -1076,7 +1076,8 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     siresolve = t.sysimage ?
         "SI=\$(cat $sysreldir/current 2>/dev/null); JOPT=''; if [ -n \"\$SI\" ] && [ -f \"\$HOME/$sysreldir/\$SI.so\" ]; then JOPT=\"--sysimage=\$HOME/$sysreldir/\$SI.so\"; fi" :
         "JOPT=''"   # region didn't opt into a sysimage → always a plain boot
-    jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $remote_script '$tag'"
+    xflags = effective_worker_extra_flags(extra_flags)
+    jl = "julia \$JOPT --project=$proj --startup-file=no --threads=$nthreads $xflags $remote_script '$tag'"
     launch = "cd \$HOME && export PATH=\"\$HOME/.juliaup/bin:\$PATH\" && export KAIMONSLATE_WORKER='$tag' && $siresolve && if command -v setsid >/dev/null 2>&1; then setsid nohup $jl > $logf 2>&1 & else nohup $jl > $logf 2>&1 & fi"
     _rlog("spawn: launching $(warm ? "WARM " : "")worker on $host  (port=$port stream=$stream_port threads=$nthreads)$(isempty(region) ? "" : " region=$region")\n    remote log: $host:$logf")
     # Pass the whole launch line as ONE ssh arg → the remote login shell parses `&&`/`>`/`&`/`$HOME` intact.
@@ -1257,7 +1258,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
                           _next_ports(floor = try; _port_floor(host); catch; 0; end)
         k.port = port; k.stream_port = stream_port
-        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, region = t.region)
+        _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
         r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
         k.ns_gen += 1   # fresh process ⇒ blank namespace: region dedups keyed on ns_gen re-establish it
