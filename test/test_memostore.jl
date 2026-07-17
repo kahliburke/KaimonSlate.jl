@@ -104,6 +104,28 @@ blobcount(root) = sum(length(fs) for (_, _, fs) in walkdir(joinpath(root, "blobs
         end
     end
 
+    @testset "gc: a pinned entry is never evicted, even alone over cap" begin
+        mktempdir() do root
+            hA, _ = MemoStore.put_blob(io -> write(io, "A"^64), root)
+            hB, _ = MemoStore.put_blob(io -> write(io, "B"^64), root)
+            MemoStore.write_manifest(root, "old", mkmanifest(["a" => hA], hA))
+            sleep(0.05)
+            MemoStore.write_manifest(root, "pinned", mkmanifest(["b" => hB], hB))
+            MemoStore.set_pin!(root, "pinned", true)
+            @test MemoStore.is_pinned(root, "pinned") && !MemoStore.is_pinned(root, "old")
+            MemoStore.gc(root; cap = 0, grace = -1.0)             # cap=0 → evict everything it can
+            @test MemoStore.read_manifest(root, "old") === nothing   # unpinned, oldest → gone
+            @test MemoStore.read_manifest(root, "pinned") !== nothing   # pinned → survives despite cap=0
+            @test MemoStore.has_blob(root, hB)                    # its blob survives too (refcounted)
+
+            # Unpin → ordinary LRU eviction applies again.
+            MemoStore.set_pin!(root, "pinned", false)
+            @test !MemoStore.is_pinned(root, "pinned")
+            MemoStore.gc(root; cap = 0, grace = -1.0)
+            @test MemoStore.read_manifest(root, "pinned") === nothing
+        end
+    end
+
     @testset "gc: grace window protects fresh unreferenced blobs" begin
         mktempdir() do root
             hO, _ = MemoStore.put_blob(io -> write(io, "orphan"), root)  # no manifest yet (mid-store)

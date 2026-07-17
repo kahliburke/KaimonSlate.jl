@@ -298,6 +298,10 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
 .memobadge.warn { opacity:.92; }
 .memobadge:hover { opacity:1; }
 .memobadge.memo-stored { color:var(--green); opacity:.95; }   /* cached — the green database cylinder */
+/* `locked` cell tag: frozen against upstream/reload churn — sits next to the region chip, not the
+   fixed-width memoslot (rare enough that its variable width doesn't disturb column alignment). */
+.lockbadge { font-size:.78rem; opacity:.85; cursor:default; user-select:none; margin-left:6px; }
+.lockbadge:hover { opacity:1; }
 .cid { color:var(--dim); font-family:monospace; }
 /* Transient "restored to <age>" pill while ⌘Z steps a cell back through its snapshots. */
 .cellhead .histago {

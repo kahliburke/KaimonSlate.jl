@@ -412,6 +412,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div class="openctl">
     <span class="ctllabel">Run on</span>
     <span id="openrunon-mount" style="display:contents"></span>
+    <label class="ctllabel" title="Uncheck to open without the initial run — cells land un-run so you can edit/tag first">
+      <input type="checkbox" id="openautorun" checked/> Run
+    </label>
     <button id="openbtn">Open</button>
     <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
     <input type="file" id="uploadin" accept=".jl" style="display:none"/>
@@ -483,9 +486,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     return s.value||''; }
   function openPath(p, runon){p=(p||'').trim();if(!p)return;
     if(runon===undefined) runon=_runonOf('openrunon');
+    var autorunEl=document.getElementById('openautorun'), autorun=autorunEl?autorunEl.checked:true;
     try{localStorage.setItem('slateLastDir', window.PLATFORM.dirOf(p));}catch(e){}   // remember the directory
-    showLoading('Opening “'+p+'” — starting the worker'+(runon&&runon!=='local'?' on '+runon:'')+'…');
-    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon})})
+    showLoading((autorun?'Opening “':'Opening (paused) “')+p+'” — starting the worker'+(runon&&runon!=='local'?' on '+runon:'')+'…');
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon,autorun:autorun})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
       .then(function(d){pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
   // ── Import a self-contained .jl (one carrying a Slate.bundle footer) ─────────

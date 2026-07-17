@@ -115,6 +115,7 @@ end
 # silently re-registers — even after a previous Yes). Best-effort and idempotent — never breaks
 # loading; opt out with `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`.
 function __init__()
+    ReportEngine._snapshot_inprocess_base_deps!()   # this process's own deps, before any notebook `pkg_op`
     get(ENV, "KAIMONSLATE_NO_AUTOREGISTER", "0") in ("1", "true") && return nothing
     haskey(ENV, "KAIMON_EXTENSION") || return nothing
     try
@@ -432,7 +433,7 @@ function create_tools(GateTool::Type)
             ok = !startswith(lstrip(res), "⛔")); res)
 
     """
-        open(path::String; threads::String="") -> String
+        open(path::String; threads::String="", autorun::Bool=true) -> String
 
     Open a reactive notebook for the `.jl` file at `path` and start its live
     browser server (creating the file if it does not exist). Returns the URL.
@@ -441,12 +442,16 @@ function create_tools(GateTool::Type)
     `threads` ("<compute>,<interactive>", e.g. "8,1") overrides the worker Julia
     thread count for THIS notebook only — useful for a CPU-heavy notebook. Empty →
     the global setting (Extensions panel / slate.json) / adaptive default.
+
+    `autorun=false` opens WITHOUT the initial run — cells land STALE, untouched —
+    so you (or the user) can inspect/edit first (e.g. tag a cell `locked`) before
+    anything, possibly expensive, runs. Only applies on a fresh open.
     """
-    function nb_open(path::String; threads::String = "")::String
+    function nb_open(path::String; threads::String = "", autorun::Bool = true)::String
         path = expanduser(path)
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
         h = _hub()
-        id = open_notebook!(h, path; threads = threads)
+        id = open_notebook!(h, path; threads = threads, autorun = autorun)
         return "Serving $(abspath(path)) at $(_base())/n/$id"
     end
 

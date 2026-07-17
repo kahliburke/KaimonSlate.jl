@@ -228,8 +228,12 @@
       setLive(id, cell.state);            // clear the transient running → real state
       activity(errored ? 'err' : 'done', id, errored ? 'errored' : (wasRestored ? '♻ restored' : (t ? fmt(now() - t) : 'done')));
       prog = { frac: 0, msg: '' };
-      renderPill(); renderChip();
+      renderChip();
     }
+    // ALWAYS refresh the pill, even for a run too fast to ever `reveal()` — a quick fix of a
+    // previously-errored cell (e.g. edit → instant success) must clear the error pill immediately,
+    // not leave it stuck showing the old error until something else happens to call renderPill().
+    renderPill();
     // Batch drained → end the streak shortly (a small delay absorbs the gap between sequential cells
     // and back-to-back batches, so the pill doesn't flicker). The error pill is derived from live cell
     // state at render, so it survives the streak end and clears itself once the errors are resolved.

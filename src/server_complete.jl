@@ -159,6 +159,12 @@ function restart_kernel!(nb::LiveNotebook)
     _broadcast(nb, "restart")
     @async begin
         try
+            # Locked cells restore first, AHEAD of the sequential full run below — a `reset!` restart
+            # wipes every cell to STALE (including locked ones), and without this a locked cell would
+            # sit STALE behind however many slow unlocked cells precede it in document order, despite
+            # its own restore costing nothing. `_drain!`'s document-order sweep below just skips them
+            # once they're FRESH again.
+            _self_heal_locked!(nb)
             _drain!(nb)            # respawns the worker + streams cells; WAIT for full completion so the
             lock(nb.lock) do       # hydrating banner stays up for the whole re-run
                 delete!(nb.report.meta, "hydrating")
@@ -191,13 +197,14 @@ function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
         build_dependencies!(nb.report)
         # New worker → empty namespace → re-run every cell (this is what drives prepare!→attach). Cells
         # left FRESH would give the runner nothing to do and the worker would never be reached. See reset!.
-        for c in nb.report.cells; c.state = STALE; c.output = nothing; end
+        ReportEngine.reset_all!(nb.report)
         nb.report.meta["hydrating"] = true
         nb.version += 1
     end
     _broadcast(nb, "restart")
     @async begin
         try
+            _self_heal_locked!(nb)                              # see restart_kernel!'s comment: same wipe pattern
             _drain!(nb)                                        # first eval → prepare! attaches to the worker
         catch e
             @warn "KaimonSlate: remote-worker switch re-run failed" exception = (e, catch_backtrace())
@@ -258,7 +265,7 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
         build_dependencies!(nb.report)
         # The new worker has an EMPTY namespace → every cell must re-run on it. Invalidate all cells so
         # `_drain!` re-evaluates them; mirrors ReportEngine.reset!.
-        for c in nb.report.cells; c.state = STALE; c.output = nothing; end
+        ReportEngine.reset_all!(nb.report)
         delete!(nb.report.meta, "hydrate_error")
         nb.report.meta["hydrating"] = true
         # Tell the banner this is a remote bring-up (provision + connect can take minutes) rather than a
@@ -274,6 +281,7 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
             # the interception point: a spawn/provision failure becomes a SINGLE notebook-level error
             # (the hydrate-error banner) instead of the identical error stamped onto every cell. Only once
             # the worker is really connected do we run the cells.
+            _self_heal_locked!(nb)                              # see restart_kernel!'s comment: same wipe pattern
             isempty(remotehost) || ReportEngine.prepare!(nb.kernel, nb.report)
             # Worker is connected now — the "provisioning & connecting…" bring-up is DONE, so drop that
             # banner before the cells run (it otherwise lingers through the whole run, still implying we're
@@ -292,7 +300,7 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
             msg = sprint(showerror, e)
             lock(nb.lock) do
                 nb.report.meta["hydrate_error"] = msg
-                for c in nb.report.cells; c.output = nothing; (c.state == RUNNING) && (c.state = STALE); end  # nothing ran → no per-cell errors
+                for c in nb.report.cells; c.output = nothing; ReportEngine.revert_running!(c); end  # nothing ran → no per-cell errors
             end
             @warn "KaimonSlate: run-on bring-up failed" host = remotehost exception = (e, catch_backtrace())
         finally
@@ -595,7 +603,10 @@ function _make_router(h::Hub)
         isfile(path) || write(path, "#%% md id=intro\n# New Notebook\n")
         # Optional run-location chosen in the open/new-notebook picker ("host[,transport]"); "" = follow
         # the file's own choice / the global default. Only applied when the notebook isn't already open.
-        id = open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))))
+        # `autorun=false` opens WITHOUT the initial run (cells land STALE) — e.g. to tag a cell `locked`
+        # or otherwise edit before anything runs. Also only applied on a fresh open.
+        id = open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))),
+                            autorun = get(b, "autorun", true) !== false)
         _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
     end)
     # Upload a `.jl` from the browser (the viewing machine) → save it under a persistent uploads dir and
@@ -1921,14 +1932,15 @@ end
 Load the notebook at `path` into the hub (reusing the existing entry if already
 open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
 """
-function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "", runon::AbstractString = "")
+function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "", runon::AbstractString = "",
+                        autorun::Bool = true)
     file = abspath(path)
     id = lock(h.lock) do
         for nb in values(h.notebooks)
             abspath(nb.path) == file && return nb.id
         end
         id = _unique_id(h, file)
-        nb = load_notebook(file; id = id, threads = threads, runon = runon)
+        nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun)
         h.notebooks[id] = nb
         _start_watcher!(nb)
         return id

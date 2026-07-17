@@ -315,6 +315,19 @@ function __slate_memo_trace(; cell::String = "")
     end
 end
 
+"Pin (`pin=true`) or release (`pin=false`) `key`'s CURRENT fullkey against `gc` eviction — the
+`locked` cell tag's durability guarantee. No-op (`ok=false`) if the memo layer is off or `key` is
+empty (an unkeyable cell has nothing to pin)."
+function __slate_memo_pin(; key::String = "", pin::Bool = true)
+    (_MEMO_OK && !isempty(key)) || return Dict{String,Any}("ok" => false)
+    try
+        MemoStore.set_pin!(_memo_dir(), _memo_fullkey(key), pin)
+        return Dict{String,Any}("ok" => true)
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
+
 # Snapshot the CURRENT namespace values for the given memoizable cells into the durable store,
 # BYPASSING the auto-store time threshold — so a standalone export can offer every memoizable
 # result for embedding, not just the cells that happened to run slow. `cells` maps cell-id →
@@ -454,17 +467,18 @@ end
 _call_leaf(f) = f isa Symbol ? f :
                 (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode) ?
                     f.args[2].value : nothing
-# Collect every `set_theme!(...)`/`update_theme!(...)` CALL expression anywhere in `ex` (they're
-# typically nested inside a plot cell's `let … end`, so a top-level scan misses them).
+# Collect every theme-setter CALL expression (`_THEME_CALL_NAMES` — see graphics_detect.jl)
+# anywhere in `ex` (they're typically nested inside a plot cell's `let … end`, so a top-level
+# scan misses them).
 function _collect_theme_calls!(acc::Vector{Any}, ex)
     ex isa Expr || return acc
-    (ex.head === :call && _call_leaf(ex.args[1]) in (:set_theme!, :update_theme!)) && push!(acc, ex)
+    (ex.head === :call && _call_leaf(ex.args[1]) in _THEME_CALL_NAMES) && push!(acc, ex)
     for a in ex.args; _collect_theme_calls!(acc, a); end
     return acc
 end
 
 # Re-execute a restored cell's cheap GLOBAL side effects — its top-level `using`/`import` statements
-# and any `set_theme!`/`update_theme!` calls — so the process state matches what the skipped run
+# and any theme-setter call (`_THEME_CALL_NAMES`) — so the process state matches what the skipped run
 # would have left, for any downstream cell that later RE-RUNS. `using`: keeps imported names +
 # method tables in scope (a NOVEL `using X`, the sole importer of X, is re-established here). Theme:
 # re-applies the global Makie theme (the rendered figure itself rides the cached wire image; this
@@ -2007,6 +2021,7 @@ function tools()
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
+        KaimonGate.GateTool("__slate_memo_pin", __slate_memo_pin),
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
         KaimonGate.GateTool("__slate_client_key", __slate_client_key),

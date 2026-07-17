@@ -920,6 +920,18 @@ function bundle_info(k::GateKernel, report::Report)
     return (projectdir = String(get(wire, :projectdir, get(wire, "projectdir", ""))), pathdeps = pd)
 end
 
+# Best-effort: a dead/reconnecting worker just means the pin doesn't (yet) apply — never surfaces
+# as a cell error (called from tag-editing / bookkeeping paths, not an eval).
+function memo_pin!(k::GateKernel, report::Report, key::AbstractString, pin::Bool)
+    isempty(key) && return nothing
+    try
+        prepare!(k, report)
+        _tool(k, "__slate_memo_pin", Dict{String,Any}("key" => String(key), "pin" => pin))
+    catch
+    end
+    return nothing
+end
+
 # Add/remove a package in the notebook's own env. Adding the FIRST package while in base
 # mode forks the notebook off its parent (seed + activate a single extended env) before the
 # add, so the parent's `Project.toml` is never touched and there's one consistent resolution.
@@ -1028,10 +1040,7 @@ end
 # Reset the worker namespace and mark every cell stale (mirrors `reset_module!`).
 function reset!(k::GateKernel, report::Report)
     k.conn === nothing || (try; _tool(k, "__slate_reset", Dict{String,Any}()); catch; end)
-    for c in report.cells
-        c.state = STALE
-        c.output = nothing
-    end
+    reset_all!(report)
     return nothing
 end
 

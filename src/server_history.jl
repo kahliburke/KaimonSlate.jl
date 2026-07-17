@@ -664,7 +664,8 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
         for did in dependents_of(nb.report, Set([id]))
             (did == id && !reruns_self) && continue
             j = findfirst(c -> c.id == did, nb.report.cells)
-            j === nothing || (nb.report.cells[j].state = STALE)
+            j === nothing && continue
+            ReportEngine.restale!(nb.report.cells[j])
         end
         _eval!(nb)
     end
@@ -865,7 +866,12 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
                 frc = get!(Set{String}, _FORCE_RUN, nb.id)
                 for did in dependents_of(nb.report, Set([id]))   # closure includes `id` itself
                     j = findfirst(c -> c.id == did, nb.report.cells)
-                    j === nothing || (nb.report.cells[j].state = STALE)
+                    j === nothing && continue
+                    c = nb.report.cells[j]
+                    # A locked dependent stays frozen against this cascade too — only its OWN
+                    # ▶ (did == id) may re-run it, so the played cell itself bypasses the guard.
+                    ok = did == id ? (c.state = STALE; true) : ReportEngine.restale!(c)
+                    ok || continue
                     # ▶ means "actually re-evaluate" — for the WHOLE cascade, not just this cell.
                     # The memo key digests upstream SOURCES, so if the played cell is impure (a data
                     # fetch — the main reason to press ▶), its dependents' keys don't change and a
