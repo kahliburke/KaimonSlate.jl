@@ -23,7 +23,7 @@ async function insertBind(snippet) {
   if (selectedId && editors[selectedId]) { const cur = edText(selectedId); edInsert(selectedId, (cur.trim() ? '\n' : '') + snippet); return; }
   const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
   if (id && editors[id]) { edSetText(id, snippet); edFocus(id); }
-  else if (!id) window.toast && window.toast('Still loading — try again in a moment', 3000);   // e.g. addCell no-ops while hydrating
+  else if (!id) window.toast && window.toast('Still loading — try again in a moment', 3000);
 }
 // ── Recipes ───────────────────────────────────────────────────────────────────
 // Starter code for common tasks (mostly Makie plots, dark theme). Each drops into a
@@ -114,7 +114,7 @@ echart(
 async function insertRecipe(code) {
   const id = await addCell(selectedId || '', 'code', false, true);   // fresh cell below, in edit mode
   if (id && editors[id]) { edSetText(id, code); edFocus(id); }
-  else if (!id) window.toast && window.toast('Still loading — try again in a moment', 3000);   // e.g. addCell no-ops while hydrating
+  else if (!id) window.toast && window.toast('Still loading — try again in a moment', 3000);
 }
 
 // ── Command palette (⌘K) ──────────────────────────────────────────────────────

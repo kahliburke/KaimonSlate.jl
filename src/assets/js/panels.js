@@ -363,7 +363,7 @@ async function _probe() {
   // The HTTP server answered with usable state — get the user BACK INTO the notebook immediately,
   // even if a background run (hydrating) or worker boot is still finishing. Those stream in live (the
   // hydrating banner + `celldone:` patches + a version bump on completion) rather than trapping the
-  // user behind a modal. Mutating actions stay gated by `_hydrating` until the run completes.
+  // user behind a modal.
   const w = state.worker || {};
   _connDown = false;
   clearTimeout(_graceTimer); clearInterval(_probeTimer); _graceTimer = _probeTimer = null;

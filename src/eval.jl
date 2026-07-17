@@ -7,7 +7,7 @@
 # dependency model (§6) layer on later without changing this loop.
 
 export eval_report!, eval_cell!, report_module, reset_module!
-export Kernel, InProcessKernel, run_capture, shutdown!
+export Kernel, InProcessKernel, PendingKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
 export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
 export register_userprog!, unregister_userprog!
@@ -208,6 +208,75 @@ eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename
 # and test kernels working unchanged.
 eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo) =
     eval_capture(k, report, source, filename)
+
+"""
+    PendingKernel <: Kernel
+
+Placeholder installed on `LiveNotebook.kernel` while the real kernel is booting (a worker
+spawn) or being reconstructed (a standalone bundle's environment). Every dispatched call
+BLOCKS until [`_resolve!`](@ref)/[`_reject!`](@ref) fires, then forwards to the real kernel —
+so a run/edit request that races the boot window queues transparently instead of silently
+evaluating in-process against the wrong (extension's own) environment, or erroring on a
+worker that doesn't exist yet. Mirrors `GateKernel`'s own lock-guarded `prepare!` (which
+blocks concurrent callers on a reconnect), generalized to "any kernel op, before the real
+kernel is known."
+"""
+mutable struct PendingKernel <: Kernel
+    ready::Base.Event
+    real::Union{Kernel,Nothing}
+    err::Union{String,Nothing}
+    PendingKernel() = new(Base.Event(), nothing, nothing)
+end
+
+"Unblock every waiter on `k` — subsequent (and in-flight) calls forward to `real`."
+function _resolve!(k::PendingKernel, real::Kernel)
+    k.real = real
+    notify(k.ready)
+    return nothing
+end
+
+"Unblock every waiter on `k` with a boot failure — forwarded calls raise `err` instead of hanging forever."
+function _reject!(k::PendingKernel, err::AbstractString)
+    k.err = err
+    notify(k.ready)
+    return nothing
+end
+
+function _await_real(k::PendingKernel)
+    wait(k.ready)
+    k.err === nothing || error(k.err)
+    return k.real::Kernel
+end
+
+# The 14 Kernel operations with no generic `::Kernel` fallback — each blocks for the real
+# kernel, then forwards. (`shutdown!`, `cancel_cells`, `memo_pin!`, `worker_log_tail`, the
+# 5-arg memo `eval_capture`, and `_kernel_status` already have safe non-blocking `::Kernel`
+# fallbacks above/elsewhere and need no override here.)
+prepare!(k::PendingKernel, report::Report) = prepare!(_await_real(k), report)
+reset!(k::PendingKernel, report::Report) = reset!(_await_real(k), report)
+eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString = "string") =
+    eval_capture(_await_real(k), report, source, filename)
+eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString, memo) =
+    eval_capture(_await_real(k), report, source, filename, memo)
+complete(k::PendingKernel, report::Report, code::AbstractString, pos::Integer) =
+    complete(_await_real(k), report, code, pos)
+assign_bind!(k::PendingKernel, report::Report, name::Symbol, value) =
+    assign_bind!(_await_real(k), report, name, value)
+table_page(k::PendingKernel, report::Report, table_id::AbstractString, request::AbstractDict) =
+    table_page(_await_real(k), report, table_id, request)
+interpolate(k::PendingKernel, report::Report, exprs::Vector{String}) =
+    interpolate(_await_real(k), report, exprs)
+harvest_docs(k::PendingKernel, report::Report, mod_names) =
+    harvest_docs(_await_real(k), report, mod_names)
+module_help(k::PendingKernel, report::Report, name::AbstractString) =
+    module_help(_await_real(k), report, name)
+macroexpand_cells(k::PendingKernel, report::Report, srcs::AbstractDict) =
+    macroexpand_cells(_await_real(k), report, srcs)
+project_deps(k::PendingKernel, report::Report) = project_deps(_await_real(k), report)
+env_info(k::PendingKernel, report::Report) = env_info(_await_real(k), report)
+bundle_info(k::PendingKernel, report::Report) = bundle_info(_await_real(k), report)
+pkg_op(k::PendingKernel, report::Report, op::AbstractString, name::AbstractString; target::AbstractString = "notebook") =
+    pkg_op(_await_real(k), report, op, name; target)
 
 """
     complete(kernel, report, code, pos) -> (; items, from, to)

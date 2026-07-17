@@ -208,7 +208,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
         p = _read_preview(src)
         p === nothing || (r.meta["preview"] = p)
         r.meta["hydrating"] = true
-        nb = LiveNotebook(nbid, String(path), r, InProcessKernel(), 0, String[], String[],
+        nb = LiveNotebook(nbid, String(path), r, PendingKernel(), 0, String[], String[],
                           ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                           Dict{String,String}())
         _wire_callbacks!(nb)
@@ -225,7 +225,8 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # get INTO the notebook (e.g. to tag a cell `locked` first) before anything expensive runs; a
     # manual ▶/"Run stale" starts it whenever the user is ready.
     autorun && (r.meta["hydrating"] = true)
-    nb = LiveNotebook(nbid, String(path), r, InProcessKernel(), 0, String[], String[],
+    pending = PendingKernel()
+    nb = LiveNotebook(nbid, String(path), r, pending, 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                       Dict{String,String}())
     _wire_callbacks!(nb)
@@ -234,6 +235,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
         try
             kernel = _select_kernel(path, r)         # boot the (gate) worker
             lock(nb.lock) do; nb.kernel = kernel; nb.version += 1; end
+            ReportEngine._resolve!(pending, kernel)   # unblock anyone who raced the boot window (edit/run before the worker existed)
             try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
             if autorun
                 _drain!(nb)                          # initial full run — WAIT for it to fully complete, so
@@ -258,6 +260,8 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
                 delete!(nb.report.meta, "hydrating")
                 nb.version += 1
             end
+            pending.real === nothing && pending.err === nothing &&
+                ReportEngine._reject!(pending, "notebook failed to start: " * sprint(showerror, e))
             @warn "KaimonSlate: initial run failed" exception = (e, catch_backtrace())
         end
         try; _broadcast(nb, string(nb.version)); catch; end   # nudge the browser to pull the now-live cells
@@ -270,6 +274,7 @@ end
 # then push — the client swaps the frozen preview for live cells. On failure, surface it and
 # drop the hydrating state (the preview stays visible as the last-known render).
 function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
+    pending = nb.kernel   # the PendingKernel placeholder installed by load_notebook, unblocked below
     try
         rc = _reconstruct_bundle!(path)
         rc.fresh && _instantiate_env!(rc.envdir)
@@ -293,6 +298,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
             (rc.install && !isempty(rc.notebook) && isfile(rc.notebook)) && (nb.path = rc.notebook)
             delete!(nb.report.meta, "preview")       # live cells supersede the frozen render
         end
+        pending isa PendingKernel && ReportEngine._resolve!(pending, kernel)   # unblock anyone who raced the boot window
         _drain!(nb)                                  # run everything + WAIT, so `hydrating` stays up for it
         lock(nb.lock) do
             delete!(nb.report.meta, "hydrating")
@@ -306,6 +312,8 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
             delete!(nb.report.meta, "hydrating")
             nb.version += 1
         end
+        pending isa PendingKernel && pending.real === nothing && pending.err === nothing &&
+            ReportEngine._reject!(pending, "notebook failed to start: " * sprint(showerror, e))
     end
     try; _broadcast(nb, string(nb.version)); catch; end
     return nothing

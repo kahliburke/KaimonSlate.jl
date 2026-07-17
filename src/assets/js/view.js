@@ -669,25 +669,31 @@ function updateChrome(state) {
   window.renderRunPill && window.renderRunPill();      // error pill reads live state → clears when a cell is fixed/removed
   if (state.path) document.getElementById('vscode').href = 'vscode://file' + state.path;
   const hb = document.getElementById('hydbanner');
-  _hydrating = !!state.hydrating;              // gate mutating actions while the env reconstructs
-  if (state.hydrating) {
+  // "run" (the plain initial autorun) gets NO banner — cells are fully interactive and each shows
+  // its own running/stale state, exactly like any later manual run; a special top banner just for
+  // the FIRST run would be an arbitrary inconsistency now that it's not gating anything. "remote"
+  // (worker provisioning) and "env" (bundle reconstruction) have no per-cell equivalent — there's
+  // no worker yet to show per-cell progress against — so those keep a status banner.
+  if (state.hydrating && state.hydratingKind !== 'run') {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
     hb.innerHTML = '<span class="hydspin"></span><span class="hydmsg">' + (
       state.hydratingKind === 'remote'
         ? ('Starting the worker on <b>' + (state.hydratingHost || 'the remote host') + '</b> — provisioning &amp; connecting' +
-           ' (a first run installs Julia deps and can take a few minutes)…')
-      : state.hydratingKind === 'run'
-        ? 'Running the notebook — cells appear as they finish; editing unlocks when the run completes…'
+           ' (a first run installs Julia deps and can take a few minutes; you can keep editing meanwhile)…')
         : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…')
       // live detail: the remote worker's streamed instantiate/precompile line (fed by `bringup:` events)
       + '</span><span id="hydstep" class="hydstep">' + (_bringupLine ? _esc(_bringupLine) : '') + '</span>';
-    document.body.classList.add('hydrating');
+    // Only the "env" case (a standalone bundle's frozen preview) substitutes real cells with a
+    // static, non-live render — that's the one case where clicking in is genuinely meaningless
+    // (your edit would target a snapshot, not the real notebook). "remote" already shows the real
+    // cells, just not-yet-computed — that stays fully interactive.
+    document.body.classList.toggle('hyd-preview', state.hydratingKind !== 'remote');
   } else if (state.hydrateError) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
     hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)
-    document.body.classList.remove('hydrating'); _bringupLine = '';
+    document.body.classList.remove('hyd-preview'); _bringupLine = '';
   } else {
-    hb.style.display = 'none'; document.body.classList.remove('hydrating'); _bringupLine = '';
+    hb.style.display = 'none'; document.body.classList.remove('hyd-preview'); _bringupLine = '';
   }
   updateStaleBadge(state);
   // Agent chat needs Kaimon's agent service — a standalone hub (slate --own / serve_notebook)
