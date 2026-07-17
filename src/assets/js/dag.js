@@ -367,6 +367,8 @@ async function _dagPeerPlan(refresh) {
   if (!el) { el = document.createElement('div'); el.id = 'dagpeerpanel'; el.className = 'dagpeerpanel'; pane.appendChild(el); }
   el.innerHTML =
     `<div class="dagpeerhd"><b>⇄ peer routing plan</b><span>` +
+    `<button onclick="_dagConnectMesh()" title="connect regions — review + arm the SSH mesh for any cross-host pair that isn't linked yet (re-opens the consent dialog, even after a prior 'Not now')">⇄ connect…</button>` +
+    `<button onclick="_dagDisconnectMesh()" title="disconnect — revoke the SSH mesh: remove this notebook's regions' keys, scoped grants, and host-key pins from every host; cross-region transfers fall back to the hub relay">⇄ disconnect…</button>` +
     `<button onclick="_dagProbeTransfers()" title="recalculate — run a test transfer on every region route now and measure the live throughput">↻ recalculate</button>` +
     `<button onclick="{const p=document.getElementById('dagpeerpanel'); if(p) p.remove();}">✕</button>` +
     `</span></div><div class="dagpeerbody">${refresh ? 'recalculating…' : 'loading…'}</div>`;
@@ -379,6 +381,38 @@ async function _dagPeerPlan(refresh) {
   }
 }
 window._dagPeerPlan = _dagPeerPlan;
+
+// "⇄ connect…" → re-summon the mesh consent dialog on demand (even after a prior "Not now"), fulfilling the
+// popup's "connect later from the peer routing plan" promise. `?force=1` recomputes the consent server-side,
+// bypassing the dismissal; shows the dialog if any cross-host pair is still un-armed, else a reassuring toast.
+async function _dagConnectMesh() {
+  try {
+    const d = await (await fetch(_apipath('/api/mesh-consent') + '?force=1')).json();
+    if (d && d.pairs && d.pairs.length) window.onMeshConsent && window.onMeshConsent(d);
+    else window.toast && window.toast('All cross-host regions are already connected.', 3500, 'ok');
+  } catch (_) { window.toast && window.toast('Could not load the mesh consent.', 4000, 'err'); }
+}
+window._dagConnectMesh = _dagConnectMesh;
+
+// "⇄ disconnect…" → revoke the SSH mesh for this notebook's regions (the inverse of connect). Confirms first
+// (it removes real ~/.ssh artifacts across hosts), POSTs the teardown, then reloads the plan + overlay so the
+// verdicts flip back to relay. Reversible — ⇄ connect… re-installs.
+async function _dagDisconnectMesh() {
+  const msg = "Revoke the SSH mesh for this notebook's regions?\n\nThis removes their slate ed25519 keys, the " +
+    "scoped authorized_keys grants on peer hosts, and the host-key pins — everywhere. Cross-region transfers " +
+    "then fall back to the hub relay. You can reconnect anytime.";
+  if (!await confirmDark(msg, 'Disconnect & revoke', 'danger')) return;
+  const el = document.getElementById('dagpeerpanel'), body = el && el.querySelector('.dagpeerbody');
+  if (body) body.innerHTML = 'revoking mesh…';
+  try {
+    const r = await (await fetch(_apipath('/api/mesh-teardown'), { method: 'POST' })).json();
+    if (r && r.ok) window.toast && window.toast('Mesh revoked for ' + ((r.torn_down || []).join(', ') || 'these regions'), 4500, 'ok');
+    else window.toast && window.toast('Teardown failed: ' + ((r && r.error) || 'unknown error'), 7000, 'err');
+  } catch (_) { window.toast && window.toast('Could not reach the hub to revoke the mesh.', 6000, 'err'); }
+  try { const d = await (await fetch(_apipath('/api/peer-plan'))).json(); if (body) body.innerHTML = _dagRenderPeerPlan(d); } catch (_) {}
+  try { _dagFetchRoutes(); } catch (_) {}
+}
+window._dagDisconnectMesh = _dagDisconnectMesh;
 
 // "recalculate" → actively probe every region route NOW with a throwaway measured transfer (random bytes,
 // never memo-cached), instead of just clearing verdicts and waiting for a cell to drive one. Then reload
@@ -1033,13 +1067,50 @@ function _dagRegionRoutes(L, regEdges) {
     arr.forEach((en, idx) => { yOf[en.it.i + ':' + en.role] = arr.length === 1 ? (ylo + yhi) / 2 : ylo + (yhi - ylo) * (idx + 1) / (arr.length + 1); });
   }
   const routes = {};
+  const parts = L.partitions;
+  const eqZ = (p, z) => Math.abs(p.x0 - z.x0) < 1 && Math.abs(p.y0 - z.y0) < 1 && Math.abs(p.x1 - z.x1) < 1;
   items.forEach(it => {
-    const e = it.e, laneX = it.right ? (zx1 + CH_OFF + it.lane * LANE_GAP) : (zx0 - CH_OFF - it.lane * LANE_GAP);
+    const e = it.e, zs = e.zs, zt = e.zt;
+    const yOv = Math.max(zs.y0, zt.y0) < Math.min(zs.y1, zt.y1);   // share vertical extent (a row band)
+    const xOv = Math.max(zs.x0, zt.x0) < Math.min(zs.x1, zt.x1);   // share horizontal extent (a column band)
+    // Facing side-by-side with a clear corridor → a short direct hop between the facing borders, no margin
+    // bus. The corridor guard keeps a STACKED column (A→C past B) on the bus so the edge never crosses B.
+    if (yOv && (zt.x0 >= zs.x1 || zs.x0 >= zt.x1)) {
+      const loX = Math.min(zs.x1, zt.x1), hiX = Math.max(zs.x0, zt.x0);
+      const y = (Math.max(zs.y0, zt.y0) + Math.min(zs.y1, zt.y1)) / 2;
+      const blocked = parts.some(p => !eqZ(p, zs) && !eqZ(p, zt) && p.x0 > loX - 1 && p.x1 < hiX + 1 && p.y0 < y - 1 && p.y1 > y + 1);
+      if (!blocked) { routes[e.src + '>' + e.dst] = [[zt.x0 >= zs.x1 ? zs.x1 : zs.x0, y], [zt.x0 >= zs.x1 ? zt.x0 : zt.x1, y]]; return; }
+    }
+    if (xOv && (zt.y0 >= zs.y1 || zs.y0 >= zt.y1)) {                // facing stacked with a clear corridor
+      const loY = Math.min(zs.y1, zt.y1), hiY = Math.max(zs.y0, zt.y0);
+      const x = (Math.max(zs.x0, zt.x0) + Math.min(zs.x1, zt.x1)) / 2;
+      const blocked = parts.some(p => !eqZ(p, zs) && !eqZ(p, zt) && p.y0 > loY - 1 && p.y1 < hiY + 1 && p.x0 < x - 1 && p.x1 > x + 1);
+      if (!blocked) { routes[e.src + '>' + e.dst] = [[x, zt.y0 >= zs.y1 ? zs.y1 : zs.y0], [x, zt.y0 >= zs.y1 ? zt.y0 : zt.y1]]; return; }
+    }
+    // Otherwise (diagonal, or a hop that would cross a third zone): the orthogonal side-channel bus.
+    const laneX = it.right ? (zx1 + CH_OFF + it.lane * LANE_GAP) : (zx0 - CH_OFF - it.lane * LANE_GAP);
     const ax = it.right ? e.zs.x1 : e.zs.x0, bx = it.right ? e.zt.x1 : e.zt.x0;
     const yA = yOf[it.i + ':s'], yB = yOf[it.i + ':t'];
     routes[e.src + '>' + e.dst] = [[ax, yA], [laneX, yA], [laneX, yB], [bx, yB]];   // out → down/up the lane → in
   });
   return routes;
+}
+// The point at HALF the polyline's arc length — the honest visual midpoint for a route label. (Anchoring at
+// a raw waypoint strands the label out in a margin lane on a bus route; this keeps it on the drawn edge.)
+function _dagPolyMidpoint(pts) {
+  if (!pts || !pts.length) return { pt: [0, 0], tan: [1, 0] };
+  if (pts.length === 1) return { pt: pts[0], tan: [1, 0] };
+  const seg = []; let total = 0;
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); seg.push(d); total += d; }
+  let half = total / 2;
+  for (let i = 0; i < seg.length; i++) {
+    if (half <= seg[i] || i === seg.length - 1) {
+      const t = seg[i] ? half / seg[i] : 0.5, dx = pts[i + 1][0] - pts[i][0], dy = pts[i + 1][1] - pts[i][1], dl = Math.hypot(dx, dy) || 1;
+      return { pt: [pts[i][0] + dx * t, pts[i][1] + dy * t], tan: [dx / dl, dy / dl] };
+    }
+    half -= seg[i];
+  }
+  return { pt: pts[Math.floor(pts.length / 2)], tan: [1, 0] };
 }
 let _dagRegionRouteCache = { sig: null, routes: null };
 function _dagCachedRegionRoutes(L, regEdges) {
@@ -1347,9 +1418,20 @@ function _dagOption() {
           }
           kids.push({ type: 'polygon', silent: true, style: { fill: col, opacity: 0.95 },
             shape: { points: [[tip[0], tip[1]], [bx - uy * aw, by + ux * aw], [bx + uy * aw, by - ux * aw]] } });
-          const mp = pts[Math.max(1, Math.floor(n / 2))] || tip;
-          kids.push({ type: 'text', silent: true, style: { x: mp[0], y: mp[1] - 6, text: lbl, fill: col,
-            font: '600 11px sans-serif', textAlign: 'center', textVerticalAlign: 'bottom', stroke: P.bg, lineWidth: 3 } });
+          // Label as a CHIP, OFFSET off the edge so it never sits on the line/arrow: a dark rounded
+          // background (reads over anything), bright text (not the edge colour — that overlapped illegibly),
+          // route-coloured border for the direct/ssh/relay cue. High z2 so EVERY label paints above EVERY
+          // edge+arrow in this series (not just its own), so a crossing edge can't occlude it.
+          const mid = _dagPolyMidpoint(pts), mpt = mid.pt;
+          let nx = -mid.tan[1], ny = mid.tan[0];                 // unit normal to the edge at the midpoint
+          if (ny > 0.01) { nx = -nx; ny = -ny; }                 // bias to the upper/left side, consistently
+          const lblW = lbl.length * 6.3 + 14, lblH = 18;
+          const off = Math.abs(nx) * lblW / 2 + Math.abs(ny) * lblH / 2 + 7;   // clear the line in the normal dir
+          const cx = mpt[0] + nx * off, cy = mpt[1] + ny * off;
+          kids.push({ type: 'rect', silent: true, z2: 30, shape: { x: cx - lblW / 2, y: cy - lblH / 2, width: lblW, height: lblH, r: 5 },
+            style: { fill: 'rgba(9,11,18,0.9)', stroke: col, lineWidth: 1, opacity: 0.97 } });
+          kids.push({ type: 'text', silent: true, z2: 31, style: { x: cx, y: cy + 0.5, text: lbl, fill: '#eaeefa',
+            font: '600 11px sans-serif', textAlign: 'center', textVerticalAlign: 'middle' } });
           return { type: 'group', children: kids };
         },
       },

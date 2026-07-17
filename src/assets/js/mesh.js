@@ -18,7 +18,7 @@ const busy = signal(false);        // true while arming (POST mesh-introduce in 
 // ── styles (injected once so notebook.css stays untouched — same pattern as health.js) ──────────────────
 const style = document.createElement('style');
 style.textContent = `
-  .meshbg{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;
+  .meshbg{position:fixed;inset:0;z-index:140;display:flex;align-items:center;justify-content:center;
     background:rgba(6,8,14,.6);backdrop-filter:blur(2px);}
   .meshcard{width:min(560px,92vw);max-height:88vh;overflow:auto;background:#141828;border:1px solid #2a2e40;
     border-radius:14px;box-shadow:0 18px 54px rgba(0,0,0,.55);padding:18px 20px;color:#d4d8e8;}
@@ -91,17 +91,17 @@ function MeshConsent() {
   return html`<div class="meshbg" onClick=${onBg}>
     <div class="meshcard" role="dialog" aria-modal="true">
       <h3><span class="meshicon">⇄</span> Connect these regions for direct transfer?</h3>
-      <p class="meshp">They run on different hosts. To move boundary values worker&#8209;to&#8209;worker over an
-        SSH&#8209;bridged link — instead of relaying every byte through this hub — Slate needs to exchange keys between them:</p>
+      <p class="meshp">They run on different hosts. To move boundary values worker‑to‑worker over an
+        SSH‑bridged link — instead of relaying every byte through this hub — Slate needs to exchange keys between them:</p>
       <ul class="meshpairs">${rows.map(p => html`<li>
         <b>${p.source}</b> <span class="meshhost">${p.source_host}</span>
         <span class="meshamp">↔</span>
         <b>${p.puller}</b> <span class="meshhost">${p.puller_host}</span></li>`)}</ul>
       <div class="meshsec">What this installs</div>
       <ul class="meshinstalls">
-        <li>an <b>ed25519 key</b> on each host — the private half is generated on&#8209;host and never leaves it</li>
-        <li>a locked&#8209;down <b>grant</b> on the source authorizing a forward to <b>only</b> its blob port — no shell, no other ports</li>
-        <li>a <b>host&#8209;key pin</b> so the bridge never trusts a host on first sight</li>
+        <li>an <b>ed25519 key</b> on each host — the private half is generated on‑host and never leaves it</li>
+        <li>a locked‑down <b>grant</b> on the source authorizing a forward to <b>only</b> its blob port — no shell, no other ports</li>
+        <li>a <b>host‑key pin</b> so the bridge never trusts a host on first sight</li>
       </ul>
       ${unreachable.length ? html`<div class="meshwarn">⚠ currently unreachable over SSH: ${unreachable.join(', ')} — arming will fail until it's back.</div>` : null}
       <p class="meshdim">Decline and transfers still work — they route through the hub relay, just slower. You can
