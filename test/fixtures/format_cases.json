@@ -18,5 +18,12 @@
   {"value": 12345,    "format": {"kind": "scientific", "digits": 3},                             "expected": "1.23e4"},
   {"value": 0.0012,   "format": {"kind": "scientific", "digits": 3},                             "expected": "1.20e-3"},
   {"value": 1000,     "format": {"kind": "scientific", "digits": 3},                             "expected": "1.00e3"},
-  {"value": "not a number", "format": {"kind": "currency"},                                      "expected": "not a number"}
+  {"value": "not a number", "format": {"kind": "currency"},                                      "expected": "not a number"},
+  {"value": 210000.0,            "format": null,                                                 "expected": "210000"},
+  {"value": 1250000.0,           "format": null,                                                 "expected": "1250000"},
+  {"value": 902.8549161999997,   "format": null,                                                 "expected": "902.855"},
+  {"value": -123.456789,         "format": null,                                                 "expected": "-123.457"},
+  {"value": 0.030000536728311206,"format": null,                                                 "expected": "0.0300005"},
+  {"value": 0.00001234,          "format": null,                                                 "expected": "1.234e-5"},
+  {"value": 0.4153,              "format": null,                                                 "expected": "0.4153"}
 ]

@@ -75,6 +75,15 @@ _names(t) = String[c.name for c in t.columns]              # ColumnDef → names
         @test err isa ArgumentError && occursin("trailing comma", err.msg)
     end
 
+    @testset "default_format: blanket numeric format, per-column override wins" begin
+        t = slate_table((Revenue = [45999.5, 12050.0], Margin = [0.324, 0.281], Product = ["A", "B"]);
+                        default_format = :integer, format = (Margin = :percent,))
+        cols = Dict(c.name => c for c in t.columns)
+        @test cols["Revenue"].format.kind == :integer          # blanket applied (numeric, no override)
+        @test cols["Margin"].format.kind == :percent           # explicit `format` wins over the blanket
+        @test cols["Product"].format === nothing                # non-numeric columns untouched
+    end
+
     @testset "viz (bar/heat) + domain + export_rows" begin
         t = slate_table((a = [1, 2, 3, 4], b = ["w", "x", "y", "z"]); viz = (a = :bar,), export_rows = 2)
         ca, cb = t.columns
