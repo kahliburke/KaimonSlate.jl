@@ -414,6 +414,23 @@ const _RUNNERS = Dict{String,Bool}()          # nb.id → a runner task is activ
 const _RUNNER_LOCK = ReentrantLock()
 const _RUNNER_FAILS = Dict{String,Int}()      # nb.id → consecutive runner failures; backs off + gives up so a
                                               # persistently-throwing drain can't re-arm in a tight loop (hub spin + log flood)
+# Cooperative stop signal for `close_notebook!`: an id can be REUSED the instant the same file is
+# reopened (once the old entry is gone from `h.notebooks`, `_unique_id` sees no conflict), but a
+# runner's `Threads.@spawn` task isn't otherwise interruptible — without this, closing a notebook
+# mid-drain orphans its task running forever against a torn-down `nb`, and it never clears
+# `_RUNNERS[id]` (only the loop's own `finally` does that) — so the REOPENED notebook, same id,
+# sees `_RUNNERS[id] == true` from the dead orphan and `_ensure_runner!` silently refuses to start
+# a new one: every cell sits STALE forever even though the fresh worker is healthy and idle.
+# Checked once per drain iteration (between cells, not mid-eval) — cheap and responsive enough.
+const _RUNNER_CANCEL = Dict{String,Bool}()
+# nb.id → epoch seconds a runner started — lets the supervisor sweep (`_reconcile_stale_runner!`)
+# detect + self-heal a `_RUNNERS` entry that's survived implausibly long (a bug THIS fix hasn't
+# anticipated, not just the close-race above, which `_RUNNER_CANCEL` already prevents) instead of
+# leaving a notebook silently wedged until something notices and restarts the whole hub.
+const _RUNNER_STARTED = Dict{String,Float64}()
+const _RUNNER_STALE_HITS = Dict{String,Int}()         # nb.id → consecutive stuck-sweep confirmations
+const _RUNNER_STALE_AFTER = 600.0                     # 10 min with pending work + no progress ⇒ suspect
+const _RUNNER_STALE_CONFIRMATIONS = 3                 # consecutive 5s sweeps before self-healing (~15s)
 
 # Per-notebook MAIN-kernel worker identity we last re-established (`_worker_key` = objectid + ns_gen). A
 # worker swap (cold spawn / pool adopt / reprovision — never a reattach) bumps `k.ns_gen`, handing us a
@@ -1093,7 +1110,45 @@ function _reconcile_nb_runs!(nb::LiveNotebook)
     return nothing
 end
 
+# Safety net alongside `_RUNNER_CANCEL` (which prevents the known cause — a close racing an
+# in-flight drain): if `_RUNNERS[nb.id]` says a runner is active, there's pending stale work, but
+# NOTHING is actually RUNNING, that's implausible for a genuinely active drain (which is always
+# either mid-eval of a cell or picking up its next one within a fraction of a second) — sustained
+# across several consecutive sweeps, it means the bookkeeping is lying: the real runner is gone
+# (crashed past its `finally`, or some other bug this fix didn't anticipate) and the notebook is
+# silently wedged. Self-heals by clearing the stale bookkeeping and re-arming, loudly logged since
+# this is the sweep catching something that's already a bug, not routine behavior.
+function _reconcile_stale_runner!(nb::LiveNotebook)
+    active = lock(_RUNNER_LOCK) do; get(_RUNNERS, nb.id, false); end
+    active || (delete!(_RUNNER_STALE_HITS, nb.id); return nothing)
+    has_pending, any_running = lock(nb.lock) do
+        _next_stale_cell(nb.report) !== nothing, any(c -> c.state == RUNNING, nb.report.cells)
+    end
+    if !has_pending || any_running
+        delete!(_RUNNER_STALE_HITS, nb.id)
+        return nothing
+    end
+    started = lock(_RUNNER_LOCK) do; get(_RUNNER_STARTED, nb.id, time()); end
+    (time() - started > _RUNNER_STALE_AFTER) || return nothing   # a real cell can legitimately run this long — only suspect once implausible
+    hits = get(_RUNNER_STALE_HITS, nb.id, 0) + 1
+    _RUNNER_STALE_HITS[nb.id] = hits
+    hits < _RUNNER_STALE_CONFIRMATIONS && return nothing
+    delete!(_RUNNER_STALE_HITS, nb.id)
+    lock(_RUNNER_LOCK) do
+        delete!(_RUNNERS, nb.id); delete!(_RUNNER_STARTED, nb.id); delete!(_RUNNER_CANCEL, nb.id)
+    end
+    ReportEngine._rlog("supervisor: notebook $(nb.id) looked wedged — a runner was marked active for " *
+                       "$(round(Int, time() - started))s with pending work and nothing actually running. " *
+                       "Clearing the stale flag and restarting its runner.")
+    @warn "slate: self-healed a wedged notebook runner" notebook = nb.id stuck_for_s = round(Int, time() - started)
+    _ensure_runner!(nb)
+    return nothing
+end
+
 function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, included at ~1510) — untyped so this loads
+    try; ReportEngine.reap_pending_kills!()   # hub-wide, not per-notebook — see gate_kernel.jl
+    catch e; ReportEngine._rlog("supervisor: pending-kill reap error: " * first(sprint(showerror, e), 120))
+    end
     nbs = lock(h.lock) do; collect(values(h.notebooks)); end
     for nb in nbs
         try; _liveness_sweep!(nb)   # heartbeat + dead-wire heal; caches running ids for the reconciler
@@ -1101,6 +1156,9 @@ function _supervise_runs!(h)   # NOTE: `Hub` is defined later (server_hub.jl, in
         end
         try; _reconcile_nb_runs!(nb)
         catch e; ReportEngine._rlog("supervisor: reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
+        end
+        try; _reconcile_stale_runner!(nb)
+        catch e; ReportEngine._rlog("supervisor: stale-runner reconcile error on $(nb.id): " * first(sprint(showerror, e), 120))
         end
         try; _watchdog_scan!(nb)
         catch e; ReportEngine._rlog("watchdog: scan error on $(nb.id): " * first(sprint(showerror, e), 120))
@@ -2022,7 +2080,16 @@ function _run_loop!(nb::LiveNotebook)
         if !isempty(pending) && ReportEngine.resolve_macros!(nb.report, nb.kernel, pending)
             lock(nb.lock) do; ReportEngine.rebuild_precise!(nb.report); end
         end
+        cancelled = false
         while true
+            # Checked between cells (not mid-eval) — the notebook was closed out from under this
+            # drain (see `_RUNNER_CANCEL`'s docstring). Stop cleanly rather than keep running
+            # against a torn-down `nb`, or worse, being unkillable and blocking a reopen forever.
+            if lock(_RUNNER_LOCK) do; get(_RUNNER_CANCEL, nb.id, false); end
+                cancelled = true
+                ReportEngine._rlog("slate: runner for $(nb.id) stopped — notebook was closed mid-drain")
+                break
+            end
             # Parallel fast-path: hand all stale code cells to the worker at once (opt-in). Falls through
             # to the serial step for markdown, reactive restales, and the 0/1-code-cell case. Held under
             # the eval mutex so a concurrent slate.eval scratch poke can't race the batch.
@@ -2037,6 +2104,7 @@ function _run_loop!(nb::LiveNotebook)
             _emit_pending(nb, pending)          # k/N pill: PENDING (stale+running); frontend adds done
             lock(_eval_mutex(nb)) do; _eval_one!(nb, target); end
         end
+        cancelled && return nothing   # skip post-drain graph refinement/re-arm — the notebook is gone
         # Drained: any bare-`using` barrier cells have now run, so resolve their exports and rebuild
         # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the
         # "barrier" marking. Kept off the hot per-cell path — it fires once per drain and no-ops unless
@@ -2062,16 +2130,25 @@ function _run_loop!(nb::LiveNotebook)
         # drain retries slowly, not hot.
         sleep(min(0.5 * fails, 15.0))
     finally
-        lock(_RUNNER_LOCK) do; delete!(_RUNNERS, nb.id); end
-        again = lock(nb.lock) do; _next_stale_cell(nb.report) !== nothing; end
-        # Give up re-arming after too many consecutive failures — the work is wedged (a dead region, a cell
-        # that can't resolve). A user edit / explicit re-run clears the counter (the drain path above) and
-        # revives it. Without this cap a permanently-failing pass spins forever.
-        giveup = lock(_RUNNER_LOCK) do; get(_RUNNER_FAILS, nb.id, 0) >= 20; end
-        if again && !giveup
-            _ensure_runner!(nb)
-        elseif again && giveup
-            ReportEngine._rlog("slate: notebook $(nb.id) runner gave up after 20 failed passes — edit or re-run a cell to retry")
+        was_cancelled = lock(_RUNNER_LOCK) do
+            delete!(_RUNNERS, nb.id)
+            delete!(_RUNNER_STARTED, nb.id)
+            delete!(_RUNNER_STALE_HITS, nb.id)
+            c = get(_RUNNER_CANCEL, nb.id, false)
+            delete!(_RUNNER_CANCEL, nb.id)         # don't poison a LATER reopen's fresh runner
+            c
+        end
+        if !was_cancelled
+            again = lock(nb.lock) do; _next_stale_cell(nb.report) !== nothing; end
+            # Give up re-arming after too many consecutive failures — the work is wedged (a dead region, a cell
+            # that can't resolve). A user edit / explicit re-run clears the counter (the drain path above) and
+            # revives it. Without this cap a permanently-failing pass spins forever.
+            giveup = lock(_RUNNER_LOCK) do; get(_RUNNER_FAILS, nb.id, 0) >= 20; end
+            if again && !giveup
+                _ensure_runner!(nb)
+            elseif again && giveup
+                ReportEngine._rlog("slate: notebook $(nb.id) runner gave up after 20 failed passes — edit or re-run a cell to retry")
+            end
         end
     end
     return nothing
@@ -2081,7 +2158,11 @@ end
 function _ensure_runner!(nb::LiveNotebook)
     started = lock(_RUNNER_LOCK) do
         get(_RUNNERS, nb.id, false) && return false
-        _RUNNERS[nb.id] = true; return true
+        _RUNNERS[nb.id] = true
+        _RUNNER_CANCEL[nb.id] = false
+        _RUNNER_STARTED[nb.id] = time()
+        delete!(_RUNNER_STALE_HITS, nb.id)
+        return true
     end
     started || return nothing
     Threads.@spawn _run_loop!(nb)        # the loop emits the live run-batch size each iteration
