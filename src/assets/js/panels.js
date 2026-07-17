@@ -395,8 +395,6 @@ async function _reopenByPath() {
 }
 // Back-compat alias used by api()'s catch.
 const _showDisconnect = _onConnTrouble;
-// Manual button: probe right now (don't wait for the next interval tick).
-function reconnectNow() { _probe(); }
 
 // ── Custom per-cell live streams (slate_emit → slateOnStream) ─────────────────────────────────────
 // A cell that renders a custom JS widget (via @asset) can receive a low-latency stream of its own

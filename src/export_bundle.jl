@@ -653,7 +653,12 @@ function _extract_bundle!(b64::AbstractString, dir::AbstractString)
     if meta !== nothing && get(meta, "mode", "") == "repo-rooted"
         Sys.which("git") === nothing && error("expand: this is a repo-rooted bundle but `git` isn't available")
         clone = joinpath(mktempdir(), "r")
-        run(pipeline(`git clone -q $(joinpath(dir, "repo.gitbundle")) $clone`; stdout = devnull, stderr = devnull))
+        # The bundle is untrusted (it rides in a `.jl` anyone can hand you), so clone it with the
+        # dangerous surfaces closed: no hooks (template hooks can't run), fsck the incoming objects
+        # (reject malformed/oversized ones — the crafted-object CVE class), and never recurse
+        # submodules (the `url = ext::…` RCE vector). Reconstruction stays inert data-materialisation.
+        run(pipeline(`git -c core.hooksPath=/dev/null -c transfer.fsckObjects=true clone -q --no-recurse-submodules $(joinpath(dir, "repo.gitbundle")) $clone`;
+                     stdout = devnull, stderr = devnull))
         urlf = joinpath(dir, "git-remote.txt")
         remote_url = isfile(urlf) ? strip(read(urlf, String)) : ""
         ov = joinpath(dir, "overlay")
