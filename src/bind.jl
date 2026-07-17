@@ -21,7 +21,7 @@ function set_bind_value!(report::Report, cell::Cell, name::Symbol, value,
     i === nothing && return cell
     spec = cell.binds[i]
     spec.value = assign_bind!(kernel, report, spec.name, value)
-    cell.state = FRESH
+    mark_fresh!(cell)
     return cell
 end
 

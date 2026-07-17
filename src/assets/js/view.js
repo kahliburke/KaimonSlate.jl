@@ -243,6 +243,12 @@ function _memoBadge(c) {
   const tip = c.memoWhy ? base + ' — ' + c.memoWhy : base;
   return `<span class="memobadge ${cls} memo-${c.memo}" title="${_esc(tip)}">${_memoGlyph(c.memo)}</span>`;
 }
+// `locked` cell tag: frozen against upstream/reload churn, only a manual ▶ moves it — shown next to
+// the memo badge since it's the same "what determines this cell's cached state" question at a glance.
+function _lockBadge(c) {
+  if (!c.tags || !c.tags.includes('locked')) return '';
+  return `<span class="lockbadge" title="locked — frozen against upstream changes and reload; only ▶ re-runs it (its memo is kept)">🔒</span>`;
+}
 function cellHeaderInner(c) {
   const isCode = c.kind === 'code' && !hasBinds(c);
   const other = c.kind === 'md' ? 'code' : 'md';
@@ -258,6 +264,7 @@ function cellHeaderInner(c) {
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     cellRegionChip(c) +
+    _lockBadge(c) +
     (c.dupdefs && c.dupdefs.length
       ? `<span class="dupwarn" onclick="window.dupInfo(event,'${c.id}')" title="defined in more than one cell — click for details">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
     (c.backrefs && c.backrefs.length

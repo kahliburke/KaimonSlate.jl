@@ -41,7 +41,7 @@ function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false)
     lock(nb.lock) do
         build_dependencies!(nb.report)
         for (i, c) in enumerate(nb.report.cells)
-            i >= idx && (c.state = STALE)
+            i >= idx && ReportEngine.restale!(c)
         end
         announce && _announce_cell!(nb, idx)
         _eval!(nb)                       # kick the async runner (non-blocking; safe inside the lock)
@@ -64,7 +64,7 @@ function _commit_reorder!(nb::LiveNotebook)
         if !isempty(changed)
             restale = dependents_of(nb.report, changed)   # the changed cells + everything downstream
             for c in nb.report.cells
-                c.id in restale && (c.state = STALE)
+                c.id in restale && ReportEngine.restale!(c)
             end
             _eval!(nb)                   # kick the async runner (non-blocking; safe inside the lock)
             _autoindex!(nb)
@@ -82,7 +82,7 @@ function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractStr
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
     cell = Cell(nid, kind == "md" ? MARKDOWN : CODE, "")
-    cell.state = FRESH                               # empty cell: nothing to run (don't show it stale)
+    ReportEngine.mark_fresh!(cell)                    # empty cell: nothing to run (don't show it stale)
     pos = before ? max(1, i) : i + 1                 # insert above (at `i`) or below the reference
     insert!(cells, pos, cell)
     _commit_reorder!(nb)                             # empty cell defines nothing → no restale/re-eval
@@ -488,13 +488,12 @@ function agent_scratch_eval!(nb::LiveNotebook, source::AbstractString;
     memo = isempty(memo_key) ? nothing :
         (; key = String(memo_key), names = collect(String, memo_names), threshold = Float64(memo_threshold))
     cell = Cell(_scratch_id(), CODE, String(source))   # display the ORIGINAL source, not the let-wrap
-    cell.state = RUNNING
+    ReportEngine.mark_running!(cell)
     _push_scratch!(nb, cell)                            # surface it immediately (running) in the panel
     out = lock(_eval_mutex(nb)) do
         ReportEngine.eval_capture(nb.kernel, nb.report, src, "scratch", memo)
     end
-    cell.output = out
-    cell.state = (out !== nothing && out.exception !== nothing) ? ERRORED : FRESH
+    ReportEngine.mark_result!(cell, out)
     _broadcast_scratch(nb, cell)                        # push the finished cell (result / error)
     return _output_result_text(out)
 end
@@ -669,7 +668,12 @@ function agent_run!(nb::LiveNotebook, id::AbstractString = "";
                 frc = get!(Set{String}, _FORCE_RUN, nb.id)
                 for did in dependents_of(nb.report, Set([id]))   # closure includes `id` itself
                     j = findfirst(c -> c.id == did, nb.report.cells)
-                    j === nothing || (nb.report.cells[j].state = STALE)
+                    j === nothing && continue
+                    c = nb.report.cells[j]
+                    # A locked dependent stays frozen against this cascade too — only its OWN
+                    # ▶ (did == id) may re-run it, so the played cell itself bypasses the guard.
+                    ok = did == id ? (c.state = STALE; true) : ReportEngine.restale!(c)
+                    ok || continue
                     push!(frc, String(did))
                 end
             end
@@ -975,12 +979,14 @@ end
 # dependency inference each eval, so it's preserved here. Toggling an eval flag (`trace`/`cache`/…)
 # changes the run result, so re-stale the cell in that case (same policy as `set_cell_flag!`).
 function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
+    unpin = nothing   # (kernel, oldkey) — an unlock's memo_pin! release, done OUTSIDE the lock (a gate RPC)
     lock(nb.lock) do
         i = _index_of(nb.report.cells, id); i === nothing && return nb
         c = nb.report.cells[i]
         had_trace = :trace in c.flags
         had_cache = :cache in c.flags
         had_nocache = :nocache in c.flags
+        had_locked = :locked in c.flags
         had_needs = sort!(ReportEngine._manual_needs(c.flags))
         had_mut = sort!(ReportEngine._manual_mutates(c.flags))
         want = _parse_tag_symbols(tags)
@@ -999,8 +1005,26 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
             build_dependencies!(nb.report)
             c.state = STALE
         end
+        now_locked = :locked in c.flags
+        if now_locked && !had_locked
+            # `locked` just turned ON. A STALE cell just self-captures on its next ordinary run
+            # (`_eval_one!` persists + pins the key it freezes on). A FRESH cell needs an explicit
+            # (surgical, non-cascading — no dependents involved) force-run so its CURRENT result
+            # actually lands in the durable store under a pinned key, not just the in-memory value
+            # `c.output` (which a restart would lose): `always` in `_eval_one!` guarantees the
+            # store happens even for a cell too cheap to auto-persist otherwise.
+            if c.state == FRESH
+                c.state = STALE
+                push!(get!(Set{String}, _FORCE_RUN, nb.id), c.id)
+            end
+        elseif !now_locked && had_locked
+            old = ReportEngine._locked_key(c)
+            ReportEngine._set_locked_key!(c, "")
+            isempty(old) || (unpin = (_region_route(nb, c)[1], old))
+        end
         _persist!(nb; label = "tags · $id")
     end
+    unpin === nothing || ReportEngine.memo_pin!(unpin[1], nb.report, unpin[2], false)
     return nb
 end
 
@@ -1017,7 +1041,7 @@ function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; s
     build_dependencies!(nb.report)
     stale = dependents_of(nb.report, [old.id])
     for c in nb.report.cells
-        c.id in stale && (c.state = STALE)
+        c.id in stale && ReportEngine.restale!(c)
     end
     _persist!(nb)
     _autoindex!(nb)                      # the new source may introduce a `using`

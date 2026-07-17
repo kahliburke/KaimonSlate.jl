@@ -269,6 +269,45 @@ function entry_bytes(root::AbstractString, key::AbstractString)
     return b
 end
 
+# ── Pins (the `locked` cell tag's durability guarantee) ────────────────────────────────────────
+# A pinned key is exempt from `gc` regardless of age/cap — a small `pins.toml` set at the store
+# root (NOT per-manifest, so pinning never touches/rewrites the manifest file itself). The set is
+# tiny (one entry per locked cell across every notebook sharing this store) so a full read+rewrite
+# on every pin/unpin is cheap and keeps the file atomic + trivially inspectable.
+const _PINS_FILE = "pins.toml"
+_pins_path(root::AbstractString) = joinpath(root, _PINS_FILE)
+function _read_pins(root::AbstractString)::Set{String}
+    p = _pins_path(root)
+    isfile(p) || return Set{String}()
+    d = try; TOML.parsefile(p); catch; return Set{String}(); end
+    ks = get(d, "keys", nothing)
+    return ks isa AbstractVector ? Set{String}(String(k) for k in ks) : Set{String}()
+end
+
+"""
+    set_pin!(root, key, pin::Bool) -> nothing
+
+Pin (`pin=true`) or release (`pin=false`) `key` against `gc` eviction. Idempotent.
+"""
+function set_pin!(root::AbstractString, key::AbstractString, pin::Bool)
+    _checkkey(key)
+    isdir(root) || mkpath(root)
+    pins = _read_pins(root)
+    pin ? push!(pins, key) : delete!(pins, key)
+    tmp = tempname(root)
+    try
+        open(io -> TOML.print(io, Dict("keys" => sort!(collect(pins)))), tmp, "w")
+        mv(tmp, _pins_path(root); force = true)
+    catch
+        try; rm(tmp; force = true); catch; end
+        rethrow()
+    end
+    return nothing
+end
+
+"Is `key` currently pinned?"
+is_pinned(root::AbstractString, key::AbstractString) = key in _read_pins(root)
+
 "Store shape/size: `(manifests, blobs, bytes)` — cheap enough for telemetry."
 function stats(root::AbstractString)
     nm = 0; nb = 0; bytes = 0
@@ -291,25 +330,35 @@ references it — a shared blob outlives any one entry's eviction. `grace` (seco
 just-written blobs whose manifest hasn't landed yet: an unreferenced blob younger than it is
 never deleted, so a concurrent worker mid-`put_blob`→`write_manifest` can't be raced. Legacy
 fmt≤2 flat files at the root level (unreadable now) and stale temp litter are always swept.
-Best-effort throughout: a vanished file (another worker's gc) is skipped, never an error.
+A `set_pin!`ned key is NEVER evicted, regardless of age or cap (the `locked` cell tag's
+durability guarantee) — pins can keep the store over `cap` indefinitely; that's the deliberate
+trade (no silent cap violates the guarantee worse than an oversized store does). Best-effort
+throughout: a vanished file (another worker's gc) is skipped, never an error.
 """
 function gc(root::AbstractString; cap::Integer, grace::Real = 900.0)
     isdir(root) || return nothing
     now = time()
     total = 0
+    pins = _read_pins(root)
     # Legacy fmt≤2 entries lived as flat files directly in `root` — no current code can read
     # them, so they're pure dead weight; sweep unconditionally.
     for f in readdir(root; join = true)
-        isfile(f) && try; rm(f; force = true); catch; end
+        isfile(f) && f != _pins_path(root) && try; rm(f; force = true); catch; end
     end
     # Inventory. Blobs live at blobs/sha256/<p>/<hash>; anything under blobs/ whose basename
     # isn't a digest is temp litter from a crashed `put_blob` — deletable past the grace window.
     mdir = joinpath(root, "manifests"); bdir = joinpath(root, "blobs")
-    manifests = Tuple{String,Float64,Int}[]           # (path, mtime, size)
+    manifests = Tuple{String,Float64,Int}[]           # (path, mtime, size) — EVICTABLE (unpinned) only
+    pinned_paths = String[]                            # pinned manifests: refcounted, never evicted
     isdir(mdir) && for f in readdir(mdir; join = true)
         isfile(f) || continue
         st = try; (Float64(mtime(f)), Int(filesize(f))); catch; continue; end
-        push!(manifests, (f, st[1], st[2])); total += st[2]
+        total += st[2]
+        if splitext(basename(f))[1] in pins
+            push!(pinned_paths, f)
+        else
+            push!(manifests, (f, st[1], st[2]))
+        end
     end
     blobinfo = Dict{String,Tuple{String,Float64,Int}}()   # hash → (path, mtime, size)
     isdir(bdir) && for (r, _, fs) in walkdir(bdir), name in fs
@@ -322,10 +371,12 @@ function gc(root::AbstractString; cap::Integer, grace::Real = 900.0)
         end
     end
     total <= cap && return nothing
-    # Refcount blobs from the surviving manifests (one parse pass, only on the over-cap path).
+    # Refcount blobs from EVERY surviving manifest, pinned or not (one parse pass, only on the
+    # over-cap path) — a pinned entry's blobs must never look orphaned just because the manifest
+    # itself is excluded from the eviction list below.
     refs = Dict{String,Int}()
     msets = Dict{String,Vector{String}}()             # manifest path → its blob hashes
-    for (p, _, _) in manifests
+    for p in Iterators.flatten((first.(manifests), pinned_paths))
         hs = (d = try; TOML.parsefile(p); catch; nothing; end) === nothing ? String[] : _manifest_blobs(d)
         msets[p] = hs
         for h in hs; refs[h] = get(refs, h, 0) + 1; end

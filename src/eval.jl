@@ -150,10 +150,7 @@ rebuild (ground truth, §6). Returns the fresh module.
 """
 function reset_module!(report::Report)
     report.mod = _new_module(report)
-    for c in report.cells
-        c.state = STALE
-        c.output = nothing
-    end
+    reset_all!(report)
     return report.mod
 end
 
@@ -301,30 +298,94 @@ function macroexpand_cells(::InProcessKernel, report::Report, srcs::AbstractDict
     return out
 end
 
+"The in-process kernel's own active project's direct deps as `{name, version, uuid}` — the
+same project `pkg_op` mutates. Mirrors the gate worker's `__slate_project_deps`."
+function _active_project_deps()
+    out = Dict{String,Any}[]
+    try
+        proj = Pkg.project()
+        info = Pkg.dependencies()
+        for (name, uuid) in proj.dependencies
+            pi = get(info, uuid, nothing)
+            ver = (pi === nothing || pi.version === nothing) ? "" : string(pi.version)
+            push!(out, Dict{String,Any}("name" => name, "version" => ver, "uuid" => string(uuid)))
+        end
+    catch
+    end
+    return out
+end
+
+# The in-process kernel's dependency baseline — whatever was already in the active project
+# when the process started, i.e. the running app's OWN footprint (KaimonSlate + its deps
+# standalone, or Kaimon + its deps as an extension). Captured once (KaimonSlate's `__init__`,
+# before any notebook could ever call `pkg_op`), so the app's own deps never masquerade as
+# something a notebook added — mirrors `_WORKER_INFRA_PKGS` filtering a GateKernel's env.
+const _INPROCESS_BASE_DEPS = Ref{Set{String}}(Set{String}())
+function _snapshot_inprocess_base_deps!()
+    d = Set{String}()
+    try
+        for (name, _) in Pkg.project().dependencies
+            push!(d, name)
+        end
+    catch
+    end
+    _INPROCESS_BASE_DEPS[] = d
+    return d
+end
+
 """
     project_deps(kernel, report) -> Vector{Dict}
 
 The notebook project's direct dependencies as `{name, version}` (for eager docs
-auto-indexing). The gate kernel reads its worker's active project; in-process has no
-distinct project, so it returns nothing (only `using`'d packages get indexed there).
+auto-indexing — everything reachable is worth indexing, so this is intentionally
+unfiltered). The gate kernel reads its worker's active project; the in-process
+kernel has no separate worker, so it reads the host's own active project — the same
+one `pkg_op` adds/removes into.
 """
-project_deps(::InProcessKernel, ::Report) = Dict{String,Any}[]
+project_deps(::InProcessKernel, ::Report) = _active_project_deps()
 
-# In-process has no notebook/parent split (cells run in the host's active project).
-env_info(::InProcessKernel, ::Report) = (notebook = (path = "", deps = Dict{String,Any}[]), parent = nothing)
+# In-process has no parent to fork from (cells already run in the host's active
+# project — same "env IS the whole world" semantics as a GateKernel detached notebook) —
+# but unlike a GateKernel's fresh worker env, that active project already carries the
+# running app's OWN deps, so filter those out via the startup baseline: only what a
+# notebook itself added should show in the package panel / reproducibility footer.
+function env_info(::InProcessKernel, ::Report)
+    base = _INPROCESS_BASE_DEPS[]
+    deps = filter(d -> !(string(get(d, "name", "")) in base), _active_project_deps())
+    return (notebook = (path = dirname(Pkg.project().path), deps = deps), parent = nothing)
+end
 bundle_info(::InProcessKernel, ::Report) = (projectdir = "", pathdeps = NamedTuple[])
+
+"""
+    memo_pin!(kernel, report, key::AbstractString, pin::Bool) -> nothing
+
+Pin (`pin=true`) or release (`pin=false`) a memo entry against `gc` eviction — the `locked` cell
+tag's durability guarantee (§ `set_cell_tags!`). The in-process kernel has no durable memo store,
+so this is a no-op there.
+"""
+memo_pin!(::Kernel, ::Report, ::AbstractString, ::Bool) = nothing
 
 """
     pkg_op(kernel, report, op, name) -> Dict{String,Any}
 
 Add (`op="add"`) or remove (`op="rm"`) a package in the kernel's active project — the
-notebook's own dependency environment. The gate kernel mutates its worker's project;
-the in-process kernel has NO distinct notebook project (cells eval in the extension), so
-it refuses rather than touch the host environment. Returns `{ok, message}`.
+notebook's own dependency environment. The gate kernel mutates its worker's project; the
+in-process kernel has no separate worker to fork an env in, so cells already run in the
+process's own active project — same "env IS the whole world" semantics as a GateKernel's
+detached notebook (`server.jl`'s `parent == ""` case). `target` is accepted for API parity
+with `GateKernel` but has no separate object to select (no parent to add to instead).
+Returns `{ok, message}`.
 """
-pkg_op(::InProcessKernel, ::Report, ::AbstractString, ::AbstractString) =
-    Dict{String,Any}("ok" => false,
-        "message" => "This notebook isn't inside a Julia project (in-process kernel), so it has no package environment to manage. Open it inside a project directory to add packages.")
+function pkg_op(::InProcessKernel, ::Report, op::AbstractString, name::AbstractString;
+                target::AbstractString = "notebook")
+    op in ("add", "rm") || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
+    try
+        op == "add" ? Pkg.add(String(name)) : Pkg.rm(String(name))
+        return Dict{String,Any}("ok" => true, "message" => "")
+    catch e
+        return Dict{String,Any}("ok" => false, "message" => sprint(showerror, e))
+    end
+end
 
 """
     eval_cell!(report, cell, kernel=InProcessKernel()) -> Cell
@@ -486,13 +547,13 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
     if cell.kind == MARKDOWN
         exprs = _md_interp_exprs(cell.source)
         cell.interp = isempty(exprs) ? CellOutput[] : interpolate(kernel, report, exprs)
-        cell.state = FRESH
+        mark_fresh!(cell)
         _emit_progress(report.id, cell)   # md renders instantly → patch it live (don't leave it "stale")
         return cell
     end
     # Bind cells are ordinary code now: `@bind x W(…)` runs, assigns `x`, and reports
     # its control through the capture channel (`output.binds`). No special path.
-    cell.state = RUNNING
+    mark_running!(cell)
     _emit_progress(report.id, cell)   # announce: this cell is now running (live status stream)
     # `trace` flag: wrap the source in `@trace begin … end` so eval returns a SlateTrace of
     # inline values (the cell's normal output is replaced by the trace table). Dependency
@@ -513,9 +574,9 @@ function eval_cell!(report::Report, cell::Cell, kernel::Kernel = InProcessKernel
             # `cache` tag: a pipeline stage whose result must persist REGARDLESS of runtime — the
             # explicit opposite of `nocache` (auto-caching only catches cells over the threshold).
             always = (:cache in cell.flags))
-    cell.output = eval_capture(kernel, report, src, "cell:" * cell.id, memo)
-    cell.binds = cell.output.binds
-    cell.state = cell.output.exception === nothing ? FRESH : ERRORED
+    out = eval_capture(kernel, report, src, "cell:" * cell.id, memo)
+    mark_result!(cell, out)
+    cell.binds = out.binds
     _emit_progress(report.id, cell)   # announce: finished (the result/error can light up immediately)
     return cell
 end

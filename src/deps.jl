@@ -617,6 +617,85 @@ function _manual_mutates(flags::AbstractSet{Symbol})
 end
 _manual_mutates(c::Cell) = _manual_mutates(c.flags)
 
+# The `lockedkey=<key>` header tag: a `locked` cell's memo key AS OF the run it froze on — set
+# by `set_cell_tags!` (locking, or a forced re-run of an already-locked cell), read at eval time
+# (`_prepare_region_for_cell!`'s sibling in server.jl) to restore/pin BY THIS FIXED KEY instead of
+# the freshly-computed one, so a locked cell survives upstream drift across a process restart (not
+# just the live in-memory FRESH state `update_source!`'s restale-skip protects). Single-valued —
+# unlike `needs=`/`mutates=`, a cell has at most one locked key at a time.
+function _locked_key(flags::AbstractSet{Symbol})
+    for f in flags
+        s = String(f)
+        startswith(s, "lockedkey=") && return chopprefix(s, "lockedkey=")
+    end
+    return ""
+end
+_locked_key(c::Cell) = _locked_key(c.flags)
+function _set_locked_key!(c::Cell, key::AbstractString)
+    filter!(f -> !startswith(String(f), "lockedkey="), c.flags)
+    isempty(key) || push!(c.flags, Symbol("lockedkey=" * key))
+    return c
+end
+
+# Shared guard for every upstream-change cascade (source edit, bind push, asset watcher, force-run,
+# reorder): a locked cell holding a FRESH frozen result stays put — only its OWN ▶ may restale it.
+# Returns whether the cell was actually restaled, so callers can track which cells changed.
+function restale!(c::Cell)
+    (:locked in c.flags && c.state == FRESH) && return false
+    c.state = STALE
+    return true
+end
+
+# Unconditional wipe — a fresh/replaced process has NOTHING established, so every code cell
+# (including locked ones) must go STALE with its in-memory output dropped. Bypasses `restale!`'s
+# locked guard on purpose: the caller (a full kernel reset) is responsible for reconciling locked
+# cells back to FRESH afterward (`_self_heal_locked!`), same as `restart_kernel!` already does.
+function reset_all!(report::Report)
+    for c in report.cells
+        c.state = STALE
+        c.output = nothing
+    end
+    return report
+end
+
+# A cell caught mid-run when something invalidated it (an orphaned worker eval, a source edit
+# racing its own in-flight run, a bring-up failure) snaps back to STALE so it gets picked up again —
+# but only if it's genuinely still RUNNING; a cell that already finished (FRESH/ERRORED) or was never
+# started (STALE) is left alone. Returns whether it actually reverted.
+function revert_running!(c::Cell)
+    c.state == RUNNING || return false
+    c.state = STALE
+    return true
+end
+
+mark_running!(c::Cell) = (c.state = RUNNING; c)
+
+# A state flip with no output involved (markdown render, `@bind` value change, a fresh empty
+# cell) — nothing to compute, so no exception to check.
+mark_fresh!(c::Cell) = (c.state = FRESH; c)
+
+# ANY→FRESH/ERRORED from a genuine computed output (possibly `nothing` — a scratch eval that
+# never ran). Callers that also mirror bind specs (`c.binds = out.binds`) do so themselves;
+# whether binds surface differs by site (a scratch eval never does, a real cell always does).
+mark_result!(c::Cell, out) = (c.output = out;
+    c.state = (out === nothing || out.exception === nothing) ? FRESH : ERRORED; c)
+
+# A failure that never reached the worker (region prime/presync) — synthesize the error output.
+mark_errored!(c::Cell, msg::AbstractString) = (
+    c.output = CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", msg, nothing, 0.0);
+    c.state = ERRORED; c)
+
+# Which memo key a cell's next run should target: its pinned `lockedkey=` (a locked cell, not
+# forced, already froze on a run) or a freshly computed one (everyone else, or an explicit ▶
+# force — the one thing allowed to move the lock). Single source of truth for the locked-vs-
+# computed key choice `_eval_one!` makes on every run.
+function target_key(cell::Cell, report::Report; forced::Bool = false)::String
+    computed_key = _memo_key(report, cell)
+    locked = :locked in cell.flags
+    lockedkey = locked ? _locked_key(cell) : ""
+    return (locked && !forced && !isempty(lockedkey)) ? lockedkey : computed_key
+end
+
 # ── Cell effect classification ─────────────────────────────────────────────────────────────────
 # ONE source of truth for "what kind of thing does this cell PRODUCE", so the subsystems that decide
 # transfer-vs-rerun (regions) and cache-vs-recompute (memo) can't drift. That drift is a real bug
@@ -867,7 +946,11 @@ function update_source!(report::Report, new_source::AbstractString)
     build_dependencies!(report)
     for id in dependents_of(report, changed)
         c = get(report.byid, id, nothing)
-        c === nothing || (c.state = STALE)
+        c === nothing && continue
+        # `locked`: freeze a cell that already has a result against upstream churn — it only
+        # re-runs on an explicit ▶ (force) or an edit to ITS OWN source (already marked STALE
+        # above, before this loop, so `c.state` is no longer FRESH and restale! lets it through).
+        restale!(c)
     end
     # A changed/removed MACRO DEFINER (a cell writing an `@name`, or a `using`/barrier cell that may
     # import macros) can alter what its callers expand to — their sources (and cache keys) are
@@ -1199,7 +1282,7 @@ function refine_macros!(report::Report, kernel::Kernel = InProcessKernel(); rest
         for id in dependents_of(report, recovered)
             id in recovered && continue
             c = get(report.byid, id, nothing)
-            c === nothing || (c.state = STALE)
+            c === nothing || restale!(c)
         end
     end
     return true

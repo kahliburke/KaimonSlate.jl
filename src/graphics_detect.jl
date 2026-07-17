@@ -27,6 +27,10 @@ const _GRAPHICS_RE = r"\b(?:Figure|Axis3?|LScene|Scene|PolarAxis|Colorbar|Legend
 _uses_shared_graphics(src::AbstractString) = occursin(_GRAPHICS_RE, src)
 
 # GLOBAL theme mutators only — `with_theme` is scoped to its block and mutates nothing global.
+# Single source of truth for "which calls count as a theme setter" — worker.jl's
+# `_collect_theme_calls!` (memo-restore replay) must recognize the SAME names, or a setter
+# classified PER_SIDE here can restore "clean" while never actually re-applying the theme.
 const _THEME_SENTINEL = Symbol("##makie_theme##")
+const _THEME_CALL_NAMES = (:set_theme!, :update_theme!, :use_slate_theme!)
 const _THEME_SET_RE = r"\b(?:set_theme!|update_theme!|use_slate_theme!)\s*\("
 _sets_global_theme(src::AbstractString) = occursin(_THEME_SET_RE, src)

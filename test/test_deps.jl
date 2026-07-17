@@ -197,6 +197,44 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         @test occursin("needs=up", ReportEngine.serialize_report(r))
     end
 
+    @testset "locked cell tag: frozen against upstream churn, not against its own edit" begin
+        # `_locked_key`/`_set_locked_key!` round-trip through the single-valued `lockedkey=` flag.
+        @test ReportEngine._locked_key(Set([Symbol("lockedkey=abc123"), :cache])) == "abc123"
+        @test ReportEngine._locked_key(Set([:cache])) == ""
+        c = findcell(parse_report("#%% code id=x\n1"), "x")
+        ReportEngine._set_locked_key!(c, "k1")
+        @test ReportEngine._locked_key(c) == "k1"
+        ReportEngine._set_locked_key!(c, "k2")          # replaces, doesn't accumulate
+        @test ReportEngine._locked_key(c) == "k2"
+        ReportEngine._set_locked_key!(c, "")
+        @test ReportEngine._locked_key(c) == ""
+
+        src1 = "#%% code id=a\nbase = 10\n#%% code id=b locked\nderived = base * 2"
+        r = parse_report(src1)
+        build_dependencies!(r)
+        eval_stale!(r)
+        @test findcell(r, "b").output.value_repr == "20"
+        outB = findcell(r, "b").output
+
+        # Upstream `a` changes — an ordinary dependent would restale; `locked` `b` does not.
+        src2 = replace(src1, "base = 10" => "base = 99")
+        update_source!(r, src2)
+        @test findcell(r, "a").state == STALE           # the actual edit still restales its own cell
+        @test findcell(r, "b").state == FRESH            # locked: upstream churn is invisible to it
+        @test findcell(r, "b").output === outB           # untouched — still the frozen result
+
+        eval_stale!(r)
+        @test findcell(r, "b").output === outB           # confirms it truly never re-ran
+
+        # Editing the LOCKED cell's OWN source still restales it (only "other" changes are frozen out).
+        src3 = replace(src2, "derived = base * 2" => "derived = base * 3")
+        update_source!(r, src3)
+        @test findcell(r, "b").state == STALE
+
+        # The tag survives serialization (ordinary free-form tag storage, like `needs=`/`cache`).
+        @test occursin("locked", ReportEngine.serialize_report(r))
+    end
+
     @testset "_BIND_CACHE is a bounded LRU (no wholesale re-inference cliff)" begin
         empty!(ReportEngine._BIND_CACHE); empty!(ReportEngine._BIND_TICKS)
         # Fill past the cap with distinct cell ids; correctness survives the eviction sweep —

@@ -13,6 +13,7 @@ evaluation yet — so it is testable with `Base` alone.
 module ReportEngine
 
 import JSON   # durable `using`-export cache file (deps.jl)
+import Pkg    # in-process package add/remove (eval.jl)
 import Serialization   # decode base64'd slate_emit values off the gate stream (gate_kernel.jl)
 import Base64
 

@@ -91,6 +91,7 @@ const TAG_DEFS = [
   ['Caching & execution', 'cache',    'always persist — restore until an input changes', ['code']],
   ['Caching & execution', 'nocache',  'never cache (impure / side-effecting)', ['code']],
   ['Caching & execution', 'resource', 'external handle (DB / file) — re-inits each run, but keeps everything downstream cacheable', ['code']],
+  ['Caching & execution', 'locked',   'freeze the result — never re-runs from upstream/reload, only ▶ · guarantees its memo is kept', ['code']],
   ['Caching & execution', 'trace',    'inspect every value (re-runs the cell)', ['code']],
   ['Display',  'collapsed', 'fold the whole cell', ['code', 'md']],
   ['Display',  'hidecode',  'hide the editor — show output only', ['code']],
@@ -109,10 +110,11 @@ function _knownTagSet() { return new Set(TAG_DEFS.map(d => d[1])); }
 
 function renderTagPop(pop, id) {
   const tags = new Set(_curTags(id)), known = _knownTagSet(), kind = _tagKind(id);
-  // Region tags (`remote` / `region=…`) are owned by the "Run on" radio above, and `needs=` edges by
-  // the DAG — don't also show them as free-form chips (applyTagChecks preserves them either way).
+  // Region tags (`remote` / `region=…`) are owned by the "Run on" radio above, `needs=` edges by
+  // the DAG, and `lockedkey=` is `locked`'s own bookkeeping — don't also show them as free-form
+  // chips (applyTagChecks preserves them either way).
   const custom = _curTags(id).filter(t => !known.has(t) && t !== 'remote'
-                 && !t.startsWith('region=') && !t.startsWith('needs='));
+                 && !t.startsWith('region=') && !t.startsWith('needs=') && !t.startsWith('lockedkey='));
   const row = (n, desc) =>
     `<label class="ctlrow tagrow"><input type="checkbox" data-tag="${n}"${tags.has(n) ? ' checked' : ''}>` +
     `<span><span class="tagname">${n}</span><span class="tagdesc">${_escc(desc)}</span></span></label>`;
