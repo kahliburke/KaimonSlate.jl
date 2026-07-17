@@ -219,12 +219,12 @@ function _run_tunnel!(t::Tunnel)
         for (lp, rp) in t.forwards
             push!(lflags, "-L", "$(lp):127.0.0.1:$(rp)")
         end
-        # Multiplex the forward over the shared per-host ControlMaster: a warm master makes this a ~10ms
-        # slave instead of a fresh TCP+SSH handshake+auth (~5s on a WAN — the dominant warm-worker ADOPT
-        # cost). The mux opts carry ServerAlive so the master (whoever it is) notices a dead link and exits,
-        # dropping this slave → we respawn on the SAME local ports and the ZMQ client reconnects. When mux
-        # is OFF (kill switch), fall back to a dedicated connection with its own ServerAlive (prior behaviour).
-        # stdin=devnull so background `ssh -N` doesn't exit on inherited-stdin EOF.
+        # Multiplex the forward over the shared per-host ControlMaster: a warm master makes this a fast
+        # slave instead of a fresh TCP+SSH handshake+auth. The mux opts carry ServerAlive so the master
+        # (whoever it is) notices a dead link and exits, dropping this slave → we respawn on the SAME local
+        # ports and the ZMQ client reconnects. When mux is OFF (kill switch), fall back to a dedicated
+        # connection with its own ServerAlive (prior behaviour). stdin=devnull so background `ssh -N` doesn't
+        # exit on inherited-stdin EOF.
         mux = _ssh_mux_opts()
         alive = isempty(mux) ? ["-o", "ServerAliveInterval=$(_tunnel_alive_interval())",
                                 "-o", "ServerAliveCountMax=$(_tunnel_alive_count())"] : String[]
@@ -251,6 +251,17 @@ function close_tunnel(t::Tunnel)
     t.running = false
     p = t.proc
     p === nothing || (try; kill(p); catch; end)
+    return nothing
+end
+
+# Kill orphaned slate ssh procs (the `ssh -N -L` tunnel forwards + whichever won ControlMaster election)
+# left by a PRIOR hub instance that exited without cleanup — an extension restart SIGKILLs the hub, orphaning
+# its child `ssh -N`, which then accumulate across restarts. They all carry the slate mux ControlPath, so
+# match on it. Called ONCE at hub startup BEFORE this instance opens any tunnel, so every match is a stale
+# orphan. Best-effort (needs `pkill`; a leftover forward is harmless, just untidy).
+function _reap_orphan_ssh!()
+    d = joinpath(_slate_cache_dir(), "mux")
+    try; run(pipeline(`pkill -9 -f $("ControlPath=" * d)`; stdout = devnull, stderr = devnull)); catch; end
     return nothing
 end
 

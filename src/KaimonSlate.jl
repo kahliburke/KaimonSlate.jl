@@ -1597,6 +1597,7 @@ function create_tools(GateTool::Type)
     try
         _load_slate_config!()            # apply the persisted worker-thread spec before any worker spawns
         _reap_orphan_workers!()
+        ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
         atexit(on_shutdown)
         _hub()
         @info "KaimonSlate hub auto-started" url = _base()
