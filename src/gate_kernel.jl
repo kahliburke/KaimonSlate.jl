@@ -112,15 +112,19 @@ end
 # and surface as a worker bind error rather than silent crosstalk.
 const _GATE_PORT = Ref(9100)
 const _PORT_LOCK = ReentrantLock()
-# Each worker owns THREE consecutive ports: main REP, stream PUB, and (remote) the blob data
-# channel at port+2 — so the stride is 3, not 2 (a 2-stride hands the next worker the previous
-# one's data port: ZMQ bind fails and the worker dies at boot; seen live). `floor` lets a caller
-# who KNOWS ports are taken (the remote roster — warm workers survive an extension restart,
-# which resets this counter) push the counter past them first.
-function _next_ports(; floor::Int = 0)
+# A worker owns its GATE port `p` (main REP) and STREAM port `p+1` (PUB) — both HUB-DIALED, so the hub
+# reserves them here. `reserve` is how many consecutive ports to burn. The DEFAULT is 2: a worker whose
+# blob channel needs no reserved slot — a LOCAL worker (runs no blob server; `data_port` unset) or a
+# `:tunnel` worker (its blob binds a worker-chosen VERIFIED-FREE port, discovered by the hub via
+# `__slate_ports`, never `p+2`). A `:direct` worker DOES pin its blob at `p+2` (firewall-opened +
+# peer-dialed), so those callers pass `reserve=3` — else the next worker's gate would land on this one's
+# blob port (a 2-stride: ZMQ bind fails and the worker dies at boot; seen live). `floor` lets a caller who
+# KNOWS ports are taken (the remote roster — warm workers survive an extension restart, which resets this
+# counter) push the counter past them first.
+function _next_ports(; floor::Int = 0, reserve::Int = 2)
     lock(_PORT_LOCK) do            # atomic bump — concurrent spawns must not grab the same port
         _GATE_PORT[] = max(_GATE_PORT[], floor)
-        p = _GATE_PORT[]; _GATE_PORT[] += 3
+        p = _GATE_PORT[]; _GATE_PORT[] += reserve
         return (p, p + 1)
     end
 end

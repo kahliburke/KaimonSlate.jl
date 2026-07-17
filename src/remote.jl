@@ -1014,6 +1014,7 @@ function _remote_worker_script(t::RemoteTarget, port::Int, stream_port::Int, par
     SlateWorker.start(; host="$bind", port=$port, stream_port=$stream_port,
                       curve=$curve, allowed_clients=$allow, data_port=$(port + 2),
                       warm_deps=$warm_deps, blob_curve=$(_blob_curve(t)), blob_bind="0.0.0.0",
+                      blob_free_port=$(t.transport === :tunnel),
                       stats_path=joinpath(homedir(), raw"$_REMOTE_WORKER", "worker-$port.stats"))
     _bt("serving")   # phase breakdown: Julia-init = launch→script-start; then KaimonGate / Revise / payload / serve
     while true; sleep(3600); end   # serve() returns after starting its loop on a spawned thread; keep alive
@@ -1253,10 +1254,11 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                 # :direct region: t.port is the base_port HINT — take a FREE slot in its stride (roster-aware)
                 # so we land in the firewall-opened range, never colliding with warm workers / another notebook.
                 (let sl = _direct_port_slots(t.port, 1; roster = (try; list_remote_workers(host); catch; Any[]; end), label = "region cold-spawn on $host")
-                     isempty(sl) ? _next_ports(floor = try; _port_floor(host); catch; 0; end) : sl[1]
+                     isempty(sl) ? _next_ports(floor = try; _port_floor(host); catch; 0; end, reserve = 3) : sl[1]   # :direct pins blob at gate+2
                  end) :
             t.port != 0 ? (t.port, t.stream_port != 0 ? t.stream_port : t.port + 1) :
-                          _next_ports(floor = try; _port_floor(host); catch; 0; end)
+                          _next_ports(floor = try; _port_floor(host); catch; 0; end,
+                                      reserve = t.transport === :direct ? 3 : 2)   # :tunnel blob = worker-chosen free port
         k.port = port; k.stream_port = stream_port
         _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
         r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
@@ -1484,7 +1486,8 @@ function teardown_remote!(k; kill::Bool = false)
             try; _ssh_test(t.ssh_host, `rm -f $("$_REMOTE_WORKER/worker-$(k.port).jl") $("$_REMOTE_WORKER/worker-$(k.port).json") $("$_REMOTE_WORKER/worker-$(k.port).state") $("$_REMOTE_WORKER/worker-$(k.port).stats")`); catch; end
             try; _attach_clear!(t.ssh_host, k.label); catch; end   # a killed worker must not be re-dialed from the record
             try; _evict_parked!(t.ssh_host; label = k.label, port = k.port); catch; end   # …nor via a parked wire
-            try; _evict_data_tunnels!(t.ssh_host; port = k.port + 2); catch; end
+            try; _evict_data_tunnels!(t.ssh_host; port = _blob_data_port_cached(t.ssh_host, k.port)); catch; end   # real port (relocated tunnel workers)
+            try; _blob_dport_forget!(t.ssh_host, k.port); catch; end
         else
             _rlog("teardown: detaching from worker-$(k.port) on $(t.ssh_host) — worker stays warm (state=idle)")
             _write_worker_state!(t.ssh_host, k.port, "idle")
@@ -2164,8 +2167,44 @@ function _blob_server_key!(t::RemoteTarget, k, dport::Int)
     return key
 end
 
+# The blob data port a worker ACTUALLY bound. A `:direct` region pins it at `gate+2` (== base_port+2) —
+# firewall-opened and dialed directly by peers, so it's fixed. A `:tunnel` worker binds a VERIFIED-FREE
+# port instead (never `gate+2`, so a co-tenant on a shared host can't stall it — worker.jl `start`), so the
+# hub can't assume `gate+2` — ask the worker (`__slate_ports`) and cache per (host, gate port). This real
+# port threads into `_data_endpoint!` (the hub-local forward target) and `_resolve_peer_route` (`route.port`
+# → the peer's direct dial AND the mesh `permitopen` finalized in `_pull_ssh!`), so the bound port is
+# reached, not a stale `gate+2`. Falls back to `gate+2` — WITHOUT caching — when the worker predates the
+# tool or hasn't bound yet (returns 0); a later call re-queries once the blob server is up.
+const _BLOB_DPORT_CACHE = Dict{Tuple{String,Int},Int}()   # (host, gate port) → real blob data port
+const _BLOB_DPORT_LOCK  = ReentrantLock()
+function _blob_data_port!(t::RemoteTarget, k)
+    default = k.port + 2
+    t.transport === :tunnel || return default          # :direct is firewall-pinned at gate+2
+    ck = (String(t.ssh_host), Int(k.port))
+    hit = lock(_BLOB_DPORT_LOCK) do; get(_BLOB_DPORT_CACHE, ck, 0); end
+    hit > 0 && return hit
+    p = try
+        r = _tool(k, "__slate_ports", Dict{String,Any}(); timeout = 15.0)
+        e = try; getproperty(r, :error); catch; nothing; end
+        e === nothing ? Int(r.blob) : 0
+    catch
+        0
+    end
+    p > 0 || return default                             # not bound yet / pre-tool worker → gate+2, re-query next call
+    lock(_BLOB_DPORT_LOCK) do; _BLOB_DPORT_CACHE[ck] = p; end
+    p == default || _rlog("data channel: $(t.ssh_host) worker-$(k.port) blob bound free port $p (not gate+2=$default)")
+    return p
+end
+# Cached-only lookup for teardown/reap, where the worker may already be dead (no gate call). `gate+2` when
+# unknown — harmless, since a worker that never bound / never transferred opened no data tunnel to evict.
+_blob_data_port_cached(host, gate_port) = lock(_BLOB_DPORT_LOCK) do
+    get(_BLOB_DPORT_CACHE, (String(host), Int(gate_port)), Int(gate_port) + 2)
+end
+_blob_dport_forget!(host, gate_port) =
+    (lock(_BLOB_DPORT_LOCK) do; delete!(_BLOB_DPORT_CACHE, (String(host), Int(gate_port))); end; nothing)
+
 function _data_endpoint!(t::RemoteTarget, k)
-    dport = k.port + 2
+    dport = _blob_data_port!(t, k)
     if t.transport === :direct
         rec = _attach_lookup(t.ssh_host, k.label)   # ip + CURVE key were learned at spawn — no ssh here
         ip = rec !== nothing && !isempty(rec.remote_ip) ? String(rec.remote_ip) : _remote_ip(t.ssh_host)
@@ -2343,7 +2382,7 @@ function _peer_server_key(k)
         rec = _attach_lookup(t.ssh_host, k.label)
         rec !== nothing && !isempty(String(rec.server_key)) && return String(rec.server_key)
     end
-    return _blob_server_key!(t, k, k.port + 2)
+    return _blob_server_key!(t, k, _blob_data_port!(t, k))   # real port (relocated under contention), aligns the key cache with `_data_endpoint!`
 end
 
 # A host's PEER-reachable IP — the address a co-located / same-subnet peer dials (NOT the hub's route).
@@ -2377,10 +2416,12 @@ end
 function _resolve_peer_route(src_k, dst_k)
     (src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget && src_k !== dst_k) ||
         return PeerRoute(:relay, "", 0, "")
-    # A's PEER-vantage endpoint: its RAW blob port (gate+2) at its PEER-reachable IP — NOT `_data_endpoint!`,
-    # which is hub-vantage (a :tunnel worker's would be the hub-local `ssh -L` forward, meaningless to a
-    # peer, and calling it would open a tunnel as a side effect). Co-located ⇒ loopback (§3).
-    port = src_k.port + 2
+    # A's PEER-vantage endpoint: its RAW blob port at its PEER-reachable IP — NOT `_data_endpoint!`, which is
+    # hub-vantage (a :tunnel worker's would be the hub-local `ssh -L` forward, meaningless to a peer, and
+    # calling it would open a tunnel as a side effect). `gate+2` for a :direct source, but a :tunnel worker
+    # binds a free port, so discover the REAL one (`__slate_ports`, cached) — it becomes `route.port`, which
+    # `_pull_ssh!` finalizes into the mesh `permitopen` and dials the forward at. Co-located ⇒ loopback (§3).
+    port = _blob_data_port!(src_k.target, src_k)
     colocated = src_k.target.ssh_host == dst_k.target.ssh_host
     skey = _peer_server_key(src_k)
     sh, dh = String(src_k.target.ssh_host), String(dst_k.target.ssh_host)
@@ -3037,12 +3078,14 @@ function _region_reconcile_impl!(r::Region)
         provision_remote!(t, r.preload)              # idempotent; one pass covers every launch below
         # Ports for the new workers. A :direct region with a pinned base marches up from it in strides of
         # 3 (each worker owns port..port+2) so you know exactly which range to open in the firewall.
-        # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster.
+        # Otherwise (tunnel, or no base) auto-assign from _next_ports, floored above the live roster —
+        # stride 2 for a :tunnel region (its blob picks a worker-chosen free port, not gate+2).
         ports = (r.transport === :direct && r.base_port > 0) ?
             _direct_port_slots(r.base_port, deficit; roster = roster, label = "region[$(r.name)]") :
             begin
                 floor = _port_floor(host; workers = roster)   # never deal a live worker's ports (see _port_floor)
-                [_next_ports(; floor) for _ in 1:deficit]
+                res = r.transport === :direct ? 3 : 2
+                [_next_ports(; floor, reserve = res) for _ in 1:deficit]
             end
         for (port, sp) in ports
             _launch_worker!(t, port, sp; label = "", parent = "", threads = r.threads,
@@ -3287,7 +3330,8 @@ function reap_remote_worker(host, port::Int)
     # self-corrects (re-installs when the live blob port differs from the cached one), so a respawn on a
     # new port is caught on the next transfer; clearing it would drop the "introduced" signal and skip the
     # finalize. It's cleared only on region teardown.
-    try; _evict_data_tunnels!(host; port = port + 2); catch; end
+    try; _evict_data_tunnels!(host; port = _blob_data_port_cached(host, port)); catch; end   # real port — a relocated tunnel worker's data forward isn't at gate+2
+    try; _blob_dport_forget!(host, port); catch; end          # …and drop its discovered-port cache (topology changed)
     try; _release_pool_claim!(host, port); catch; end
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
     # supersede-reap targets — never processes SIGTERM (a stopped process queues it; a signal-ignoring one

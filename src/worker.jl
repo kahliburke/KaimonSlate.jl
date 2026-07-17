@@ -1000,6 +1000,15 @@ function __slate_server_key()
     end
 end
 
+"The two auxiliary ports THIS worker bound, so the hub owns only the gate port (its first-contact anchor)
+and LEARNS the rest over the gate — no `gate+1`/`gate+2` assumption (PEER_TUNNEL_PLAN §2). `stream` is the
+telemetry/output PUB port (hub-assigned today); `blob` is the data-channel port, which a `:tunnel` worker
+picks as a VERIFIED-FREE port (never `gate+2`) so a co-tenant holding `gate+2` on a shared host can't stall
+it. `blob = 0` until the (boot-deferred) blob server has bound. Never throws."
+function __slate_ports()
+    return (; stream = _STREAM_PORT[], blob = _BLOB_DATA_PORT[])
+end
+
 "Authorise `pubkey` (a peer worker's Z85 client public key) on THIS worker's BLOB-channel allow-list so
 it may connect to this worker's blob server — blob-pull rights ONLY, never the control gate (the blob
 channel has its own ZAP handler + allow-file; PEER_TUNNEL_PLAN §2). Hub-brokered; takes effect on the
@@ -2027,6 +2036,7 @@ function tools()
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
         KaimonGate.GateTool("__slate_client_key", __slate_client_key),
         KaimonGate.GateTool("__slate_server_key", __slate_server_key),
+        KaimonGate.GateTool("__slate_ports", __slate_ports),
         KaimonGate.GateTool("__slate_authorize_client", __slate_authorize_client),
         KaimonGate.GateTool("__slate_revoke_client", __slate_revoke_client),
         KaimonGate.GateTool("__slate_pull_blob", __slate_pull_blob),
@@ -2136,6 +2146,12 @@ end
 
 const _BLOB_ZAP_DOMAIN = "kaimon-blob"
 const _BLOB_CTX = Ref{Any}(nothing)   # anchor the blob ZMQ context so GC can't finalize it mid-serve
+# The blob data port this worker ACTUALLY bound: the pinned `gate+2` on a `:direct` worker (firewall/peer
+# constraint), or a VERIFIED-FREE port on a `:tunnel` worker (never `gate+2`; see `start`). `__slate_ports`
+# returns it so the hub reaches the real port. Set from the blob server's `on_ready` (post-bind), so a
+# reader never sees an un-bound port. `_STREAM_PORT` mirrors the (hub-assigned) stream port for the same tool.
+const _BLOB_DATA_PORT = Ref(0)
+const _STREAM_PORT = Ref(0)
 
 # The blob channel's OWN ZAP REP handler (RFC 27), bound on the blob `ctx`. Answers 200/400 per CURVE
 # handshake from the UNION of the gate's control clients and the blob-only allow-list, re-read each
@@ -2190,7 +2206,10 @@ function _blob_server!(host::String, port::Int; curve::Bool = true)
     end : nothing
     blob_server!(KaimonGate.ZMQ, host, port, _memo_dir(); ctx = ctx, configure! = configure!,
                  control_handler = _xfer_control,   # transfer-control plane rides the blob channel (X/S verbs)
-                 on_ready = () -> @info "slate worker: blob data channel listening" port = port curve = curve allowlist = enforce)
+                 on_ready = () -> begin             # publish the actually-bound port for `__slate_ports` (post-bind = never a stale/racing value)
+                     _BLOB_DATA_PORT[] = port
+                     @info "slate worker: blob data channel listening" port = port curve = curve allowlist = enforce
+                 end)
     return nothing
 end
 
@@ -2347,7 +2366,8 @@ workers) turns on the 2s telemetry sampler writing that sidecar + PUBbing `slate
 function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
                curve::Bool = false, allowed_clients::Vector{String} = String[],
                data_port::Int = 0, warm_deps::Bool = false, stats_path::String = "",
-               blob_curve::Bool = true, blob_bind::String = "")
+               blob_curve::Bool = true, blob_bind::String = "", blob_free_port::Bool = false)
+    _STREAM_PORT[] = stream_port   # publish for `__slate_ports` (hub-assigned today; the hub owns only the gate)
     # Install the task-demux as stdout/stderr + a task-local capture display, so cell evaluators can
     # run CONCURRENTLY in this one process while each captures its own output (see demux.jl, capture.jl
     # DemuxCapture). Non-cell output falls through to the real streams (the worker log). Once installed,
@@ -2394,23 +2414,36 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         # (a peer must hold the server key to even handshake), so exposing it on a firewalled cloud subnet
         # is safe; peer allow-listing over :tunnel is the follow-on hardening.
         #
-        # RETRY on EADDRINUSE: a warm-pool respawn (or a reap+replace) commonly RACES the previous worker's
-        # not-yet-released blob socket on the same data_port, so the bind throws "Address already in use". The
-        # port frees within a second or two; without a retry the worker would run blob-LESS for its whole life
-        # (no peer transport at all — every pull FROM it silently relays / an ssh-bridge stalls). Retry a few
-        # times with backoff, then give up loudly. `_blob_server!` only returns on shutdown, so reaching past
-        # it means a clean stop, not a bind failure.
+        # PORT SELECTION. A `:tunnel` worker's blob channel has no firewall/peer-dial constraint (the hub
+        # discovers the port via `__slate_ports` and bridges it over ssh), so it binds a VERIFIED-FREE port
+        # up front (`blob_free_port`) rather than the hub-assigned `gate+2` — a co-tenant holding `gate+2` on
+        # a shared host then can't stall it (the old bug: same-port retries never cleared sustained
+        # contention, so the worker ran blob-LESS for life and every pull FROM it relayed / an ssh-bridge
+        # stalled). A `:direct` worker MUST bind the pinned `gate+2` (firewall-opened + dialed directly by
+        # peers), so it keeps that port; a warm respawn / reap-replace can briefly RACE the predecessor's
+        # not-yet-released socket there, so retry the SAME port a few times, then give up loudly.
+        # `_blob_server!` only returns on shutdown, so reaching past it means a clean stop, not a bind failure.
+        bind_host = isempty(blob_bind) ? host : blob_bind
+        port_try = blob_free_port ? _free_local_port() : data_port
         for attempt in 1:12
             try
-                _blob_server!(isempty(blob_bind) ? host : blob_bind, data_port; curve = blob_curve)
+                _blob_server!(bind_host, port_try; curve = blob_curve)
                 break
             catch e
-                if attempt < 12 && occursin("Address already in use", sprint(showerror, e))
-                    @info "slate worker: blob port busy, retrying" port = data_port attempt = attempt
-                    sleep(1.5); continue
+                if !occursin("Address already in use", sprint(showerror, e))
+                    @warn "slate worker: blob channel died" port = port_try exception = e
+                    break
                 end
-                @warn "slate worker: blob channel died" port = data_port exception = e
-                break
+                if blob_free_port
+                    port_try = _free_local_port()   # a just-probed-free port lost a rare race — pick another
+                    @info "slate worker: blob port raced, re-picking a free port" port = port_try attempt = attempt
+                    sleep(0.2)
+                elseif attempt < 12
+                    @info "slate worker: blob port busy (pinned), retrying" port = port_try attempt = attempt
+                    sleep(1.5)
+                else
+                    @warn "slate worker: blob channel gave up — pinned port stayed busy" port = port_try
+                end
             end
         end
     end
