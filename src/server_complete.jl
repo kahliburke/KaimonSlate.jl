@@ -1962,6 +1962,14 @@ function close_notebook!(h::Hub, id::AbstractString)
         _close_listeners(nb)
         _close_agent!(nb)
         _unwire_callbacks!(nb)
+        # Signal any in-flight runner to stop BEFORE tearing anything else down — its `Threads.@spawn`
+        # task isn't otherwise interruptible, and a reopen of this same path reuses this exact id (see
+        # `_RUNNER_CANCEL`'s docstring), so an orphaned runner would silently block the reopened
+        # notebook from ever draining. Cheap even when no runner is active (most closes).
+        if lock(_RUNNER_LOCK) do; get(_RUNNERS, id, false); end
+            ReportEngine._rlog("slate: closing $(id) with its runner still draining — signalling it to stop")
+            lock(_RUNNER_LOCK) do; _RUNNER_CANCEL[id] = true; end
+        end
         try; shutdown!(nb.kernel); catch; end
         _teardown_region!(nb)                 # detach — a remote region idles warm like the main kernel
         lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end

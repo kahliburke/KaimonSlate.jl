@@ -545,14 +545,60 @@ function _kill_worker!(k::GateKernel; kill_remote::Bool = false)
     end
     p = k.proc
     if p !== nothing
-        try; process_running(p) && kill(p); catch; end
-        for _ in 1:20                              # up to ~1s grace
-            (try; !process_running(p); catch; true; end) && break
-            sleep(0.05)
-        end
-        try; process_running(p) && kill(p, Base.SIGKILL); catch; end
+        try; process_running(p) && kill(p); catch; end   # SIGTERM — ask nicely first
+        # DON'T block waiting for it to actually die: this runs inside `close_notebook!`'s
+        # `lock(h.lock)`, and a worker wedged in precompile/codegen can take real time to exit
+        # even after SIGTERM. A blocking wait here serializes EVERY other hub operation (any
+        # open/close on ANY notebook needs the same lock) behind however long this one process
+        # takes to die. Register it for the background reaper instead (see `reap_pending_kills!`,
+        # ridden on the hub's existing 5s supervisor sweep) — it escalates to SIGKILL and logs,
+        # without holding anything up. `_kill_worker!` itself returns essentially instantly.
+        register_pending_kill!(p)
     end
     k.conn = nothing; k.proc = nothing
+    return nothing
+end
+
+# ── Background process reaper ─────────────────────────────────────────────────────────────────
+# A worker asked to exit (SIGTERM, above) is tracked here until it's CONFIRMED dead — escalating
+# to SIGKILL if it outlives its grace period, and logging either way — instead of a caller
+# blocking on it (see `_kill_worker!`). `reap_pending_kills!()` is called once per hub-wide 5s
+# sweep tick (server.jl `_supervise_runs!`), not per-notebook.
+const _PENDING_KILLS = Dict{Int,NamedTuple}()   # pid → (proc, term_at, kill_at::Union{Float64,Nothing})
+const _PENDING_KILLS_LOCK = ReentrantLock()
+const _KILL_GRACE_S = 3.0            # how long a SIGTERM'd process gets before SIGKILL
+const _KILL_GIVEUP_S = 15.0          # how long AFTER SIGKILL before we stop watching + warn once
+
+function register_pending_kill!(p)
+    pid = try; getpid(p); catch; return nothing; end
+    lock(_PENDING_KILLS_LOCK) do
+        _PENDING_KILLS[pid] = (proc = p, term_at = time(), kill_at = nothing)
+    end
+    return nothing
+end
+
+function reap_pending_kills!()
+    snap = lock(_PENDING_KILLS_LOCK) do; collect(_PENDING_KILLS); end
+    isempty(snap) && return nothing
+    now = time()
+    for (pid, rec) in snap
+        alive = try; process_running(rec.proc); catch; false; end
+        if !alive
+            lock(_PENDING_KILLS_LOCK) do; delete!(_PENDING_KILLS, pid); end
+            continue
+        end
+        if rec.kill_at === nothing
+            (now - rec.term_at < _KILL_GRACE_S) && continue    # still within SIGTERM grace
+            try; kill(rec.proc, Base.SIGKILL); catch; end
+            _rlog("worker reaper: pid $pid still alive $(round(now - rec.term_at; digits=1))s after SIGTERM — sent SIGKILL")
+            lock(_PENDING_KILLS_LOCK) do
+                haskey(_PENDING_KILLS, pid) && (_PENDING_KILLS[pid] = (proc = rec.proc, term_at = rec.term_at, kill_at = now))
+            end
+        elseif now - rec.kill_at > _KILL_GIVEUP_S
+            @warn "slate: worker process would not die even after SIGKILL — giving up on it" pid = pid
+            lock(_PENDING_KILLS_LOCK) do; delete!(_PENDING_KILLS, pid); end
+        end
+    end
     return nothing
 end
 
