@@ -7,7 +7,6 @@ const charts = {};            // cell id -> [echarts instances]
 const tableState = {};        // cell id -> [{sort,filter,page,pageSize} per table] (view prefs, sticky)
 const srcMap = {};            // cell id -> raw source (for markdown editing)
 let nbState = null;           // latest notebook state (drives the controls palette)
-let _hydrating = false;       // true while a standalone's env reconstructs (read-only preview)
 // Min delay (ms) between live recomputes while dragging a control. Persisted.
 let updateMs = Math.max(0, parseInt(localStorage.getItem('slateUpdateMs') ?? '200', 10) || 0);
 let lastVersion = -1;

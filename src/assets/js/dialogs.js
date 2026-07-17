@@ -30,7 +30,6 @@ document.addEventListener('keydown', e => {
 document.addEventListener('mousedown', e => { if (e.target && e.target.id === 'modalbg') _modalClose(false); });
 
 async function runAll()  {
-  if (_hydrating) return;
   const shape = c => (hasBinds(c) ? 'b' : c.kind);          // structural signature
   const before = new Map(((nbState && nbState.cells) || []).map(c => [c.id, shape(c)]));
   const state = await api('POST', '/api/run');
@@ -42,10 +41,10 @@ async function runAll()  {
 }
 async function resetAll(){ updateStates(await api('POST', '/api/reset')); }
 // Run EVERY cell (force), keeping the live worker/namespace — the notebook top-to-bottom.
-async function rerunAll(){ if (_hydrating) return; updateStates(await api('POST', '/api/rerun-all', {})); }
+async function rerunAll(){ updateStates(await api('POST', '/api/rerun-all', {})); }
 // Run the given cell and every code cell BELOW it (positional), forced, in order.
 async function runCellAndBelow(id){
-  if (_hydrating || !id) return;
+  if (!id) return;
   const ids = cellIds(); const i = ids.indexOf(id); if (i < 0) return;
   for (let j = i; j < ids.length; j++) { const c = _cellById(ids[j]); if (c && c.kind === 'code') await runCell(ids[j], true); }
 }

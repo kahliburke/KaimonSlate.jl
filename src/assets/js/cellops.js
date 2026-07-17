@@ -2,7 +2,6 @@
 // the keyboard/palette flow leave it false: a clean cell isn't re-run (just commits any edit +
 // advances), so stepping through a notebook doesn't redundantly recompute expensive cells.
 async function runCell(id, force = false) {
-  if (_hydrating) return;                      // env still reconstructing — preview is read-only
   const before = _cellById(id);                // shape BEFORE the run (from the live state)
   // An ERRORED cell always re-runs on an explicit run (⇧⏎ / palette), even with unchanged source —
   // the whole point is to retry it. A clean cell with unchanged source is still skipped (advance-only).
@@ -19,7 +18,6 @@ async function runCell(id, force = false) {
     updateStates(state);
 }
 async function addCell(after, kind, before, edit) {
-  if (_hydrating) return;
   const oldIds = new Set(cellIds());
   const state = await api('POST', '/api/cell-add', { after, kind, before: !!before });
   renderAll(state);

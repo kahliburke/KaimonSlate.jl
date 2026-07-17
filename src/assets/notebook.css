@@ -145,8 +145,11 @@ body.toc-open .page { margin-left:312px; }
 .hydbanner .hydstep { margin-left:.5em; padding-left:.6em; border-left:1px solid var(--border); font-family:var(--mono,ui-monospace,monospace);
   font-size:.92em; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
 .hydbanner .hydstep:empty { display:none; }
-body.hydrating #nb { opacity:.9; pointer-events:none; }   /* frozen preview — not interactive yet */
-body.hydrating #runstale, body.hydrating #addcellbtn { opacity:.45; pointer-events:none; }
+/* Only while a standalone bundle's frozen preview is shown in place of the real cells — see
+   the hydratingKind check in view.js. Once real (even if not-yet-computed) cells are live, the
+   notebook stays fully interactive through the rest of hydration. */
+body.hyd-preview #nb { opacity:.9; pointer-events:none; }
+body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.45; pointer-events:none; }
 /* Dependency-cone highlight (the 🔗 button on a cell): the focused cell + its
    transitive upstream precursors light up, so you can see/navigate what feeds a cell. */
 .cell.dep-focus { outline:2px solid var(--accent); outline-offset:-2px; }
