@@ -967,11 +967,15 @@ function _make_router(h::Hub)
     end))
     HTTP.register!(router, "POST", "/api/{id}/mesh-introduce", req -> _withnb(h, req, nb -> begin
         names = _nb_defined_regions(nb)
+        prog(d) = _broadcast(nb, "mesh-build:" * JSON.json(d))    # per-pair "i/n" progress → the consent popup
         r = try
-            installed = ReportEngine.introduce_group!(names)     # idempotent; whole group (§5.1)
+            installed = ReportEngine.introduce_group!(names;     # idempotent; whole group (§5.1)
+                on_progress = (i, n, src, pul) -> prog(Dict("phase" => "run", "i" => i, "n" => n, "src" => src, "puller" => pul)))
+            prog(Dict("phase" => "complete", "n" => length(installed)))
             _mesh_resolve!(nb.id); _mesh_broadcast_clear!(nb)
             Dict("ok" => true, "installed" => length(installed), "plan" => ReportEngine.peer_plan_data(names))
         catch e
+            prog(Dict("phase" => "error"))
             Dict("ok" => false, "error" => first(sprint(showerror, e), 300))
         end
         _json(r)
@@ -1029,18 +1033,27 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/probe", req -> _withnb(h, req, nb -> begin
         names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
         filter!(!isempty, names)
+        # Every ordered cross-region pair, counted up front so we can PUSH "i/n" progress over the notebook's
+        # SSE channel (same `_broadcast` bus as `mesh-consent:`) as each probe runs — a probe is a real test
+        # transfer that takes seconds, so a single blocking POST would otherwise show no step-by-step feedback.
+        pairs = [(a, b) for a in names for b in names if a != b]
+        n = length(pairs)
+        prog(d) = _broadcast(nb, "probe-progress:" * JSON.json(d))
         results = Any[]
-        for a in names, b in names
-            a == b && continue
+        for (i, (a, b)) in enumerate(pairs)
+            prog(Dict("phase" => "run", "i" => i, "n" => n, "src" => a, "dst" => b))
             ka = try; _region_kernel!(nb, a); catch; nothing; end
             kb = try; _region_kernel!(nb, b); catch; nothing; end
             (ka === nothing || kb === nothing) && continue
             r = try; ReportEngine.probe_transfer!(ka, kb)
                 catch e; (; kind = :error, bytes = 0, seconds = 0.0, mbps = 0.0, err = first(sprint(showerror, e), 160)); end
             String(r.kind) == "local" && continue          # same host with no wire — nothing to measure
-            push!(results, Dict("src" => a, "dst" => b, "kind" => String(r.kind), "bytes" => r.bytes,
-                                "mbps" => round(r.mbps; digits = 1), "err" => hasproperty(r, :err) ? String(r.err) : ""))
+            res = Dict("src" => a, "dst" => b, "kind" => String(r.kind), "bytes" => r.bytes,
+                       "mbps" => round(r.mbps; digits = 1), "err" => hasproperty(r, :err) ? String(r.err) : "")
+            push!(results, res)
+            prog(merge(Dict("phase" => "done", "i" => i, "n" => n), res))
         end
+        prog(Dict("phase" => "complete", "n" => n))
         _json(Dict("probed" => results))
     end))
     # Retained transfer TRACES for the summary dashboard: each recent region→region transfer with its

@@ -1063,6 +1063,14 @@ body.modkey .cm-content { cursor: pointer; }
 .dagpeerbody { font-size:.72rem; line-height:1.5; color:var(--text); }
 .dagpp-sec { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted, #8a91ab);
   margin:8px 0 3px; }
+/* in-panel action status (spinner + message) for connect / disconnect / recalculate — feedback where the
+   user is looking, not a far-corner toast */
+.dagppstatus { align-items:center; gap:7px; font-size:.72rem; color:var(--text); margin-bottom:6px;
+  background:color-mix(in srgb, var(--accent) 13%, transparent); padding:5px 9px; border-radius:6px;
+  border:1px solid color-mix(in srgb, var(--accent) 38%, transparent); }
+.dagppspin { width:11px; height:11px; flex:0 0 auto; border-radius:50%; border:2px solid color-mix(in srgb, var(--text) 28%, transparent);
+  border-top-color:var(--accent); animation:dagppspin .7s linear infinite; }
+@keyframes dagppspin { to { transform:rotate(360deg); } }
 
 /* 📊 transfer summary — stat tiles + throughput timeline, region peer-to-peer grid, and rate KDE */
 .dagxferdash { position:absolute; left:10px; right:10px; bottom:46px; z-index:9; max-height:72%; overflow:auto;
