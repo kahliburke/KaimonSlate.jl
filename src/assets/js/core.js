@@ -428,7 +428,11 @@ function _buildShell(wrap, cols, spec, st) {
     htr.appendChild(th); return th;
   });
   thead.appendChild(htr); tbl.appendChild(thead);
-  const tbody = document.createElement('tbody'); tbl.appendChild(tbody); wrap.appendChild(tbl);
+  const tbody = document.createElement('tbody'); tbl.appendChild(tbody);
+  // Scroll wrapper: a wide table pans horizontally instead of squeezing/clipping its
+  // columns. Only the table scrolls — the filter bar and pagination stay put.
+  const scroll = document.createElement('div'); scroll.className = 'st-scroll';
+  scroll.appendChild(tbl); wrap.appendChild(scroll);
   const pag = document.createElement('div'); pag.className = 'st-pag'; wrap.appendChild(pag);
   wrap._refs = { fi, info, ths, tbody, pag };
 }
