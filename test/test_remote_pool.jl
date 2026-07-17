@@ -72,6 +72,34 @@ mkworker(port; alive = true, state = "idle", region = "testreg", hub = gethostna
         @test !RE._region_warm_worker(mkworker(9100; region = "gpu", hub = "someone-else"), "gpu") # another hub's
     end
 
+    @testset "_region_target: origin_env override decouples the env from preload" begin
+        name = "__regenv-$(getpid())__"
+        withenv("KAIMONSLATE_CONFIG_HOME" => mktempdir()) do
+            RE.region_set!(name; host = "h1", transport = :tunnel, preload = "/tmp/warm-proj")
+            r = RE.region_get(name)
+            # default: the region's preload IS the env (warm-pool key)
+            @test RE._region_target(r).origin_env == "/tmp/warm-proj"
+            @test RE._region_target(r).project == "~/.cache/kaimonslate/remote/" * RE._proj_key("/tmp/warm-proj")
+            # override: a region cell runs the NOTEBOOK's env — project keyed by it, not by preload
+            t = RE._region_target(r; origin_env = "/home/u/NeuroSlate")
+            @test t.origin_env == "/home/u/NeuroSlate"
+            @test t.project == "~/.cache/kaimonslate/remote/" * RE._proj_key("/home/u/NeuroSlate")
+            @test t.project != RE._region_target(r).project              # different env ⇒ isolated dir
+            @test t.transport === :tunnel && t.region == RE._fold_region(name)  # region def still governs the rest
+            RE.region_delete!(name)
+        end
+    end
+
+    @testset "adoption env gate: only a worker with the notebook's project+transport fits" begin
+        proj = "~/.cache/kaimonslate/remote/NeuroSlate-abc123"
+        w = mkworker(9100; region = "gpu", project = proj, transport = "tunnel")
+        @test RE._worker_env_fits(w, proj, "tunnel")                     # exact env + transport → adoptable
+        @test !RE._worker_env_fits(w, "~/.cache/kaimonslate/remote/Other-def456", "tunnel")  # wrong env (packages differ)
+        @test !RE._worker_env_fits(w, proj, "direct")                    # right env, wrong transport
+        @test RE._worker_env_fits(w, "", "")                             # empty ⇒ don't-care (back-compat)
+        @test RE._worker_env_fits(w, proj, "")                           # gate on project only
+    end
+
     @testset "claim set: exclusive, idempotent release" begin
         h = "__claimtest__"
         RE._release_region_claim!(h, 9100)                  # clean slate (idempotent on absent)
