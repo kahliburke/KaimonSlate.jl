@@ -247,7 +247,7 @@ end
 # inferred `ColumnDef`s IN PLACE (immutable structs → replace by index). An unknown column name is a
 # build-time authoring typo → hard error listing the available names.
 function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align = NamedTuple(),
-                         coltype = NamedTuple(), viz = NamedTuple())
+                         coltype = NamedTuple(), viz = NamedTuple(), default_format = nothing)
     # The inevitable Julia trap: `viz = (x = :heat)` is an ASSIGNMENT in parens, not a NamedTuple —
     # the option arrives as a bare Symbol and `pairs` would throw an opaque MethodError. Say it
     # in human instead.
@@ -268,6 +268,15 @@ function _apply_col_opts!(cols::Vector{ColumnDef}; format = NamedTuple(), align 
         i = _at(nm); c = cols[i]
         cols[i] = ColumnDef(c.name, c.type, Symbol(v), c.format, c.sortable, c.filterable, c.viz, c.domain)
     end
+    # Blanket format for every numeric column, applied BEFORE the per-column overlay below so an
+    # explicit `format=(col=...,)` entry always wins over `default_format`.
+    if default_format !== nothing
+        parsed = _parse_col_format(default_format)
+        for (i, c) in enumerate(cols)
+            (c.type === :int || c.type === :float) || continue
+            cols[i] = ColumnDef(c.name, c.type, c.align, parsed, c.sortable, c.filterable, c.viz, c.domain)
+        end
+    end
     for (nm, v) in pairs(format)
         i = _at(nm); c = cols[i]
         cols[i] = ColumnDef(c.name, c.type, c.align, _parse_col_format(v), c.sortable, c.filterable, c.viz, c.domain)
@@ -282,8 +291,8 @@ end
 # ── Public helper (injected into the cell namespace as `slate_table`) ─────────
 
 """
-    slate_table(data; format, align, coltype, viz, paged, page_size, export_rows) -> SlateTable
-    slate_table(columns, rows; format, align, coltype, viz, export_rows)          -> SlateTable
+    slate_table(data; format, align, coltype, viz, default_format, paged, page_size, export_rows) -> SlateTable
+    slate_table(columns, rows; format, align, coltype, viz, default_format, export_rows)          -> SlateTable
 
 Build an interactive, sortable, filterable, paged table. RETURN it from a cell to render it — a bare
 DataFrame / Tables.jl source already auto-renders, so you only call `slate_table` explicitly to pass
@@ -304,6 +313,9 @@ NamedTuple needs its trailing comma: `(Revenue = :currency,)`:
   • `coltype` — override the inferred physical type (e.g. force an id column to `:string`).
   • `viz` — an in-cell visualization for a NUMERIC column, scaled over its min→max: `:bar`
     (a proportional bar behind the value) or `:heat` (a background shaded by magnitude).
+  • `default_format` — one format spec (same DSL as a `format` value) applied to EVERY numeric
+    column that doesn't have an explicit entry in `format`. Handy for a blanket
+    `default_format = :integer` (round-to-nearest-int) instead of listing every column.
 
 Example combining several:
 
@@ -318,7 +330,8 @@ rows shown in FIXED exports (PDF / markdown / static HTML) to the first `n` (wit
 note); the live table stays fully paginated.
 """
 function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = nothing,
-                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple())
+                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple(),
+                     default_format = nothing)
     # `paged=true` → a server-paged provider (paged.jl), one page fetched at a time; otherwise the
     # eager form below materializes all rows (capped). `page_size` sets the paged page length.
     if paged
@@ -327,7 +340,7 @@ function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = 
             "slate_table(…; paged=true): cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl " *
             "source, a Vector of NamedTuples, or a Dict/NamedTuple of column vectors."))
         pt = _make_paged(prov; page_size = page_size)
-        _apply_col_opts!(pt.columns; format, align, coltype, viz)
+        _apply_col_opts!(pt.columns; format, align, coltype, viz, default_format)
         return pt   # paged tables are already page-limited in fixed exports (only page 1 ships)
     end
     t = _as_slate_table(x)
@@ -335,13 +348,14 @@ function slate_table(x; paged::Bool = false, page_size::Int = 50, export_rows = 
     t === nothing && throw(ArgumentError(
         "slate_table: cannot tabulate $(typeof(x)) — pass a DataFrame/Tables.jl source, " *
         "a Vector of NamedTuples, a Dict/NamedTuple of column vectors, or `columns, rows`."))
-    _apply_col_opts!(t.columns; format, align, coltype, viz)
+    _apply_col_opts!(t.columns; format, align, coltype, viz, default_format)
     export_rows === nothing || (t.opts["export_rows"] = Int(export_rows))   # cap rows in fixed exports (PDF/md/HTML)
     return t
 end
 
 function slate_table(columns, rows; export_rows = nothing,
-                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple())
+                     format = NamedTuple(), align = NamedTuple(), coltype = NamedTuple(), viz = NamedTuple(),
+                     default_format = nothing)
     names = String[string(c) for c in columns]
     ncol = length(names)
     rawrows = rows isa AbstractMatrix ?
@@ -350,7 +364,7 @@ function slate_table(columns, rows; export_rows = nothing,
     rws = Vector{Any}[Any[_cellval(v) for v in r] for r in rawrows]
     rawcols = Any[Any[(j <= length(r) ? r[j] : nothing) for r in rawrows] for j in 1:ncol]
     cols = _infer_columns(names, rawcols)
-    _apply_col_opts!(cols; format, align, coltype, viz)
+    _apply_col_opts!(cols; format, align, coltype, viz, default_format)
     t = _finish(cols, rws)
     export_rows === nothing || (t.opts["export_rows"] = Int(export_rows))
     return t

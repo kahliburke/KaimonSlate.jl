@@ -301,8 +301,29 @@ function _bytes(x, d) {
   return (neg ? '-' : '') + _roundDec(ax, i === 0 ? 0 : d) + ' ' + _BYTE_UNITS[i];
 }
 // Clean default render for a raw value when a column has NO explicit format (mirrors Julia
-// `_clean_default`): numbers via native String() (already trims `.0` and avoids sci for normal ranges).
-function _cleanDefault(v) { return v == null ? '' : String(v); }
+// `_clean_default`): integers as-is; other numbers rounded to `_DEFAULT_SIGDIGITS` significant
+// figures (trailing zeros stripped), scientific notation outside a normal display range. A column
+// that needs full precision opts in via an explicit format spec.
+const _DEFAULT_SIGDIGITS = 6;
+function _stripTrailingZeros(s) {
+  if (s.indexOf('.') < 0) return s;
+  s = s.replace(/0+$/, '');
+  return s.endsWith('.') ? s.slice(0, -1) : s;
+}
+function _cleanDefault(v) {
+  if (v == null) return '';
+  if (typeof v !== 'number' || !isFinite(v)) return String(v);
+  if (v === Math.round(v) && Math.abs(v) < 1e15) return String(Math.round(v));
+  const av = Math.abs(v);
+  if (av >= 1e15 || av < 1e-4) {
+    const s = _sci(v, _DEFAULT_SIGDIGITS);
+    const idx = s.indexOf('e');
+    return _stripTrailingZeros(s.slice(0, idx)) + s.slice(idx);
+  }
+  const e = Math.floor(Math.log10(av));
+  const d = Math.max(_DEFAULT_SIGDIGITS - 1 - e, 0);
+  return _stripTrailingZeros(_roundDec(v, d));
+}
 function fmtCell(value, fmt) {
   if (value == null) return '';
   if (!fmt) return _cleanDefault(value);

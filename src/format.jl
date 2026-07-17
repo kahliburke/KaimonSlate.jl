@@ -76,6 +76,14 @@ function _bytes(x::Float64, d::Int)
     return (neg ? "-" : "") * body * " " * _BYTE_UNITS[i]
 end
 
+# Strip trailing zeros off a decimal string's fractional part (and the point itself if nothing's
+# left) — "210.500" → "210.5", "100.000" → "100". Leaves an integer-only string untouched.
+function _strip_trailing_zeros(s::AbstractString)
+    occursin('.', s) || return s
+    s = rstrip(s, '0')
+    return endswith(s, '.') ? s[1:end-1] : s
+end
+
 """
     _format_cell(value, fmt) -> String
 
@@ -84,9 +92,11 @@ Render one reduced cell `value` under a column format `fmt` (a `ColumnFormat`, t
 (so a stray text cell never breaks). Mirror of JS `fmtCell`.
 """
 # Default (no explicit format): a CLEAN render — integers as-is; an integer-valued float without a
-# trailing `.0` (210000.0 → "210000", 1.25e6 → "1250000"); other floats via the shortest repr. This
-# mirrors what the browser shows for a raw JSON number (`String(n)`), so the live table and the static
-# exports agree on the default. (Conservative: no thousands separators / % / currency unless opted in.)
+# trailing `.0` (210000.0 → "210000", 1.25e6 → "1250000"); other floats rounded to `_DEFAULT_SIGDIGITS`
+# significant figures (trailing zeros stripped), scientific notation only outside a normal display
+# range. Full-precision repr floods a table with noise (a raw float column can carry 15+ digits) — a
+# column that genuinely needs more precision opts in via an explicit `format=(col=ColumnFormat(...),)`.
+const _DEFAULT_SIGDIGITS = 6
 _clean_default(::Nothing) = ""
 _clean_default(::Missing) = ""
 _clean_default(v::Bool) = string(v)
@@ -94,7 +104,14 @@ _clean_default(v::Integer) = string(v)
 function _clean_default(v::AbstractFloat)
     isfinite(v) || return string(v)
     (v == round(v) && abs(v) < 1e15) && return string(Integer(round(v)))
-    return string(v)
+    av = abs(v)
+    if av >= 1e15 || av < 1e-4
+        parts = split(_sci(Float64(v), _DEFAULT_SIGDIGITS), 'e')
+        return _strip_trailing_zeros(parts[1]) * "e" * parts[2]
+    end
+    e = floor(Int, log10(av))
+    d = max(_DEFAULT_SIGDIGITS - 1 - e, 0)
+    return _strip_trailing_zeros(_round_dec(Float64(v), d))
 end
 _clean_default(v) = string(v)
 _format_cell(value, ::Nothing) = _clean_default(value)
