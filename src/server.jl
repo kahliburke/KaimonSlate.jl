@@ -81,12 +81,26 @@ end
 # Julia project (cells eval in a per-notebook worker); else in-process.
 # Instantiate an env in a subprocess (isolated; best-effort). Blocking — used by the background
 # hydrate on a fresh bundle reconstruction (the content-addressed cache makes every later open
-# instant), so it never sits on the open path.
-function _instantiate_env!(envdir::AbstractString)
+# instant), so it never sits on the open path. `online` (optional): a `line::String -> nothing`
+# callback fed the subprocess's stdout/stderr line-by-line as it precompiles — mirrors the
+# remote-provision path's `_run_streamed`, so a slow first-run instantiate narrates itself into
+# the boot banner instead of being silent for however long `Pkg.instantiate()` takes.
+function _instantiate_env!(envdir::AbstractString; online = nothing)
     jl = Base.julia_cmd()[1]
     try
-        run(pipeline(`$jl --project=$envdir --startup-file=no -e 'using Pkg; Pkg.instantiate()'`;
-                     stdout = devnull, stderr = devnull))
+        cmd = `$jl --project=$envdir --startup-file=no -e 'using Pkg; Pkg.instantiate()'`
+        if online === nothing
+            run(pipeline(cmd; stdout = devnull, stderr = devnull))
+        else
+            out = Pipe()
+            proc = run(pipeline(cmd; stdout = out, stderr = out); wait = false)
+            close(out.in)
+            for line in eachline(out)
+                s = strip(line)
+                isempty(s) || (try; online(String(s)); catch; end)
+            end
+            wait(proc)
+        end
     catch
     end
     return envdir
@@ -94,7 +108,7 @@ end
 
 # Self-contained `.jl`s are intercepted earlier in `load_notebook` (background hydrate against
 # the depot cache), so this only handles ordinary notebooks: base / forked / detached.
-function _select_kernel(path::AbstractString, report; threads::AbstractString = "")
+function _select_kernel(path::AbstractString, report; threads::AbstractString = "", online = nothing)
     if ReportEngine.gate_available()
         ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) runon=[$(get(report.meta, "runon", ""))] remoteworker=[$(get(report.meta, "remoteworker", ""))]")
         # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
@@ -167,17 +181,17 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             # Project.toml is written by the reconstruction itself, so a worker that never ran
             # leaves the env "absent" and reconstruction retries on the next open.
             mkpath(envdir)
-            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta, threads = th, label = lbl)
+            return GateKernel(envdir; parent = parent, envdir = envdir, pending = delta, threads = th, label = lbl, online = online)
         elseif parent == ""
             # Detached: the notebook env IS the whole world (everything is a "notebook add").
             ReportEngine.ensure_notebook_env!(envdir)
-            return GateKernel(envdir; parent = "", envdir = envdir, threads = th, label = lbl)
+            return GateKernel(envdir; parent = "", envdir = envdir, threads = th, label = lbl, online = online)
         elseif env_exists
             # Already has its own packages → run in the forked env (extends the parent).
-            return GateKernel(envdir; parent = parent, envdir = envdir, threads = th, label = lbl)
+            return GateKernel(envdir; parent = parent, envdir = envdir, threads = th, label = lbl, online = online)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.
-            return GateKernel(parent; parent = parent, envdir = envdir, threads = th, label = lbl)
+            return GateKernel(parent; parent = parent, envdir = envdir, threads = th, label = lbl, online = online)
         end
     end
     return InProcessKernel()
@@ -224,7 +238,14 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # want it live — but skips the initial run, so cells land STALE and untouched. The point is to
     # get INTO the notebook (e.g. to tag a cell `locked` first) before anything expensive runs; a
     # manual ▶/"Run stale" starts it whenever the user is ready.
-    autorun && (r.meta["hydrating"] = true)
+    #
+    # `hydrating` (+`hydratingKind = "boot"`) is set UNCONDITIONALLY here, regardless of `autorun` —
+    # a cold worker spawn can mean a multi-minute Julia precompile with zero other feedback, and that
+    # was genuinely invisible before (looked identical to a hang). This doesn't gate anything (editing
+    # already works immediately via `PendingKernel`); it's purely a status banner narrating the boot
+    # via the same `bringup:` streaming the remote-provision path already uses.
+    r.meta["hydrating"] = true
+    r.meta["hydratingKind"] = "boot"
     pending = PendingKernel()
     nb = LiveNotebook(nbid, String(path), r, pending, 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
@@ -233,21 +254,35 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
     @async begin
         try
-            kernel = _select_kernel(path, r)         # boot the (gate) worker
+            # `online`: a cold local spawn's stdout/stderr streamed line-by-line into the boot banner
+            # (see GateKernel.online / _spawn_worker! in gate_kernel.jl); a no-op for InProcessKernel,
+            # an already-running remoteworker attach, or a remote-SPAWN (which already narrates itself
+            # via `_bringup_note`/`_run_streamed` on its own "remote" hydratingKind).
+            kernel = _select_kernel(path, r; online = line -> (try; _broadcast(nb, "bringup:" * line); catch; end))
             lock(nb.lock) do; nb.kernel = kernel; nb.version += 1; end
             ReportEngine._resolve!(pending, kernel)   # unblock anyone who raced the boot window (edit/run before the worker existed)
-            try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
             if autorun
+                lock(nb.lock) do; delete!(nb.report.meta, "hydratingKind"); end   # boot done → falls back to the (bannerless) "run" default
+                try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
                 _drain!(nb)                          # initial full run — WAIT for it to fully complete, so
-                                                     # `hydrating` (and its banner) stays up for the whole run
+                                                     # `hydrating` stays up for it (no banner though, see above)
                 lock(nb.lock) do
                     delete!(nb.report.meta, "hydrating")
+                    delete!(nb.report.meta, "hydratingKind")
                     nb.version += 1
                 end
                 # Seed the durable history with the initial run state, so the first edit has a parent to
                 # diff against and the "buildup" replay starts from the true origin.
                 _history!(nb; source = "open")
             else
+                # Boot's done and there's no run phase to narrate — drop hydrating now rather than
+                # leaving a banner up with nothing left to report.
+                lock(nb.lock) do
+                    delete!(nb.report.meta, "hydrating")
+                    delete!(nb.report.meta, "hydratingKind")
+                    nb.version += 1
+                end
+                try; _broadcast(nb, string(nb.version)); catch; end
                 # A fresh process has nothing in memory, so cells parse STALE like everything else —
                 # but a locked cell's restore is a near-instant memo hit, not the expensive re-run
                 # `autorun=false` exists to avoid.
@@ -258,6 +293,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
             lock(nb.lock) do
                 nb.report.meta["hydrate_error"] = sprint(showerror, e)
                 delete!(nb.report.meta, "hydrating")
+                delete!(nb.report.meta, "hydratingKind")
                 nb.version += 1
             end
             pending.real === nothing && pending.err === nothing &&
@@ -277,7 +313,8 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
     pending = nb.kernel   # the PendingKernel placeholder installed by load_notebook, unblocked below
     try
         rc = _reconstruct_bundle!(path)
-        rc.fresh && _instantiate_env!(rc.envdir)
+        rc.fresh && _instantiate_env!(rc.envdir;
+            online = line -> (try; _broadcast(nb, "bringup:" * line); catch; end))
         # Embedded precomputed results → unpack into the local memo store BEFORE the drain, so the
         # expensive cells RESTORE instead of recompute (content-addressed: existing blobs are kept).
         # host-portable keys (manifest/src digests) make the exporter's fullkeys match here.
@@ -290,7 +327,8 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
         catch e
             @warn "KaimonSlate: embedded memo unpack failed (cells will recompute)" exception = (e, catch_backtrace())
         end
-        kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir, label = basename(abspath(path)))
+        kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir, label = basename(abspath(path)),
+                            online = line -> (try; _broadcast(nb, "bringup:" * line); catch; end))
         lock(nb.lock) do
             nb.kernel = kernel
             # A durable INSTALL (SLATE_INSTALL_DIR) → serve the notebook FROM the installed project, so

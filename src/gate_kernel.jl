@@ -169,10 +169,14 @@ mutable struct GateKernel <: Kernel
                      # policy: `prepare!` then refuses to re-dial/cold-spawn until an EXPLICIT run clears
                      # it (a reactive cascade errors instead), so a flaky region isn't silently replaced
                      # behind the user's back. Always false under the `auto` policy (eager re-dial).
+    online::Any      # optional `line::String -> nothing` callback: a COLD LOCAL spawn's stdout/stderr,
+                     # streamed line-by-line (mirrors the remote path's `_bringup_note`/`_run_streamed`) —
+                     # so a slow first-run precompile narrates itself into the UI instead of looking hung.
+                     # `nothing` (the default) skips the callback entirely; the log file write is unaffected.
     GateKernel(project::AbstractString; parent::AbstractString = "", envdir::AbstractString = "",
                pending::Vector = Any[], threads::AbstractString = "", label::AbstractString = "",
-               target = nothing) =
-        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing, 0, false)
+               target = nothing, online = nothing) =
+        new(String(project), String(parent), String(envdir), collect(Any, pending), 0, 0, nothing, nothing, "", ReentrantLock(), String(threads), false, String(label), target, nothing, 0, false, online)
 end
 
 """
@@ -487,12 +491,20 @@ function _spawn_worker!(k::GateKernel)
     # SIGINT again. Workers must never touch the operator's terminal.
     k.proc = run(pipeline(cmd; stdin = devnull, stdout = out, stderr = out); wait = false)
     close(out.in)
+    online = k.online   # captured once — a respawn gets a fresh GateKernel, so this can't go stale mid-pump
     Threads.@spawn begin
         io = open(k.logpath, "w")
         Sys.isunix() && (try; chmod(k.logpath, 0o600); catch; end)
         try
-            while !eof(out)
-                write(io, readavailable(out)); flush(io)
+            # Line-by-line (not chunked `readavailable`) so a slow first-run precompile can narrate
+            # itself live via `online`, mirroring the remote path's `_run_streamed`. Net effect on the
+            # log file is the same content, just written one newline-terminated line at a time.
+            for line in eachline(out)
+                println(io, line); flush(io)
+                if online !== nothing
+                    s = strip(line)
+                    isempty(s) || (try; online(String(s)); catch; end)
+                end
             end
         catch
         finally
