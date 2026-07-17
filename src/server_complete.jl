@@ -950,6 +950,18 @@ function _make_router(h::Hub)
     # place that touches ~/.ssh, only on the user's explicit grant). POST dismiss records "not now" so the
     # popup won't re-nag until the region set changes again.
     HTTP.register!(router, "GET", "/api/{id}/mesh-consent", req -> _withnb(h, req, nb -> begin
+        # ?force=1 (the DAG "⇄ connect" action) recomputes the consent status FRESH — bypassing both the
+        # pending stash AND the "not now" dismissal — so the user can summon the popup back on demand after
+        # declining (the popup's own "connect later from the peer routing plan" promise). A plain GET (a
+        # fresh tab checking on load) returns only a genuinely-pending payload, so it never re-nags on its own.
+        if get(HTTP.queryparams(HTTP.URI(req.target)), "force", "0") == "1"
+            st = try
+                ReportEngine.mesh_consent_status(_nb_defined_regions(nb))
+            catch e
+                Dict("connected" => true, "pairs" => Any[], "error" => first(sprint(showerror, e), 200))
+            end
+            return _json(merge(Dict("pending" => !get(st, "connected", true)), st))
+        end
         p = _mesh_pending(nb.id)
         _json(p === nothing ? Dict("pending" => false) : merge(Dict("pending" => true), p))
     end))
@@ -968,6 +980,22 @@ function _make_router(h::Hub)
         _mesh_dismiss!(nb)
         _mesh_broadcast_clear!(nb)
         _json(Dict("ok" => true))
+    end))
+    # REVOKE the mesh (the inverse of introduce): drop the region('s) slate ed25519 key, its scoped
+    # authorized_keys grants on every peer, and its host-key pins — the UUID-tagged artifacts, nothing a
+    # human added — then forget the cached route verdicts so transfers re-probe (→ relay). `?region=<name>`
+    # revokes just that one; no param revokes the whole notebook group. Reversible: introduce re-installs.
+    HTTP.register!(router, "POST", "/api/{id}/mesh-teardown", req -> _withnb(h, req, nb -> begin
+        one = get(HTTP.queryparams(HTTP.URI(req.target)), "region", "")
+        names = isempty(one) ? _nb_defined_regions(nb) : String[one]
+        r = try
+            for n in names; ReportEngine.teardown_region_mesh!(n); end
+            _mesh_broadcast_clear!(nb)
+            Dict("ok" => true, "torn_down" => names, "plan" => ReportEngine.peer_plan_data(_nb_defined_regions(nb)))
+        catch e
+            Dict("ok" => false, "error" => first(sprint(showerror, e), 300))
+        end
+        _json(r)
     end))
     # Peer-mesh plan for the DAG region-map view: the cached route verdict per cross-region pair, the
     # on-host mesh artifacts, and the exact `ssh -N -L` each cross-host pull would run (PEER_TUNNEL_PLAN

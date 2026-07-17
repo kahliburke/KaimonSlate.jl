@@ -1462,7 +1462,7 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 /* The shared confirm/alert (#modalbg, driven by dlg/confirmDark) is a modal-ON-modal — it must sit
    above any base surface (settings/export/publishing all share .modal-bg z-index:50) and the loading
    spinner (60) / palette (65), so a confirmation never hides behind the surface that opened it. */
-#modalbg { z-index: 90; }
+#modalbg { z-index: 150; }   /* above the Destinations modal (130) + mesh consent (140) it can be raised from; below the 200 connection-critical modals */
 .modal { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:18px 20px; max-width:520px; width:90%;
          box-shadow:0 16px 48px rgba(0,0,0,.55); }
 .modal .msg { color:var(--text); font-size:.92rem; line-height:1.5; margin-bottom:16px; white-space:pre-wrap; word-break:break-word; }

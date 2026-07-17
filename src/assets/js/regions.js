@@ -24,9 +24,26 @@ async function enableDestination(name) {
   const names = _nbRegions().map(r => r.name);
   if (names.indexOf(name) < 0) names.push(name);
   await _postRegions(names);
+  closeDestinations();   // adding a destination closes the manager — no reason to keep it up, and a mesh
+                         // consent popup (if the new region forms a cross-host pair) then shows unobstructed
+                         // instead of stacking behind the still-open modal.
 }
 async function removeDestination(name) {
+  // Cells tagged to this region would keep it "alive" (a cell tag re-adds it to the notebook's region list
+  // via _regions_json), so a bare footer-removal LOOKS like it did nothing. Warn, then actually untag those
+  // cells — they fall back to 💻 local (the main kernel) — before dropping the region.
+  const tagged = ((typeof nbState !== 'undefined' && nbState && nbState.cells) || [])
+    .filter(c => cellAssignedRegion(c) === name);
+  if (tagged.length) {
+    const n = tagged.length, plural = n === 1 ? '' : 's';
+    const msg = `${n} cell${plural} run on 🖧 ${name}.\nRemoving it moves ${n === 1 ? 'it' : 'them'} back to ` +
+      `💻 local (the main kernel). Continue?`;
+    if (!await confirmDark(msg, 'Remove & move to local', 'danger')) return;
+    for (const c of tagged) await setCellRegion(c.id, '');   // untag → the cell runs on the main kernel again
+  }
   await _postRegions(_nbRegions().map(r => r.name).filter(n => n !== name));
+  renderDestinations();   // stay open (you may remove several) but REFRESH the lists — _postRegions re-renders
+                          // the notebook, not this modal, so without this the removed region lingers in the list.
 }
 
 // Set a cell's region ('' = local/main): drop any region tag, add the new one.
