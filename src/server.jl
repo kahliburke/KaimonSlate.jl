@@ -866,9 +866,16 @@ function _region_kernel!(nb::LiveNotebook, name::String)
         r === nothing && error("region '$name' is not defined — create it in the registry: " *
                                "region(\"$name\"; host=…, warm=…) or the home-page Regions manager")
         isempty(r.host) && error("region '$name' has no host — set one in the Regions manager")
-        target = ReportEngine._region_target(r)   # env dir + transport + datadir + region tag, from the registry def
         proj = Base.current_project(dirname(abspath(nb.path)))
         parent = proj === nothing ? "" : dirname(proj)   # notebook's own /src synced for hot-reload provenance
+        # The region worker replicates the NOTEBOOK's exact env — its own fork env if it has one, else the
+        # parent project (identical resolution to `_select_kernel`'s whole-notebook remote path). The region's
+        # `preload` is only a warm-pool key, never the env a region cell runs — so a region cell gets the
+        # notebook's packages + dev'd path deps even when the region has no preload configured.
+        envdir = ReportEngine.notebook_env_dir(nb.path)
+        origin_env = isfile(joinpath(envdir, "Project.toml")) ? envdir :
+                     (!isempty(parent) && isfile(joinpath(parent, "Project.toml")) ? parent : "")
+        target = ReportEngine._region_target(r; origin_env = origin_env)   # transport/datadir/region from the def; env = the notebook's
         ReportEngine._rlog("region: kernel '$name' for $(nb.id) → $(r.host) ($(r.transport))" *
                            (isempty(r.data_root) ? "" : " root=$(r.data_root)"))
         k = ReportEngine.GateKernel(target.project; parent = parent, target = target,

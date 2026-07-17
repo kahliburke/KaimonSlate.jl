@@ -541,7 +541,15 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
             _rlog("provision [3/3] rsync parent project → $host:$(t.project) + instantiate (no resolved origin env)")
             _rsync!(host, parent_project, t.project; excludes = ["Manifest.toml", ".git", "*.cov"]) ||
                 error("provision: rsync parent project → $host failed")
-            first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()",
+            # Replicate the parent's dev'd path deps (e.g. a `[sources]` local package) into devsrc/ and
+            # rewrite Project.toml's `[sources]` paths to point there — else the resolve below dangles on a
+            # `path="../dep"` that doesn't exist on the host. The Manifest is intentionally NOT shipped here
+            # (fresh resolve), so only the `[sources]` rewrite bites; `_rsync_dev_deps!` reads the LOCAL
+            # Manifest to discover which deps are dev'd. Same dev-dep handling as `_replicate_env!`.
+            rewrites = _rsync_dev_deps!(t, parent_project)
+            build = _rewrite_devpaths_script(rel, rewrites) *
+                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()\n"
+            first(_ssh_julia!(host, build,
                               "instantiate parent project on $host")) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
@@ -829,6 +837,73 @@ end
 
 const _REMOTE_DEVSRC = "$_REMOTE_ROOT/devsrc"   # rsync'd sources for dev'd deps (Pkg.develop targets)
 
+# Rsync each dev'd (path) dependency of the project at `local_env` into `devsrc/<name>` on the remote and
+# return the (name → $HOME-relative remote path) rewrites — the local checkouts (`Pkg.develop` targets)
+# that must resolve on the host. Skips the project itself (it appears in its own Manifest as `path="."`
+# and IS the remote's active project) and any dep whose local source has vanished. Shared by
+# `_replicate_env!` (origin-env replication) and `provision_remote!`'s parent-project branch, so BOTH ship
+# dev sources instead of leaving a `[sources]` `path="../dep"` dangling on the remote. `_dev_deps` reads
+# the LOCAL Manifest to discover which deps are dev'd — so this works even when the remote Manifest isn't
+# shipped (a fresh-resolve provision).
+function _rsync_dev_deps!(t::RemoteTarget, local_env::AbstractString)
+    host = t.ssh_host
+    rewrites = Tuple{String,String}[]
+    for (name, lpath) in _dev_deps(joinpath(local_env, "Manifest.toml"), local_env)
+        # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/") so the
+        # project-itself entry compares equal to the env dir and is left as the active project.
+        if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(local_env)), '/')
+            _rlog("env: dev dep '$name' is the project itself — left as the active project (not redirected to devsrc)")
+            continue
+        end
+        if !isdir(lpath)
+            _rlog("env: dev dep '$name' source missing locally ($lpath) — skipping (its path will dangle)")
+            continue
+        end
+        rp = "$_REMOTE_DEVSRC/$name"
+        _rsync!(host, lpath, rp; excludes = [".git", "*.cov"]) ||
+            (_rlog("env: rsync dev dep '$name' → $host failed"); continue)
+        push!(rewrites, (name, rp))
+        _rlog("env: dev dep '$name' → $host:$rp")
+    end
+    return rewrites
+end
+
+# Remote Julia code that rewrites each dev dep's path — in the Manifest (if present) AND in Project.toml's
+# `[sources]` — to its rsync'd `devsrc` location. Julia ≥1.11's resolver reads the `[sources]` path, so a
+# dev dep dangles unless BOTH are redirected. Returns "" when there's nothing to rewrite. Shared so the
+# origin-env replication and the parent-project provision rewrite paths identically.
+function _rewrite_devpaths_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}})
+    isempty(rewrites) && return ""
+    io = IOBuffer()
+    println(io, "import Pkg, TOML")
+    println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
+    println(io, "mf = joinpath(proj, \"Manifest.toml\")")
+    println(io, "if isfile(mf)")
+    println(io, "  data = TOML.parsefile(mf)")
+    println(io, "  deps = get(data, \"deps\", Dict{String,Any}())")
+    for (name, rp) in rewrites
+        println(io, "  if haskey(deps, raw\"$name\")")
+        println(io, "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\")); end")
+        println(io, "  end")
+    end
+    println(io, "  open(mf, \"w\") do _io; TOML.print(_io, data); end")
+    println(io, "end")
+    println(io, "pf = joinpath(proj, \"Project.toml\")")
+    println(io, "if isfile(pf)")
+    println(io, "  pdata = TOML.parsefile(pf)")
+    println(io, "  src = get(pdata, \"sources\", nothing)")
+    println(io, "  if src isa AbstractDict")
+    for (name, rp) in rewrites
+        println(io, "    if get(src, raw\"$name\", nothing) isa AbstractDict && haskey(src[raw\"$name\"], \"path\")")
+        println(io, "      src[raw\"$name\"][\"path\"] = joinpath(homedir(), raw\"$rp\")")
+        println(io, "    end")
+    end
+    println(io, "    open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
+    println(io, "  end")
+    println(io, "end")
+    return String(take!(io))
+end
+
 """
     _replicate_env!(t::RemoteTarget) -> nothing
 
@@ -846,27 +921,7 @@ function _replicate_env!(t::RemoteTarget)
     _rsync!(host, origin, t.project; excludes = [".git", "*.cov", ".ready"]) ||
         error("env: rsync origin project → $host failed")
     # 2. dev'd deps: rsync each local source into devsrc/<name>; collect (name → $HOME-relative remote path).
-    devs = _dev_deps(joinpath(origin, "Manifest.toml"), origin)
-    rewrites = Tuple{String,String}[]
-    for (name, lpath) in devs
-        # The project itself appears in its own Manifest as a path dep (`path = "."`). It IS `t.project`
-        # on the remote (the active project) — don't copy it into devsrc or redirect its path there.
-        # Normalize + strip the trailing slash the `path="."` form leaves (abspath("x/.") → "x/"), so it
-        # compares equal to the env dir.
-        if rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(origin)), '/')
-            _rlog("env: dev dep '$name' is the project itself — left as the active project (not redirected to devsrc)")
-            continue
-        end
-        if !isdir(lpath)
-            _rlog("env: dev dep '$name' source missing locally ($lpath) — skipping (its Manifest path will dangle)")
-            continue
-        end
-        rp = "$_REMOTE_DEVSRC/$name"
-        _rsync!(host, lpath, rp; excludes = [".git", "*.cov"]) ||
-            (_rlog("env: rsync dev dep '$name' → $host failed"); continue)
-        push!(rewrites, (name, rp))
-        _rlog("env: dev dep '$name' → $host:$rp")
-    end
+    rewrites = _rsync_dev_deps!(t, origin)
     # 3. rewrite the remote Manifest's dev paths to the rsync'd locations, then instantiate.
     projrel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     # STREAM the instantiate/precompile — the long, otherwise-silent step — into the remote log live, so a
@@ -898,37 +953,11 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"Revise\")]" :
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\")]"
     io = IOBuffer()
-    println(io, "import Pkg, TOML")
+    # Redirect dev deps' Manifest + [sources] paths to their rsync'd devsrc locations (no-op when empty).
+    rw = _rewrite_devpaths_script(projrel, rewrites)
+    isempty(rw) || print(io, rw)
+    println(io, "import Pkg")
     println(io, "proj = joinpath(homedir(), raw\"$projrel\")")
-    println(io, "mf = joinpath(proj, \"Manifest.toml\")")
-    if !isempty(rewrites)
-        println(io, "if isfile(mf)")
-        println(io, "  data = TOML.parsefile(mf)")
-        println(io, "  deps = get(data, \"deps\", Dict{String,Any}())")
-        for (name, rp) in rewrites
-            println(io, "  if haskey(deps, raw\"$name\")")
-            println(io, "    for e in deps[raw\"$name\"]; e isa AbstractDict && (e[\"path\"] = joinpath(homedir(), raw\"$rp\")); end")
-            println(io, "  end")
-        end
-        println(io, "  open(mf, \"w\") do _io; TOML.print(_io, data); end")
-        println(io, "end")
-        # Julia ≥1.11 records a `Pkg.develop`'d path in Project.toml's `[sources]`, and that is what the
-        # RESOLVER reads (`Pkg.add`/instantiate) — rewriting only the Manifest leaves `[sources]` pointing
-        # at the local `../dep` path, which dangles on the remote. Redirect it to the rsync'd devsrc too.
-        println(io, "pf = joinpath(proj, \"Project.toml\")")
-        println(io, "if isfile(pf)")
-        println(io, "  pdata = TOML.parsefile(pf)")
-        println(io, "  src = get(pdata, \"sources\", nothing)")
-        println(io, "  if src isa AbstractDict")
-        for (name, rp) in rewrites
-            println(io, "    if get(src, raw\"$name\", nothing) isa AbstractDict && haskey(src[raw\"$name\"], \"path\")")
-            println(io, "      src[raw\"$name\"][\"path\"] = joinpath(homedir(), raw\"$rp\")")
-            println(io, "    end")
-        end
-        println(io, "    open(pf, \"w\") do _io; TOML.print(_io, pdata); end")
-        println(io, "  end")
-        println(io, "end")
-    end
     println(io, "Pkg.activate(proj)")
     # Add the worker infra INTO this same env so it resolves against the notebook's exact dependency
     # versions (no stacked-env skew). KaimonGate is always needed (the gate); ExpressionExplorer too
@@ -956,27 +985,51 @@ const _SYNC_LOCK = ReentrantLock()
 
 function start_sync!(t::RemoteTarget, parent_project::AbstractString)
     (isempty(parent_project) && !isdir(parent_project)) && return
-    key = string(t.ssh_host, ":", t.project)
+    base = string(t.ssh_host, ":", t.project)
     lock(_SYNC_LOCK) do
-        haskey(_SYNCERS, key) && _SYNCERS[key].running && return
-        w = SyncWatcher(Threads.@spawn(_sync_loop(t, parent_project, key)), true)
-        _SYNCERS[key] = w
+        # 1. the notebook's parent project /src → t.project (project code hot-reload). NEVER the env
+        #    files, or we'd clobber the replicated Project/Manifest (the exact env provisioning set up).
+        _start_syncer!(base, t.ssh_host, parent_project,
+                       isdir(joinpath(parent_project, "src")) ? joinpath(parent_project, "src") : parent_project,
+                       t.project, ["Manifest.toml", "Project.toml", ".git", "*.cov"])
+        # 2. each dev'd path dep → devsrc/<name>, so a local package the notebook develops stays fresh on
+        #    the remote and Revise hot-reloads its edits there — the "kept up to date" half of dev-dep
+        #    provisioning. Read the SAME env whose Manifest provisioning replicated (origin_env, else the
+        #    parent) to discover which deps are dev'd; skip the project itself and any vanished source.
+        env = isempty(t.origin_env) ? parent_project : t.origin_env
+        for (name, lpath) in _dev_deps(joinpath(env, "Manifest.toml"), env)
+            rstrip(normpath(abspath(lpath)), '/') == rstrip(normpath(abspath(env)), '/') && continue
+            isdir(lpath) || continue
+            _start_syncer!("$base:dev:$name", t.ssh_host, lpath,
+                           isdir(joinpath(lpath, "src")) ? joinpath(lpath, "src") : lpath,
+                           "$_REMOTE_DEVSRC/$name", [".git", "*.cov"])
+        end
     end
     return nothing
 end
 
-function _sync_loop(t::RemoteTarget, parent_project::AbstractString, key::String)
-    watchdir = isdir(joinpath(parent_project, "src")) ? joinpath(parent_project, "src") : parent_project
+# Start one keyed filesystem→remote syncer if not already running (call with _SYNC_LOCK held).
+function _start_syncer!(key::AbstractString, host::AbstractString, localdir::AbstractString,
+                        watchdir::AbstractString, remotedir::AbstractString, excludes::Vector{String})
+    k = String(key)
+    (haskey(_SYNCERS, k) && _SYNCERS[k].running) && return
+    _SYNCERS[k] = SyncWatcher(Threads.@spawn(_sync_task(String(host), String(localdir), String(watchdir),
+                                                        String(remotedir), excludes, k)), true)
+    return nothing
+end
+
+# One sync task: watch `watchdir`, and on any change rsync `localdir` → `remotedir` (delta-only),
+# coalescing bursts. Generic over what's synced so BOTH the parent project (/src hot-reload) and each
+# dev'd path dep (devsrc/<name>, so a local package's edits Revise-reload on the remote) share it.
+function _sync_task(host::AbstractString, localdir::AbstractString, watchdir::AbstractString,
+                    remotedir::AbstractString, excludes::Vector{String}, key::String)
     while get(_SYNCERS, key, nothing) !== nothing && _SYNCERS[key].running
         try
             FileWatching.watch_folder(watchdir, 2.0)          # block until a change (or 2s tick)
             sleep(0.15)                                        # coalesce a burst of saves
-            # Sync /src (project code) only — NEVER the env files, or we'd clobber the replicated
-            # Project/Manifest (the exact env `_replicate_env!` set up) on every save.
-            _rsync!(t.ssh_host, parent_project, t.project;
-                    excludes = ["Manifest.toml", "Project.toml", ".git", "*.cov"])
+            _rsync!(host, localdir, remotedir; excludes = excludes)
         catch e
-            @warn "slate remote: sync loop error" host = t.ssh_host exception = (e,) maxlog = 3
+            @warn "slate remote: sync loop error" host = host dir = localdir exception = (e,) maxlog = 3
             sleep(1.0)
         end
     end
@@ -984,12 +1037,16 @@ function _sync_loop(t::RemoteTarget, parent_project::AbstractString, key::String
     return nothing
 end
 
+# Stop every syncer for this target — the parent-project watcher AND each dev-dep watcher (keyed
+# `<base>:dev:<name>`), so a teardown leaves no orphaned rsync loops.
 function stop_sync!(t::RemoteTarget)
-    key = string(t.ssh_host, ":", t.project)
+    base = string(t.ssh_host, ":", t.project)
     lock(_SYNC_LOCK) do
-        w = get(_SYNCERS, key, nothing)
-        w === nothing || (w.running = false)
-        delete!(_SYNCERS, key)
+        for key in collect(keys(_SYNCERS))
+            (key == base || startswith(key, base * ":")) || continue
+            _SYNCERS[key].running = false
+            delete!(_SYNCERS, key)
+        end
     end
     return nothing
 end
@@ -1402,7 +1459,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
     #     its manifest to this notebook. Any failure falls through to a fresh spawn. The claim
     #     set stops two notebooks opening concurrently from adopting the same worker.
     pool = nothing
-    try; pool = _claim_region_worker!(t.region, host); catch e; _rlog("adopt: region scan failed ($(sprint(showerror, e)))"); end
+    try; pool = _claim_region_worker!(t.region, host; project = t.project, transport = string(t.transport)); catch e; _rlog("adopt: region scan failed ($(sprint(showerror, e)))"); end
     if pool !== nothing
         k.port = pool.port; k.stream_port = pool.stream_port
         _rlog("adopt: warm worker-$(pool.port) on $host for region '$(t.region)' — adopting for '$(k.label)'")
@@ -3030,15 +3087,22 @@ end
 # parent project — never the shared mutable dir when there's content to isolate.
 _remote_env_key(origin_env, parent) = _proj_key(isempty(String(origin_env)) ? parent : origin_env)
 
-# A region's RemoteTarget. Env dir keyed (isolated) by the preload PATH; `region` tags the worker so its
-# OWN region reclaims it on adoption. For a :direct region, `port` carries base_port as the range HINT —
+# A region's RemoteTarget. The worker replicates `origin_env` — the ADOPTING NOTEBOOK's project when
+# given (so a region cell runs the notebook's EXACT env, incl. dev'd path deps), else the region's
+# `preload`. `preload` is therefore purely a warm-pool key: it decides which env the pre-built warm
+# workers hold, so a notebook whose env MATCHES can adopt them instantly; it is never the source of
+# truth for what a region cell runs. The env dir is keyed (isolated) by the env it replicates, so two
+# notebooks with different projects never share/poison one mutable env, and a notebook running whole-
+# remote (`run_on`) and on a region converge on the SAME dir. `region` tags the worker so its own
+# region reclaims it on adoption. For a :direct region, `port` carries base_port as the range HINT —
 # fresh_spawn allocates a free slot from it (see _direct_port_slots) so the kernel lands in the
 # firewall-opened range, not the growing auto counter.
-_region_target(r::Region) = RemoteTarget(r.host; transport = r.transport,
-    project = "~/.cache/kaimonslate/remote/" * _proj_key(r.preload),
-    port = (r.transport === :direct ? r.base_port : 0),
-    origin_env = r.preload, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
-    sysimage = r.sysimage, curve = r.curve)
+_region_target(r::Region; origin_env::AbstractString = r.preload) =
+    RemoteTarget(r.host; transport = r.transport,
+        project = "~/.cache/kaimonslate/remote/" * _proj_key(origin_env),
+        port = (r.transport === :direct ? r.base_port : 0),
+        origin_env = origin_env, datadir = r.data_root, cache_root = r.cache_root, region = r.name,
+        sysimage = r.sysimage, curve = r.curve)
 
 # In-flight adoption claims (hub-local). Without a claim two notebooks opening at once could both scan
 # the roster, see the same idle worker, and both adopt it.
@@ -3055,12 +3119,24 @@ _region_warm_worker(w, name::AbstractString) =
     _manifest_get(w["manifest"], "region") == String(name) &&
     _manifest_get(w["manifest"], "hub") == gethostname()
 
+# Does warm worker `w` hold the ENV the adopting notebook needs? Adoption re-points PARENT_PROJECT but
+# does NOT re-instantiate, so its loaded packages must already be the notebook's — i.e. it was built
+# with the SAME env-keyed `project` (and `transport`). Empty ⇒ "don't care" (no gating). A mismatch is
+# left un-adopted so the caller cold-spawns and provisions the notebook's env fresh.
+_worker_env_fits(w, project::AbstractString, transport::AbstractString) =
+    (isempty(project)   || _manifest_get(w["manifest"], "project")   == String(project)) &&
+    (isempty(transport) || _manifest_get(w["manifest"], "transport") == String(transport))
+
 # Find + claim a warm worker for region `name` on `host`. First unclaimed wins — a region's warm
-# workers are interchangeable. Returns (port, stream_port) | nothing.
-function _claim_region_worker!(name::AbstractString, host)
+# workers are interchangeable ONLY within one env: `project`/`transport` (when given) must match the
+# adopting notebook's, because `__slate_adopt` re-points PARENT_PROJECT but does NOT re-instantiate the
+# env — a worker booted with a DIFFERENT env holds the wrong packages. A mismatch simply isn't adopted,
+# so the caller cold-spawns and provisions the notebook's env fresh. Returns (port, stream_port) | nothing.
+function _claim_region_worker!(name::AbstractString, host; project::AbstractString = "", transport::AbstractString = "")
     isempty(String(name)) && return nothing
     for w in list_remote_workers(host)
         _region_warm_worker(w, name) || continue
+        _worker_env_fits(w, project, transport) || continue
         sp = tryparse(Int, _manifest_get(w["manifest"], "stream_port")); sp === nothing && continue
         port = w["port"]
         claimed = lock(_REGION_CLAIM_LOCK) do
