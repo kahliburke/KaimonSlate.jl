@@ -140,7 +140,7 @@ const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 # env var → the default. See `_rcfg` in gate_kernel.jl for the precedence + install mechanism. Values
 # are SECONDS unless noted. slate.json key / env var / default / what it governs:
 #   ssh_connect_timeout     KAIMONSLATE_SSH_CONNECT_TIMEOUT     15    ConnectTimeout for every ssh/scp/rsync op
-#   ssh_control_persist     KAIMONSLATE_SSH_CONTROL_PERSIST     120   mux master warm-hold past the last op
+#   ssh_control_persist     KAIMONSLATE_SSH_CONTROL_PERSIST     600   mux master warm-hold past the last op
 #   tunnel_alive_interval   KAIMONSLATE_TUNNEL_ALIVE_INTERVAL   5     supervised tunnel ServerAliveInterval
 #   tunnel_alive_count      KAIMONSLATE_TUNNEL_ALIVE_COUNT      3     supervised tunnel ServerAliveCountMax
 #   tunnel_respawn_backoff  KAIMONSLATE_TUNNEL_RESPAWN_BACKOFF  1     backoff after a dropped forward before respawn
