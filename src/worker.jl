@@ -2387,15 +2387,32 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     # ALWAYS CURVE (decoupled from hub transport): allow-listed on :direct (its OWN Slate-side ZAP
     # handler + allow-file, not the gate's), encryption-only behind SSH on :tunnel. No plaintext blob
     # path on any worker. Needs the memo/CAS layer (MemoStore + codecs) — memo-off means no store to serve.
-    data_port > 0 && _MEMO_OK && Threads.@spawn try
+    data_port > 0 && _MEMO_OK && Threads.@spawn begin
         sleep(5)   # DEFERRED: another CURVE-server setup; keep it out of the hub's handshake window
         # The blob server binds `blob_bind` when given (remote workers → 0.0.0.0 so same-subnet PEERS can
         # reach it for direct pulls) else the gate's `host` (local → loopback). CURVE-protected regardless
         # (a peer must hold the server key to even handshake), so exposing it on a firewalled cloud subnet
         # is safe; peer allow-listing over :tunnel is the follow-on hardening.
-        _blob_server!(isempty(blob_bind) ? host : blob_bind, data_port; curve = blob_curve)
-    catch e
-        @warn "slate worker: blob channel died" port = data_port exception = e
+        #
+        # RETRY on EADDRINUSE: a warm-pool respawn (or a reap+replace) commonly RACES the previous worker's
+        # not-yet-released blob socket on the same data_port, so the bind throws "Address already in use". The
+        # port frees within a second or two; without a retry the worker would run blob-LESS for its whole life
+        # (no peer transport at all — every pull FROM it silently relays / an ssh-bridge stalls). Retry a few
+        # times with backoff, then give up loudly. `_blob_server!` only returns on shutdown, so reaching past
+        # it means a clean stop, not a bind failure.
+        for attempt in 1:12
+            try
+                _blob_server!(isempty(blob_bind) ? host : blob_bind, data_port; curve = blob_curve)
+                break
+            catch e
+                if attempt < 12 && occursin("Address already in use", sprint(showerror, e))
+                    @info "slate worker: blob port busy, retrying" port = data_port attempt = attempt
+                    sleep(1.5); continue
+                end
+                @warn "slate worker: blob channel died" port = data_port exception = e
+                break
+            end
+        end
     end
     # Dedicated transfer executor — pumps queued peer pulls (verb `X`) on a default-pool thread, off the
     # gate loop and off the blob serve loop (TRANSFER_CONTROL_PLAN Mode A). One task = serial per worker.
