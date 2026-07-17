@@ -147,6 +147,7 @@ _startup_mode(hub_up::Bool, ext_autostart::Bool, own::Bool) =
 function _own_hub!()
     _load_slate_config!()
     _reap_orphan_workers!()
+    ReportEngine._reap_orphan_ssh!()   # …and any ssh tunnel/master procs a hard-killed prior hub orphaned
     atexit(on_shutdown)          # backstop — cleanup! also stops the hub on a clean quit
     _hub()
     return nothing
