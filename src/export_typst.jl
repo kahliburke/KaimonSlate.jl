@@ -12,6 +12,26 @@
 const _CMARKER_VER = "0.1.6"
 const _MITEX_VER = "0.2.5"
 
+# Cap on a single on-demand-rendered chart SVG we'll cache across exports (see
+# `_figure_for_export`'s live round-trip) — small charts stay cached indefinitely (no TTL,
+# same as the existing PNG snapshot store), a rare huge one just re-renders next export.
+const _LIVE_SVG_CACHE_MAX_BYTES = 2 * 1024 * 1024
+
+# Ask the open browser tab to render `cell`'s chart as vector SVG right now (see core.js
+# `_renderChartSvg`) — used only at export time, not on every chart update. `nothing` if no
+# tab is open, the round-trip times out, or the cell has no live chart.
+function _live_render_svg(nb::LiveNotebook, cell::AbstractString; dark::Bool = false)
+    code = "window._renderChartSvg && window._renderChartSvg(" *
+           JSON.json(String(cell)) * ", " * (dark ? "true" : "false") * ")"
+    res = request_live_eval(nb, code; timeout = 6.0)
+    res isa AbstractDict || return nothing
+    get(res, "ok", false) === true || return nothing
+    raw = get(res, "result", nothing)
+    raw isa AbstractString || return nothing
+    s = try; JSON.parse(raw); catch; nothing; end
+    return (s isa AbstractString && !isempty(s)) ? s : nothing
+end
+
 # LaTeX macro shims for commands mitex lacks. mitex honors parameterized \newcommand, so
 # these inject cheaply ahead of every equation. Grow as needed.
 const _MITEX_SHIMS = raw"""
@@ -420,10 +440,12 @@ end
 
 # Resolve the best figure representation for publication export: prefer VECTOR (the
 # `application/pdf` chunk a CairoMakie figure carries — fonts embedded, crisp at any
-# scale — then a captured SVG), and only fall back to raster PNG. Client-rendered
-# charts (ECharts) come through the snapshot store: the browser's SVG snapshot if it
-# supplied one, else its PNG. Returns `(bytes, ext)` with `ext ∈ ("pdf","svg","png")`,
-# or `nothing` when the cell has no figure.
+# scale — then a captured SVG), and only fall back to raster PNG. Client-rendered charts
+# (ECharts) come through the snapshot store: a cached SVG snapshot if one exists (see
+# `_warm_chart_svgs!`, which populates it via a live browser round-trip BEFORE the caller
+# takes `nb.lock` — `_figure_for_export` itself must stay lock-safe, so it only ever READS
+# the cache, never triggers a round-trip), else its PNG. Returns `(bytes, ext)` with
+# `ext ∈ ("pdf","svg","png")`, or `nothing` when the cell has no figure.
 function _figure_for_export(nb::LiveNotebook, c::Cell; dark::Bool = false)
     o = c.output
     if o !== nothing
@@ -433,10 +455,40 @@ function _figure_for_export(nb::LiveNotebook, c::Cell; dark::Bool = false)
             end
         end
     end
-    svg = _snapshot_svg(nb.id, c.id; dark = dark)    # theme-matched vector chart, if the browser supplied one
+    svg = _snapshot_svg(nb.id, c.id; dark = dark)    # theme-matched vector chart, if the browser supplied one (live or pre-warmed)
     svg !== nothing && return (Vector{UInt8}(codeunits(svg)), "svg")
     png = _snapshot(nb.id, c.id)
     png !== nothing && return (copy(png), "png")
+    return nothing
+end
+
+# Tell the open tab a chart is being rendered live for export — best-effort UI feedback (the
+# activity log; see runstatus.js `onExportProgress`), never load-bearing for the export itself.
+_export_progress(nb::LiveNotebook, cid::AbstractString) =
+    (try; _broadcast(nb, "exportprog:" * JSON.json(Dict("cell" => cid))); catch; end; nothing)
+
+# Pre-warm the SVG snapshot cache for every ECharts cell that doesn't already have one, via a
+# live round-trip to an open browser tab — called BEFORE the caller takes `nb.lock` (each
+# `request_live_eval` blocks up to its timeout; doing this under the notebook lock would stall
+# every other operation on the notebook for the whole export). `progress` (optional) is called
+# with each cell id as its round-trip starts, so the caller can report what's happening (a
+# multi-chart export is the one case this is newly slower than the old eager-render design).
+# Best-effort throughout: a cell that fails/times out just falls through to PNG in
+# `_figure_for_export`, same as when no tab is open at all.
+function _warm_chart_svgs!(nb::LiveNotebook; dark::Bool = false, progress = nothing)
+    targets = lock(nb.lock) do
+        [c.id for c in nb.report.cells
+         if c.output !== nothing && !isempty(c.output.echarts) && _snapshot_svg(nb.id, c.id; dark = dark) === nothing]
+    end
+    for cid in targets
+        progress === nothing || (try; progress(cid); catch; end)
+        live = _live_render_svg(nb, cid; dark = dark)
+        live === nothing && continue
+        # Cache small ones so tweak-and-reexport doesn't re-pay the round-trip each time — but a
+        # genuinely huge chart's SVG (a downsampled heatmap can still run to a few MB) isn't
+        # worth holding onto forever; it's still used for THIS export, just re-rendered next time.
+        sizeof(live) <= _LIVE_SVG_CACHE_MAX_BYTES && set_snapshot_svg!(nb.id, cid, dark, live)
+    end
     return nothing
 end
 
@@ -994,6 +1046,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
     show_source = include_source && code != "hidden"
     cols = clamp(Int(columns), 1, 2)
     body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
+    _warm_chart_svgs!(nb; dark = theme == "dark", progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         # Dark theme highlights code via a bundled tmTheme that Typst reads from the root.
@@ -1101,6 +1154,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                                include_source::Bool = false, include_params::Bool = false,
                                notes::Bool = false, level::Integer = 2, outputs::AbstractString = "all")
     show_source = include_source && code != "hidden"
+    _warm_chart_svgs!(nb; dark = theme == "dark", progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)

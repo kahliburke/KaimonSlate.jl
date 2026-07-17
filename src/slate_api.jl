@@ -216,6 +216,7 @@ const SLATE_API = SlateApiEntry[
     # Real exported functions — documented ONCE in their own docstrings (tables.jl / paged.jl).
     SlateApiEntry("slate_table", "Tables", Base.Docs.Binding(ReportEngine, :slate_table)),
     SlateApiEntry("slate_query", "Tables", Base.Docs.Binding(ReportEngine, :slate_query)),
+SlateApiEntry("slate_matrix", "Matrices", Base.Docs.Binding(ReportEngine, :slate_matrix)),
 
     # ── Assets & front-end ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("@asset", "Assets & front-end", "@asset \"path\" -> String   ·   @asset bytes \"path\" -> Vector{UInt8}",

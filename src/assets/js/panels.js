@@ -435,6 +435,7 @@ function connectLive() {
     if (e.data.startsWith('cellstream:')) { try { const p = JSON.parse(e.data.slice(11)); window.onCellStream && window.onCellStream(p.channel, p.data); } catch (_) {} return; }   // slate_emit(channel,data) → a cell's custom JS renderer
     if (e.data.startsWith('inspect:')) { try { const r = JSON.parse(e.data.slice(8)); window._slateInspect && window._slateInspect(r.reqid, r.cell); } catch (_) {} return; }   // slate.inspect: capture this cell for the agent
     if (e.data.startsWith('js:')) { try { const r = JSON.parse(e.data.slice(3)); window._slateEvalJs && window._slateEvalJs(r.reqid, r.code); } catch (_) {} return; }   // slate.eval_js: run agent JS in this tab
+    if (e.data.startsWith('exportprog:')) { try { window.onExportProgress && window.onExportProgress(JSON.parse(e.data.slice(11)).cell); } catch (_) {} return; }   // a chart is being rendered live for PDF/Typst export
     if (e.data.startsWith('mesh-consent:')) { try { window.onMeshConsent && window.onMeshConsent(JSON.parse(e.data.slice(13))); } catch (_) {} return; }   // §5.1: a new cross-host pair needs a consented SSH mesh
     if (e.data.startsWith('bringup:')) { window.onBringup && window.onBringup(e.data.slice(8)); return; }               // remote worker bring-up: live instantiate/precompile line → banner detail
     if (e.data.startsWith('scratchclear:')) { window.onScratchClear && window.onScratchClear(); return; }               // scratchpad emptied

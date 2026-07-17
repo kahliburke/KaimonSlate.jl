@@ -335,6 +335,14 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     tables = Any[]
     animations = Any[]
     if err === nothing && value !== nothing && !quiet
+        # A bare Matrix/SparseMatrixCSC/structured-LinearAlgebra return auto-renders via
+        # slate_matrix (KaTeX / dotted notation / downsampled heatmap, picked by size and
+        # type) instead of dumping the terminal grid below — replace, then fall through the
+        # SAME dispatch (a heatmap comes back as an EChart; the KaTeX forms fall to the
+        # generic rich-MIME branch below via their `show(io, MIME"text/latex", …)` method).
+        if value isa AbstractMatrix
+            value = try; Base.invokelatest(slate_matrix, value); catch; value; end
+        end
         if value isa EChart
             push!(echarts, value.option)
         elseif value isa Animation

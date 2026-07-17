@@ -53,37 +53,51 @@ function _snapCell(cellId, insts, spec) {
   _snapPending[cellId] = setTimeout(() => {
     delete _snapPending[cellId];
     const inst = insts[0]; if (!inst) return;
-    let png = '', svg = '', svgDark = '';
-    // PNG (dark theme) → matches the live UI for the agent's slate_view.
+    let png = '';
+    // PNG (dark theme) → matches the live UI for the agent's slate_view, AND is the PDF-export
+    // fallback for this cell. We used to ALSO eagerly re-render the spec offscreen as vector SVG
+    // (twice — light + dark theme) on every settle, "just in case" a PDF export happened later.
+    // For a large chart (a downsampled matrix heatmap can be tens of thousands of points) that's
+    // an expensive SVG DOM tree built repeatedly for an export that may never happen — real
+    // memory cost paid on every update, not just when exporting. `_figure_for_export`
+    // (export_typst.jl) already falls back cleanly to this PNG when no SVG snapshot exists, so
+    // dropping the eager SVG render costs nothing but export-time vector crispness for ECharts
+    // figures specifically (Makie figures already export true vector PDF separately).
     try { png = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#0e1116' }) || '').split(',')[1] || ''; } catch (_) {}
-    // Vector SVG for publication PDF: re-render the spec offscreen with the SVG renderer,
-    // once for a light page (default theme, white bg) and once for a dark page (dark
-    // theme, dark bg), so each PDF theme gets a chart that reads on its background. The spec
-    // is run through _pubSpec first so the exported figure carries no interactive chrome.
-    // Best-effort; the server prefers these over the raster PNG when present.
-    const pub = _pubSpec(spec);
-    const renderSvg = (themeName, bg) => {
-      let off = null, div = null;
-      try {
-        const w = inst.getWidth() || 640, h = inst.getHeight() || 400;
-        div = document.createElement('div');
-        div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
-        document.body.appendChild(div);
-        if (themeName === 'slate') _ensureSlateTheme();
-        off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
-        off.setOption(Object.assign({ backgroundColor: bg }, pub));
-        return off.renderToSVGString();
-      } catch (_) { return ''; }
-      // ALWAYS tear down the offscreen instance + div — without this, a throw in setOption/render
-      // leaked an ECharts instance (live zrender) + a detached node on every failed snapshot.
-      finally { if (off) { try { off.dispose(); } catch (_) {} } if (div) div.remove(); }
-    };
-    if (spec) { svg = renderSvg(null, '#ffffff'); svgDark = renderSvg('slate', '#12141c'); }
     if (png) fetch(_apipath('/api/snapshot'), { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cell: cellId, image: png, svg: svg || undefined, svgDark: svgDark || undefined }) }).catch(() => {});
+      body: JSON.stringify({ cell: cellId, image: png }) }).catch(() => {});
   }, 700);
 }
+
+// ON-DEMAND vector SVG for one cell, called via `request_live_eval` (server_snapshots.jl) only
+// when a PDF/Typst export actually needs it — the replacement for the eager per-settle render
+// `_snapCell` used to do. Re-renders the spec offscreen (same technique as before, just invoked
+// rarely instead of on every chart update) and disposes immediately; nothing is retained after
+// this returns. `dark` picks the dark-theme rendering. Returns an SVG string, or '' if the cell
+// has no live chart (already gone, or never an ECharts figure).
+window._renderChartSvg = function (cellId, dark) {
+  const cell = ((window.nbState && window.nbState.cells) || []).find(c => c.id === cellId);
+  const spec = cell && cell.echarts && cell.echarts[0];
+  if (!spec) return '';
+  const inst = (window.charts && window.charts[cellId] && window.charts[cellId][0]) || null;
+  const w = (inst && inst.getWidth()) || (spec.__size && spec.__size.width) || 640;
+  const h = (inst && inst.getHeight()) || (spec.__size && spec.__size.height) || 400;
+  const pub = _pubSpec(spec);
+  const themeName = dark ? 'slate' : null;
+  const bg = dark ? '#12141c' : '#ffffff';
+  let off = null, div = null;
+  try {
+    div = document.createElement('div');
+    div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
+    document.body.appendChild(div);
+    if (themeName === 'slate') _ensureSlateTheme();
+    off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
+    off.setOption(Object.assign({ backgroundColor: bg }, pub));
+    return off.renderToSVGString();
+  } catch (_) { return ''; }
+  finally { if (off) { try { off.dispose(); } catch (_) {} } if (div) div.remove(); }
+};
 
 // Geo maps: a spec may carry `registerMap` — {name, url} (or a list) declaring GeoJSON the chart
 // needs (Slate serves a vendored world at /assets/maps/world.json). Each map is fetched + passed to

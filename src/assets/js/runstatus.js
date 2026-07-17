@@ -273,6 +273,21 @@
     const p = document.getElementById('actpanel'); if (p) p.classList.toggle('open');
   };
 
+  // A PDF/Typst export needs a live browser round-trip to render a chart as vector SVG (see
+  // `_warm_chart_svgs!`, export_typst.jl) — genuinely slower than the old eager-render design
+  // for a chart-heavy notebook, so surface it: log each cell to the activity feed and pop the
+  // panel open (once per export burst, not on every event) so it's not a silent multi-second
+  // pause with no feedback.
+  let _exportPanelOpenT = 0;
+  window.onExportProgress = function (cellId) {
+    activity('run', cellId, 'rendering for export…');
+    const now = performance.now();
+    if (now - _exportPanelOpenT > 3000) {   // once per burst — don't fight a user who closed it
+      const p = document.getElementById('actpanel'); if (p) p.classList.add('open');
+    }
+    _exportPanelOpenT = now;
+  };
+
   // Click a cell id in the activity feed → jump to that cell.
   const _actlog = document.getElementById('actlog');
   if (_actlog) _actlog.addEventListener('click', (e) => {
