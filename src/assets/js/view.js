@@ -671,23 +671,27 @@ function updateChrome(state) {
   const hb = document.getElementById('hydbanner');
   // "run" (the plain initial autorun) gets NO banner — cells are fully interactive and each shows
   // its own running/stale state, exactly like any later manual run; a special top banner just for
-  // the FIRST run would be an arbitrary inconsistency now that it's not gating anything. "remote"
-  // (worker provisioning) and "env" (bundle reconstruction) have no per-cell equivalent — there's
-  // no worker yet to show per-cell progress against — so those keep a status banner.
+  // the FIRST run would be an arbitrary inconsistency now that it's not gating anything. "boot"
+  // (cold local worker spawn), "remote" (worker provisioning), and "env" (bundle reconstruction)
+  // have no per-cell equivalent — there's no worker yet to show per-cell progress against — so
+  // those keep a status banner, narrated live by the same `bringup:` stream in all three cases.
   if (state.hydrating && state.hydratingKind !== 'run') {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
     hb.innerHTML = '<span class="hydspin"></span><span class="hydmsg">' + (
       state.hydratingKind === 'remote'
         ? ('Starting the worker on <b>' + (state.hydratingHost || 'the remote host') + '</b> — provisioning &amp; connecting' +
            ' (a first run installs Julia deps and can take a few minutes; you can keep editing meanwhile)…')
+      : state.hydratingKind === 'boot'
+        ? 'Starting the worker — a first run installs/precompiles Julia packages, which can take a while; you can keep editing meanwhile…'
         : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…')
-      // live detail: the remote worker's streamed instantiate/precompile line (fed by `bringup:` events)
+      // live detail: the worker's streamed instantiate/precompile line (fed by `bringup:` events)
       + '</span><span id="hydstep" class="hydstep">' + (_bringupLine ? _esc(_bringupLine) : '') + '</span>';
     // Only the "env" case (a standalone bundle's frozen preview) substitutes real cells with a
     // static, non-live render — that's the one case where clicking in is genuinely meaningless
-    // (your edit would target a snapshot, not the real notebook). "remote" already shows the real
-    // cells, just not-yet-computed — that stays fully interactive.
-    document.body.classList.toggle('hyd-preview', state.hydratingKind !== 'remote');
+    // (your edit would target a snapshot, not the real notebook). "boot"/"remote" already show
+    // the real cells, just not-yet-computed — those stay fully interactive.
+    document.body.classList.toggle('hyd-preview',
+      state.hydratingKind !== 'remote' && state.hydratingKind !== 'boot');
   } else if (state.hydrateError) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
     hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)
