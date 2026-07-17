@@ -456,6 +456,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const animate = $animate))     # animate(frames;…) → Animation (animation.jl)
     Core.eval(m, :(const slate_table = $slate_table))
     Core.eval(m, :(const SlateTable = $SlateTable))
+    Core.eval(m, :(const slate_matrix = $slate_matrix))   # explicit override — bare Matrix returns auto-render (capture.jl)
     Core.eval(m, :(const slate_query = $slate_query))
     Core.eval(m, :(const slate_refresh = $slate_refresh))
     Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress

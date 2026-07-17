@@ -89,6 +89,17 @@ _snapshot_svg(nbid, cell; dark::Bool = false) = lock(_SNAP_LOCK) do
     store = dark ? _SNAP_SVG_DARK : _SNAP_SVG
     get(get(store, String(nbid), Dict{String,String}()), String(cell), nothing)
 end
+# Cache a SINGLE-theme SVG rendered on demand at export time (`_figure_for_export`'s live
+# round-trip) — unlike `set_snapshot!`, no PNG is required (the round-trip may run before any
+# PNG snapshot ever existed for this cell). A later export (or a request for the other theme)
+# then skips the round-trip.
+function set_snapshot_svg!(nbid::AbstractString, cell::AbstractString, dark::Bool, svg::AbstractString)
+    lock(_SNAP_LOCK) do
+        store = dark ? _SNAP_SVG_DARK : _SNAP_SVG
+        get!(store, String(nbid), Dict{String,String}())[String(cell)] = String(svg)
+    end
+    return nothing
+end
 
 """
     cell_image(nb, cell) -> Vector{UInt8} | nothing

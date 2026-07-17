@@ -550,6 +550,7 @@ include(joinpath(@__DIR__, "slate_look.jl")) # slate_theme()/use_slate_theme! �
 include(joinpath(@__DIR__, "animation.jl")) # animate(frames;…) → Animation (used by capture.jl; shared)
 include(joinpath(@__DIR__, "reactive.jl"))  # reactive/@onclick/pause async primitives (shared)
 include(joinpath(@__DIR__, "tables.jl"))    # SlateTable / slate_table (used by capture.jl)
+include(joinpath(@__DIR__, "slate_matrix.jl")) # slate_matrix — auto-render for AbstractMatrix (used by capture.jl)
 include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value tracing (engine + worker)
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
