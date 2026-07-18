@@ -25,7 +25,7 @@ const PORT = Number(process.env.SLATE_DOCS_PORT || 8799)
 const BASE = `http://127.0.0.1:${PORT}`
 const SCALE = 2
 const FIRST = 'demo'                                          // serve_notebook opens this one
-const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables'] // opened over /api/open
+const EXTRA = ['widgets', 'charts', 'anim', 'docs', 'tables', 'hero'] // opened over /api/open
 
 mkdirSync(OUT, { recursive: true })
 const VIDTMP = mkdtempSync(join(tmpdir(), 'slate-vid-'))
@@ -344,6 +344,27 @@ const REG_NBSTATE = {
   multidefCells: {}, backrefCells: {},
 }
 
+// README hero — a clean reactive example (title + controls + a live chart, no errors), captured
+// tight to its content so there's no empty tail below the last cell.
+async function heroShot(browser) {
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await runNotebook(page, 'hero')
+    await page.evaluate(() => window.scrollTo(0, 0))
+    await sleep(500)
+    const clip = await page.evaluate(() => {
+      const cells = [...document.querySelectorAll('.cell')]
+      const last = cells[cells.length - 1]
+      const bottom = last ? last.getBoundingClientRect().bottom : window.innerHeight
+      return { x: 0, y: 0, width: Math.min(window.innerWidth, 1280),
+               height: Math.min(window.innerHeight, Math.ceil(bottom + 24)) }
+    })
+    await page.screenshot({ path: join(OUT, 'hero.png'), clip })
+    log('✓ hero.png')
+    await page.context().close()
+  } catch (e) { log('! hero skipped:', e.message.split('\n')[0]) }
+}
+
 // ── regions / DAG / mesh captures ─────────────────────────────────────────────────────────────
 // All synthetic: inject a region-split notebook state and mock the region/remote endpoints, then let
 // the REAL renderers draw. No worker ever spawns. Each capture is best-effort (skip-and-log), like
@@ -553,6 +574,8 @@ async function main() {
 
     // SLATE_REGION_ONLY=1 captures just the region/DAG/mesh shots (fast iteration on those alone).
     if (process.env.SLATE_REGION_ONLY === '1') { await regionShots(browser); log('done (region-only) — assets in', OUT); return }
+    // SLATE_HERO_ONLY=1 captures just the README hero.
+    if (process.env.SLATE_HERO_ONLY === '1') { await heroShot(browser); log('done (hero-only) — assets in', OUT); return }
 
     // ── per-notebook static cell screenshots ────────────────────────────────────────────────
     for (const [id, shots] of Object.entries(CELL_SHOTS)) {
@@ -763,6 +786,9 @@ async function main() {
       await elShot(p2, '#pubdashbg .pubdash', 'publishing-manager.png')
       await p2.context().close()
     } catch (e) { log('! publishing shots skipped:', e.message.split('\n')[0]) }
+
+    // ── README hero ──────────────────────────────────────────────────────────────────────────
+    await heroShot(browser)
 
     // ── regions / DAG / mesh (synthetic — no real hosts) ─────────────────────────────────────
     await regionShots(browser)
