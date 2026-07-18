@@ -69,11 +69,12 @@ function _outputsQS() { const v = (document.getElementById('exoutputs') || {}).v
 // Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
 function exportHtml(dl) {
   const src = document.getElementById('htmlsource');
-  const theme = (document.getElementById('htmltheme') || {}).value || 'dark';
+  const { theme, charttheme, override } = _resolveExportTheme((document.getElementById('htmltheme') || {}).value || 'asis');
   const code = (document.getElementById('htmlcode') || {}).value || 'normal';
   const parts = [];
   if (src && !src.checked) parts.push('source=0');
-  if (theme !== 'dark') parts.push('theme=' + theme);
+  parts.push('theme=' + theme, 'charttheme=' + charttheme);
+  if (override) parts.push('override=1');
   if (code !== 'normal') parts.push('code=' + code);
   const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
   if ((document.getElementById('htmlrunnable') || {}).checked) {
@@ -208,8 +209,22 @@ function _memoParam() {
 }
 // Publication-quality PDF via Typst, driven by the modal's pdf* controls. Can take a few seconds
 // (first run also fetches Typst packages) → loading overlay + blob-download. Figures embed as vector.
+// Resolve a Theme-picker value ("asis" | "light" | "dark") to the export params shared by PDF and
+// HTML: `theme` = the page-chrome bucket (dark/light), `charttheme` = the Slate PALETTE figures render
+// in (As-is = the notebook's live palette; Light/Dark force one, UI-independent), and `override` =
+// whether native (Makie) figures must be re-rendered under it. See export_typst.jl / server_export.jl.
+function _resolveExportTheme(pick) {
+  const live = (typeof curSlateTheme === 'function') ? curSlateTheme() : 'midnight';
+  const themes = (typeof SLATE_UI_THEMES !== 'undefined') ? SLATE_UI_THEMES : [];
+  const liveDark = !themes.some(t => t.name === live && t.dark === false);
+  return {
+    theme: pick === 'light' ? 'light' : pick === 'dark' ? 'dark' : (liveDark ? 'dark' : 'light'),
+    charttheme: pick === 'light' ? 'daylight' : pick === 'dark' ? 'midnight' : live,
+    override: pick !== 'asis'
+  };
+}
 async function _runPdfExport() {
-  const theme = document.getElementById('pdftheme').value;
+  const { theme, charttheme, override } = _resolveExportTheme(document.getElementById('pdftheme').value);
   const [style, columns] = document.getElementById('pdflayout').value.split('|');
   const slides = style === 'slides';
   const body = document.getElementById('pdfbody').value;
@@ -223,7 +238,7 @@ async function _runPdfExport() {
   localStorage.setItem('slate_pdfnotes', notes ? '1' : '0');
   showLoading('Rendering PDF with Typst…');
   try {
-    const qs = '?theme=' + theme + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code + (params ? '&params=1' : '')
+    const qs = '?theme=' + theme + '&charttheme=' + charttheme + (override ? '&override=1' : '') + '&style=' + style + '&columns=' + columns + '&body=' + body + '&code=' + code + (params ? '&params=1' : '')
       + (slides ? '&layout=slides' : '') + (notes ? '&notes=1' : '') + _outputsQS();
     const r = await fetch(_apipath('/api/export.pdf') + qs);
     if (!r.ok) { await alertDark('PDF export failed:\n' + (await r.text())); return; }
@@ -238,6 +253,13 @@ async function _runPdfExport() {
 // ── The unified modal ─────────────────────────────────────────────────────────
 function _exFormat() { return document.getElementById('exfmt').value; }
 function closeExportModal() { document.getElementById('exportbg').classList.remove('show'); }
+// The theme-override warning applies only when the picker forces a palette (light/dark), not for
+// "as-is" (which reuses the already-rendered figures). Shown only while the PDF format is active.
+function _pdfSyncThemeWarn() {
+  const row = document.getElementById('pdfthemewarnrow');
+  const pick = (document.getElementById('pdftheme') || {}).value;
+  if (row) row.style.display = (_exFormat() === 'pdf' && pick && pick !== 'asis') ? '' : 'none';
+}
 // Show the speaker-notes row only for the slides layout (PDF only).
 function _pdfSyncSlides() {
   const slides = (document.getElementById('pdflayout').value || '').startsWith('slides');
@@ -248,7 +270,7 @@ function _pdfSyncSlides() {
 function _exSyncRows() {
   const f = _exFormat();
   document.querySelectorAll('#exportbg .exrow').forEach(el => { el.style.display = el.classList.contains('fmt-' + f) ? '' : 'none'; });
-  if (f === 'pdf') _pdfSyncSlides();
+  if (f === 'pdf') { _pdfSyncSlides(); _pdfSyncThemeWarn(); }
   // The bundle-only rows (git history + precomputed results) apply only to a RUNNABLE html page —
   // hide them when html isn't runnable, where they'd have nowhere to embed.
   if (f === 'html') {
@@ -456,6 +478,8 @@ function openExport(preset) {
   const mq = document.getElementById('memoquality'); if (mq) mq.value = localStorage.getItem('slate_memoquality') || '100';
   document.getElementById('exfmt').onchange = _exSyncRows;
   document.getElementById('pdflayout').onchange = _exSyncRows;
+  const _pt = document.getElementById('pdftheme');
+  if (_pt) { _pt.onchange = _pdfSyncThemeWarn; _pdfSyncThemeWarn(); }
   _loadSitePicker();             // populate the "Into site" picker from saved sites + destinations
   _exSyncRows();
   // Publish mode (opened via ☁ Publish…): focus the dialog on the Website flow — retitle it and hide

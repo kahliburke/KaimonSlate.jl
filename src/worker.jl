@@ -1415,6 +1415,39 @@ __slate_table_page(table_id::String, page::Int, page_size::Int, sort_col::Int, s
 "Capture markdown `{{ }}` interpolation expressions (rich) — one wire-form each."
 __slate_interp(exprs::Vector{String}) = [run_capture(_NS[], e; capture = DemuxCapture()) for e in exprs]
 
+# Re-render a native (server-side, e.g. Makie) figure cell under a specific Slate PALETTE, for a themed
+# PDF export that OVERRIDES the notebook's live theme. Makie bakes its theme when the figure is built,
+# so the only way to re-theme a figure is to re-render it: we re-run the cell's `source` in the live
+# namespace inside `with_theme(slate_theme(theme=…))` so the figure is BUILT under that palette, then
+# return the richest export representation — `(; ok, ext, b64)` with `ext ∈ ("pdf","svg","png")`, or
+# `ok=false` if Makie isn't loaded, the cell yielded no figure, or anything threw. Export-only; the
+# result rides back as bytes (base64) and never touches the live cell output. `with_theme` restores the
+# prior default theme on exit, so a cell that relies on the ambient theme picks up the palette while one
+# that sets its OWN styling still wins (its code runs last).
+function __slate_rerender_fig(; source::String = "", theme::String = "", raster::Bool = false,
+                             filename::String = "cell:export")
+    Mk = _loaded_makie()
+    Mk === nothing && return (; ok = false)
+    thm = try; slate_theme(theme = theme); catch; return (; ok = false); end
+    wire = nothing
+    themed = () -> (wire = run_capture(_NS[], source, filename; capture = DemuxCapture()))
+    try
+        Base.invokelatest(Mk.with_theme, themed, thm)
+    catch
+        return (; ok = false)
+    end
+    wire === nothing && return (; ok = false)
+    # PDF export wants VECTOR (pdf/svg); HTML can't embed pdf, so `raster` prefers svg/png instead.
+    prefs = raster ? (("image/svg+xml", "svg"), ("image/png", "png")) :
+                     (("application/pdf", "pdf"), ("image/svg+xml", "svg"), ("image/png", "png"))
+    for (mime, ext) in prefs
+        for (m, bytes) in wire.mime
+            m == mime && return (; ok = true, ext = ext, b64 = Base64.base64encode(bytes))
+        end
+    end
+    return (; ok = false)
+end
+
 "Completion candidates in the warm namespace → `(; items, from, to)` (see `slate_completions`)."
 __slate_complete(code::String, pos::Int) = slate_completions(_NS[], code, pos)
 
@@ -2060,6 +2093,7 @@ end
 function tools()
     return KaimonGate.GateTool[
         KaimonGate.GateTool("__slate_eval", __slate_eval),
+        KaimonGate.GateTool("__slate_rerender_fig", __slate_rerender_fig),
         KaimonGate.GateTool("__slate_eval_batch", __slate_eval_batch),
         KaimonGate.GateTool("__slate_running", __slate_running),
         KaimonGate.GateTool("__slate_cancel", __slate_cancel),

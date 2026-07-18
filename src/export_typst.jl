@@ -20,9 +20,9 @@ const _LIVE_SVG_CACHE_MAX_BYTES = 2 * 1024 * 1024
 # Ask the open browser tab to render `cell`'s chart as vector SVG right now (see core.js
 # `_renderChartSvg`) — used only at export time, not on every chart update. `nothing` if no
 # tab is open, the round-trip times out, or the cell has no live chart.
-function _live_render_svg(nb::LiveNotebook, cell::AbstractString; dark::Bool = false)
+function _live_render_svg(nb::LiveNotebook, cell::AbstractString; theme::AbstractString = "midnight")
     code = "window._renderChartSvg && window._renderChartSvg(" *
-           JSON.json(String(cell)) * ", " * (dark ? "true" : "false") * ")"
+           JSON.json(String(cell)) * ", " * JSON.json(String(theme)) * ")"
     res = request_live_eval(nb, code; timeout = 6.0)
     res isa AbstractDict || return nothing
     get(res, "ok", false) === true || return nothing
@@ -446,7 +446,14 @@ end
 # takes `nb.lock` — `_figure_for_export` itself must stay lock-safe, so it only ever READS
 # the cache, never triggers a round-trip), else its PNG. Returns `(bytes, ext)` with
 # `ext ∈ ("pdf","svg","png")`, or `nothing` when the cell has no figure.
-function _figure_for_export(nb::LiveNotebook, c::Cell; dark::Bool = false)
+function _figure_for_export(nb::LiveNotebook, c::Cell; theme::AbstractString = "midnight", override::Bool = false)
+    # Themed OVERRIDE: a native figure re-rendered under the chosen palette (`_warm_makie_figs!`) wins
+    # over the baked-in bytes, which carry the theme the cell was last RUN in — Makie can't be re-themed
+    # any other way. Falls through to the baked bytes when the re-render was unavailable.
+    if override
+        fig = _snapshot_fig(nb.id, c.id, theme; raster = false)   # PDF wants the vector re-render
+        fig !== nothing && return fig
+    end
     o = c.output
     if o !== nothing
         for (mime, ext) in (("application/pdf", "pdf"), ("image/svg+xml", "svg"), ("image/png", "png"))
@@ -455,7 +462,7 @@ function _figure_for_export(nb::LiveNotebook, c::Cell; dark::Bool = false)
             end
         end
     end
-    svg = _snapshot_svg(nb.id, c.id; dark = dark)    # theme-matched vector chart, if the browser supplied one (live or pre-warmed)
+    svg = _snapshot_svg(nb.id, c.id, theme)          # theme-matched vector chart, if the browser supplied one (live or pre-warmed)
     svg !== nothing && return (Vector{UInt8}(codeunits(svg)), "svg")
     png = _snapshot(nb.id, c.id)
     png !== nothing && return (copy(png), "png")
@@ -475,19 +482,53 @@ _export_progress(nb::LiveNotebook, cid::AbstractString) =
 # multi-chart export is the one case this is newly slower than the old eager-render design).
 # Best-effort throughout: a cell that fails/times out just falls through to PNG in
 # `_figure_for_export`, same as when no tab is open at all.
-function _warm_chart_svgs!(nb::LiveNotebook; dark::Bool = false, progress = nothing)
+function _warm_chart_svgs!(nb::LiveNotebook; theme::AbstractString = "midnight", progress = nothing)
     targets = lock(nb.lock) do
         [c.id for c in nb.report.cells
-         if c.output !== nothing && !isempty(c.output.echarts) && _snapshot_svg(nb.id, c.id; dark = dark) === nothing]
+         if c.output !== nothing && !isempty(c.output.echarts) && _snapshot_svg(nb.id, c.id, theme) === nothing]
     end
     for cid in targets
         progress === nothing || (try; progress(cid); catch; end)
-        live = _live_render_svg(nb, cid; dark = dark)
+        live = _live_render_svg(nb, cid; theme = theme)
         live === nothing && continue
         # Cache small ones so tweak-and-reexport doesn't re-pay the round-trip each time — but a
         # genuinely huge chart's SVG (a downsampled heatmap can still run to a few MB) isn't
         # worth holding onto forever; it's still used for THIS export, just re-rendered next time.
-        sizeof(live) <= _LIVE_SVG_CACHE_MAX_BYTES && set_snapshot_svg!(nb.id, cid, dark, live)
+        sizeof(live) <= _LIVE_SVG_CACHE_MAX_BYTES && set_snapshot_svg!(nb.id, cid, theme, live)
+    end
+    return nothing
+end
+
+# Resolve the ECharts export theme (a Slate palette NAME the browser renders in) from the export
+# request: an explicit `charttheme` (the "As-is" case sends the notebook's live palette; Light/Dark
+# send "daylight"/"midnight") wins; otherwise fall back to the page theme's canonical palette so a
+# caller that passes only `theme=` (older callers, tests) still gets a real Slate look.
+_chart_theme(charttheme::AbstractString, theme::AbstractString) =
+    isempty(strip(charttheme)) ? (theme == "dark" ? "midnight" : "daylight") : String(strip(charttheme))
+
+# True when a cell carries a native, server-rendered figure (Makie's raster/vector) — the cells the
+# themed-override path re-renders. ECharts (client-rendered) come through the SVG snapshot path, and a
+# hand-authored `text/html` / inline-SVG card isn't a re-runnable native figure, so both are excluded.
+_is_native_figure(c::Cell) = c.output !== nothing &&
+    any(ch -> ch.mime in ("application/pdf", "image/png", "image/svg+xml"), c.output.display)
+
+# Re-render every native figure under `theme` (a Slate palette) for a themed OVERRIDE export. Makie
+# bakes its theme at build time, so honoring a Light/Dark override means re-running those cells under
+# `with_theme(slate_theme(theme))` on the worker (see gate_kernel.jl `rerender_fig`). Called BEFORE the
+# caller takes `nb.lock` (each round-trip re-evaluates a cell and can be slow), mirroring
+# `_warm_chart_svgs!`. Best-effort: a cell whose re-render fails/times out falls back to its baked
+# bytes in `_figure_for_export`. A non-gate (in-process) kernel has no worker to re-render on → skip.
+function _warm_makie_figs!(nb::LiveNotebook; theme::AbstractString, raster::Bool = false, progress = nothing)
+    k = lock(nb.lock) do; nb.kernel; end
+    k isa ReportEngine.GateKernel || return nothing
+    targets = lock(nb.lock) do
+        [(c.id, c.source) for c in nb.report.cells if _is_native_figure(c)]
+    end
+    for (cid, src) in targets
+        progress === nothing || (try; progress(cid); catch; end)
+        res = try; ReportEngine.rerender_fig(k, nb.report, src, theme; cellid = cid, raster = raster); catch; nothing; end
+        res === nothing && continue
+        set_snapshot_fig!(nb.id, cid, theme, raster, res[1], res[2])
     end
     return nothing
 end
@@ -502,7 +543,8 @@ _outputs_text_ok(outputs) = String(outputs) == "all"
 _outputs_any(outputs) = String(outputs) != "none"
 
 function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::LiveNotebook, c::Cell;
-                       theme::AbstractString = "light", outputs::AbstractString = "all")
+                       theme::AbstractString = "light", charttheme::AbstractString = "",
+                       override::Bool = false, outputs::AbstractString = "all")
     o = c.output
     (o === nothing || !_outputs_any(outputs)) && return
     texts = _outputs_text_ok(outputs)
@@ -520,7 +562,7 @@ function _emit_output!(io::IO, dir::AbstractString, base::AbstractString, nb::Li
         write(joinpath(dir, base * ".val"), o.value_repr)
         print(io, "#valblock(read(\"", base, ".val\"))\n")
     end
-    fig = _figure_for_export(nb, c; dark = theme == "dark")   # vector (pdf/svg) preferred, else raster png
+    fig = _figure_for_export(nb, c; theme = _chart_theme(charttheme, theme), override = override)   # vector (pdf/svg) preferred, else raster png
     # An HTML output (a custom `text/html` card, e.g. the grading `check(...)` cells) can't be
     # rendered by Typst and isn't an embeddable figure — so rasterize the rendered card via the open
     # tab (html2canvas, same round-trip slate.inspect uses) and embed that image. Needs a live tab;
@@ -1035,18 +1077,23 @@ end
 # the caller owns the returned dir and must `rm` it.
 function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                               style::AbstractString = "article", columns::Integer = 1,
-                              theme::AbstractString = "light", code::AbstractString = "normal",
+                              theme::AbstractString = "light", charttheme::AbstractString = "",
+                              override::Bool = false, code::AbstractString = "normal",
                               body::AbstractString = "", include_params::Bool = false,
                               layout::AbstractString = "article", notes::Bool = false,
                               level::Integer = 2, outputs::AbstractString = "all")
     # Slide-deck layout takes a wholly different page geometry/flow — dispatch early.
-    layout == "slides" && return _build_slides_project(nb; theme = theme, code = code,
-        include_source = include_source, include_params = include_params, notes = notes,
+    layout == "slides" && return _build_slides_project(nb; theme = theme, charttheme = charttheme, override = override,
+        code = code, include_source = include_source, include_params = include_params, notes = notes,
         level = level, ratio = get(nb.report.meta, "slideratio", "16:9"), outputs = outputs)
     show_source = include_source && code != "hidden"
     cols = clamp(Int(columns), 1, 2)
     body = isempty(body) ? (cols == 2 ? "compact" : "normal") : body   # narrow columns → smaller default
-    _warm_chart_svgs!(nb; dark = theme == "dark", progress = cid -> _export_progress(nb, cid))
+    ct = _chart_theme(charttheme, theme)                               # the Slate palette charts render in
+    _warm_chart_svgs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    # Themed override: re-render native (Makie) figures under the picked palette too (see the export
+    # dialog's warning). No-op when not overriding — the baked figure bytes already match the live theme.
+    override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         # Dark theme highlights code via a bundled tmTheme that Typst reads from the root.
@@ -1109,7 +1156,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
                 include_params && print(io, _emit_controls(c))   # frozen @bind controls — off by default
-                _emit_output!(io, dir, base, nb, c; theme = theme, outputs = outputs)
+                _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = ct, override = override, outputs = outputs)
                 print(io, "\n")
             end
             if inrow                                  # close this grid slot; the row's last cell closes the grid
@@ -1127,7 +1174,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
 end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
-function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all")
+function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all")
     c, override = frag
     if c.kind == MARKDOWN
         md = _md_for_typst(c, override === nothing ? c.source : override; citekeys = citekeys)
@@ -1140,7 +1187,7 @@ function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, show_s
             print(io, "#codeblock(read(\"", base, ".jl\"))\n")
         end
         include_params && print(io, _emit_controls(c))
-        _emit_output!(io, dir, base, nb, c; theme = theme, outputs = outputs)
+        _emit_output!(io, dir, base, nb, c; theme = theme, charttheme = charttheme, override = override, outputs = outputs)
         print(io, "\n")
     end
     return
@@ -1149,12 +1196,14 @@ end
 # Assemble a slide-DECK Typst project: one page per slide (segmented by `_slide_segments`),
 # 16:9/4:3 landscape, auto-fit. Code listings are hidden by default on slides (set `code`/
 # `include_source`). With `notes=true`, a speaker-notes appendix follows the deck.
-function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
-                               ratio::AbstractString = "16:9", code::AbstractString = "hidden",
+function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark", charttheme::AbstractString = "",
+                               override::Bool = false, ratio::AbstractString = "16:9", code::AbstractString = "hidden",
                                include_source::Bool = false, include_params::Bool = false,
                                notes::Bool = false, level::Integer = 2, outputs::AbstractString = "all")
     show_source = include_source && code != "hidden"
-    _warm_chart_svgs!(nb; dark = theme == "dark", progress = cid -> _export_progress(nb, cid))
+    ct = _chart_theme(charttheme, theme)                               # the Slate palette charts render in
+    _warm_chart_svgs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
+    override && _warm_makie_figs!(nb; theme = ct, progress = cid -> _export_progress(nb, cid))
     lock(nb.lock) do
         dir = mktempdir()
         theme == "dark" && write(joinpath(dir, "code-dark.tmTheme"), _CODE_DARK_TMTHEME)
@@ -1192,7 +1241,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                     # Strip the hoisted H1 from the implicit-title cell so it isn't repeated on a body slide.
                     f = (frag[1].id == fm.titlecell && frag[2] === nothing) ? (frag[1], _strip_leading_h1(frag[1].source)) : frag
                     multi && print(io, "[")
-                    _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme,
+                    _emit_slide_frag!(io, dir, "s$(si)f$(fi)", nb, f; theme = theme, charttheme = ct, override = override,
                                       show_source = show_source, include_params = include_params, citekeys = citekeys, outputs = outputs)
                     multi && print(io, "],\n")
                 end
