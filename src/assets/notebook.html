@@ -50,7 +50,6 @@
   <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
   <button id="addcellbtn" onclick="addCell('','code')" oncontextmenu="addMenu(event,'');return false" title="add code cell · right-click for type">＋ cell</button>
-  <button onclick="enterPresent()" title="present this notebook as a slide deck (⌘⇧P)">▶ Present</button>
   <button onclick="toggleTOC()" title="table of contents — jump to a heading (⌘⇧L)">📑 Contents</button>
   <button onclick="toggleDag()" title="pipeline graph — the notebook's dataflow DAG, live (⌘⇧G)">🕸 DAG</button>
   <button onclick="toggleFiles()" title="edit this notebook's package source (src/ + notebooks/) — save reloads via Revise">📁 Files</button>
@@ -65,6 +64,7 @@
       <button onclick="toggleLog();closeTopMenu()">🪵 Worker log</button>
       <button onclick="toggleHistory();closeTopMenu()">🕘 History</button>
       <button id="scratchbtn" onclick="toggleScratch();closeTopMenu()">🧪 Scratchpad</button>
+      <button onclick="enterPresent();closeTopMenu()" title="present this notebook as a slide deck (⌘⇧P)">📽 Present</button>
       <button onclick="toggleZen();closeTopMenu()" title="reading mode — hide code &amp; chrome, show only markdown + output (Esc to exit)">🧘 Zen mode</button>
       <hr>
       <button id="undobtn" onclick="undoNb();closeTopMenu()">↶ Undo</button>
