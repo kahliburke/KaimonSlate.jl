@@ -228,9 +228,10 @@ function _parse_controls(s::AbstractString)
 end
 
 # Flags Slate manages internally (never written to / read from the header). `:opaque` and
-# `:macrocall` are re-derived every eval by dependency inference, so they must never be
-# serialized as tags.
-const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant, :import_scaffold])
+# `:macrocall` are re-derived every eval by dependency inference; `:everywhere` is a runtime
+# effect classification re-established each session (from a run or the durable EffectStore), so
+# none of them are author tags and must never be serialized to the header.
+const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant, :import_scaffold, :everywhere])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
 const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :resource, :slide, :notes,
