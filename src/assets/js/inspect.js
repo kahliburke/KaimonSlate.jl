@@ -40,7 +40,17 @@ async function _slateInspect(reqid, cellId) {
       // snapshot path — overwriting that store with a whole-cell screenshot is strictly worse.
       // So the raster only fills in for non-figure cells (markdown / tables / plain values).
       const hasNativeFig = !!el.querySelector('.echarts canvas, .echart canvas, .output img');
-      if (!hasNativeFig) {
+      // A cell-mounted CLIENT-CANVAS widget (the neuro/DAG canvas, …) can't be captured by html2canvas
+      // — it can't read arbitrary canvas pixels, so the widget comes out black. Grab it DIRECTLY: a widget
+      // may register a settled-render provider at window.__slateSnapshot[cellId] (force-renders its final
+      // state, then returns base64 PNG); otherwise read the cell's own <canvas>. POSTed back under reqid
+      // here (NOT the 20k-capped eval-result path), so a full-size PNG survives.
+      try {
+        const prov = window.__slateSnapshot && window.__slateSnapshot[cellId];
+        if (typeof prov === 'function') out.png = prov() || '';
+        else if (!hasNativeFig) { const cv = el.querySelector('.output canvas'); if (cv) out.png = (cv.toDataURL('image/png').split(',')[1]) || ''; }
+      } catch (_) {}
+      if (!out.png && !hasNativeFig) {
         try {
           const h2c = await _loadHtml2Canvas();
           const bg = (getComputedStyle(document.body).backgroundColor) || '#12141c';
