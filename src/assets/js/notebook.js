@@ -210,6 +210,14 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
         const slot = head.querySelector('.memoslot');   // fixed-width slot rendered in the header; just refill it
         if (slot) slot.innerHTML = window._memoBadge(c);
       }
+      // Interim stored-render badge: present during hydration (c.preview), cleared the moment a live
+      // celldone (no preview flag) replaces the cell — patch the slot in place like the memo badge.
+      const pkey = c.preview ? (c.previewStale ? 'stale' : 'stored') : '';
+      if (head.dataset.previewkey !== pkey) {
+        head.dataset.previewkey = pkey;
+        const pslot = head.querySelector('.previewslot');
+        if (pslot) pslot.innerHTML = window._previewBadge(c);
+      }
     }
 
     if (c.kind === 'md') {

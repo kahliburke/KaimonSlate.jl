@@ -1077,11 +1077,14 @@ function _make_router(h::Hub)
         mb = get(qp, "memo", "")               # precomputed-results budget (MB) for the embedded bundle
         budget = isempty(mb) ? typemax(Int) :
                  (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
+        pv = get(qp, "preview", "")            # interim-render budget (MB) for the embedded bundle's preview
+        pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
+                  (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
                            theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
                            outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run,
                            history = get(qp, "history", "0") == "1",   # source-only by default (public page)
-                           memo_budget = budget)
+                           memo_budget = budget, preview_budget = pbudget)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
             fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
@@ -1261,9 +1264,14 @@ function _make_router(h::Hub)
         mb = get(qp, "memo", "")
         budget = isempty(mb) ? typemax(Int) :
                  (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
+        # `preview` = byte budget for the embedded interim render (MB → bytes): ""/absent = the
+        # default cap; "0" = omit the frozen preview entirely (smaller file, cells show un-run on open).
+        pv = get(qp, "preview", "")
+        pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
+                  (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
         jl = try
             export_standalone(nb; history = get(qp, "history", "1") != "0",   # full git history by default (deliberate share)
-                              memo_budget = budget)
+                              memo_budget = budget, preview_budget = pbudget)
         catch e
             return HTTP.Response(500, "Standalone export failed: " * sprint(showerror, e))
         end
@@ -2000,6 +2008,8 @@ function close_notebook!(h::Hub, id::AbstractString)
         # the notebook by path — respawning it seconds after every close. The queued message
         # still reaches each tab: a closed Channel drains its buffered items first.
         _broadcast(nb, "closed:hub")
+        # Capture the final rendered state as the next reopen's interim preview, past the debounce.
+        try; _save_preview!(nb; force = true); catch; end
         _close_listeners(nb)
         _close_agent!(nb)
         _unwire_callbacks!(nb)

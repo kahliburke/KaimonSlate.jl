@@ -76,6 +76,35 @@ _unzb64(b64::AbstractString) = String(_unzb64_bytes(b64))
 _preview_footer(cells) = _footer_block(_PREVIEW_OPEN, _PREVIEW_CLOSE,
     "v1 · frozen render shown while the live env reconstructs", _zb64(JSON.json(cells)))
 
+# Externalized rendered figures reference the blob-serving server (`/api/<nbid>/blob/<hash>`), which
+# ISN'T there when an exported `.jl` is reopened elsewhere — so the frozen preview's images would
+# 404. Re-inline them as self-contained `data:` URIs (from the durable blob store) so the preview
+# TRAVELS with the export. Capped: a single asset over `_PREVIEW_MAX_ASSET`, or one that would push
+# the running total past `budget`, is left as a URL (it recomputes on hydrate rather than bloating
+# the file); gzip-encoded blobs (animation stacks) can't be a plain data URI, so they're skipped and
+# their heavy `animations` manifests dropped from the travelling preview. Mutates + returns `cells`.
+const _BLOBURL_RE = r"/api/[^/\"]+/blob/([A-Za-z0-9]+)"
+function _inline_preview_blobs!(nbid::AbstractString, cells; budget::Integer = _PREVIEW_MAX_TOTAL)
+    total = Ref(0)
+    for e in cells
+        e isa AbstractDict || continue
+        haskey(e, "animations") && (e["animations"] = Any[])   # frame stacks are too heavy to embed
+        out = get(e, "output", nothing)
+        (out isa AbstractString && occursin("/blob/", out)) || continue
+        e["output"] = replace(out, _BLOBURL_RE => function (s)
+            m = match(_BLOBURL_RE, s); h = m.captures[1]
+            b = blob_lookup(string(nbid, "/", h))
+            b === nothing && return s
+            mime, bytes, enc = b
+            (isempty(enc) && length(bytes) <= _PREVIEW_MAX_ASSET &&
+             total[] + length(bytes) <= budget) || return s
+            total[] += length(bytes)
+            string("data:", mime, ";base64,", Base64.base64encode(bytes))
+        end)
+    end
+    return cells
+end
+
 # Pull the embedded frozen-render cells out of a standalone `.jl` (or `nothing` if absent).
 function _read_preview(text::AbstractString)
     b64 = _read_footer_b64(text, _PREVIEW_OPEN, _PREVIEW_CLOSE)
@@ -507,7 +536,7 @@ end
 # 0 disables). Entries are chosen by compute-saved-per-byte so a small budget still banks the
 # most expensive solves. See `_build_memo_footer`.
 function export_standalone(nb::LiveNotebook; include_preview::Bool = true, history::Bool = true,
-                           memo_budget::Integer = typemax(Int))
+                           memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL)
     lock(nb.lock) do
         info = ReportEngine.bundle_info(nb.kernel, nb.report)
         isempty(info.projectdir) &&
@@ -515,8 +544,10 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true, histo
         cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
         b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells; history = history)
         out = cells * "\n" * _bundle_footer(b64)
-        include_preview && try
-            out *= "\n" * _preview_footer(state_json(nb)["cells"])   # frozen render for instant display
+        (include_preview && preview_budget > 0) && try
+            # Re-inline blob URLs → data URIs so the frozen render travels self-contained (capped).
+            pcells = _inline_preview_blobs!(nb.id, state_json(nb)["cells"]; budget = preview_budget)
+            out *= "\n" * _preview_footer(pcells)   # frozen render for instant display
         catch
         end
         try

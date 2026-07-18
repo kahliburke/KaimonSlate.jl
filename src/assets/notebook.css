@@ -301,6 +301,12 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
 .memobadge.warn { opacity:.92; }
 .memobadge:hover { opacity:1; }
 .memobadge.memo-stored { color:var(--green); opacity:.95; }   /* cached — the green database cylinder */
+/* Interim stored-render badge: the cell is showing its last SAVED figure (full fidelity) while the
+   live run recomputes. Subtle by default; `.stale` (source changed since the snapshot) warns amber. */
+.previewbadge { font-size:.72rem; opacity:.8; cursor:default; user-select:none; margin-left:4px;
+  padding:0 5px; border-radius:8px; border:1px solid var(--border); color:var(--dim); white-space:nowrap; }
+.previewbadge:hover { opacity:1; }
+.previewbadge.stale { color:var(--amber, #d6a340); border-color:var(--amber, #d6a340); opacity:.95; }
 /* `locked` cell tag: frozen against upstream/reload churn — sits next to the region chip, not the
    fixed-width memoslot (rare enough that its variable width doesn't disturb column alignment). */
 .lockbadge { font-size:.78rem; opacity:.85; cursor:default; user-select:none; margin-left:6px; }
