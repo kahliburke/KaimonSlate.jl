@@ -565,6 +565,7 @@ include(joinpath(@__DIR__, "format.jl"))    # _format_cell — server-side table
 include(joinpath(@__DIR__, "completion.jl")) # shared REPLCompletions (engine + worker)
 include(joinpath(@__DIR__, "macroexpand.jl")) # shared cell macro-expansion (engine + worker)
 include(joinpath(@__DIR__, "graphics_detect.jl")) # Makie graphics/theme cell detection (deps + scheduler)
+include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output (shared w/ worker; used by the remote bring-up banner)
 include(joinpath(@__DIR__, "eval.jl"))
 include(joinpath(@__DIR__, "deps.jl"))
 include(joinpath(@__DIR__, "bind.jl"))

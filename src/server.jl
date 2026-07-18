@@ -67,6 +67,7 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_progress!(nb.report.id, c -> _broadcast_progress(nb, c))                      # stream per-cell run status to the UI
     register_runbatch!(nb.report.id, n -> (try; _broadcast(nb, "runbatch:$n"); catch; end))   # run size → stable k/N
     register_userprog!(nb.report.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
+    register_prepare!(nb.report.id, json -> (try; _broadcast(nb, "prepare:" * json); catch; end))   # env precompile progress → "Preparing packages" banner
     register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     return nb
@@ -75,6 +76,7 @@ function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
+    unregister_prepare!(nb.report.id)
     return nb
 end
 

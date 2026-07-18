@@ -360,6 +360,7 @@ function _ensure_poller!()
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
                 emits = Tuple{String,String,Any}[]   # ordered slate_emit pushes (rid, channel, deserialized VALUE) — NOT coalesced; each event matters
+                prepares = Dict{String,String}()     # notebook → LATEST env-prep status JSON (coalesced per wake; a burst collapses harmlessly)
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
                 # idle extension now costs ~no CPU, and a streaming cell wakes us on arrival (lower
@@ -401,6 +402,8 @@ function _ensure_poller!()
                         _record_telemetry!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_log"           # worker log record → live tail push (no store)
                         _relay_log!(m.conn_name, String(m.data))
+                    elseif m.channel == "slate_prepare"       # env precompile progress → "Preparing packages" banner
+                        prepares[rid] = String(m.data)
                     end
                 end
                 for (rid, vars) in pending
@@ -414,6 +417,9 @@ function _ensure_poller!()
                 end
                 for ((rid, bid), (frac, msg, done)) in prog
                     _do_userprog(rid, frac, msg, bid, done)
+                end
+                for (rid, json) in prepares
+                    _do_prepare(rid, json)
                 end
                 for (rid, ch, d) in emits
                     _do_emit(rid, ch, d)
