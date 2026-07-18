@@ -382,7 +382,13 @@
       <option value="none">None (prose &amp; code only)</option>
     </select></div>
   <div class="setrow exrow fmt-pdf"><label>Theme</label>
-    <select id="pdftheme"><option value="light">Light (publication)</option><option value="dark">Dark (matches UI)</option></select></div>
+    <select id="pdftheme">
+      <option value="asis">As-is — the notebook's current look</option>
+      <option value="light">Light — publication</option>
+      <option value="dark">Dark</option>
+    </select></div>
+  <div class="setrow exrow fmt-pdf" id="pdfthemewarnrow" style="display:none"><label></label>
+    <span style="font-weight:400;font-size:0.85em;color:var(--dim)">⚠ Overriding the theme re-renders every figure (Makie &amp; ECharts) for the export.</span></div>
   <div class="setrow exrow fmt-pdf"><label>Layout</label>
     <select id="pdflayout">
       <option value="article|1">Article — single column</option>
@@ -417,7 +423,11 @@
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="pdftypst"> Also download the editable Typst project (<code>.tar.gz</code>)</label></div>
   <div class="setrow exrow fmt-html"><label>Theme</label>
-    <select id="htmltheme"><option value="dark">Dark (matches UI)</option><option value="light">Light (publication)</option></select></div>
+    <select id="htmltheme">
+      <option value="asis">As-is — the notebook's current look</option>
+      <option value="light">Light — publication</option>
+      <option value="dark">Dark</option>
+    </select></div>
   <div class="setrow exrow fmt-html"><label>Code size</label>
     <select id="htmlcode">
       <option value="normal">Normal</option>

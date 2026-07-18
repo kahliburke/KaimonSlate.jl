@@ -18,10 +18,49 @@ const _EXPORT_THEMES = Dict(
 # Code-listing font size, mirroring the PDF's `code` option.
 _export_code_size(code) = get(Dict("normal" => ".82rem", "small" => ".76rem", "smaller" => ".70rem", "tiny" => ".64rem"), String(code), ".82rem")
 
+# The Slate ECharts theme for an EXPORTED (standalone) page, built from the page's CSS custom
+# properties — the SAME brand palette the notebook uses live. A self-contained mirror of core.js
+# `_slateEchartsThemeFrom`/`_slateAxisTheme` (the export can't load core.js), so an exported chart
+# reads like the notebook instead of ECharts' generic 'dark'/default. Registered as 'slate' below.
+const _EXPORT_ECHARTS_THEME_JS = raw"""
+function _slateExportTheme(){var cs=getComputedStyle(document.documentElement);
+var V=function(n,d){var v=cs.getPropertyValue(n).trim();return v||d;};
+var text=V('--text','#d4d8e8'),dim=V('--dim','#6a7090'),border=V('--border','#2a2e40'),bg2=V('--bg2','#141828');
+var cycle=[['--accent','#569cd6'],['--green','#56d364'],['--orange','#ce9178'],['--purple','#c586c0'],['--teal','#4ec9b0'],['--gold','#ffd700'],['--red','#e57575']].map(function(p){return V(p[0],p[1]);});
+var vir=['#440154','#472d7b','#3b528b','#2c728e','#21918c','#28ae80','#5ec962','#addc30','#fde725'];
+var ax={axisLine:{lineStyle:{color:border}},axisTick:{lineStyle:{color:border}},axisLabel:{color:dim,fontSize:14},nameTextStyle:{color:text,fontSize:15},splitLine:{lineStyle:{color:border,opacity:0.4}},splitArea:{areaStyle:{color:['transparent','transparent']}}};
+return {color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:'inherit',fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text}},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};}
+"""
+
+# Light-family Slate palettes — page chrome + code-highlight theme flip on these; all others are dark.
+const _LIGHT_PALETTES = Set(["daylight", "solarized-light"])
+_export_is_light(name::AbstractString) = String(name) in _LIGHT_PALETTES
+# Resolve an export `theme` arg to a Slate palette NAME: back-compat "dark"/"light" → the canonical
+# midnight/daylight, and any real palette name (charttheme: "nord", "daylight", …) passes through.
+function _resolve_export_theme(theme::AbstractString)
+    s = lowercase(strip(String(theme)))
+    s == "dark" && return "midnight"
+    (isempty(s) || s == "light") && return "daylight"
+    haskey(ReportEngine.SLATE_PALETTES, s) ? s : "midnight"
+end
+# The full Slate palette (ReportEngine.SLATE_PALETTES) as export `:root` CSS vars, so an exported
+# page's chrome, code, tables AND client-rendered ECharts all use the SAME brand palette the notebook
+# and PDF do — not a separate dark/light approximation. `name` is a Slate palette; unknown → midnight.
+function _export_palette_root(name::AbstractString)
+    p = get(ReportEngine.SLATE_PALETTES, String(name), ReportEngine.SLATE_PALETTES["midnight"])
+    titlefg = _export_is_light(name) ? p.text : "#ffffff"
+    return string("--bg:", p.bg, ";--bg2:", p.bg2, ";--bg3:", p.bg3, ";--border:", p.border,
+                  ";--text:", p.text, ";--dim:", p.dim, ";--accent:", p.accent, ";--green:", p.green,
+                  ";--red:", p.red, ";--gold:", p.gold, ";--orange:", p.orange, ";--purple:", p.purple,
+                  ";--teal:", p.teal, ";--titlefg:", titlefg, ";")
+end
+
 function _export_css(theme::AbstractString = "dark", code::AbstractString = "normal")
-    t = get(_EXPORT_THEMES, lowercase(String(theme)), _EXPORT_THEMES["dark"])
+    name = _resolve_export_theme(theme)                       # a Slate palette name (charttheme or dark/light)
+    root = _export_palette_root(name)                         # full Slate palette → page + chart colours match
+    t = _EXPORT_THEMES[_export_is_light(name) ? "light" : "dark"]   # code-highlight theme by family
     return """
-:root{$(t.root)}
+:root{$(root)}
 *{box-sizing:border-box;} body{background:var(--bg);color:var(--text);margin:0;
   font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
 .export{max-width:900px;margin:0 auto;padding:36px 24px 80px;}
@@ -92,6 +131,27 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .disp.latex{padding:6px 14px;overflow-x:auto;} .katex{font-size:1.1em;}
 @media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
 """
+end
+
+# A themed-override figure (re-rendered raster/svg) as an HTML fragment: inline for SVG, a base64
+# data-URI `<img>` for a raster. Matches the `.dispwrap > .disp.img` structure `_render_chunks` emits.
+function _themed_fig_html(bytes::Vector{UInt8}, ext::AbstractString)
+    ext == "svg" && return string("<div class=\"disp img\">", String(copy(bytes)), "</div>")
+    mime = ext == "png" ? "image/png" : "image/png"
+    return string("<div class=\"disp img\"><img src=\"data:", mime, ";base64,",
+                  Base64.base64encode(bytes), "\"/></div>")
+end
+# The text portions of a cell's output (stdout / warnings / scalar value) WITHOUT its display chunks —
+# used when a themed override supplies the figure separately, so `output_html`'s baked image isn't
+# re-embedded. Mirrors the text blocks of `output_html` (render.jl).
+function _output_text_only_html(c::Cell)
+    o = c.output; o === nothing && return ""
+    io = IOBuffer()
+    isempty(o.stdout) || print(io, "<div class=\"out\"><pre>", _esc(o.stdout), "</pre></div>")
+    isempty(o.stderr) || print(io, "<div class=\"warn\"><pre>", _esc(o.stderr), "</pre></div>")
+    (isempty(o.display) && !isempty(o.value_repr)) &&
+        print(io, "<div class=\"val\"><pre>", _esc(o.value_repr), "</pre></div>")
+    return String(take!(io))
 end
 
 # The row column a cell sits in: a `column=N` header tag → N (default 1). Only N≥2 pulls a cell up
@@ -314,12 +374,19 @@ function _export_importmap(imports)
 end
 
 function export_html(nb::LiveNotebook; include_source::Bool = true,
-                     theme::AbstractString = "dark", code::AbstractString = "normal",
+                     theme::AbstractString = "dark", charttheme::AbstractString = "",
+                     override::Bool = false, code::AbstractString = "normal",
                      outputs::AbstractString = "all", og_image::AbstractString = "",
                      og_url::AbstractString = "", og_type::AbstractString = "article",
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
                      memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
+    # One Slate palette drives the page chrome, code AND the client-rendered ECharts (they read its CSS
+    # vars) — As-is uses the notebook's live palette (charttheme), Light/Dark force one. A themed OVERRIDE
+    # also re-renders native (Makie) figures under it (raster, HTML-embeddable) — done BEFORE nb.lock
+    # (worker round-trip), mirroring the PDF path.
+    palette = _resolve_export_theme(isempty(strip(String(charttheme))) ? theme : charttheme)
+    override && _warm_makie_figs!(nb; theme = palette, raster = true)
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
         title = _esc(fm0.title)
@@ -349,7 +416,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # ECharts renders CLIENT-SIDE from the embedded specs below (real charts with data), instead
               # of freezing to a server snapshot that headless exports can't capture.
               "<script src=\"https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js\"></script>",
-              "<style>", _export_css(theme, code), "</style></head><body><article class=\"export\">")
+              "<style>", _export_css(palette, code), "</style></head><body><article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
@@ -399,10 +466,18 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 if _outputs_any(outputs)
                     # `figures`: only rich display (images/html/latex) — drop scalar text / stdout / errors.
                     o = c.output
+                    # Themed OVERRIDE: a native figure re-rendered under the palette (raster) replaces the
+                    # baked image, so an exported page's Makie plots follow the picker like its ECharts do.
+                    themed = override ? _snapshot_fig(nb.id, c.id, palette; raster = true) : nothing
                     if _outputs_text_ok(outputs)
-                        print(io, "<div class=\"exp-out\">", output_html(c), "</div>")
+                        themed === nothing ?
+                            print(io, "<div class=\"exp-out\">", output_html(c), "</div>") :
+                            print(io, "<div class=\"exp-out\">", _output_text_only_html(c),
+                                  "<div class=\"dispwrap\">", _themed_fig_html(themed[1], themed[2]), "</div></div>")
                     elseif o !== nothing && !isempty(o.display)
-                        print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">", ReportRender._render_chunks(o.display), "</div></div>")
+                        print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">",
+                              themed === nothing ? ReportRender._render_chunks(o.display) : _themed_fig_html(themed[1], themed[2]),
+                              "</div></div>")
                     end
                     for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
                         did = string("chart-", c.id, "-", si)
@@ -459,10 +534,15 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         print(io, "<script>")
         print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
         if !isempty(charts)
-            echtheme = theme == "dark" ? "'dark'" : "null"   # echarts.init(el, theme) — dark palette or default
-            print(io, "var _slateCharts=[", join(("['" * id * "'," * opt * "]" for (id, opt) in charts), ","), "];",
-                  "function _slateRenderCharts(){if(!window.echarts)return;_slateCharts.forEach(function(c){",
-                  "var el=document.getElementById(c[0]);if(!el)return;var ch=echarts.init(el,", echtheme, ");",
+            # Register the Slate ECharts theme from the page's CSS vars (the SAME brand palette as the
+            # chrome) and render every embedded spec under it — so an exported page's charts match the
+            # notebook + PDF instead of ECharts' generic 'dark'/default.
+            print(io, _EXPORT_ECHARTS_THEME_JS,
+                  "var _slateCharts=[", join(("['" * id * "'," * opt * "]" for (id, opt) in charts), ","), "];",
+                  "function _slateRenderCharts(){if(!window.echarts)return;",
+                  "try{echarts.registerTheme('slate',_slateExportTheme());}catch(e){}",
+                  "_slateCharts.forEach(function(c){",
+                  "var el=document.getElementById(c[0]);if(!el)return;var ch=echarts.init(el,'slate');",
                   "ch.setOption(c[1]);window.addEventListener('resize',function(){ch.resize();});});}",
                   "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
         end

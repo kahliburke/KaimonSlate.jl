@@ -799,6 +799,31 @@ _ctx_args(report::Report, region::AbstractString, regions::AbstractVector) = (
     "ctx_notebook" => String(report.id),
     "ctx_regions"  => String[String(r) for r in regions])
 
+# Ask the worker to re-render a native (Makie) figure cell under a Slate PALETTE, for a themed PDF
+# export that overrides the notebook's live theme (see worker.jl `__slate_rerender_fig`). Returns
+# `(bytes, ext)` with `ext ∈ ("pdf","svg","png")`, or `nothing` when Makie isn't loaded, the cell has
+# no figure, or the round-trip fails — the caller then falls back to the already-rendered bytes.
+function rerender_fig(k::GateKernel, report::Report, source::AbstractString, theme::AbstractString;
+                      cellid::AbstractString = "export", raster::Bool = false)
+    res = try
+        prepare!(k, report)
+        _tool(k, "__slate_rerender_fig", Dict{String,Any}(
+            "source" => String(source), "theme" => String(theme), "raster" => raster,
+            "filename" => "cell:" * String(cellid)); timeout = _eval_timeout())
+    catch
+        return nothing
+    end
+    (res !== nothing && hasproperty(res, :ok) && res.ok === true) || return nothing
+    b64 = hasproperty(res, :b64) ? String(res.b64) : ""
+    ext = hasproperty(res, :ext) ? String(res.ext) : ""
+    (isempty(b64) || isempty(ext)) && return nothing
+    bytes = try; Vector{UInt8}(Base64.base64decode(b64)); catch; return nothing; end
+    return (bytes, ext)
+end
+# In-process / non-gate kernels have no worker to round-trip — themed re-render is a gate-worker
+# capability, so fall back to the already-rendered figure bytes (no override for the in-process kernel).
+rerender_fig(::Kernel, ::Report, ::AbstractString, ::AbstractString; cellid::AbstractString = "export", raster::Bool = false) = nothing
+
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
                       region::AbstractString = "", regions::AbstractVector = String[])
     (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions)

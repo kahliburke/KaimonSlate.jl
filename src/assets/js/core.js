@@ -62,7 +62,11 @@ function _snapCell(cellId, insts, spec) {
     // (export_typst.jl) already falls back cleanly to this PNG when no SVG snapshot exists, so
     // dropping the eager SVG render costs nothing but export-time vector crispness for ECharts
     // figures specifically (Makie figures already export true vector PDF separately).
-    try { png = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#0e1116' }) || '').split(',')[1] || ''; } catch (_) {}
+    // Match the live theme's page colour (not a hardcoded dark) so the PNG fallback reads correctly
+    // on a light export too; charts declare a transparent bg, so without an explicit fill they'd come
+    // through with none.
+    const _bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0e1116';
+    try { png = (inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: _bg }) || '').split(',')[1] || ''; } catch (_) {}
     if (png) fetch(_apipath('/api/snapshot'), { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cell: cellId, image: png }) }).catch(() => {});
@@ -73,25 +77,27 @@ function _snapCell(cellId, insts, spec) {
 // when a PDF/Typst export actually needs it — the replacement for the eager per-settle render
 // `_snapCell` used to do. Re-renders the spec offscreen (same technique as before, just invoked
 // rarely instead of on every chart update) and disposes immediately; nothing is retained after
-// this returns. `dark` picks the dark-theme rendering. Returns an SVG string, or '' if the cell
-// has no live chart (already gone, or never an ECharts figure).
-window._renderChartSvg = function (cellId, dark) {
-  const cell = ((window.nbState && window.nbState.cells) || []).find(c => c.id === cellId);
+// this returns. `themeName` is the Slate palette to render in (e.g. "midnight"/"daylight"/"nord")
+// — read straight from its stylesheet rule, so the export theme is honored REGARDLESS of the theme
+// the live UI is currently showing. Returns an SVG string, or '' if the cell has no live chart.
+window._renderChartSvg = function (cellId, themeName) {
+  const cells = ((window.__slateState || window.nbState || {}).cells) || [];
+  const cell = cells.find(c => c.id === cellId);
   const spec = cell && cell.echarts && cell.echarts[0];
   if (!spec) return '';
   const inst = (window.charts && window.charts[cellId] && window.charts[cellId][0]) || null;
   const w = (inst && inst.getWidth()) || (spec.__size && spec.__size.width) || 640;
   const h = (inst && inst.getHeight()) || (spec.__size && spec.__size.height) || 400;
   const pub = _pubSpec(spec);
-  const themeName = dark ? 'slate' : null;
-  const bg = dark ? '#12141c' : '#ffffff';
+  const vars = _themeVarsFor(themeName);
+  const bg = vars['--bg'] || '#ffffff';                          // the target palette's page colour
   let off = null, div = null;
   try {
     div = document.createElement('div');
     div.style.cssText = 'position:absolute;left:-99999px;top:0;width:' + w + 'px;height:' + h + 'px;';
     document.body.appendChild(div);
-    if (themeName === 'slate') _ensureSlateTheme();
-    off = echarts.init(div, themeName, { renderer: 'svg', width: w, height: h });
+    echarts.registerTheme('__export', _slateEchartsThemeFrom((n, d) => vars[n] || d));
+    off = echarts.init(div, '__export', { renderer: 'svg', width: w, height: h });
     off.setOption(Object.assign({ backgroundColor: bg }, pub));
     return off.renderToSVGString();
   } catch (_) { return ''; }
@@ -150,9 +156,10 @@ function _slateAxisTheme(line, label, name) {
 // heatmap reads identically whether it's an interactive ECharts figure or a rendered Makie one.
 const _SLATE_VIRIDIS = ['#440154', '#472d7b', '#3b528b', '#2c728e', '#21918c',
   '#28ae80', '#5ec962', '#addc30', '#fde725'];
-function _slateEchartsTheme() {
-  const cs = getComputedStyle(document.documentElement);
-  const V = (n, d) => _slateThemeVar(cs, n, d);
+// Build the Slate ECharts theme from a var-getter `V(name, default)` — decoupled from WHERE the
+// palette comes from, so the live theme (computed styles) and an export render in an arbitrary
+// named palette (its stylesheet rule) share one builder.
+function _slateEchartsThemeFrom(V) {
   const text = V('--text', '#d4d8e8'), dim = V('--dim', '#6a7090'),
         border = V('--border', '#2a2e40'), bg2 = V('--bg2', '#141828');
   const cycle = [['--accent', '#569cd6'], ['--green', '#56d364'], ['--orange', '#ce9178'],
@@ -171,6 +178,32 @@ function _slateEchartsTheme() {
     timeline: { lineStyle: { color: dim }, label: { color: dim } },
     calendar: { splitLine: { lineStyle: { color: border } }, itemStyle: { borderColor: border } },
   };
+}
+// The live-theme ECharts theme (registered as 'slate') — reads the currently-applied CSS vars.
+function _slateEchartsTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  return _slateEchartsThemeFrom((n, d) => _slateThemeVar(cs, n, d));
+}
+// Read ONE Slate palette's CSS custom properties straight from its stylesheet rule (":root" for
+// midnight, `html[data-slate-theme="<name>"]` otherwise), merged over :root so a block that omits a
+// var still resolves. This lets an export render a chart in ANY theme WITHOUT applying it to the live
+// UI — the palette is the single source of truth (notebook.css, golden-tested against SLATE_PALETTES).
+function _themeVarsFor(name) {
+  const read = wanted => {
+    for (const ss of document.styleSheets) {
+      let rules; try { rules = ss.cssRules; } catch (_) { continue; }   // cross-origin sheet → skip
+      for (const r of rules || []) {
+        if (r.selectorText !== wanted || !r.style) continue;
+        const o = {};
+        for (const p of r.style) if (p[0] === '-' && p[1] === '-') o[p] = r.style.getPropertyValue(p).trim();
+        return o;
+      }
+    }
+    return {};
+  };
+  const base = read(':root');
+  return (!name || name === 'midnight') ? base
+    : Object.assign(base, read('html[data-slate-theme="' + name + '"]'));
 }
 function _ensureSlateTheme() {
   if (_slateThemeReady || typeof echarts === 'undefined') return;

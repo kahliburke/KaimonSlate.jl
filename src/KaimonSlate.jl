@@ -1294,7 +1294,11 @@ function create_tools(GateTool::Type)
     the browser's "Export PDF") and WRITE it to a file, so you can open that file with `Read`
     to verify the result — layout, figures, math, and whether interactive chrome or `@bind`
     parameter strips leaked in. This is how you check the PDF without a browser. Options mirror
-    the export dialog: `theme ∈ ("light","dark")`; `params="1"` shows the frozen `@bind`
+    the export dialog: `theme ∈ ("light","dark")` sets the PAGE chrome; `charttheme` names the Slate
+    PALETTE figures render in (e.g. "daylight"/"midnight"/"nord" — default: derived from `theme`) and
+    `override="1"` re-renders native (Makie) figures under it too (the dialog's Light/Dark override —
+    without it, only ECharts + page chrome follow the palette, Makie keeps its baked-in theme);
+    `params="1"` shows the frozen `@bind`
     parameter strip (hidden by default); `source="0"` drops code listings; `style ∈
     ("article","report")`; `columns ∈ ("1","2")`; `code ∈ ("normal","small","smaller","tiny",
     "hidden")`; `body ∈ ("","large","normal","compact","small")`. `path` overrides the output
@@ -1305,7 +1309,8 @@ function create_tools(GateTool::Type)
     mode). On a deck, code is hidden by default (set `source="1"`/`code` to show it) and
     `notes="1"` appends a speaker-notes section.
     """
-    function export_pdf_tool(notebook::String; theme::String = "light", params::String = "0",
+    function export_pdf_tool(notebook::String; theme::String = "light", charttheme::String = "",
+                             override::String = "0", params::String = "0",
                              source::String = "1", style::String = "article", columns::String = "1",
                              code::String = "normal", body::String = "", path::String = "",
                              layout::String = "article", notes::String = "0")::String
@@ -1316,6 +1321,7 @@ function create_tools(GateTool::Type)
         pdf = try
             export_pdf(nb; include_source = slide_source, style = style,
                        columns = something(tryparse(Int, columns), 1), theme = theme,
+                       charttheme = charttheme, override = override == "1",
                        code = code, body = body, include_params = params == "1",
                        layout = layout, notes = notes == "1",
                        level = get(nb.report.meta, "slidelevel", 2))

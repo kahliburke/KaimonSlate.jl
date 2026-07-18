@@ -1081,7 +1081,8 @@ function _make_router(h::Hub)
         pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
                   (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
-                           theme = get(qp, "theme", "dark"), code = get(qp, "code", "normal"),
+                           theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
+                           override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
                            outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run,
                            history = get(qp, "history", "0") == "1",   # source-only by default (public page)
                            memo_budget = budget, preview_budget = pbudget)
@@ -1137,6 +1138,8 @@ function _make_router(h::Hub)
                        style = get(qp, "style", "article"),
                        columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
                        theme = get(qp, "theme", "light"),
+                       charttheme = get(qp, "charttheme", ""),
+                       override = get(qp, "override", "0") == "1",
                        code = get(qp, "code", "normal"),
                        body = get(qp, "body", ""),
                        include_params = get(qp, "params", "0") == "1",
@@ -1160,6 +1163,8 @@ function _make_router(h::Hub)
                        style = get(qp, "style", "article"),
                        columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
                        theme = get(qp, "theme", "light"),
+                       charttheme = get(qp, "charttheme", ""),
+                       override = get(qp, "override", "0") == "1",
                        code = get(qp, "code", "normal"),
                        body = get(qp, "body", ""),
                        include_params = get(qp, "params", "0") == "1",
@@ -1499,10 +1504,8 @@ function _make_router(h::Hub)
     # Client-rendered figure snapshot (ECharts canvas → PNG) — feeds slate_view + PDF.
     HTTP.register!(router, "POST", "/api/{id}/snapshot", req -> _withnb(h, req, nb -> begin
         b = _body(req); cell = String(get(b, "cell", "")); img = String(get(b, "image", ""))
-        getstr(k) = (v = get(b, k, nothing); (v isa AbstractString && !isempty(v)) ? String(v) : nothing)
-        svg = getstr("svg"); svg_dark = getstr("svgDark")
         (isempty(cell) || isempty(img)) && return _json(Dict("ok" => false))
-        try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(img)); svg = svg, svg_dark = svg_dark); catch; return _json(Dict("ok" => false)); end
+        try; set_snapshot!(nb.id, cell, Vector{UInt8}(Base64.base64decode(img))); catch; return _json(Dict("ok" => false)); end
         _json(Dict("ok" => true))
     end))
     # Live cell inspect: the open tab POSTs a cell's captured DOM + console + raster in answer to an

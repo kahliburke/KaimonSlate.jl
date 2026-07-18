@@ -66,37 +66,53 @@ function _pkg_complete(q::AbstractString, limit::Int = 50)
     first(vcat(exact, pre, sub), limit)
 end
 
-const _SNAPSHOTS = Dict{String,Dict{String,Vector{UInt8}}}()   # nbid → cellid → latest PNG
-const _SNAP_SVG = Dict{String,Dict{String,String}}()           # nbid → cellid → latest light-theme SVG (vector)
-const _SNAP_SVG_DARK = Dict{String,Dict{String,String}}()      # nbid → cellid → latest dark-theme SVG (vector)
+const _SNAPSHOTS = Dict{String,Dict{String,Vector{UInt8}}}()          # nbid → cellid → latest PNG
+# Vector (SVG) chart snapshots for PDF export, keyed by the EXPORT THEME they were rendered in
+# ("asis" = the notebook's live theme, or a Slate palette name like "daylight"/"midnight"). A
+# client re-render (new data or a theme switch) posts a fresh PNG through `set_snapshot!`, which
+# drops that cell's cached SVGs so the next export re-warms — the cache can't outlive its figure.
+const _SNAP_SVG = Dict{String,Dict{String,Dict{String,String}}}()    # nbid → cellid → theme → SVG
 const _SNAP_LOCK = ReentrantLock()
-function set_snapshot!(nbid::AbstractString, cell::AbstractString, png::Vector{UInt8};
-                       svg::Union{AbstractString,Nothing} = nothing,
-                       svg_dark::Union{AbstractString,Nothing} = nothing)
+function set_snapshot!(nbid::AbstractString, cell::AbstractString, png::Vector{UInt8})
     lock(_SNAP_LOCK) do
         get!(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}())[String(cell)] = png
-        svg === nothing || (get!(_SNAP_SVG, String(nbid), Dict{String,String}())[String(cell)] = String(svg))
-        svg_dark === nothing || (get!(_SNAP_SVG_DARK, String(nbid), Dict{String,String}())[String(cell)] = String(svg_dark))
+        cells = get(_SNAP_SVG, String(nbid), nothing)     # a fresh raster ⇒ any cached export SVGs are stale
+        cells === nothing || delete!(cells, String(cell))
     end
     return nothing
 end
 _snapshot(nbid, cell) = lock(_SNAP_LOCK) do
     get(get(_SNAPSHOTS, String(nbid), Dict{String,Vector{UInt8}}()), String(cell), nothing)
 end
-# Vector (SVG) snapshot of a client-rendered chart for PDF export — crisp at any scale.
-# `dark` picks the dark-theme rendering (for a dark-mode PDF). `nothing` if absent.
-_snapshot_svg(nbid, cell; dark::Bool = false) = lock(_SNAP_LOCK) do
-    store = dark ? _SNAP_SVG_DARK : _SNAP_SVG
-    get(get(store, String(nbid), Dict{String,String}()), String(cell), nothing)
+# Vector (SVG) snapshot of a client-rendered chart in export `theme`, or `nothing` if not cached.
+_snapshot_svg(nbid, cell, theme::AbstractString) = lock(_SNAP_LOCK) do
+    get(get(get(_SNAP_SVG, String(nbid), Dict{String,Dict{String,String}}()), String(cell), Dict{String,String}()), String(theme), nothing)
 end
-# Cache a SINGLE-theme SVG rendered on demand at export time (`_figure_for_export`'s live
-# round-trip) — unlike `set_snapshot!`, no PNG is required (the round-trip may run before any
-# PNG snapshot ever existed for this cell). A later export (or a request for the other theme)
-# then skips the round-trip.
-function set_snapshot_svg!(nbid::AbstractString, cell::AbstractString, dark::Bool, svg::AbstractString)
+# Cache an on-demand SVG rendered at export time (`_figure_for_export`'s live round-trip), keyed by
+# the export theme it was rendered in — no PNG required (the round-trip may run before any PNG existed).
+function set_snapshot_svg!(nbid::AbstractString, cell::AbstractString, theme::AbstractString, svg::AbstractString)
     lock(_SNAP_LOCK) do
-        store = dark ? _SNAP_SVG_DARK : _SNAP_SVG
-        get!(store, String(nbid), Dict{String,String}())[String(cell)] = String(svg)
+        cells = get!(_SNAP_SVG, String(nbid), Dict{String,Dict{String,String}}())
+        get!(cells, String(cell), Dict{String,String}())[String(theme)] = String(svg)
+    end
+    return nothing
+end
+
+# Native (server-rendered, e.g. Makie) figure bytes RE-RENDERED at export time under a chosen Slate
+# palette — the themed-override path (`_warm_makie_figs!`). Keyed by (nbid, cell, theme); each entry is
+# `(bytes, ext)` with `ext ∈ ("pdf","svg","png")`. Overwritten on every override export (always fresh —
+# a re-render is the whole point of an override), so no invalidation hook is needed.
+const _SNAP_FIG = Dict{String,Dict{String,Dict{String,Tuple{Vector{UInt8},String}}}}()   # nbid → cell → "theme|fmt" → (bytes,ext)
+# The PDF and HTML exports want different formats from the SAME re-render (vector pdf vs. an
+# HTML-embeddable raster/svg), so the format preference is part of the key.
+_fig_key(theme::AbstractString, raster::Bool) = string(theme, raster ? "|r" : "|v")
+_snapshot_fig(nbid, cell, theme::AbstractString; raster::Bool = false) = lock(_SNAP_LOCK) do
+    get(get(get(_SNAP_FIG, String(nbid), Dict{String,Dict{String,Tuple{Vector{UInt8},String}}}()), String(cell), Dict{String,Tuple{Vector{UInt8},String}}()), _fig_key(theme, raster), nothing)
+end
+function set_snapshot_fig!(nbid::AbstractString, cell::AbstractString, theme::AbstractString, raster::Bool, bytes::Vector{UInt8}, ext::AbstractString)
+    lock(_SNAP_LOCK) do
+        cells = get!(_SNAP_FIG, String(nbid), Dict{String,Dict{String,Tuple{Vector{UInt8},String}}}())
+        get!(cells, String(cell), Dict{String,Tuple{Vector{UInt8},String}}())[_fig_key(theme, raster)] = (copy(bytes), String(ext))
     end
     return nothing
 end
