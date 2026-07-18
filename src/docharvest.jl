@@ -38,6 +38,25 @@ function harvest_module_docs(where::Module, mod_names)
     return recs
 end
 
+# Case-insensitive resolution of a bare identifier against the names visible in `where`: the module's own
+# bindings PLUS the exports of every module it has `using`'d / `import`ed (the module binding itself is in
+# scope, so its exports are reachable). Exact case wins; otherwise the unique (sorted-first) case-insensitive
+# match. Returns the canonical name, or `nothing` if there's no case-insensitive match. Used only as a
+# fallback when the exact-case lookup misses (e.g. `regionplan` → `RegionPlan`).
+function _ci_resolve_name(where::Module, nm::AbstractString)
+    Symbol(nm) in names(where; all = true, imported = true) && return nm   # exact case takes priority
+    target = lowercase(nm)
+    cands = Set{Symbol}()
+    for s in names(where; all = true, imported = true)
+        push!(cands, s)
+        (isdefined(where, s) && (v = try getfield(where, s) catch; nothing end) isa Module) || continue
+        for e in names(v); push!(cands, e); end
+    end
+    Symbol(nm) in cands && return nm
+    matches = sort!(String[string(s) for s in cands if lowercase(string(s)) == target])
+    return isempty(matches) ? nothing : first(matches)
+end
+
 """
     module_help(where, name) -> Dict
 
@@ -47,11 +66,19 @@ there) and return a help record: `{name, module, doc, kind, exports}`. `kind` is
 its exported bindings as `{name, kind}` (sorted) for drill-down; empty otherwise.
 `doc` is the raw `@doc` text (markdown). Pure (Base.Docs + reflection only) so it
 loads into the dependency-light worker, exactly like `harvest_module_docs`.
+
+A bare identifier that doesn't resolve is retried case-insensitively (exact case still
+wins), so `regionplan` finds `RegionPlan` — see [`_ci_resolve_name`](@ref).
 """
 function module_help(where::Module, name::AbstractString)
     nm = String(name)
     ex = try; Meta.parse(nm); catch; nothing; end
     val = ex === nothing ? nothing : (try; Core.eval(where, ex); catch; nothing; end)
+    # Wrong-case bare name (no dots) that missed → re-resolve to the correctly-cased binding, if unique.
+    if val === nothing && occursin(r"^[A-Za-z_][A-Za-z0-9_!]*$", nm)
+        canon = _ci_resolve_name(where, nm)
+        canon === nothing || canon == nm || return module_help(where, canon)
+    end
     _kind(v) = v isa Module ? "module" :
                v isa Type ? "type" :
                (v isa Function || v isa Base.Callable) ? "function" :
