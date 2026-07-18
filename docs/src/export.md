@@ -23,8 +23,12 @@ CDN to typeset math. The route is `GET /api/<id>/export.html` (`?dl=1` to downlo
 **☰ → Export PDF (publication)** renders a typeset PDF **server-side via Typst** — not a
 browser print. A small dialog (remembered between exports) offers:
 
-- **Theme** — *Light* (publication) or *Dark* (matches the live UI; a natural fit for figures
-  drawn with the Makie dark theme).
+- **Theme** — *As-is*, *Light* (publication), or *Dark*. **As-is** reuses each figure exactly as
+  it's already rendered in the live UI (fastest — nothing re-renders). **Light** and **Dark**
+  force a canonical palette and **re-render every figure for the export** so the whole document is
+  internally consistent regardless of the live theme: native **Makie** figures are re-rendered on
+  the worker under the chosen palette, and **ECharts** are re-drawn in the matching chart theme.
+  (The dialog flags an override, since re-rendering takes a moment.)
 - **Layout** — *Article* / *Report* × *single* / *two-column* (the title and abstract span the
   full width above the columns).
 - **Body text** — *Auto* (compact for two-column), *Large*, *Normal*, *Compact*, *Small*.
@@ -35,8 +39,7 @@ browser print. A small dialog (remembered between exports) offers:
 Highlights:
 
 - **Vector figures** — CairoMakie figures embed as **PDF** (fonts embedded, crisp at any
-  scale); ECharts charts embed as **SVG** captured in both light and dark themes. Rasters are
-  the fallback.
+  scale); ECharts charts embed as **SVG** in the export's theme. Rasters are the fallback.
 - **Math** through LaTeX (`mitex`), with a shim preamble for commands `mitex` lacks.
 - **Frozen controls** — `@bind` widgets render as a compact *parameters* strip at their
   current values (a PDF is a snapshot).

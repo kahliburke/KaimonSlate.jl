@@ -198,6 +198,10 @@ const REG_REGISTRY = {
       warm: 2, threads: '8,1', sysimage: true, status: { ok: true, msg: 'warm 2/2 ready', age: 7 } },
     { name: 'db', host: 'db-box', transport: 'direct', base_port: 9200, preload: '', data_root: '/srv/warehouse',
       warm: 1, threads: '4,1', sysimage: false, status: { ok: true, msg: 'warm 1/1 ready', age: 12 } },
+    // Defined globally but NOT enabled in the demo notebook — so it shows as an available destination
+    // to add (regions are global; a notebook opts into the subset it uses).
+    { name: 'bigmem', host: 'mem-box', transport: 'tunnel', base_port: 0, preload: '', data_root: '/scratch',
+      warm: 1, threads: '16,1', sysimage: false, status: { ok: true, msg: 'warm 1/1 ready', age: 20 } },
   ],
   parked: [{ host: 'gpu-box', label: 'vision', port: 9312, idle_s: 43 }],
 }
@@ -213,6 +217,9 @@ const REG_ROSTERS = {
     { port: 9200, alive: true, state: 'attached', manifest: mkStats({ region: 'db', notebook: 'pipeline.jl', transport: 'direct', project: 'warehouse', spawned: 'attached · 6m', stream_port: 9201 }),
       stats: mkStats({ cpu: 33, rss: 1800 * MB, memo_bytes: 3400 * MB, running: [], warm: 'ready', sys_cpu: 22, load1: 1.1, sys_mem_total: 128000 * MB, sys_mem_free: 96000 * MB }) },
   ],
+  // mem-box (region `bigmem`) intentionally has no live worker here — it exists in the registry so it
+  // shows as an available destination to add, without adding a third row to the activity strip.
+  'mem-box': [],
 }
 // Telemetry ring for the worker-detail sparklines (/api/worker-stats). A gentle synthetic wobble.
 function regStatsHistory(port) {
@@ -290,7 +297,7 @@ async function mockRegions(page) {
     const port = Number(new URL(r.request().url()).searchParams.get('port'))
     r.fulfill(J({ ok: true, port, samples: regStatsHistory(port) }))
   })
-  await page.route('**/api/ssh-hosts', (r) => r.fulfill(J({ hosts: ['gpu-box', 'db-box', 'workstation'], global: '' })))
+  await page.route('**/api/ssh-hosts', (r) => r.fulfill(J({ hosts: ['gpu-box', 'db-box', 'mem-box', 'workstation'], global: '' })))
   await page.route('**/api/sysimage*', (r) => {
     const region = new URL(r.request().url()).searchParams.get('region') || ''
     r.fulfill(J({ ok: true, building: false, current: region === 'gpu', stale: false, bytes: 1780 * MB,
@@ -305,6 +312,9 @@ async function mockRegions(page) {
     const host = new URL(r.request().url()).searchParams.get('host') || 'gpu-box'
     r.fulfill({ contentType: 'text/event-stream', body: regPreflightSSE(host) })
   })
+  // Never resolve the mesh-introduce POST — the consent dialog then stays in its "Connecting…"
+  // building state. (The real path is notebook-scoped, /api/<id>/mesh-introduce, so match loosely.)
+  await page.route('**/mesh-introduce*', () => new Promise(() => {}))
 }
 // Fake notebook state for the DAG region overlay: a 5-cell model pipeline split local→db→gpu, with
 // declared regions + live workers. `renderAll(this)` publishes it; the real renderers draw the zones,
@@ -325,7 +335,7 @@ const REG_NBSTATE = {
     { id: 'intro', kind: 'markdown', state: 'fresh', source: '# Model pipeline\nLocal ingest, features on the warehouse, training on the GPU box.', deps: [], needs: [], defs: [], tags: [] },
     { id: 'load', kind: 'code', state: 'fresh', source: 'df = load_frame("events.parquet")', deps: [], needs: [], defs: ['df'], tags: [], stats: { ranOn: 'local', total_ms: 340, last_ms: 340, evals: 1 } },
     { id: 'features', kind: 'code', state: 'fresh', source: 'feat = build_features(df)', deps: ['load'], needs: [], defs: ['feat'], tags: ['region=db'], stats: { ranOn: 'db (db-box)', total_ms: 2100, last_ms: 2100, evals: 1 } },
-    { id: 'train', kind: 'code', state: 'running', source: 'model = train(feat; epochs=40)', deps: ['features'], needs: [], defs: ['model'], tags: ['region=gpu'], stats: { ranOn: 'gpu (gpu-box)', total_ms: 54000, last_ms: 54000, evals: 1 } },
+    { id: 'train', kind: 'code', state: 'running', source: 'model = train(feat; epochs=40)', deps: ['features'], needs: [], defs: ['model'], tags: ['region=gpu'], stats: { ranOn: 'gpu (gpu-box)', total_ms: 54000, last_ms: 54000, mean_ms: 52000, std_ms: 3500, evals: 1, pulls: 2, last_ts: Math.floor(Date.now() / 1000) - 8, recent: [51000, 53500, 52000, 54000, 52500], xferBytes: 220 * 1048576 } },
     { id: 'evaluate', kind: 'code', state: 'stale', source: 'score = evaluate(model, df)', deps: ['train', 'load'], needs: [], defs: ['score'], tags: ['region=gpu'], stats: { ranOn: 'gpu (gpu-box)' } },
     { id: 'report', kind: 'code', state: 'fresh', source: 'summarize(score)', deps: ['evaluate'], needs: [], defs: [], tags: [], stats: { ranOn: 'local', total_ms: 90, last_ms: 90, evals: 1 } },
   ],
@@ -395,6 +405,91 @@ async function regionShots(browser) {
       await elShot(page, '.meshcard', 'mesh-consent.png')
       await page.evaluate(() => window.onMeshConsent && window.onMeshConsent({ connected: true, pairs: [] }))
     } catch (e) { log('! mesh-consent skipped:', e.message.split('\n')[0]) }
+
+    // mesh-connect "Connecting…" building state — accept the consent, then stall the introduce POST
+    try {
+      await sleep(400)                                       // let the prior consent dialog finish tearing down
+      await page.evaluate(() => window.onMeshConsent && window.onMeshConsent({
+        connected: false, pairs: [{ source: 'gpu', puller: 'db', source_host: 'gpu-box', puller_host: 'db-box' }], unreachable: [],
+      }))
+      await page.waitForSelector('.meshcard .meshbtn.primary', { timeout: 6000 })
+      await sleep(300)
+      // arm() awaits window.api(POST /api/…/mesh-introduce); hang exactly that call so `busy` stays
+      // true and the card holds its "Connecting…" state (transport/URL-agnostic — page.route can't
+      // catch a WS RPC, and the HTTP path is notebook-scoped).
+      await page.evaluate(() => { const o = window.api; window.api = (m, p, b) => (p && String(p).includes('mesh-introduce')) ? new Promise(() => {}) : o(m, p, b) })
+      await page.evaluate(() => document.querySelector('.meshcard .meshbtn.primary')?.click())
+      await sleep(300)
+      await page.evaluate(() => window.onMeshBuild && window.onMeshBuild({ phase: 'run', src: 'gpu', puller: 'db', i: 1, n: 2 }))
+      await sleep(500)
+      await elShot(page, '.meshcard', 'mesh-connecting.png')
+      await page.evaluate(() => window.onMeshConsent && window.onMeshConsent({ connected: true, pairs: [] }))
+    } catch (e) { log('! mesh-connecting skipped:', e.message.split('\n')[0]) }
+
+    // DAG node detail card for a remote cell — provenance chips (last ran 🖧 host · moved ⇄ MB) + Run-on picker
+    try {
+      await page.evaluate(() => window._dagCard && window._dagCard('train', 0, 0))
+      await page.waitForSelector('#dagcard', { timeout: 5000 })
+      await sleep(600)
+      await elShot(page, '#dagcard', 'dag-node-card.png')
+      await page.evaluate(() => window._dagCardClose && window._dagCardClose())
+    } catch (e) { log('! dag-node-card skipped:', e.message.split('\n')[0]) }
+
+    // region hover card — a zone's worker status card in the DAG
+    try {
+      await page.evaluate(() => window._dagRegCardShow && window._dagRegCardShow({
+        name: 'gpu', isLocal: false, host: 'gpu-box', wstatus: 'ok',
+        worker: { port: 9300, transport: 'tunnel', host: 'gpu-box', note: '',
+          stats: JSON.stringify({ cpu: 78, rss: 940 * 1048576, evals: 1, running: ['train'], warm: 'ready · CUDA', memo: 512 * 1048576 }) },
+      }, 420, 70))
+      await page.waitForSelector('#dagregcard', { timeout: 5000 })
+      await sleep(500)
+      await elShot(page, '#dagregcard', 'region-hover-card.png')
+      await page.evaluate(() => document.getElementById('dagregcard')?.remove())
+    } catch (e) { log('! region-hover-card skipped:', e.message.split('\n')[0]) }
+
+    // peer-plan mid-probe state — the recalculate flow testing a route
+    try {
+      await page.evaluate(() => window._dagPeerPlan && window._dagPeerPlan(false))
+      await page.waitForSelector('#dagpeerpanel .dagpeerbody', { timeout: 6000 })
+      await page.evaluate(() => window.onProbeProgress && window.onProbeProgress({ phase: 'run', src: 'gpu', dst: 'db', i: 1, n: 3 }))
+      await sleep(600)
+      await elShot(page, '#dagpeerpanel', 'dag-peer-plan-probing.png')
+      await page.evaluate(() => document.getElementById('dagpeerpanel')?.remove())
+    } catch (e) { log('! dag-peer-plan-probing skipped:', e.message.split('\n')[0]) }
+
+    // close the DAG pane so the cell-level popovers/bars aren't covered
+    await page.evaluate(() => { if (document.getElementById('dagpane')?.classList.contains('open')) window.toggleDag() })
+    await sleep(400)
+
+    // tag editor "Run on" section — radio rows (💻 local / 🖧 region / ＋ Add destination)
+    try {
+      await page.evaluate(() => window.openTagEditor && window.openTagEditor('features'))
+      await page.waitForSelector('#tagpop.show', { timeout: 5000 })
+      await sleep(500)
+      await elShot(page, '#tagpop', 'tag-runon.png')
+      await page.evaluate(() => window.hideTagEditor && window.hideTagEditor())
+    } catch (e) { log('! tag-runon skipped:', e.message.split('\n')[0]) }
+
+    // destinations manager — enable which declared regions the notebook uses
+    try {
+      await page.evaluate(() => window.openDestinations && window.openDestinations())
+      await page.waitForSelector('#destbg.show', { timeout: 5000 })
+      await sleep(600)
+      await elShot(page, '#destbg .destmodal, #destbg > div', 'destinations.png')
+      await page.evaluate(() => window.closeDestinations && window.closeDestinations())
+    } catch (e) { log('! destinations skipped:', e.message.split('\n')[0]) }
+
+    // a cell's live boundary-transfer progress bar (⇄ name: N/M MB ← host)
+    try {
+      await page.evaluate(() => {
+        window.onCellRun && window.onCellRun('train')
+        window.onCellProgress && window.onCellProgress({ id: 'train', frac: 0.375, msg: '⇄ feat: 79/210 MB ← 🖧 gpu-box' })
+      })
+      await page.waitForSelector('.cell[data-cid="train"] .cellprog', { timeout: 5000 })
+      await sleep(500)
+      await elShot(page, '.cell[data-cid="train"]', 'cell-transfer-progress.png')
+    } catch (e) { log('! cell-transfer-progress skipped:', e.message.split('\n')[0]) }
     await page.context().close()
   } catch (e) { log('! notebook region shots skipped:', e.message.split('\n')[0]) }
 
