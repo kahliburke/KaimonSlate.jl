@@ -67,7 +67,9 @@ const CELL_SHOTS = {
 function startServer() {
   log(`starting serve_notebook on :${PORT}`)
   const jl = `using KaimonSlate; KaimonSlate.serve_notebook(raw"${join(SHOTDIR, FIRST + '.jl')}"; port=${PORT})`
-  const proc = spawn('julia', [`--project=${DOCS}`, '--color=no', '-e', jl], { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] })
+  // KAIMONSLATE_NO_OPEN: don't pop the system browser (Safari) — the captures run in headless Chromium.
+  const proc = spawn('julia', [`--project=${DOCS}`, '--color=no', '-e', jl],
+    { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, KAIMONSLATE_NO_OPEN: '1' } })
   proc.stdout.on('data', (d) => process.stdout.write(`[server] ${d}`))
   proc.stderr.on('data', (d) => process.stderr.write(`[server] ${d}`))
   return proc
@@ -682,13 +684,16 @@ async function main() {
               { role: 'assistant', text: 'Done — drag the slider and the wave recomputes live.', done: true },
             ]
             renderAgentMsgs()
-            if (!document.getElementById('agentpanel').classList.contains('open')) toggleAgent()
+            // Open the panel directly rather than via toggleAgent() — it refuses to open when no live
+            // agent is connected (agentAvailable()), and the standalone docs server never has one.
+            document.getElementById('agentpanel').classList.add('open')
+            document.body.classList.add('agent-open')
           })
           // Settle the open transition, then a DIRECT element shot. (panelShot's height-collapse
           // trick mis-crops the agent panel's flex/transform layout → an off-screen capture.)
           await sleep(900)
           await elShot(page, '#agentpanel', 'agent-panel.png')
-          await page.evaluate(() => { if (document.getElementById('agentpanel').classList.contains('open')) toggleAgent() })
+          await page.evaluate(() => { document.getElementById('agentpanel').classList.remove('open'); document.body.classList.remove('agent-open') })
         } catch (e) { log('! agent-panel skipped:', e.message.split('\n')[0]) }
 
         // cell tag editor (🏷) — open the popover on a cell and shoot it
