@@ -1698,6 +1698,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
              background: var(--gold); border-radius: 5px; padding: 1px 6px; }
   .docmd { font-size: 12.5px; line-height: 1.5; color: #c8d2e4; }
   .docmd p { margin: 6px 0; } .docmd.dim { color: #8190a8; }
+  /* Documenter @ref cross-refs rewritten to inert spans (capture.jl _fix_at_refs). Scoped to #nb (the
+     LIVE notebook root) so the click affordance shows only where outputs.js can open the docs dock; a
+     static export has no #nb, so .docref renders as plain text. */
+  #nb .docref { color: var(--accent); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+  #nb .docref:hover { text-decoration-style: solid; }
   .docmd h1, .docmd h2, .docmd h3 { font-size: 13px; color: #cfe0ff; margin: 12px 0 4px; }
   .docmd ul, .docmd ol { margin: 6px 0; padding-left: 20px; }
   .docmd li { display: list-item; }   /* not the shared .cmdpal li flex (would split each item) */
