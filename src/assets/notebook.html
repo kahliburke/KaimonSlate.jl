@@ -13,7 +13,7 @@
      palette lives in notebook.css under html[data-slate-theme="…"]; "midnight" is the bare default. -->
 <script>try{var _t=localStorage.getItem('slateTheme');if(_t&&_t!=='midnight')document.documentElement.dataset.slateTheme=_t;}catch(e){}</script>
 <!-- Inline SVG favicon (data URI → no extra request, no /favicon.ico 404). -->
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23569cd6'/><text x='50' y='73' font-size='62' text-anchor='middle' fill='%23ffffff' font-family='monospace'>S</text></svg>"/>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' fill='none'><rect x='2.5' y='2.5' width='43' height='43' rx='12' fill='%23141828' stroke='%232a2e40' stroke-width='1.5'/><path d='M16 15 L33 20 M33 20 L22 34 M16 15 L22 34' stroke='%23566089' stroke-width='2' stroke-linecap='round'/><circle cx='16' cy='15' r='4' fill='%237cc0ff'/><circle cx='33' cy='20' r='4' fill='%23c586c0'/><circle cx='22' cy='34' r='4' fill='%2356d364'/></svg>"/>
 <!-- All third-party assets are served locally from /assets/vendor/* (the server fetches +
      caches them on first run from the URLs pinned in assets/vendor.json), so the notebook
      works offline after one warm load. Preact is ESM via an import map; signals/htm import
@@ -40,7 +40,7 @@
 </head>
 <body>
 <div class="topbar">
-  <a class="brand" href="/" title="all notebooks"><span class="brandmark">S</span>Slate</a>
+  <a class="brand" href="/" title="all notebooks"><svg class="brandmark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2.5" y="2.5" width="43" height="43" rx="12" fill="#141828" stroke="#2a2e40" stroke-width="1.5"/><path d="M16 15 L33 20 M33 20 L22 34 M16 15 L22 34" stroke="#566089" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="15" r="4" fill="#7cc0ff"/><circle cx="33" cy="20" r="4" fill="#c586c0"/><circle cx="22" cy="34" r="4" fill="#56d364"/></svg>Slate</a>
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title" onclick="toggleFiles()" title="open Files — edit this notebook's package source" style="cursor:pointer">Notebook</h1>
   <span id="runloc" class="runloc" style="display:none" onclick="openWorkerPop('', event)" title="worker — click for its live log &amp; status">
