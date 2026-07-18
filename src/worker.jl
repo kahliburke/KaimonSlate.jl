@@ -56,6 +56,7 @@ include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_sched
 include(joinpath(@__DIR__, "macroexpand.jl")) # _expand_cell_source — macro-aware deps (engine + worker)
 include(joinpath(@__DIR__, "capture.jl"))   # run_capture — uses EChart + SlateTable above
 include(joinpath(@__DIR__, "completion.jl")) # slate_completions — REPLCompletions in the NB namespace
+include(joinpath(@__DIR__, "prepare.jl"))   # PrepareTracker — classify precompile output into structured status (shared w/ engine)
 
 # Per-notebook execution namespace (warm; reset by replacing the module). Built by the
 # SAME shared contract `_populate_notebook_ns!` as the in-process kernel, so the two
@@ -1964,6 +1965,77 @@ function _bg_precompile_loop!()
     return nothing
 end
 
+# ── Proactive, NARRATED precompile on boot (the slow-Makie-open fix) ───────────────────────────────
+# A notebook whose env isn't precompiled pays that cost lazily, under the first cell's `using` — and
+# because cell output is capture-redirected, Julia's "Precompiling…" progress lands in the cell buffer,
+# INVISIBLE, so the topbar just shows a frozen "Running 0/N". Here we pay it up front instead: detect a
+# cold env, precompile it in a SUBPROCESS (in-process `Pkg.precompile()` crashes a live worker — see
+# `_bg_precompile_loop!`), and stream each package through the shared classifier onto `slate_prepare`, so
+# the browser narrates "Preparing packages · precompiling k/N · <pkg>". Non-blocking: cells and edits
+# proceed; a cell's own `using` that races this coordinates on Julia's per-package pidfile lock (it waits
+# on our compile rather than duplicating it). A warm env is a near-instant no-op — no subprocess, no banner.
+function _prepare_env!()
+    projfile = try; Base.active_project(); catch; nothing; end
+    projfile === nothing && return nothing
+    proj = dirname(String(projfile))
+    # Cheap warm-check: if every DIRECT dep is already precompiled, the whole closure is too (precompile
+    # is bottom-up — a stale indirect dep leaves its dependents stale), so there's nothing to narrate.
+    direct = try
+        [Base.PkgId(uuid, name) for (name, uuid) in Pkg.project().dependencies
+         if !(name in _PREP_SKIP)]
+    catch; return nothing; end
+    isempty(direct) && return nothing
+    cold = any(pid -> !_pkg_ready(pid), direct)
+    cold || return nothing
+    @info "slate prepare: env cold — precompiling in the background (one-time; narrated to the notebook)"
+    tr = PrepareTracker(time())
+    # The subprocess computes the ACCURATE full-closure total (Base.isprecompiled over the manifest) and
+    # emits it as a control marker, then precompiles — its combined stdout/stderr is what we classify.
+    script = raw"""
+        using Pkg
+        try
+            need = 0
+            for (uuid, info) in Pkg.dependencies()
+                info.name in ("KaimonGate", "Revise", "ExpressionExplorer") && continue
+                pid = Base.PkgId(uuid, info.name)
+                ready = (try; Base.in_sysimage(pid); catch; false; end) || (try; Base.isprecompiled(pid); catch; true; end)
+                ready || (global need += 1)
+            end
+            println(stderr, "@@SLATE_PREP total=", need); flush(stderr)
+        catch; end
+        try
+            Pkg.precompile()
+        catch e
+            println(stderr, "@@SLATE_PREP error ", first(split(sprint(showerror, e), '\n')))
+        end
+        println(stderr, "@@SLATE_PREP done"); flush(stderr)
+    """
+    out = Pipe()
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$proj -e $script`
+    proc = try
+        run(pipeline(cmd; stdout = out, stderr = out); wait = false)
+    catch e
+        @warn "slate prepare: precompile subprocess could not start" exception = e
+        return nothing
+    end
+    close(out.in)
+    for line in eachline(out)
+        (prepare_feed!(tr, line) && prepare_active(tr)) &&
+            (try; KaimonGate._publish_stream("slate_prepare", prepare_json(tr)); catch; end)
+    end
+    try; wait(proc); catch; end
+    tr.phase == "error" || (tr.phase = "done")
+    try; KaimonGate._publish_stream("slate_prepare", prepare_json(tr)); catch; end
+    @info "slate prepare: precompile complete" pkgs = tr.done secs = round(Int, time() - tr.t0)
+    return nothing
+end
+const _PREP_SKIP = ("KaimonGate", "Revise", "ExpressionExplorer")   # infra deps — never notebook-relevant
+# "Available without compiling": a sysimage-baked stdlib (Libdl/LinearAlgebra/…) has NO separate cache, so
+# `Base.isprecompiled` reports false for it — treat in-sysimage packages as ready, else a warm env always
+# looks cold. `in_sysimage` is 1.9+; the guard degrades gracefully if it's ever absent.
+_pkg_ready(pid::Base.PkgId) =
+    (try; Base.in_sysimage(pid); catch; false; end) || (try; Base.isprecompiled(pid); catch; true; end)
+
 # Resilient headless hot-reload. Revise's own file watchers populate `revision_queue`
 # headlessly; we poll it, APPLY the revisions, and PUB either the changed def-names
 # (`slate_revise`) or a parse/load error (`slate_revise_err`). Every iteration is wrapped so a
@@ -2576,6 +2648,15 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     catch e
         _WARM_STATUS[] = "warm failed"
         @warn "slate worker: warm-deps pass died" exception = e
+    end
+    # Cold-env narration (attached workers; pool workers already warm via `warm_deps` above). If this
+    # notebook's project isn't precompiled — the classic slow Makie open — precompile it in the background
+    # NOW and stream structured progress, so a cold open reads as "Preparing packages · precompiling k/N"
+    # instead of a frozen "Running 0/N". Non-blocking; a warm env is a near-instant no-op.
+    warm_deps || Threads.@spawn try
+        _prepare_env!()
+    catch e
+        @warn "slate worker: prepare pass died" exception = e
     end
     # Sample every worker — local kernels too. The `.stats` sidecar is still remote-only (empty
     # stats_path skips it), but the `slate_telemetry` PUB now flows from every worker process, so the

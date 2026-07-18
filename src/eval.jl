@@ -11,6 +11,7 @@ export Kernel, InProcessKernel, PendingKernel, run_capture, shutdown!
 export register_refresh!, unregister_refresh!, register_srcchange!, unregister_srcchange!, revise_apply!
 export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
 export register_userprog!, unregister_userprog!
+export register_prepare!, unregister_prepare!
 export register_emit!, unregister_emit!
 export register_celldone!, unregister_celldone!
 
@@ -68,6 +69,20 @@ function _do_userprog(report_id::AbstractString, frac, msg, id = "", done = fals
     cb === nothing && return nothing
     f = try; clamp(Float64(frac), 0.0, 1.0); catch; 0.0; end
     try; cb(f, String(msg), String(id), done === true); catch e; @debug "eval: user-progress callback failed" report_id exception = e; end
+    return nothing
+end
+
+# Environment prep progress: a booting worker precompiles a cold env in the background and PUBs a
+# structured status (JSON: phase/k/n/pkg/…) on `slate_prepare`; the poller routes it here by report id
+# and the server relays it to the browser's "Preparing packages" banner. Same out-of-band registry; the
+# callback takes the JSON string verbatim (the worker already encoded it — the hub just forwards).
+const _PREPARE_REGISTRY = Dict{String,Any}()
+register_prepare!(report_id::AbstractString, cb) = (_PREPARE_REGISTRY[String(report_id)] = cb; nothing)
+unregister_prepare!(report_id::AbstractString) = (delete!(_PREPARE_REGISTRY, String(report_id)); nothing)
+function _do_prepare(report_id::AbstractString, json::AbstractString)
+    cb = get(_PREPARE_REGISTRY, String(report_id), nothing)
+    cb === nothing && return nothing
+    try; cb(String(json)); catch e; @debug "eval: prepare callback failed" report_id exception = e; end
     return nothing
 end
 

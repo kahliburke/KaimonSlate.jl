@@ -143,11 +143,38 @@ body.toc-open .page { margin-left:312px; }
 .hydbanner .hydstep { margin-left:.5em; padding-left:.6em; border-left:1px solid var(--border); font-family:var(--mono,ui-monospace,monospace);
   font-size:.92em; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
 .hydbanner .hydstep:empty { display:none; }
-/* Only while a standalone bundle's frozen preview is shown in place of the real cells — see
-   the hydratingKind check in view.js. Once real (even if not-yet-computed) cells are live, the
-   notebook stays fully interactive through the rest of hydration. */
-body.hyd-preview #nb { opacity:.9; pointer-events:none; }
-body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.45; pointer-events:none; }
+/* Structured "Preparing packages" body: a message line, a precompile progress line (bar + k/N + current
+   package + elapsed), and a collapsible raw build log. The spinner sits at the top of the body column. */
+.hydbanner { align-items:flex-start; }
+.hydbanner .hydbody { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1 1 auto; }
+.hydbanner .hydbody .hydmsg { line-height:1.35; }
+.hydprep { display:flex; flex-direction:column; gap:3px; }
+.hydprep:empty { display:none; }
+.hydprepline { display:flex; align-items:center; gap:8px; min-width:0; font-variant-numeric:tabular-nums; }
+.hydprepline.done { color:var(--green); } .hydprepline.err { color:var(--red); }
+.hydprepmark { font-weight:700; flex:0 0 auto; }
+.hydpreplabel { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hydpreplabel b { color:var(--text); font-weight:600; }
+.hydpkg { color:var(--text); font-family:var(--mono,ui-monospace,monospace); font-size:.92em; }
+.hydprepnote { color:var(--dim); font-size:.88em; }
+.hydbar { position:relative; width:170px; height:6px; flex:0 0 auto; border-radius:3px; overflow:hidden;
+  background:color-mix(in srgb, var(--accent) 18%, transparent); }
+.hydbar > span { position:absolute; top:0; bottom:0; left:0; height:100%; border-radius:3px;
+  background:var(--accent); transition:width .25s ease; }
+.hydraw { font-size:.8rem; max-width:100%; }
+.hydraw > summary { color:var(--dim); cursor:pointer; user-select:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* The latest raw line, shown inline on the collapsed summary — live activity without expanding. */
+.hydrawlast { color:var(--dim); font-family:var(--mono,ui-monospace,monospace); font-size:.9em; opacity:.8; }
+.hydrawlast:empty { display:none; }
+.hydraw > pre { margin:4px 0 0; max-height:180px; overflow:auto; padding:6px 8px; border-radius:6px;
+  background:var(--bg3); color:var(--dim); font-family:var(--mono,ui-monospace,monospace); font-size:.92em;
+  white-space:pre-wrap; word-break:break-word; }
+/* While a saved preview render is shown during hydration (see the hydratingKind check in view.js): a
+   SUBTLE dim signals "not fully live yet", but the notebook stays INTERACTIVE — the preview cells carry
+   the real cell ids, so edits/adds target the real cells and are picked up when live cells land. (Was
+   `pointer-events:none`, which wrongly froze editing during any preview-backed open.) */
+body.hyd-preview #nb { opacity:.97; }
+body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.7; }
 /* Dependency-cone highlight (the 🔗 button on a cell): the focused cell + its
    transitive upstream precursors light up, so you can see/navigate what feeds a cell. */
 .cell.dep-focus { outline:2px solid var(--accent); outline-offset:-2px; }

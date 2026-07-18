@@ -1913,16 +1913,42 @@ function _ws_calls(stream, nb::LiveNotebook)
     return nothing
 end
 
-# Push one remote bring-up line to every HYDRATING notebook's browser (as a `bringup:` SSE the banner
-# renders as its live detail). Runs on the provisioner's thread, so it stays cheap and swallows errors —
-# losing a progress line is never worth disrupting a bring-up.
+# A REMOTE provision streams raw `Pkg.instantiate()`/`Pkg.precompile()` output through here. Runs the
+# SAME classifier the local worker uses, so the remote banner reads a structured "Precompiling k/N · Makie"
+# headline instead of dumping resolver churn (`[hash] + Pkg v…`). Provisions are serialized in practice
+# (one hydrating notebook at a time), so a single module-global tracker suffices; it resets on a terminal
+# phase or when a fresh instantiate's `Updating` follows a precompile run.
+const _REMOTE_PREP = Ref{Any}(nothing)   # (tracker, last-touch-time) | nothing
+function _remote_prep_tracker(::AbstractString)
+    prev = _REMOTE_PREP[]
+    # A fresh run when: nothing yet; the previous run finished/errored (every provision path ends with an
+    # `@@SLATE_PREP done` marker → phase "done"); or a long idle gap (an error-aborted provision leaves the
+    # tracker mid-precompile — a later provision must not resume its counts). The gap is generous so a single
+    # slow package (Makie can compile for minutes with no output) never false-resets mid-run.
+    fresh = prev === nothing || prev[1].phase in ("done", "error") || (time() - prev[2] > 300)
+    tr = fresh ? ReportEngine.PrepareTracker(time()) : prev[1]
+    _REMOTE_PREP[] = (tr, time())
+    return tr
+end
+
+# Push one remote bring-up line to every HYDRATING notebook's browser: the raw line as `bringup:` (the
+# banner's collapsible detail log) AND, when it advances the classifier, a structured `prepare:` headline.
+# Runs on the provisioner's thread, so it stays cheap and swallows errors — losing a line never disrupts a
+# bring-up.
 function _bringup_broadcast(h, line::AbstractString)
     s = strip(String(line)); isempty(s) && return nothing
-    msg = "bringup:" * first(s, 200)
+    prepmsg = try
+        tr = _remote_prep_tracker(s)
+        (ReportEngine.prepare_feed!(tr, s) && ReportEngine.prepare_active(tr)) ?
+            "prepare:" * ReportEngine.prepare_json(tr) : nothing
+    catch; nothing; end
+    # `@@SLATE_PREP …` control markers drive the structured banner ONLY — keep them out of the raw build log.
+    raw = startswith(s, "@@SLATE_PREP") ? nothing : "bringup:" * first(s, 200)
     nbs = try; lock(h.lock) do; collect(values(h.notebooks)); end; catch; return nothing; end
     for nb in nbs
         get(nb.report.meta, "hydrating", false) === true || continue
-        try; _broadcast(nb, msg); catch; end
+        raw === nothing || (try; _broadcast(nb, raw); catch; end)
+        prepmsg === nothing || (try; _broadcast(nb, prepmsg); catch; end)
     end
     return nothing
 end

@@ -663,14 +663,11 @@ function _publishState(state) {
   window.onNbState && window.onNbState(state);                // graph-shaped consumers (DAG panel)
   updateChrome(state);
 }
-// Live remote bring-up detail — the latest streamed instantiate/precompile line, shown under the
-// hydrating banner. updateChrome re-renders the banner from this; `onBringup` patches it live between
-// renders; it's cleared when hydration ends.
-let _bringupLine = '';
+// Raw worker-boot / remote-provision output → the hydrating banner's collapsible "build log" (prepare.js).
+// The structured headline (phase, precompile k/N, current package) rides the separate `prepare:` stream;
+// this keeps the raw Pkg lines available a click away without dumping resolver churn as the headline.
 window.onBringup = function (line) {
-  _bringupLine = String(line || '');
-  const step = document.getElementById('hydstep');   // banner already up → update in place, no full re-render
-  if (step) step.textContent = _bringupLine;
+  window._prepPushRaw && window._prepPushRaw(line);
 };
 // Topbar/banner bits that live outside #nb (title, worker dot, vscode link, hydrating banner).
 function updateChrome(state) {
@@ -708,15 +705,20 @@ function updateChrome(state) {
   // those keep a status banner, narrated live by the same `bringup:` stream in all three cases.
   if (state.hydrating && state.hydratingKind !== 'run') {
     hb.className = 'hydbanner'; hb.style.display = 'flex';
-    hb.innerHTML = '<span class="hydspin"></span><span class="hydmsg">' + (
-      state.hydratingKind === 'remote'
-        ? ('Starting the worker on <b>' + (state.hydratingHost || 'the remote host') + '</b> — provisioning &amp; connecting' +
-           ' (a first run installs Julia deps and can take a few minutes; you can keep editing meanwhile)…')
+    // Short headline per kind — shown only until structured status arrives, then prepare.js hides it so the
+    // banner stays compact (the #hydprep line becomes the headline). Specifics (precompile k/N, current
+    // package, elapsed) ride #hydprep; raw Pkg output tucks into the collapsed build log.
+    const msg = state.hydratingKind === 'remote'
+        ? ('Starting the worker on <b>' + _esc(state.hydratingHost || 'the remote host') + '</b>…')
       : state.hydratingKind === 'boot'
-        ? 'Starting the worker — a first run installs/precompiles Julia packages, which can take a while; you can keep editing meanwhile…'
-        : 'Reconstructing environment &amp; instantiating packages — showing a saved preview; cells go live when it’s ready…')
-      // live detail: the worker's streamed instantiate/precompile line (fed by `bringup:` events)
-      + '</span><span id="hydstep" class="hydstep">' + (_bringupLine ? _esc(_bringupLine) : '') + '</span>';
+        ? 'Starting the worker…'
+        : 'Reconstructing environment…';
+    hb.innerHTML = '<span class="hydspin"></span><div class="hydbody">'
+      + '<div id="hydmsg" class="hydmsg">' + msg + '</div>'
+      + '<div id="hydprep" class="hydprep"></div>'
+      + '<details id="hydraw" class="hydraw" style="display:none" ontoggle="window._prepRawToggle&&window._prepRawToggle()"><summary>build log <span id="hydrawlast" class="hydrawlast"></span></summary><pre id="hydrawpre"></pre></details>'
+      + '</div>';
+    window.renderPrepare && window.renderPrepare();   // fill #hydprep / build log from the current prepare state
     // Only the "env" case (a standalone bundle's frozen preview) substitutes real cells with a
     // static, non-live render — that's the one case where clicking in is genuinely meaningless
     // (your edit would target a snapshot, not the real notebook). "boot"/"remote" already show
@@ -726,9 +728,9 @@ function updateChrome(state) {
   } else if (state.hydrateError) {
     hb.className = 'hydbanner err'; hb.style.display = 'flex';
     hb.textContent = '⚠ ' + state.hydrateError;   // worker bring-up / env reconstruction failed (message is self-contained)
-    document.body.classList.remove('hyd-preview'); _bringupLine = '';
+    document.body.classList.remove('hyd-preview'); window.clearPrepare && window.clearPrepare();
   } else {
-    hb.style.display = 'none'; document.body.classList.remove('hyd-preview'); _bringupLine = '';
+    hb.style.display = 'none'; document.body.classList.remove('hyd-preview'); window.clearPrepare && window.clearPrepare();
   }
   updateStaleBadge(state);
   // Agent chat needs Kaimon's agent service — a standalone hub (slate --own / serve_notebook)

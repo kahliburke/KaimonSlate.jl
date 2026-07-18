@@ -334,6 +334,12 @@ end
 const _BRINGUP_SINK = Ref{Any}(nothing)
 _bringup_note(line::AbstractString) = (f = _BRINGUP_SINK[]; f === nothing || (try; f(String(line)); catch; end); nothing)
 
+# Emit a coarse bring-up STAGE label to the browser banner (through the same sink) — the structured
+# headline for a boot step: payload sync, worker-runtime build, env build, worker spawn, connect. The
+# streamed Pkg output drives the precompile k/N bar UNDER this headline. No-op when the sink is unset,
+# and `_bringup_broadcast` only reaches HYDRATING notebooks, so a background/region provision is silent.
+_prep_stage(label::AbstractString) = _bringup_note("@@SLATE_PREP stage=" * String(label))
+
 # Stream a one-line status to the MCP CALLER of the in-flight gate tool (agent-visible progress via
 # KaimonGate.progress, keyed to the current request) — so a slow tool like `check_remote` (a cold
 # provision is minutes) isn't a silent "evaluating…". No-op if the gate/progress isn't available.
@@ -502,6 +508,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
             (endswith(f, ".jl") && isfile(joinpath(srcdir, f))) && cp(joinpath(srcdir, f), joinpath(tmp, f))
         end
         _rlog("provision [1/3] rsync worker payload → $host:$_REMOTE_WORKER")
+        _prep_stage("Syncing worker files → $host")
         _rsync!(host, tmp, _REMOTE_WORKER) || error("provision: rsync worker payload → $host failed")
     finally
         rm(tmp; recursive = true, force = true)
@@ -509,6 +516,7 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     # 2. KaimonGate worker env (from the registry) — instantiate once
     if !_ssh_test(host, `test -f $_REMOTE_KGATE_ENV/.ready`)
         _rlog("provision [2/3] building KaimonGate env on $host (first run — adds KaimonGate+Revise; can take minutes)")
+        _prep_stage("Building worker runtime on $host")
         code = """
         import Pkg
         Pkg.activate(joinpath(homedir(), raw"$_REMOTE_KGATE_ENV"))
@@ -547,16 +555,21 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
             # (fresh resolve), so only the `[sources]` rewrite bites; `_rsync_dev_deps!` reads the LOCAL
             # Manifest to discover which deps are dev'd. Same dev-dep handling as `_replicate_env!`.
             rewrites = _rsync_dev_deps!(t, parent_project)
+            # Streamed so the (fresh-resolve) instantiate narrates into the bring-up banner. No Manifest is
+            # shipped here → no reliable pre-count, so the precompile bar is indeterminate ("k done"), but it
+            # still shows live progress + the current package instead of going dark.
             build = _rewrite_devpaths_script(rel, rewrites) *
-                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()\n"
-            first(_ssh_julia!(host, build,
-                              "instantiate parent project on $host")) || error("provision: parent env build → $host failed")
+                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()\n" *
+                _PREP_DONE_SNIPPET * "\n"
+            first(_ssh_julia!(host, build, "instantiate parent project on $host";
+                              stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
             first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); Pkg.instantiate()",
                               "bare worker env on $host")) || error("provision: could not build the worker env on $host")
         end
     end
+    _prep_stage("Building package environment on $host")
     try
         build_env!()
     catch e
@@ -946,6 +959,26 @@ function _local_has_revise()
     return false
 end
 
+# Emit the classifier's `@@SLATE_PREP total=<n>` marker so a REMOTE bring-up shows a real k/N precompile
+# bar (not just "k done") — the same structured "Preparing packages" experience as a local open. Same
+# readiness test as the local worker (`_pkg_ready`): an in-sysimage stdlib has no cache file, so
+# `isprecompiled` reports false — count it as ready or a warm env looks entirely cold. Runs with the
+# project already active + resolved (Manifest present); best-effort — a miss only costs the denominator.
+const _PREP_TOTAL_SNIPPET = raw"""
+try
+    local _need = 0
+    for (uuid, info) in Pkg.dependencies()
+        info.name in ("KaimonGate", "Revise", "ExpressionExplorer") && continue
+        pid = Base.PkgId(uuid, info.name)
+        ready = (try; Base.in_sysimage(pid); catch; false; end) || (try; Base.isprecompiled(pid); catch; true; end)
+        ready || (_need += 1)
+    end
+    println(stderr, "@@SLATE_PREP total=", _need); flush(stderr)
+catch
+end
+"""
+const _PREP_DONE_SNIPPET = "try; println(stderr, \"@@SLATE_PREP done\"); flush(stderr); catch; end"
+
 # The remote script: rewrite each dev dep's Manifest `path` to its rsync'd remote source, then instantiate
 # the project. Uses the TOML stdlib on the remote (always available); homedir() resolves the absolute paths.
 function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple{String,String}}, add_revise::Bool)
@@ -968,7 +1001,11 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     # invalidate the notebook's (very expensive, e.g. Makie) precompile cache — that doubles the build.
     # Fall back to a normal add only if the infra genuinely can't be satisfied against those pins.
     println(io, "try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end")
+    # The Manifest is resolved (shipped), so count what still needs precompiling BEFORE instantiate's
+    # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
+    print(io, _PREP_TOTAL_SNIPPET)
     println(io, "Pkg.instantiate()")
+    println(io, _PREP_DONE_SNIPPET)
     return String(take!(io))
 end
 
@@ -1265,6 +1302,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
             connect_host, connect_port, connect_stream = "127.0.0.1", lport, lstream
         end
         _rlog("connect: dialing $connect_host:$connect_port (stream $connect_stream, transport=$(t.transport), deadline=$(round(Int, deadline))s)")
+        _prep_stage("Connecting to worker on $host — remote Julia boot + handshake…")
         # A FORWARDED transport (:tunnel) sets up its `ssh -L` ASYNC (open_tunnel spawns it), so the local
         # port isn't listening the instant we dial — a bare connect_tcp! then burns its full ~1.5s
         # _tcp_port_open timeout on the not-yet-ready forward before the first retry. Tight-poll the local
@@ -1351,6 +1389,7 @@ function spawn_and_connect_remote!(k, t::RemoteTarget, parent_project::AbstractS
                           _next_ports(floor = try; _port_floor(host); catch; 0; end,
                                       reserve = t.transport === :direct ? 3 : 2)   # :tunnel blob = worker-chosen free port
         k.port = port; k.stream_port = stream_port
+        _prep_stage("Starting worker process on $host")
         _launch_worker!(t, port, stream_port; label = k.label, parent = k.parent, threads = k.threads, extra_flags = k.extra_flags, region = t.region)
         r = dial(port, stream_port; deadline = _dial_deadline_cold())   # covers remote Julia boot + KaimonGate load (~90s)
         r.conn === nothing && error("slate remote: could not reach worker on $host:$port ($(r.err))")
