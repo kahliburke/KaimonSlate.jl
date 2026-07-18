@@ -223,7 +223,10 @@ document.getElementById('cmdbg').addEventListener('mousedown', e => { if (e.targ
 // A bottom-right dock: semantic search of the notebook's package docs PLUS a REPL-style help
 // viewer (markdown docstrings, clickable `refs`, module-exports drill-down). Searches and
 // opened pages form a back/forward history; the panel minimizes to a launcher and restores.
-const _IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_!]*)*$/;
+// `!` is legal at the end of a bare Julia identifier (`cut!`, `assign!`), not just in a dotted segment —
+// without it, a `!`-suffixed name skipped the live `?name` lookup and only hit the semantic index (which
+// misses newly-defined / not-yet-indexed symbols), so you'd have to qualify it (`NeuroDSL.cut!`) to resolve.
+const _IDENT_RE = /^[A-Za-z_][A-Za-z0-9_!]*(\.[A-Za-z_][A-Za-z0-9_!]*)*$/;
 const _NOLINK = new Set(['true','false','nothing','missing','end','function','for','while','if','x','i','n','a','b']);
 const _DOC_HINT = '<li class="dochint">Describe an API in plain words — e.g. “draw a heatmap” — or type an exact name / module (e.g. <code>LinearAlgebra</code>) to browse it.</li>';
 
@@ -433,16 +436,32 @@ function _linkifyDoc(root, r) {
   // the module so the lookup resolves (the worker imports the head segment as a module).
   const isMod = r && (r.kind === 'module' || (r.exports && r.exports.length));
   const ctxMod = isMod ? (r.module && r.module !== r.name ? r.module + '.' + r.name : r.name) : '';
+  const params = _sigParams(root);   // this doc's OWN parameter names — back-ticked in prose but not symbols
   root.querySelectorAll('.docmd code').forEach(c => {
     if (c.closest('pre')) { _linkifyCode(c); return; }       // signature / fenced block → bare type tokens
     const t = c.textContent.trim();
-    if (t.length > 1 && _IDENT_RE.test(t) && !_NOLINK.has(t)) {
+    if (t.length > 1 && _IDENT_RE.test(t) && !_NOLINK.has(t) && !params.has(t)) {
       const a = document.createElement('a'); a.className = 'doclink';
       a.dataset.name = (ctxMod && t.indexOf('.') < 0) ? ctxMod + '.' + t : t;   // qualify a sibling under the module
       a.textContent = c.textContent;
       c.replaceWith(a);
     }
   });
+}
+// A function docstring's leading signature block lists its own parameters (`inbound`, `head`, `target`,
+// …). Those get back-ticked throughout the prose but aren't referenceable symbols, so linking them makes
+// dead "not found" refs (and clutters the Referenced rail). Collect them from the first signature block so
+// _linkifyDoc can skip them — real referenced symbols (types, other functions) still link.
+function _sigParams(root) {
+  const params = new Set();
+  const pre = root.querySelector('.docmd pre code');
+  if (!pre) return params;
+  const m = pre.textContent.match(/\(([\s\S]*)\)/);          // the arg list (positional; kwargs after ;)
+  if (m) for (const seg of m[1].split(/[,;]/)) {
+    const nm = seg.trim().match(/^[A-Za-z_][A-Za-z0-9_!]*/);
+    if (nm) params.add(nm[0]);
+  }
+  return params;
 }
 // CommonMark code blocks are plain text → safe to re-emit as escaped HTML with CamelCase
 // type tokens wrapped as links (e.g. `-> Vector{Float64}` → Vector and Float64 clickable).

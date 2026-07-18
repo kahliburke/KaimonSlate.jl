@@ -15,6 +15,19 @@ function collapseOutputs(root) {
     }
   });
 }
+// Documenter @ref cross-refs in rendered docstrings (e.g. a cell's `@doc name` output) are emitted as
+// <span class="docref" data-name="sym"> (see capture.jl _fix_at_refs) — inert markup with no href. In
+// the LIVE notebook a click opens the docs dock for that symbol; a static export has no handler, so the
+// span is just plain text. One delegated listener on #nb covers all cells across re-renders.
+(function wireDocRefs() {
+  const nb = document.getElementById('nb');
+  if (!nb) return;
+  nb.addEventListener('click', e => {
+    const d = e.target.closest('.docref');
+    if (d && d.dataset.name && typeof openDocsFor === 'function') { e.preventDefault(); openDocsFor(d.dataset.name); }
+  });
+})();
+
 function updateStaleBadge(state) {
   const n = ((state && state.cells) || []).filter(c => c.kind === 'code' && (c.state === 'stale' || c.state === 'edited')).length;
   const b = document.getElementById('runstale');

@@ -128,12 +128,41 @@ end
 function _capture_rich!(chunks::Vector{Tuple{String,Vector{UInt8}}}, x)
     for m in _RICH_MIMES
         if Base.invokelatest(showable, m, x)
-            push!(chunks, (m, Base.invokelatest(_mime_bytes, MIME(m), x)))
+            bytes = Base.invokelatest(_mime_bytes, MIME(m), x)
+            m == "text/html" && (bytes = _fix_at_refs(bytes))
+            push!(chunks, (m, bytes))
             startswith(m, "image/") && _capture_export_vector!(chunks, x)
             return true
         end
     end
     return false
+end
+
+# Documenter `[foo](@ref)` cross-references render (via Markdown/CommonMark, e.g. a cell's `@doc name`
+# output) as `<a href="@ref">…</a>`, whose relative href resolves to `/n/@ref` → 404. Rewrite each to an
+# inert `<span class="docref" data-name="…">`: the LIVE notebook wires a click on it to open the docs
+# dock for that symbol (see outputs.js), while a static EXPORT — no such handler, no `#nb` styling —
+# degrades it to plain text. Either way, no broken link. Guarded on the literal `@ref`, so it's a no-op
+# on any other HTML and only ever touches rendered docstrings.
+const _ATREF_RE = r"<a href=\"@ref([^\"]*)\">(.*?)</a>"s
+_attr_esc(s) = replace(String(s), '&' => "&amp;", '"' => "&quot;", '<' => "&lt;", '>' => "&gt;")
+# Decode the HTML entities Markdown emits inside a symbol name (`assign&#33;` → `assign!`, `f&#40;x&#41;`
+# → `f(x)`) so `data-name` is the real identifier `openDocsFor()` looks up, not its escaped form.
+function _html_unescape(s::AbstractString)
+    s = replace(s, r"&#(\d+);" => m -> string(Char(parse(Int, SubString(m, 3, lastindex(m) - 1)))))
+    return replace(s, "&amp;" => "&", "&lt;" => "<", "&gt;" => ">", "&quot;" => "\"")
+end
+function _atref_span(matched::AbstractString)
+    m = match(_ATREF_RE, matched)
+    tgt = strip(replace(String(m.captures[1]), "%20" => " "))          # explicit `@ref target`, if any
+    inner = m.captures[2]                                              # the link's rendered content
+    sym = isempty(tgt) ? strip(replace(inner, r"<[^>]*>" => "")) : tgt  # else the symbol it displays
+    return string("<span class=\"docref\" data-name=\"", _attr_esc(_html_unescape(sym)), "\">", inner, "</span>")
+end
+function _fix_at_refs(bytes::Vector{UInt8})
+    s = String(copy(bytes))
+    occursin("\"@ref", s) || return bytes
+    return Vector{UInt8}(replace(s, _ATREF_RE => _atref_span))
 end
 
 # When we just captured a raster figure (image/*), also try to render it to PDF — a
