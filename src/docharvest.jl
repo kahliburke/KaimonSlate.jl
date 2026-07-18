@@ -68,7 +68,7 @@ its exported bindings as `{name, kind}` (sorted) for drill-down; empty otherwise
 loads into the dependency-light worker, exactly like `harvest_module_docs`.
 
 A bare identifier that doesn't resolve is retried case-insensitively (exact case still
-wins), so `regionplan` finds `RegionPlan` — see [`_ci_resolve_name`](@ref).
+wins), so `regionplan` finds `RegionPlan` — see `_ci_resolve_name`.
 """
 function module_help(where::Module, name::AbstractString)
     nm = String(name)
