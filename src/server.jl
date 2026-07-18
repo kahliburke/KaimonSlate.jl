@@ -979,15 +979,51 @@ function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
     key = (nb.id, _worker_key(k))
     lock(_REGION_LOCK) do; get(_REGION_PRIMED, key, UInt(0)); end == sig && return nothing
     for c in env
+        prime_src = _everywhere_replay_source(c)   # the marked statements when safe, else the whole cell
         try
-            ReportEngine.eval_capture(k, nb.report, c.source, "cell:" * c.id * "#prime", nothing)
+            ReportEngine.eval_capture(k, nb.report, prime_src, "cell:" * c.id * "#prime", nothing)
         catch e
-            ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
-                               first(sprint(showerror, e), 160))
+            # Per-statement replay can throw if a marked statement referenced a cell-local name defined by
+            # an UNMARKED earlier statement — fall back to the whole cell source (always sufficient).
+            if prime_src != c.source
+                try
+                    ReportEngine.eval_capture(k, nb.report, c.source, "cell:" * c.id * "#prime", nothing)
+                catch e2
+                    ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
+                                       first(sprint(showerror, e2), 160))
+                end
+            else
+                ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
+                                   first(sprint(showerror, e), 160))
+            end
         end
     end
     lock(_REGION_LOCK) do; _REGION_PRIMED[key] = sig; end
     return nothing
+end
+
+# What to REPLAY to re-establish an EVERYWHERE cell's effect on a region worker. Per-statement replay —
+# just the statements that DECLARED an `:everywhere` effect (from this session's harvest, or the durable
+# store across a reload) — is used ONLY when the cell's EVERYWHERE-ness comes purely from those runtime
+# declarations. A cell that is EVERYWHERE because it's an import scaffold / pure `using` / theme setter
+# needs its WHOLE source (the import itself must run), so it replays whole-cell — as does a declared cell
+# with no recorded statements. This avoids re-running expensive NON-effect statements of a mixed cell on
+# every region worker, while staying correct (the caller falls back to whole-cell if an isolated statement
+# throws for a missing intra-cell dependency).
+function _everywhere_replay_source(c::Cell)
+    (:everywhere in c.flags) || return c.source
+    (:import_scaffold in c.flags || ReportEngine._is_pure_using(c.source) ||
+        ReportEngine._THEME_SENTINEL in c.writes) && return c.source
+    recs = (c.output !== nothing && !isempty(c.output.effects)) ? c.output.effects :
+           try; EffectStore.load(SlateHome.effects_dir(), string(c.src_hash)); catch; nothing; end
+    (recs === nothing || isempty(recs)) && return c.source
+    stmts = String[]; seen = Set{String}()
+    for r in recs
+        s = strip(String(something(_effect_field(r, :stmt_src), "")))
+        (isempty(s) || s in seen) && continue
+        push!(seen, s); push!(stmts, s)
+    end
+    isempty(stmts) ? c.source : join(stmts, "\n")
 end
 
 # Detach (default) or kill every region kernel + forget the boundary sync state.
