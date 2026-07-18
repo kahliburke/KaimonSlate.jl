@@ -33,6 +33,22 @@ const VIDTMP = mkdtempSync(join(tmpdir(), 'slate-vid-'))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const log = (...a) => console.log('[assets]', ...a)
 
+// Fetch with retry. `POST /api/open` runs a notebook synchronously (holding the hub lock), so
+// the server can be mid-compile when the next request lands; undici also reuses the keep-alive
+// socket from an earlier request, which the server may reset — surfacing as ECONNRESET. Force a
+// fresh connection (Connection: close) and back off a few times before giving up.
+async function fetchRetry(url, opts = {}, tries = 5) {
+  const headers = { ...(opts.headers || {}), Connection: 'close' }
+  for (let i = 0; i < tries; i++) {
+    try { return await fetch(url, { ...opts, headers }) }
+    catch (e) {
+      if (i === tries - 1) throw e
+      log(`fetch ${url} failed (${e.cause?.code || e.message.split('\n')[0]}), retry ${i + 1}/${tries - 1}`)
+      await sleep(1000 * (i + 1))
+    }
+  }
+}
+
 // Static per-cell screenshots: { notebookId: { cellId: filename } }.
 const CELL_SHOTS = {
   demo: { highlight: 'editor-highlighting.png', chart: 'chart.png', table: 'table.png',
@@ -59,16 +75,19 @@ function startServer() {
 async function waitForServer(timeoutMs = 180_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    try { if ((await fetch(`${BASE}/n/${FIRST}`)).ok) { log('server up'); return } } catch (_) {}
+    try { if ((await fetch(`${BASE}/n/${FIRST}`, { headers: { Connection: 'close' } })).ok) { log('server up'); return } } catch (_) {}
     await sleep(1000)
   }
   throw new Error('server did not come up')
 }
 async function openExtra() {
   for (const id of EXTRA) {
-    await fetch(`${BASE}/api/open`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: join(SHOTDIR, id + '.jl') }) })
-    log(`opened ${id}`)
+    // Tolerate a single bad open: skip that notebook's shots rather than aborting the whole run.
+    try {
+      await fetchRetry(`${BASE}/api/open`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: join(SHOTDIR, id + '.jl') }) })
+      log(`opened ${id}`)
+    } catch (e) { log(`! open ${id} failed: ${e.cause?.code || e.message.split('\n')[0]}`) }
   }
 }
 
@@ -165,6 +184,266 @@ async function mockPublish(page) {
   await page.route('**/api/sites', (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ sites: ['portfolio'] }) }))
 }
 
+// ── regions / remotes (synthetic — no real hosts spawn) ───────────────────────────────────────
+// A coherent fake fleet in the REAL JSON shapes, so every region/DAG/mesh surface renders clean
+// demo content without provisioning a single remote worker. Two hosts, two regions: `gpu` (a warm
+// pool over an ssh tunnel) and `db` (a direct·CURVE box). Stats that ride worker/roster objects are
+// JSON *strings* (as the wire delivers them); cell stats are plain objects. `mb` = 2^20.
+const MB = 1048576
+const mkStats = (o) => JSON.stringify(o)
+// Front-page registry (/api/regions) + Remotes-modal / activity-monitor / focus-view.
+const REG_REGISTRY = {
+  regions: [
+    { name: 'gpu', host: 'gpu-box', transport: 'tunnel', base_port: 0, preload: '~/proj/vision', data_root: '/data/gpu',
+      warm: 2, threads: '8,1', sysimage: true, status: { ok: true, msg: 'warm 2/2 ready', age: 7 } },
+    { name: 'db', host: 'db-box', transport: 'direct', base_port: 9200, preload: '', data_root: '/srv/warehouse',
+      warm: 1, threads: '4,1', sysimage: false, status: { ok: true, msg: 'warm 1/1 ready', age: 12 } },
+  ],
+  parked: [{ host: 'gpu-box', label: 'vision', port: 9312, idle_s: 43 }],
+}
+// Per-host live rosters (/api/remote-workers?host=). state ∈ attached|idle; stats/manifest are JSON strings.
+const REG_ROSTERS = {
+  'gpu-box': [
+    { port: 9300, alive: true, state: 'attached', manifest: mkStats({ region: 'gpu', notebook: 'pipeline.jl', transport: 'tunnel', project: 'vision', spawned: 'attached · 6m', stream_port: 9301 }),
+      stats: mkStats({ cpu: 78, rss: 940 * MB, memo_bytes: 512 * MB, running: ['train'], warm: 'ready · CUDA', sys_cpu: 61, load1: 3.2, sys_mem_total: 64000 * MB, sys_mem_free: 21000 * MB }) },
+    { port: 9312, alive: true, state: 'idle', manifest: mkStats({ region: 'gpu', notebook: '', transport: 'tunnel', project: 'vision', spawned: 'warm · 43s idle', stream_port: 9313 }),
+      stats: mkStats({ cpu: 2, rss: 260 * MB, memo_bytes: 0, running: [], warm: 'ready · CUDA', sys_cpu: 61, load1: 3.2 }) },
+  ],
+  'db-box': [
+    { port: 9200, alive: true, state: 'attached', manifest: mkStats({ region: 'db', notebook: 'pipeline.jl', transport: 'direct', project: 'warehouse', spawned: 'attached · 6m', stream_port: 9201 }),
+      stats: mkStats({ cpu: 33, rss: 1800 * MB, memo_bytes: 3400 * MB, running: [], warm: 'ready', sys_cpu: 22, load1: 1.1, sys_mem_total: 128000 * MB, sys_mem_free: 96000 * MB }) },
+  ],
+}
+// Telemetry ring for the worker-detail sparklines (/api/worker-stats). A gentle synthetic wobble.
+function regStatsHistory(port) {
+  const base = port === 9300 ? 76 : port === 9200 ? 31 : 3
+  const rssB = port === 9300 ? 940 : port === 9200 ? 1800 : 260
+  const now = Math.floor(Date.now() / 1000)
+  return Array.from({ length: 40 }, (_, i) => ({ t: now - (40 - i) * 3,
+    cpu: Math.max(0, Math.round(base + 14 * Math.sin(i / 3) + (i % 5))),
+    rss: Math.round((rssB + 30 * Math.sin(i / 4)) * MB) }))
+}
+// /api/{id}/peer-plan — resolved routes + host grants + live/recent boundary transfers.
+const REG_PEERPLAN = {
+  regions: ['gpu', 'db'], refreshed: true,
+  // Region↔region peer routes resolve to a direct/ssh path; local↔region edges have no peer route
+  // (the main kernel relays through the hub), so they read as `unresolved` on the map until a transfer
+  // probes them — authentic behaviour, not faked away.
+  routes: [
+    { src: 'db', dst: 'gpu', kind: 'direct', addr: 'gpu-box:9302', age_s: 4 },
+    { src: 'gpu', dst: 'db', kind: 'ssh', addr: 'db-box:9200', age_s: 4 },
+    { src: 'local', dst: 'db', kind: 'relay', addr: 'hub', age_s: 9 },
+  ],
+  hosts: [
+    { host: 'gpu-box', reachable: true, grants: [{ puller: 'db', source: 'gpu', port: 9302, placeholder: false }], pins: [{ source: 'gpu', addrs: ['gpu-box:9302'] }] },
+    { host: 'db-box', reachable: true, grants: [{ puller: 'gpu', source: 'db', port: 9200, placeholder: false }], pins: [{ source: 'db', addrs: ['db-box:9200'] }] },
+  ],
+  transfers: [{ src: 'db', dst: 'gpu', name: 'feat', via: 'direct', done: 147 * MB, total: 210 * MB, active: true, err: '', mbps: 92.4 }],
+}
+// /api/{id}/transfer-stats — retained per-transfer (t, cumulative-bytes) traces for the dashboard.
+function regTransferStats() {
+  const now = Math.floor(Date.now() / 1000)
+  const trace = (src, dst, name, via, dur, total, ago) => {
+    const started = now - ago, n = 8
+    const ts = Array.from({ length: n }, (_, i) => started + (dur * i) / (n - 1))
+    const bs = Array.from({ length: n }, (_, i) => Math.round((total * i) / (n - 1)))
+    return { src, dst, name, via, started, finished: started + dur, total, err: '', ts, bs }
+  }
+  return { now, traces: [
+    trace('db', 'gpu', 'feat', 'direct', 3.1, 210 * MB, 30),
+    trace('local', 'db', 'df', 'ssh', 1.4, 38 * MB, 55),
+    trace('gpu', 'local', 'model', 'direct', 2.2, 96 * MB, 12),
+    trace('db', 'gpu', 'weights', 'direct', 0.9, 44 * MB, 5),
+  ] }
+}
+// Worker-log tail for the topbar pill popup (/api/{id}/worker-log?side=).
+const REG_WORKER_LOG = [
+  '[gate] worker gpu-box:9300 attached (adopted warm · 0.9s)',
+  '[boot] sync_memo: 12 blobs deduped, 3 carried (512 MB)',
+  '[eval] train ▶ running — CUDA device 0, batch 256',
+  '[xfer] ⇄ feat: 210/210 MB ← db (direct, 92 MB/s)',
+  '[telemetry] cpu 78% · rss 940 MB · 1 running',
+].join('\n')
+// Preflight SSE (/api/preflight-stream) — a canned "Test & prime" checklist. All events at once is
+// fine: the client fills the list as it parses them.
+function regPreflightSSE(host) {
+  const step = (name, status, detail, ms) => `event: step\ndata: ${JSON.stringify({ name, status, detail, ms })}\n\n`
+  return [
+    step('SSH reachable', 'ok', `${host} · key auth`, 210),
+    step('Julia present', 'ok', 'v1.12.0', 180),
+    step('Environment', 'ok', 'provisioned · gate loaded', 4200),
+    step('CURVE key', 'ok', 'server key pinned', 40),
+    step('Spawn + connect', 'ok', 'worker :9300 · round-trip 1+1', 2600),
+    step('Teardown', 'ok', 'clean', 120),
+    `event: done\ndata: ${JSON.stringify({ ok: true, host, transport: 'tunnel' })}\n\n`,
+  ].join('')
+}
+// Install every region/remote route interceptor on a page BEFORE navigating.
+async function mockRegions(page) {
+  const J = (o) => ({ contentType: 'application/json', body: JSON.stringify(o) })
+  await page.route('**/api/regions', (r) => r.request().method() === 'GET' ? r.fulfill(J(REG_REGISTRY)) : r.continue())
+  await page.route('**/api/remote-workers*', (r) => {
+    const host = new URL(r.request().url()).searchParams.get('host') || ''
+    r.fulfill(J({ host, workers: REG_ROSTERS[host] || [] }))
+  })
+  await page.route('**/api/worker-stats*', (r) => {
+    const port = Number(new URL(r.request().url()).searchParams.get('port'))
+    r.fulfill(J({ ok: true, port, samples: regStatsHistory(port) }))
+  })
+  await page.route('**/api/ssh-hosts', (r) => r.fulfill(J({ hosts: ['gpu-box', 'db-box', 'workstation'], global: '' })))
+  await page.route('**/api/sysimage*', (r) => {
+    const region = new URL(r.request().url()).searchParams.get('region') || ''
+    r.fulfill(J({ ok: true, building: false, current: region === 'gpu', stale: false, bytes: 1780 * MB,
+      built: 'built · 2h ago', compiler: true, host: region === 'gpu' ? 'gpu-box' : 'db-box', reachable: true }))
+  })
+  await page.route('**/peer-plan*', (r) => r.fulfill(J(REG_PEERPLAN)))
+  await page.route('**/transfer-stats*', (r) => r.fulfill(J(regTransferStats())))
+  await page.route('**/worker-log*', (r) => r.fulfill(J({ side: new URL(r.request().url()).searchParams.get('side') || '',
+    host: 'gpu-box', port: 9300, connected: true, status: 'ok', note: '',
+    stats: mkStats({ cpu: 78, rss: 940 * MB, evals: 1, memo: 512 * MB, running: ['train'] }), log: REG_WORKER_LOG })))
+  await page.route('**/api/preflight-stream*', (r) => {
+    const host = new URL(r.request().url()).searchParams.get('host') || 'gpu-box'
+    r.fulfill({ contentType: 'text/event-stream', body: regPreflightSSE(host) })
+  })
+}
+// Fake notebook state for the DAG region overlay: a 5-cell model pipeline split local→db→gpu, with
+// declared regions + live workers. `renderAll(this)` publishes it; the real renderers draw the zones,
+// region-map coloring, pills, and provenance from it.
+const REG_NBSTATE = {
+  title: 'pipeline', path: '/pipeline.jl', version: 3, hydrating: false,
+  worker: { kind: 'gate', connected: true, port: 9100 }, runLocation: 'local',
+  regions: [
+    { name: 'gpu', host: 'gpu-box', transport: 'tunnel', warm: 2, base_port: 0, data_root: '/data/gpu', preload: '~/proj/vision', sysimage: true, defined: true, status: { ok: true, msg: 'ready' } },
+    { name: 'db', host: 'db-box', transport: 'direct', warm: 1, base_port: 9200, data_root: '/srv/warehouse', preload: '', sysimage: false, defined: true, status: { ok: true, msg: 'ready' } },
+  ],
+  workers: [
+    { side: '', host: '', port: 9100, status: 'ok', connected: true, transport: 'local', note: '', stats: mkStats({ cpu: 12, rss: 280 * MB, evals: 0 }) },
+    { side: 'gpu', host: 'gpu-box', port: 9300, stream_port: 9301, status: 'ok', connected: true, transport: 'tunnel', note: '', stats: mkStats({ cpu: 78, rss: 940 * MB, evals: 1, running: ['train'], warm: 'ready · CUDA', memo: 512 * MB }) },
+    { side: 'db', host: 'db-box', port: 9200, stream_port: 9201, status: 'ok', connected: true, transport: 'direct', note: '', stats: mkStats({ cpu: 33, rss: 1800 * MB, evals: 0, warm: 'ready', memo: 3400 * MB }) },
+  ],
+  cells: [
+    { id: 'intro', kind: 'markdown', state: 'fresh', source: '# Model pipeline\nLocal ingest, features on the warehouse, training on the GPU box.', deps: [], needs: [], defs: [], tags: [] },
+    { id: 'load', kind: 'code', state: 'fresh', source: 'df = load_frame("events.parquet")', deps: [], needs: [], defs: ['df'], tags: [], stats: { ranOn: 'local', total_ms: 340, last_ms: 340, evals: 1 } },
+    { id: 'features', kind: 'code', state: 'fresh', source: 'feat = build_features(df)', deps: ['load'], needs: [], defs: ['feat'], tags: ['region=db'], stats: { ranOn: 'db (db-box)', total_ms: 2100, last_ms: 2100, evals: 1 } },
+    { id: 'train', kind: 'code', state: 'running', source: 'model = train(feat; epochs=40)', deps: ['features'], needs: [], defs: ['model'], tags: ['region=gpu'], stats: { ranOn: 'gpu (gpu-box)', total_ms: 54000, last_ms: 54000, evals: 1 } },
+    { id: 'evaluate', kind: 'code', state: 'stale', source: 'score = evaluate(model, df)', deps: ['train', 'load'], needs: [], defs: ['score'], tags: ['region=gpu'], stats: { ranOn: 'gpu (gpu-box)' } },
+    { id: 'report', kind: 'code', state: 'fresh', source: 'summarize(score)', deps: ['evaluate'], needs: [], defs: [], tags: [], stats: { ranOn: 'local', total_ms: 90, last_ms: 90, evals: 1 } },
+  ],
+  multidefCells: {}, backrefCells: {},
+}
+
+// ── regions / DAG / mesh captures ─────────────────────────────────────────────────────────────
+// All synthetic: inject a region-split notebook state and mock the region/remote endpoints, then let
+// the REAL renderers draw. No worker ever spawns. Each capture is best-effort (skip-and-log), like
+// the rest of this file.
+async function regionShots(browser) {
+  // ── notebook-page surfaces (DAG overlay, peer plan, transfers, worker log, mesh consent) ──────
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await mockRegions(page)
+    await page.goto(`${BASE}/n/demo`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector('.cell', { timeout: 30_000 })
+    await page.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+    // Publish the fake region-split state through the real pipeline, open the DAG, turn on the region map.
+    await page.evaluate((st) => { window.renderAll(st) }, REG_NBSTATE)
+    await sleep(500)
+    await page.evaluate(() => { if (!document.getElementById('dagpane').classList.contains('open')) window.toggleDag() })
+    await page.waitForSelector('#dagcanvas', { timeout: 8000 }).catch(() => {})
+    await page.evaluate(() => { if (typeof window.dagRegions === 'function' && !window._dagRegionsOn) window.dagRegions() })
+    await sleep(1400)                                        // dagre + region partition settle
+    await elShot(page, '#dagpane', 'dag-region-map.png')
+
+    // peer-plan panel (⇄ peer plan) — resolved routes + host grants
+    try {
+      await page.evaluate(() => window._dagPeerPlan && window._dagPeerPlan(false))
+      await page.waitForSelector('#dagpeerpanel .dagpeerbody', { timeout: 6000 })
+      await sleep(700)
+      await elShot(page, '#dagpeerpanel', 'dag-peer-plan.png')
+      await page.evaluate(() => document.getElementById('dagpeerpanel')?.remove())
+    } catch (e) { log('! dag-peer-plan skipped:', e.message.split('\n')[0]) }
+
+    // live transfers dashboard (📊 transfers)
+    try {
+      await page.evaluate(() => window._dagXferDash && window._dagXferDash())
+      await page.waitForSelector('#dagxferdash', { timeout: 6000 })
+      await sleep(1200)                                      // let the three ECharts lay out
+      await elShot(page, '#dagxferdash', 'dag-transfers.png')
+      await page.evaluate(() => document.getElementById('dagxferdash')?.remove())
+    } catch (e) { log('! dag-transfers skipped:', e.message.split('\n')[0]) }
+
+    // worker/region pills (topbar) + worker-log popup (pill → streamed log + telemetry)
+    try {
+      await elShot(page, '#workerpills', 'worker-pills.png')
+      await page.evaluate(() => window.openWorkerPop && window.openWorkerPop('gpu'))
+      await page.waitForSelector('#workerpop-log', { timeout: 6000 })
+      await sleep(800)                                        // let the mocked log tail render
+      await elShot(page, '#workerpopbg', 'worker-log.png')
+      await page.evaluate(() => window.closeWorkerPop && window.closeWorkerPop())
+    } catch (e) { log('! worker-log skipped:', e.message.split('\n')[0]) }
+
+    // mesh consent popup — injected straight through its handler (app.js loads mesh.js). The host div
+    // stays 0-size until the dialog renders, so wait on the card itself.
+    try {
+      await page.evaluate(() => window.onMeshConsent && window.onMeshConsent({
+        connected: false, pending: true,
+        pairs: [{ source: 'gpu', puller: 'db', source_host: 'gpu-box', puller_host: 'db-box' },
+                { source: 'db', puller: 'gpu', source_host: 'db-box', puller_host: 'gpu-box' }],
+        unreachable: [],
+      }))
+      await page.waitForSelector('.meshcard', { timeout: 5000 })
+      await sleep(500)
+      await elShot(page, '.meshcard', 'mesh-consent.png')
+      await page.evaluate(() => window.onMeshConsent && window.onMeshConsent({ connected: true, pairs: [] }))
+    } catch (e) { log('! mesh-consent skipped:', e.message.split('\n')[0]) }
+    await page.context().close()
+  } catch (e) { log('! notebook region shots skipped:', e.message.split('\n')[0]) }
+
+  // ── home-page surfaces (Remotes modal, region focus, activity strip, preflight, worker detail) ─
+  try {
+    const page = await (await newContext(browser)).newPage()
+    await mockRegions(page)
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    await sleep(1800)                                        // let the activity monitor poll /api/regions
+    await elShot(page, '#actmon', 'remote-activity.png')
+
+    // worker-detail popup — click a worker row (opens the CPU/RSS history popup)
+    try {
+      await page.locator('#actmon .actrow').first().click({ timeout: 3000 })
+      await page.waitForSelector('.wdhead', { timeout: 5000 })
+      await sleep(700)                                        // let the sparklines lay out
+      await page.evaluate(() => { const e = document.querySelector('.wdhead'); if (e && e.parentElement) e.parentElement.id = '__wdpop' })
+      await elShot(page, '#__wdpop', 'worker-detail.png')
+      await page.keyboard.press('Escape')
+    } catch (e) { log('! worker-detail skipped:', e.message.split('\n')[0]) }
+
+    // Remotes modal — 🖧 Remotes
+    try {
+      await page.evaluate(() => { const b = document.getElementById('remotesbtn'); if (b) b.click() })
+      await page.waitForSelector('#remotesbg', { timeout: 6000 })
+      await sleep(900)
+      await elShot(page, '#remotesbg .rtmodal, #remotesbg > div', 'remotes-modal.png')
+
+      // preflight checklist — fill a host, then drive Test & prime (mocked SSE fills the step rows)
+      try {
+        await page.fill('#rthost', 'gpu-box')
+        await page.getByText('Test & prime', { exact: false }).first().click({ timeout: 3000 })
+        await page.waitForSelector('#remotesbg .rtstep', { timeout: 6000 })
+        await sleep(900)
+        await elShot(page, '#remotesbg .rtmodal, #remotesbg > div', 'preflight-checklist.png')
+      } catch (e) { log('! preflight-checklist skipped:', e.message.split('\n')[0]) }
+
+      // region focus view — open a host's regions
+      try {
+        await page.getByText('Regions', { exact: false }).first().click({ timeout: 3000 })
+        await page.waitForSelector('#remotesbg .rtfocus', { timeout: 6000 })
+        await sleep(900)
+        await elShot(page, '#remotesbg .rtfocus, #remotesbg > div', 'region-focus.png')
+      } catch (e) { log('! region-focus skipped:', e.message.split('\n')[0]) }
+    } catch (e) { log('! remotes-modal skipped:', e.message.split('\n')[0]) }
+    await page.context().close()
+  } catch (e) { log('! home region shots skipped:', e.message.split('\n')[0]) }
+}
+
 async function main() {
   const server = startServer()
   let browser
@@ -174,6 +453,9 @@ async function main() {
     await waitForServer()
     await openExtra()
     browser = await chromium.launch({ headless: true })
+
+    // SLATE_REGION_ONLY=1 captures just the region/DAG/mesh shots (fast iteration on those alone).
+    if (process.env.SLATE_REGION_ONLY === '1') { await regionShots(browser); log('done (region-only) — assets in', OUT); return }
 
     // ── per-notebook static cell screenshots ────────────────────────────────────────────────
     for (const [id, shots] of Object.entries(CELL_SHOTS)) {
@@ -381,6 +663,9 @@ async function main() {
       await elShot(p2, '#pubdashbg .pubdash', 'publishing-manager.png')
       await p2.context().close()
     } catch (e) { log('! publishing shots skipped:', e.message.split('\n')[0]) }
+
+    // ── regions / DAG / mesh (synthetic — no real hosts) ─────────────────────────────────────
+    await regionShots(browser)
 
     // ── webm: drag the slider → the chart re-renders live (reactivity) ───────────────────────
     // Frame the slider AND the chart together (slider is the cell right above the chart) so the
