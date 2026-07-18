@@ -1471,13 +1471,14 @@ end
 function __slate_module_help(name::String)
     head = String(first(split(name, '.')))
     # Prefer the live notebook namespace: a `using`'d or cell-defined symbol (e.g. `damped_wave`)
-    # resolves there WITH its docs. Only fall back to a throwaway module that imports the head
-    # package for `?Module` drill-down on a package the notebook hasn't brought into scope.
+    # resolves there WITH its docs. Try it ALWAYS — `module_help` resolves a bare name
+    # case-insensitively (a wrong-case `regionplan` finds `RegionPlan`), so gating on an exact
+    # `isdefined(nb, head)` would skip that path. Accept the record only if it actually found docs.
     nb = _NS[]
-    if isdefined(nb, Symbol(head))
-        rec = try; module_help(nb, name); catch; nothing; end
-        rec !== nothing && (get(rec, "kind", "unknown") != "unknown" || !isempty(strip(get(rec, "doc", "")))) && return rec
-    end
+    rec = try; module_help(nb, name); catch; nothing; end
+    rec !== nothing && (get(rec, "kind", "unknown") != "unknown" || !isempty(strip(get(rec, "doc", "")))) && return rec
+    # Fall back to a throwaway module that imports the head package for `?Module` drill-down on a
+    # package the notebook hasn't brought into scope.
     m = _doc_scan()
     try; Core.eval(m, Meta.parse("import " * head)); catch; end   # load the package if needed
     return module_help(m, name)
