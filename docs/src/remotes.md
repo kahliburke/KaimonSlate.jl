@@ -26,6 +26,8 @@ it checks the host, ensures a Julia + environment is present, and starts the wor
 On the hub's [front page](getting-started.md#the-front-page), click **🖧 Remotes** to add and test a
 host:
 
+![The Remotes dialog: a host field, the transport choice (SSH tunnel / Direct · CURVE), a Test & prime button, the known-remotes list with per-host region counts, and the notebook-wide data-transfer settings](./assets/remotes-modal.png)
+
 - **Host** — the SSH target (`my-workstation`, or `user@host`).
 - **Transport** — how the notebook talks to the worker:
   - **SSH tunnel** (default) — traffic is forwarded over the SSH connection. Works anywhere `ssh`
@@ -40,6 +42,8 @@ host:
   environment provisioning, gate load, a CURVE key (for `direct`), then a real
   spawn → connect → round-trip eval → clean teardown. It returns a step-by-step checklist **and
   primes the host**, so the first real notebook run is fast (cold provisioning happens here, once).
+
+![The Test & prime checklist filling in live: SSH reachable, Julia present (v1.12.0), environment provisioned, CURVE key pinned, spawn + connect round-trip, clean teardown — ending in an "All checks passed — host is primed and ready" verdict](./assets/preflight-checklist.png)
 
 !!! tip "Run the preflight first"
     Always **Test & prime** a new host before running a notebook on it — it catches setup problems
@@ -114,12 +118,20 @@ happening and where.
 ids · ⏳ warming · ✓ ready · idle), with a click-through detail popup (cpu/rss sparklines + full
 telemetry). It refreshes every few seconds and hides itself when you have no regions or remote hosts.
 
+![The Remote activity strip: workers grouped by region (db · db-box, gpu · gpu-box), each row with a CPU meter, RSS, and status — one attached and running ▶ train, one warm and ✓ ready · CUDA](./assets/remote-activity.png)
+
+![A worker-detail popup opened from the strip: the worker's host, region, notebook, transport, ports and stat chips (CPU, RSS, memo store, host CPU/load/memory), plus CPU% and RSS history sparklines](./assets/worker-detail.png)
+
 **Inside the notebook:**
 
 - **The worker/region pill** (top bar) — a live status pill for the notebook's worker, and one per
   active region, ranked so the one needing attention shows first. Click it for a dropdown of every
   worker plus a side panel that **streams that worker's log and telemetry** (cpu / rss / running cell)
   live over the page's WebSocket — no polling.
+
+  ![The top-bar worker/region pills — one per kernel (main + each active region), each showing its live status](./assets/worker-pills.png)
+
+  ![A worker-log popup opened from a region pill: the header (region · gpu · gpu-box :9300) with cpu / rss / running / memo chips, above a live tail of the worker's log — attach, sync_memo, running eval, and a boundary transfer](./assets/worker-log.png)
 - **🪵 Worker log** (**☰ → Worker log**, or the command palette) — a full tail of the main worker's
   log, following the bottom as it grows. For a remote worker it interleaves the local orchestration
   log and the remote worker's own log.

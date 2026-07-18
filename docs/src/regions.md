@@ -51,6 +51,8 @@ Many regions can point at the **same host** with different config (e.g. `gpu` an
 with different data roots). Names are folded to identifiers (`slate-remote` → `slate_remote`) so they
 always match a `region=` tag.
 
+![The Regions manager focused on a host: a region's config (warm count, transport, sysimage, data root), the New-region editor, and the host's live worker roster with per-worker telemetry and a parked warm worker](./assets/region-focus.png)
+
 !!! note "Advanced, still settling"
     Two newer per-region knobs: an opt-in **sysimage** (a PackageCompiler image baked for the region's
     workers, for faster startup) and a **`curve`** toggle — the region's data channel is
@@ -83,6 +85,21 @@ cell's kernel first, **just in time** — you never move data by hand.
   generation) collapses a repeat to nothing.
 - **Progress is visible.** A transfer past a size threshold drives the cell's own progress bar
   (`⇄ <name>: N/M MB ← host`), so a big move never looks like a hang.
+
+The DAG's **⇄ peer routing plan** shows how each region pair is wired — a resolved *direct* or *ssh-bridge*
+route worker-to-worker, or a *relay* through the hub — plus the per-host grants and host-key pins:
+
+![The peer routing plan panel: resolved routes between regions (gpu ← db direct, db ← gpu ssh-bridge, db ← local relay) and, under MESH, the per-host grants and pinned addresses](./assets/dag-peer-plan.png)
+
+The first time two regions on different hosts need a worker-to-worker link, Slate asks before exchanging
+keys — decline and transfers still work, just relayed through the hub:
+
+![The connect-regions consent dialog: it lists the region pair and hosts to bridge, explains exactly what it installs (an on-host ed25519 key, a locked-down single-port grant, a host-key pin), and offers Not now / Connect & exchange keys](./assets/mesh-consent.png)
+
+The DAG's **📊 transfers** dashboard summarizes every boundary move — total moved, throughput over time, a
+region-to-region grid, and the rate distribution:
+
+![The transfer summary dashboard: stat tiles (total moved, transfer count, average and peak MB/s), a throughput-over-time chart, a region peer-to-peer heatmap, and a rate-distribution curve](./assets/dag-transfers.png)
 - **Live handles aren't shipped.** A cell that produces a live DB connection / socket / open file
   (a [`resource`](cell-tags.md) cell) can't cross the wire — instead its setup is **replayed** on the
   destination so each side opens its own handle. If a live handle would cross, the run stops and names
@@ -98,6 +115,8 @@ Every cell records **where it last ran** — surfaced across the [DAG pane](dag.
   cross-column edges *are* the boundary transfers, and you drag cells between columns to reassign.
 - **🖧 region map** — the DAG's region-map toggle recolors nodes by where they run, with a legend
   naming the hosts.
+
+![The DAG laid out as region zones — local · main kernel, db · db-box, gpu · gpu-box — with each cell colored by where it ran and the cross-zone hand-offs drawn as labeled edges](./assets/dag-region-map.png)
 
 Provenance only appears while a region is active — a plain local notebook shows none of it. For the
 worker-level view (roster, telemetry, where a notebook's kernels live), see

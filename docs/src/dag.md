@@ -52,6 +52,8 @@ host) while the rest stay local. The DAG pane is how you *see and steer* that sp
 - the **🖧 region map** toggle colors each node by where it runs (a legend names the hosts), and a
   node wears a **🖧** badge when its last run executed on a region kernel.
 
+![The DAG pane with the region map on: cells laid out in side-by-side zones (local · main kernel, db · db-box, gpu · gpu-box), each node tinted by where it runs, with the region hand-off edges labeled by transport (direct / relay)](./assets/dag-region-map.png)
+
 The full story — assigning cells, declaring destinations, how boundary values cross, and the
 provenance chips — is in **[Regions](regions.md)**.
 
