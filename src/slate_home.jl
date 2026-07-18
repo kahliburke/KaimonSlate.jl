@@ -67,6 +67,9 @@ API and used by tests); otherwise it's `sites/` under the cache home.
 """
 sites_dir() = get(ENV, "KAIMONSLATE_SITES_DIR", joinpath(cache_home(), "sites"))
 
+"Durable per-cell declared-effect records (`EffectStore`), keyed by cell source digest."
+effects_dir() = joinpath(cache_home(), "effects")
+
 "`mkpath` each home that will be written to; returns the three paths."
 function ensure_homes!()
     for d in (config_home(), data_home(), cache_home())
