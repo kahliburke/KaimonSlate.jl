@@ -71,9 +71,7 @@ body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui
 .brand { display:flex; align-items:center; gap:7px; flex:0 0 auto; text-decoration:none;
          color:var(--strong); font-weight:600; font-size:1.05rem; padding:2px 4px; border-radius:7px; }
 .brand:hover { color:var(--accent); }
-.brandmark { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px;
-             border-radius:7px; background:var(--accent); color:#fff; font-weight:700; font-size:.95rem;
-             font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.brandmark { display:inline-flex; width:24px; height:24px; flex:0 0 auto; }
 /* ── Run-status pill (topbar) + Activity log feed ─────────────────────────────── */
 .runpill { display:inline-flex; align-items:center; justify-content:flex-start; gap:7px; flex:0 0 auto;
            min-width:150px; cursor:pointer; font-size:.74rem; font-weight:600; padding:3px 10px;
