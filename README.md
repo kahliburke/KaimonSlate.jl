@@ -12,7 +12,7 @@
 </div>
 
 A **reactive** Julia notebook with a live browser UI, packaged as a
-[Kaimon](https://github.com/…/Kaimon.jl) extension. Cells form a dependency graph, so changing a
+[Kaimon](https://github.com/kahliburke/Kaimon.jl) extension. Cells form a dependency graph, so changing a
 value recomputes exactly what depends on it — no hidden kernel state, no manual "run all". It's a
 plain `.jl` file the whole way down, so the browser, the AI agent, and git share one source of truth.
 
@@ -60,7 +60,7 @@ your open notebooks. `↑↓`/`enter` opens one, `o` the hub index, `q` quits.*
 ### As a Kaimon extension (recommended)
 
 The full experience — per-notebook gate workers **and** the AI agent. The first time you run `slate`
-with [Kaimon](https://github.com/…/Kaimon.jl) installed, it offers to register itself as a Kaimon
+with [Kaimon](https://github.com/kahliburke/Kaimon.jl) installed, it offers to register itself as a Kaimon
 extension — a one-time **consented** prompt (no longer automatic on package load). Say yes (Kaimon
 picks it up dynamically — no restart): your agents get the `slate.*` tools (`slate.open` / `slate.list` / `slate.close` / …),
 Kaimon serves your notebooks from its own hub — each in its own gate worker, pinned to the notebook's
