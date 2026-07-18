@@ -1754,14 +1754,44 @@ body.presenting { overflow: hidden; }
   align-items: center; justify-content: center; }
 .deck-stage { position: relative; width: 100%; height: 100%; display: flex;
   align-items: center; justify-content: center; overflow: hidden; }
+/* Scroll mode: tall slides fit width and scroll vertically. Scroll lives on the STAGE (a scaled
+   slide can't scroll its own overflow), and alignment flips to top so the head isn't clipped. */
+.deck-stage.scrolling { overflow-y: auto; align-items: flex-start; padding: 2vh 0 6vh; }
 .deck-slide { width: min(1080px, 92vw); transform-origin: center center;
   max-height: 100vh; }
-.deck-slide.overflow { align-self: flex-start; max-height: none; overflow: auto; }
+.deck-slide.overflow { max-height: none; }
 /* The moved-in cells lose their notebook chrome — present clean output, no editor/handles. */
 .deck-slide .cell { border: none !important; background: none !important; margin: 0 0 18px 0 !important; padding: 0 !important; }
 .deck-slide .cellhead { display: none !important; }
+/* The deck moves the LIVE cell nodes in, so command-mode selection / multi-select / dep-focus outlines
+   would ride along — a presentation shouldn't show editing chrome, so strip them. */
+.deck-slide .cell.selected, .deck-slide .cell.multisel, .deck-slide .cell.dep-focus { outline: none !important; }
 .deck-slide .srcedit, .deck-slide .cm-editor { display: none; }
 .deck-slide.show-code .srcedit, .deck-slide.show-code .cm-editor { display: block; }
+/* Presented code is read from a distance — bump it above the editor's default size (the slide-level
+   scale still shrinks it to fit, so this sets the on-screen size, not the layout size). */
+.deck-slide.show-code .cm-editor, .deck-slide.show-code .cm-editor .cm-content,
+.deck-slide.show-code .srcedit { font-size: 1.02rem; line-height: 1.5; }
+/* Code-left / output-right: reclaim horizontal space when code is shown. Only cells tagged
+   `slide-split` (plain non-column cells that have output — see slides.js) split; the editor takes the
+   left column, every output host stacks in the right. */
+/* A code-split slide uses the wide screen — otherwise the narrow default width wraps the code into a
+   tall column and the whole slide scales down, wasting the horizontal space the split was meant to use. */
+.deck-slide.show-code.has-split { width: min(1600px, 94vw); }
+/* The editor spans ALL rows (grid-row 1/-1 over an ample explicit row track) so the two columns are
+   decoupled: without this, each output host lands in its own row, row 1 is shared with the tall code,
+   and the figure gets pushed DOWN by the code's height instead of sitting at the top of column 2. */
+.deck-slide.show-code .cell.slide-split { display: grid; align-items: start;
+  grid-template-columns: minmax(0, 44%) minmax(0, 1fr);
+  grid-template-rows: repeat(20, auto); column-gap: 22px; }
+.deck-slide.show-code .cell.slide-split > .srchost,
+.deck-slide.show-code .cell.slide-split > .srcedit { grid-column: 1; grid-row: 1 / -1; min-width: 0; }
+.deck-slide.show-code .cell.slide-split > .binds,
+.deck-slide.show-code .cell.slide-split > .controls,
+.deck-slide.show-code .cell.slide-split > .output,
+.deck-slide.show-code .cell.slide-split > .tables,
+.deck-slide.show-code .cell.slide-split > .echarts,
+.deck-slide.show-code .cell.slide-split > .anim { grid-column: 2; min-width: 0; }
 .deck-slide .output { max-height: none !important; }
 .deck-slide .md { font-size: 1.15rem; }
 .deck-slide .md h1 { font-size: 2.6rem; } .deck-slide .md h2 { font-size: 2rem; }

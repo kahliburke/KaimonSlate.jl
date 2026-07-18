@@ -80,18 +80,39 @@
     document.body.appendChild(deck);
   }
 
+  // Mirror of notebook.js `_cellColumn`: a `column=N` tag (N≥2) rows a cell beside its predecessor.
+  function _slideCellColumn(c) {
+    for (const t of (c && c.tags) || []) { const m = /^column=(\d+)$/.exec(t); if (m) return Math.max(1, parseInt(m[1], 10) || 1); }
+    return 1;
+  }
   function _mountSlide(i, dir) {
     _unmount();
     const stage = document.getElementById('deckstage');
     const slide = document.createElement('div');
     slide.className = 'deck-slide' + (D.showCode ? ' show-code' : '');
     const sld = D.slides[i] || { ids: [] };
+    // `column=N` cells live inside a `.cell-row` flex wrapper in the notebook (see notebook.js). Moving
+    // the bare cell nodes would drop that wrapper and stack them — so rebuild the row grouping here,
+    // recreating `.cell-row` wrappers in the slide. The live cells still move (never clone); each one's
+    // real home (its original `.cell-row` in #nb) is remembered for restore.
+    const cells = (nbState && nbState.cells) || [];
+    let row = null;   // the current open `.cell-row`, or null when at top level
     for (const id of sld.ids) {
       const el = document.getElementById('cell-' + id);
       if (!el) continue;
+      const c = cells.find(x => x.id === id);
+      const col = c ? _slideCellColumn(c) : 1;
       D.restore.push({ el, parent: el.parentNode, next: el.nextSibling });   // remember home for exit
-      slide.appendChild(el);
+      if (col >= 2 && row) { row.appendChild(el); continue; }                // extra column → into open row
+      // A default-column cell may still anchor a row if the NEXT slide cell is column≥2.
+      const j = sld.ids.indexOf(id);
+      const nextC = cells.find(x => x.id === sld.ids[j + 1]);
+      if (nextC && _slideCellColumn(nextC) >= 2) {
+        row = document.createElement('div'); row.className = 'cell-row';
+        row.appendChild(el); slide.appendChild(row);
+      } else { row = null; slide.appendChild(el); }
     }
+    _applySplit(slide);
     stage.appendChild(slide);
     // Transition: start offset/transparent, then release on the next frame.
     const cls = D.slides.length <= 1 ? '' : _transClass(dir);
@@ -99,10 +120,59 @@
     _typesetSlide(slide);
     _fit();
     _syncHud();
+    // Second pass once laid out: decide which splits actually FIT side-by-side (a cell whose code is
+    // taller than the slide reads better stacked), box-fit charts, and re-fit the slide to real heights.
+    requestAnimationFrame(() => _relayout(slide));
+  }
+  function _relayout(slide) {
+    slide = slide || document.querySelector('#deckstage .deck-slide');
+    if (!slide) return;
+    _reviewSplitFit(slide);
+    _fitCharts();
+    _fit();
+  }
+  // Code-left / output-right for present mode: given the limited vertical space, a plain (non-column)
+  // code cell that HAS output lays its editor beside its output instead of stacking. Tag those cells
+  // `slide-split`; the CSS only splits them when code is actually shown (`.show-code`). Column-declared
+  // cells (inside a `.cell-row`) already own their horizontal layout, so they're left alone. This is the
+  // FIRST pass (pre-layout) so the widened width is right on first paint; `_reviewSplitFit` then measures.
+  function _applySplit(slide) {
+    let any = false;
+    for (const el of slide.querySelectorAll(':scope > .cell.code, :scope > .cell.bind')) {
+      let hasOut = false;
+      el.querySelectorAll(':scope > .output, :scope > .tables, :scope > .echarts, :scope > .anim')
+        .forEach(n => { if (n.childNodes.length) hasOut = true; });
+      el.classList.toggle('slide-split', hasOut);
+      any = any || hasOut;
+    }
+    // A split slide wants the wide screen: the default narrow slide would just wrap the code into a tall
+    // column and then scale the whole slide down, defeating the point. Flag it so the CSS widens it.
+    slide.classList.toggle('has-split', any);
+  }
+  // Second pass (post-layout): only KEEP a split where the code fits side-by-side. Re-tag from output
+  // first (so a cell can re-split if the window grew), then unsplit any whose code column — measured at
+  // the split width + present font — is taller than the slide can show; those read better stacked.
+  function _reviewSplitFit(slide) {
+    _applySplit(slide);
+    const stage = document.getElementById('deckstage');
+    const maxH = stage ? Math.max(200, stage.clientHeight - 48) : 900;
+    for (const el of slide.querySelectorAll(':scope > .cell.slide-split')) {
+      const src = el.querySelector(':scope > .srchost, :scope > .srcedit');
+      if (D.showCode && src && src.scrollHeight > maxH) el.classList.remove('slide-split');
+    }
+    slide.classList.toggle('has-split', !!slide.querySelector(':scope > .cell.slide-split'));
   }
   function _unmount() {
-    for (const r of D.restore) {
-      if (r.parent && r.parent.isConnected) r.parent.insertBefore(r.el, r.next && r.next.isConnected ? r.next : null);
+    // Restore in REVERSE so each cell's `next` sibling is already home before we place it — that keeps
+    // the anchor a real child of `parent` (preserving original order) instead of forcing an append.
+    for (let i = D.restore.length - 1; i >= 0; i--) {
+      const r = D.restore[i];
+      // Only use `next` as the insert anchor if it's STILL a child of `parent`; a non-child reference
+      // node makes insertBefore throw (the bug when sibling cells shared a slide).
+      const anchor = r.next && r.next.parentNode === r.parent ? r.next : null;
+      r.el.classList.remove('slide-split');   // shed present-only layout tag before it goes home
+      _restoreCellCharts(r.el);                // undo present-only chart box-fit → notebook sizing
+      if (r.parent && r.parent.isConnected) r.parent.insertBefore(r.el, anchor);
       else { const nb = document.getElementById('nb'); nb && nb.appendChild(r.el); }
     }
     D.restore = [];
@@ -115,28 +185,79 @@
     if (t === 'slide') return dir < 0 ? 'enter-prev' : 'enter-next';
     return 'enter-fade';
   }
+  function _cellCharts(el) {
+    return (window.charts && window.charts[el.id.replace(/^cell-/, '')]) || [];
+  }
+  // ECharts carry an explicit pixel size (core.js `_applySize`), so a bare `.resize()` keeps their fixed
+  // height. For NON-split cells that's fine — the slide-level scale in `_fit` handles overflow. For a
+  // slide-split cell the chart sits in a narrow output column, where a fixed square would overflow, so we
+  // box-fit it: shrink to the column width AND the available slide height, preserving aspect (never
+  // upscaling past its natural size). The natural + original inline sizes are captured ONCE per chart so
+  // toggling code off restores the notebook sizing exactly.
+  function _fitCharts() {
+    const stage = document.getElementById('deckstage');
+    const maxH = stage ? Math.max(160, stage.clientHeight - 48) : 600;
+    for (const r of D.restore) {
+      const split = r.el.classList.contains('slide-split');
+      const host = split ? r.el.querySelector(':scope > .echarts') : null;
+      for (const inst of _cellCharts(r.el)) {
+        const dom = inst.getDom && inst.getDom(); if (!dom) continue;
+        if (dom.dataset.natW == null) {                 // capture natural size before we ever constrain it
+          const w = inst.getWidth(), h = inst.getHeight();
+          if (w && h) { dom.dataset.natW = w; dom.dataset.natH = h; dom.dataset.origW = dom.style.width; dom.dataset.origH = dom.style.height; }
+        }
+        if (split && D.showCode && host && dom.dataset.natW != null) {
+          const natW = +dom.dataset.natW, natH = +dom.dataset.natH;
+          const availW = host.clientWidth || natW;
+          const k = Math.min(availW / natW, maxH / natH, 1);
+          const w = Math.round(natW * k), h = Math.round(natH * k);
+          dom.style.width = w + 'px'; dom.style.height = h + 'px';
+          try { inst.resize({ width: w, height: h }); } catch (e) {}
+        } else if (dom.dataset.natW != null) {          // full-width slide (or code hidden) → notebook sizing
+          dom.style.width = dom.dataset.origW || ''; dom.style.height = dom.dataset.origH || '';
+          try { inst.resize(); } catch (e) {}
+        } else { try { inst.resize(); } catch (e) {} }
+      }
+    }
+  }
+  // Drop the present-only chart sizing so a cell returns to its notebook layout on exit.
+  function _restoreCellCharts(el) {
+    for (const inst of _cellCharts(el)) {
+      const dom = inst.getDom && inst.getDom(); if (!dom || dom.dataset.natW == null) continue;
+      dom.style.width = dom.dataset.origW || ''; dom.style.height = dom.dataset.origH || '';
+      delete dom.dataset.natW; delete dom.dataset.natH; delete dom.dataset.origW; delete dom.dataset.origH;
+      try { inst.resize(); } catch (e) {}
+    }
+  }
   function _typesetSlide(slide) {
     if (window.typeset) try { window.typeset(slide); } catch (e) {}
-    // ECharts canvases were laid out at notebook width — resize to the slide.
-    requestAnimationFrame(() => {
-      for (const r of D.restore) {
-        const inst = window.charts && window.charts[r.el.id.replace(/^cell-/, '')];
-        if (Array.isArray(inst)) inst.forEach(ch => { try { ch.resize(); } catch (e) {} });
-      }
-    });
   }
-  // Auto-fit: scale the slide so it fits the stage, down to a 0.5× floor (then scroll).
+  // Auto-fit: scale a slide to fit the stage when it reasonably can; otherwise keep the text at a
+  // readable size (fit width only) and let the stage scroll vertically. `transform: scale()` shrinks
+  // the slide visually but NOT its layout box, so in scroll mode we pull the following extent up with a
+  // negative margin (= the height the scale reclaimed) — the stage's scroll area then matches what's
+  // visible, and centring-vs-top alignment is handed to the stage via the `.scrolling` class.
+  // A slide that fits with only a gentle shrink just scales; once it would need to shrink past this,
+  // shrinking makes the content too small to read from a distance — so keep it at a readable size and
+  // scroll vertically instead. (Raised from a low floor: users would rather scroll than squint.)
+  const _FIT_FLOOR = 0.85;
   function _fit() {
     const stage = document.getElementById('deckstage');
     const slide = stage && stage.firstElementChild;
     if (!slide) return;
+    slide.classList.remove('overflow');
     slide.style.transform = 'none';
+    slide.style.marginBottom = '';
     const vw = stage.clientWidth, vh = stage.clientHeight;
     const sw = slide.scrollWidth, sh = slide.scrollHeight;
-    let k = Math.min(vw / sw, vh / sh, 1);
-    k = Math.max(k, 0.5);
+    const fit = Math.min(vw / sw, vh / sh, 1);
+    const scroll = fit < _FIT_FLOOR;                 // can't fit legibly → scroll
+    const k = scroll ? Math.min(vw / sw, 1) : fit;   // scroll mode fits width only, keeps text readable
+    slide.style.transformOrigin = scroll ? 'top center' : 'center center';
     slide.style.transform = 'scale(' + k + ')';
-    slide.classList.toggle('overflow', sh * k > vh + 1);
+    if (scroll) slide.style.marginBottom = (-sh * (1 - k)) + 'px';  // collapse layout box to visual height
+    slide.classList.toggle('overflow', scroll);
+    stage.classList.toggle('scrolling', scroll);
   }
   function _syncHud() {
     const pos = document.getElementById('deckpos');
@@ -180,7 +301,7 @@
   function slideToggleCode() {
     D.showCode = !D.showCode;
     const s = document.querySelector('#deckstage .deck-slide');
-    if (s) { s.classList.toggle('show-code', D.showCode); _fit(); }
+    if (s) { s.classList.toggle('show-code', D.showCode); _relayout(s); }
   }
   function slideFullscreen() {
     const deck = document.getElementById('deck');
@@ -226,7 +347,7 @@
       case 's': case 'S': openPresenter(); break;
     }
   }, true);
-  addEventListener('resize', () => { if (D.open) _fit(); });
+  addEventListener('resize', () => { if (D.open) _relayout(); });
 
   // ════════════════════════════════════════════════════════════════════════════
   //  Presenter window (?present=1) — mirrors position, shows notes + next + timer

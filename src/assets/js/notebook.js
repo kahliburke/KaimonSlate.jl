@@ -134,7 +134,7 @@ function Editor({ cell }) {
       try { view && view.destroy(); } catch (_) {}
     };
   }, []);
-  return html`<div ref=${ref}></div>`;
+  return html`<div ref=${ref} class="srchost"></div>`;
 }
 
 function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
