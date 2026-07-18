@@ -309,6 +309,14 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
    fixed-width memoslot (rare enough that its variable width doesn't disturb column alignment). */
 .lockbadge { font-size:.78rem; opacity:.85; cursor:default; user-select:none; margin-left:6px; }
 .lockbadge:hover { opacity:1; }
+/* Cell-effects badge: this cell DECLARED an effect to Slate (code→Slate channel) — e.g. an `:everywhere`
+   op registration re-established on every region worker. A compact pill next to the lock badge; hover for
+   the full "what did this cell do to Slate" list (kinds, names, statements). */
+.effectbadge { font-size:.72rem; opacity:.9; cursor:default; user-select:none; margin-left:6px;
+  padding:0 6px; border-radius:9px; white-space:nowrap; max-width:22em; overflow:hidden;
+  text-overflow:ellipsis; vertical-align:middle;
+  color:var(--blue, #4a9eff); background:color-mix(in srgb, var(--blue, #4a9eff) 13%, transparent); }
+.effectbadge:hover { opacity:1; }
 .cid { color:var(--dim); font-family:monospace; }
 /* Transient "restored to <age>" pill while ⌘Z steps a cell back through its snapshots. */
 .cellhead .histago {

@@ -60,7 +60,7 @@ struct CellOutput
     memo::String                  # durable-cache outcome of this run: "" | "restored" | "stored" | "handle" | "uncacheable"
     memo_why::String              # human reason for a non-caching outcome (handle/uncacheable); "" otherwise
     effects::Vector{Any}          # cell-DECLARED effects harvested this run — (; kind, names, stmt_src, data) per
-                                  # `slate_effect(...)` call; drives per-side classification + the durable effect store
+                                  # `slate_effect(...)` call; drives everywhere classification + the durable effect store
 end
 # Back-compat constructors (callers that omit trailing fields — trace/stderr through effects — get empty defaults).
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =

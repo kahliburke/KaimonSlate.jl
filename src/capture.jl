@@ -311,7 +311,7 @@ Returns the wire form:
 # (`nothing` on the main kernel), `side` its string spelling (`""` = main), `regions` the declared
 # region names. Built on the eval side (only there is the module's live `slate_emit` known).
 # The OUTBOUND half of the seam (code → Slate): a running cell / a package it calls DECLARES an effect
-# ("I established per-side state", "memoize me", …) which the hub harvests and acts on. Transport-free —
+# ("establish this on every worker", "memoize me", …) which the hub harvests and acts on. Transport-free —
 # just pushes to the task-local `:slate_effects` sink, attributed to the executing statement
 # (`:slate_stmt`); `run_capture` resolves the statement index → source and returns the records in the wire.
 # A no-op outside a harvesting eval (no sink), so a package can call it unconditionally.

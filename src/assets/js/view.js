@@ -262,6 +262,22 @@ function _lockBadge(c) {
   if (!c.tags || !c.tags.includes('locked')) return '';
   return `<span class="lockbadge" title="locked — frozen against upstream changes and reload; only ▶ re-runs it (its memo is kept)">🔒</span>`;
 }
+// Cell-effects badge: this cell DECLARED an effect to Slate via the code→Slate channel (`slate_effect` /
+// a package's registrar). `c.effects` is [{kind,names,stmt}] (see cell_json). e.g. an `:everywhere` op
+// registration Slate re-establishes on every region worker. Compact glyph + the registered names; the
+// hover lists every declaration and the statement that made it — a "what did this cell do to Slate" peek.
+function _effectBadge(c) {
+  if (!c.effects || !c.effects.length) return '';
+  const names = [...new Set([].concat(...c.effects.map(e => e.names || [])))];
+  const everywhere = c.effects.some(e => e.kind === 'everywhere');
+  const label = everywhere ? 'everywhere' : (c.effects[0].kind || 'effect');
+  const shown = names.length ? ' · ' + names.join(', ') : '';
+  const tip = 'declares to Slate:\n' + c.effects.map(e =>
+    '• ' + (e.kind === 'everywhere' ? 'everywhere' : e.kind) +
+    ((e.names && e.names.length) ? ' · ' + e.names.join(', ') : '') +
+    (e.stmt ? '\n    ' + e.stmt : '')).join('\n');
+  return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
+}
 function cellHeaderInner(c) {
   const isCode = c.kind === 'code' && !hasBinds(c);
   const other = c.kind === 'md' ? 'code' : 'md';
@@ -278,6 +294,7 @@ function cellHeaderInner(c) {
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
     cellRegionChip(c) +
     _lockBadge(c) +
+    _effectBadge(c) +
     (c.dupdefs && c.dupdefs.length
       ? `<span class="dupwarn" onclick="window.dupInfo(event,'${c.id}')" title="defined in more than one cell — click for details">⚠ ${c.dupdefs.map(_esc).join(', ')}</span>` : '') +
     (c.backrefs && c.backrefs.length
