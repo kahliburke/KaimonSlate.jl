@@ -440,6 +440,9 @@
       <input type="range" id="memoquality" min="0" max="100" value="100" oninput="_memoSyncReadout()">
       <span id="memoreadout" class="memoreadout"></span>
     </div></div>
+  <div class="setrow exrow fmt-standalone fmt-html" id="previewrow"><label title="Embed the last RENDERED figures/tables so the notebook shows them at full fidelity the instant it opens, while the live environment reconstructs in the background. Distinct from precomputed results (which restore the underlying VALUES). Heavy figures over the per-asset cap recompute instead.">Interim preview</label>
+    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="previewembed" checked> Embed last-rendered figures for instant display on open</label></div>
   <div class="setrow exrow fmt-standalone sethint"><span></span>One <code>.jl</code> carrying the notebook + its full environment. Reinflate with <code>KaimonSlate.expand</code>, or open it directly — it reconstructs and (with precomputed results) restores instantly.</div>
   <div class="setrow exrow fmt-markdown"><label>Source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">

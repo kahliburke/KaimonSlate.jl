@@ -318,7 +318,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      outputs::AbstractString = "all", og_image::AbstractString = "",
                      og_url::AbstractString = "", og_type::AbstractString = "article",
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
-                     memo_budget::Integer = typemax(Int))
+                     memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     lock(nb.lock) do
         fm0 = report_frontmatter(nb.report)
@@ -476,7 +476,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 # The bundle + run.jl ride inside the page; the buttons hand them out as Blob downloads.
                 # A notebook with no project env (in-process) can't be bundled → embed empty (button no-ops).
                 runjl = _run_script(""; agent = true, bundle_name = bname)
-                bundle_b64 = try; Base64.base64encode(export_standalone(nb; history = history, memo_budget = memo_budget)); catch; ""; end
+                bundle_b64 = try; Base64.base64encode(export_standalone(nb; history = history, memo_budget = memo_budget, preview_budget = preview_budget)); catch; ""; end
                 print(io, "var _rj=", JSON.json(runjl), ";var _rps1=", JSON.json(_run_ps1()), ";var _rbat=", JSON.json(_run_bat()), ";var _bb64=", JSON.json(bundle_b64), ";",
                       "var _save=function(name,blob){var u=URL.createObjectURL(blob),a=document.createElement('a');",
                       "a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);};",

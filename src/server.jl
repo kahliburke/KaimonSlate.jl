@@ -249,6 +249,13 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # via the same `bringup:` streaming the remote-provision path already uses.
     r.meta["hydrating"] = true
     r.meta["hydratingKind"] = "boot"
+    # Interim render: if we persisted a snapshot of this notebook's last rendered figures, show it
+    # AT ONCE while the worker boots + the initial run recomputes — the notebook springs to life
+    # instead of showing every cell un-run. Marked entries carry a stored/stale badge; live cells
+    # supersede them cell-by-cell (state_json's hydrating branch serves meta["preview"]).
+    let p = _load_preview_marked(path, r)
+        p === nothing || (r.meta["preview"] = p)
+    end
     pending = PendingKernel()
     nb = LiveNotebook(nbid, String(path), r, pending, 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
@@ -272,8 +279,11 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
                 lock(nb.lock) do
                     delete!(nb.report.meta, "hydrating")
                     delete!(nb.report.meta, "hydratingKind")
+                    delete!(nb.report.meta, "preview")   # live cells now stand — drop the interim render
                     nb.version += 1
                 end
+                # Capture the freshly-run state as the next reopen's interim preview (force past the debounce).
+                _save_preview!(nb; force = true)
                 # Seed the durable history with the initial run state, so the first edit has a parent to
                 # diff against and the "buildup" replay starts from the true origin.
                 _history!(nb; source = "open")
@@ -345,6 +355,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
             delete!(nb.report.meta, "hydrating")
             nb.version += 1
         end
+        _save_preview!(nb; force = true)             # freshly-run state → next reopen's interim preview
         _history!(nb; source = "open")
         _autoindex!(nb)
     catch e
@@ -444,6 +455,9 @@ function _broadcast_progress(nb::LiveNotebook, cell)
             bibctx = _bib_link_ctx(nb)
             figidx = figure_index(nb.report)
             _broadcast(nb, "celldone:" * JSON.json(cell_json(cell, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx, report = nb.report)))
+            # A cell just produced a result → refresh the interim-render preview sidecar (debounced),
+            # so a later reopen springs to life showing the last-known figures. Best-effort.
+            _save_preview!(nb)
         end
     catch
     end

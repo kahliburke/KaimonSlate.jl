@@ -80,6 +80,7 @@ function exportHtml(dl) {
     parts.push('bundle=1');
     if ((document.getElementById('htmlhistory') || {}).checked) parts.push('history=1');   // ship full git history
     const mp = _memoParam(); if (mp !== '') parts.push('memo=' + mp);   // precomputed-results budget for the embedded bundle
+    const pp = _previewParam(); if (pp !== '') parts.push('preview=' + pp);   // interim-render budget for the embedded bundle
   }
   const q = parts.length ? '?' + parts.join('&') : '';
   if (dl === false) { window.open(_apipath('/api/export.html' + q), '_blank'); return; }
@@ -147,11 +148,19 @@ async function exportMarkdown(mode) {
 function _slug(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
 // Self-contained single-source .jl: cells + full Project/Manifest + source (+ a git bundle when the
 // project is a repo). Can take a moment (tars the env + source).
+// "0" when the interim-preview checkbox is off (omit the frozen render → smaller file), else ""
+// (embed it, server-capped). A separate axis from the memo budget: figures shown vs values restored.
+function _previewParam() {
+  const cb = document.getElementById('previewembed');
+  return (cb && !cb.checked) ? '0' : '';
+}
 async function exportStandalone() {
   showLoading('Bundling environment + source…');
   try {
-    const mp = _memoParam();
-    const r = await fetch(_apipath('/api/export.standalone.jl') + (mp === '' ? '' : '?memo=' + mp));
+    const qs = [];
+    const mp = _memoParam(); if (mp !== '') qs.push('memo=' + mp);
+    const pp = _previewParam(); if (pp !== '') qs.push('preview=' + pp);
+    const r = await fetch(_apipath('/api/export.standalone.jl') + (qs.length ? '?' + qs.join('&') : ''));
     if (!r.ok) { await alertDark('Standalone export failed:\n' + (await r.text())); return; }
     _saveBlob(await r.blob(), '.standalone.jl');
   } catch (e) { await alertDark('Standalone export failed: ' + e); }
@@ -244,7 +253,7 @@ function _exSyncRows() {
   // hide them when html isn't runnable, where they'd have nowhere to embed.
   if (f === 'html') {
     const run = (document.getElementById('htmlrunnable') || {}).checked;
-    ['htmlhistory', 'memorow'].forEach(id => {
+    ['htmlhistory', 'memorow', 'previewrow'].forEach(id => {
       const el = document.getElementById(id); const row = el && el.closest('.exrow');
       if (row) row.style.display = run ? '' : 'none';
     });

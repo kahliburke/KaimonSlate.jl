@@ -243,6 +243,19 @@ function _memoBadge(c) {
   const tip = c.memoWhy ? base + ' — ' + c.memoWhy : base;
   return `<span class="memobadge ${cls} memo-${c.memo}" title="${_esc(tip)}">${_memoGlyph(c.memo)}</span>`;
 }
+// Interim stored-render badge: this cell's output is the last SAVED render (a figure/table/rich
+// output from a prior session), shown AT FULL FIDELITY while the live env boots and the cell
+// recomputes — so the notebook springs to life on open instead of showing blanks. `c.previewStale`
+// means the cell's source changed since the snapshot (so the figure may be out of date). The badge
+// clears the instant the live `celldone:` replaces the cell.
+function _previewBadge(c) {
+  if (!c.preview) return '';
+  const stale = c.previewStale;
+  const tip = stale
+    ? 'stored render — the cell’s source changed since this was saved, so it may be out of date; recomputing…'
+    : 'stored render — the last saved figure, shown while this cell recomputes';
+  return `<span class="previewbadge${stale ? ' stale' : ''}" title="${_esc(tip)}">🖼 ${stale ? 'stored · stale' : 'stored'}</span>`;
+}
 // `locked` cell tag: frozen against upstream/reload churn, only a manual ▶ moves it — shown next to
 // the memo badge since it's the same "what determines this cell's cached state" question at a glance.
 function _lockBadge(c) {
@@ -294,6 +307,7 @@ function cellHeaderInner(c) {
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
     // width) · cache verdict (fixed slot) · state badge (fixed width) — so nothing floats mid-header.
     `<span class="cdur">${c.duration != null ? c.duration + ' ms' : ''}</span>` +
+    `<span class="previewslot">${_previewBadge(c)}</span>` +
     `<span class="memoslot">${_memoBadge(c)}</span>` +
     `<span class="badge">${c.state}</span>`;
 }

@@ -320,6 +320,14 @@ function _png_dims(b::Vector{UInt8})
     h = (Int(b[21]) << 24) | (Int(b[22]) << 16) | (Int(b[23]) << 8) | Int(b[24])
     (w > 0 && h > 0) ? (w, h) : nothing
 end
+# Preview-asset size caps (shared by the durable-blob tier, the interim-render sidecar, and the
+# export-embedded preview). A single rendered asset over `_PREVIEW_MAX_ASSET` isn't persisted for
+# interim display — it recomputes live on reopen rather than bloating the sidecar / export. The
+# `_PREVIEW_MAX_TOTAL` cap bounds a whole notebook's persisted preview (enforced at snapshot/export
+# time, where the running total is known).
+const _PREVIEW_MAX_ASSET = 5 * 1024 * 1024
+const _PREVIEW_MAX_TOTAL = 50 * 1024 * 1024
+
 # Replace inlined base64 image <img>s in `html` with cached `/api/<nbid>/blob/<hash>` URLs, adding
 # width/height so the layout reserves space before the (async, cached) image loads.
 function _externalize_blobs(nbid::AbstractString, html::AbstractString)
@@ -329,7 +337,12 @@ function _externalize_blobs(nbid::AbstractString, html::AbstractString)
         pre, mime, b64, post = m.captures
         bytes = try; Base64.base64decode(b64); catch; return s; end
         h = string(hash(bytes); base = 16)
-        _blob_put!(string(nbid, "/", h), mime, bytes)
+        key = string(nbid, "/", h)
+        _blob_put!(key, mime, bytes)
+        # Also persist to the durable tier (under the per-asset cap), so the interim-render preview
+        # survives a server restart AND has a real byte source to re-inline into a travelling export.
+        # Content-addressed → write-once; an oversized asset stays memory-only and recomputes on reopen.
+        length(bytes) <= _PREVIEW_MAX_ASSET && _blob_put_durable!(key, mime, bytes)
         dim = _png_dims(bytes)
         sz = dim === nothing ? "" : string(" width=\"", dim[1], "\" height=\"", dim[2], "\"")
         string("<img", pre, "src=\"/api/", nbid, "/blob/", h, "\"", sz, post, ">")
@@ -374,6 +387,143 @@ function blob_lookup(key::AbstractString)
     isfile(f) || return nothing
     meta = isfile(f * ".meta") ? split(read(f * ".meta", String), "\n") : ["application/octet-stream", ""]
     return (String(meta[1]), read(f), length(meta) >= 2 ? String(meta[2]) : "")
+end
+
+# ── Rendered cells array ──────────────────────────────────────────────────────────────────────
+# The document's cells as JSON (`state_json`'s `cells`), factored out so the interim-render snapshot
+# (below) and the export-embedded preview build the SAME shape from the SAME code path. Recomputes
+# the render context (bind index, citations, figure numbering) when not supplied by the caller.
+function _render_cells(nb::LiveNotebook; bindref = nothing, hostednames = nothing,
+                       md = nothing, nbdir = nothing, cited = nothing, bibctx = :unset,
+                       figidx = :unset, br = nothing)
+    if bindref === nothing || hostednames === nothing
+        bindref, hostednames = _bind_index(nb.report)
+    end
+    md === nothing && (md = Set{String}(get(nb.report.meta, "multidef", String[])))
+    br === nothing && (br = get(nb.report.meta, "backref", Dict{String,Vector{String}}()))
+    nbdir === nothing && (nbdir = dirname(abspath(nb.path)))
+    cited === nothing && (cited = cited_citation_keys(nb.report))
+    bibctx === :unset && (bibctx = _bib_link_ctx(nb))
+    figidx === :unset && (figidx = figure_index(nb.report))
+    return [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
+        cited = cited, bibctx = bibctx, figidx = figidx, backref = br, report = nb.report)
+            for c in nb.report.cells]
+end
+
+# ── Interim-render preview sidecar ──────────────────────────────────────────────────────────────
+# Persist the last rendered cells array (with rich display) so REOPENING a notebook shows the
+# last-known figures at full fidelity INSTANTLY while the live env boots and cells recompute — the
+# notebook "springs to life" instead of showing everything un-run. Keyed by the notebook's abspath
+# (mirrors the chat-log sidecar); the display BYTES already live in the durable blob tier, so the
+# manifest is small (blob URLs, not inline rasters). Cache-tier and fully disposable: a missing or
+# corrupt sidecar just means no interim preview, never a correctness issue. Live cells supersede it
+# cell-by-cell as each `celldone:` lands (the browser reconciles by id + content hash).
+_preview_file(path) = joinpath(get(ENV, "XDG_CACHE_HOME", joinpath(homedir(), ".cache")),
+    "kaimonslate", "preview", SlateHistory._sha(abspath(String(path)))[1:16] * ".json")
+
+const _PREVIEW_SAVE_AT = Dict{String,Float64}()   # nbid → last flush time (debounce)
+const _PREVIEW_SAVE_LOCK = ReentrantLock()
+const _PREVIEW_DEBOUNCE_S = 2.0
+
+# Any cell carrying rich display output (figure/image/rich HTML/table/echart/animation) — the signal
+# that a notebook is worth snapshotting for interim display. Cheap text-only cells recompute fast and
+# don't need a preview.
+function _has_rich_display(nb::LiveNotebook)
+    for c in nb.report.cells
+        o = c.output
+        o === nothing && continue
+        (isempty(o.display) && isempty(_echarts_specs(c)) && isempty(_table_specs(c)) &&
+         isempty(_animation_specs(c, nb.id))) || return true
+    end
+    return false
+end
+
+# Every blob hash the rendered `cells` still reference (across output HTML, animation manifests,
+# echart specs, tables) — the SET the durable tier must keep for this notebook. Anything else under
+# this notebook's id is a superseded render, safe to evict.
+const _BLOBHASH_RE = r"/blob/([A-Za-z0-9]+)"
+function _live_blob_hashes(cells)
+    live = Set{String}()
+    for e in cells
+        e isa AbstractDict || continue
+        for k in ("output", "animations", "echarts", "tables")
+            v = get(e, k, nothing); v === nothing && continue
+            s = v isa AbstractString ? v : JSON.json(v)
+            for m in eachmatch(_BLOBHASH_RE, s); push!(live, String(m.captures[1])); end
+        end
+    end
+    return live
+end
+
+# Superseded rendered figures pile up in the durable blob tier (content-addressed, write-once): every
+# edit that changes a plot mints a NEW hash, so the old raster would otherwise linger forever. The
+# freshly-snapshotted render tells us EXACTLY which blobs this notebook still references — so drop
+# every durable blob under this notebook's id whose hash isn't among them. Bounds the tier to the
+# live render; another notebook's blobs (its own id prefix) are untouched. Best-effort.
+function _prune_preview_blobs!(nbid::AbstractString, live::AbstractSet)
+    try
+        dir = _dblob_dir()
+        base = basename(_dblob_file(string(nbid, "/")))   # "<nbid>__" (key sep "/" → "__")
+        for fn in readdir(dir)
+            (startswith(fn, base) && !endswith(fn, ".meta")) || continue
+            h = fn[nextind(fn, lastindex(base)):end]
+            h in live && continue
+            rm(joinpath(dir, fn); force = true)
+            rm(joinpath(dir, fn * ".meta"); force = true)
+        end
+    catch e
+        @debug "KaimonSlate: preview blob prune failed" exception = (e, catch_backtrace())
+    end
+    return nothing
+end
+
+# Snapshot the current render to the sidecar. Debounced (a burst of `celldone:`s during a run
+# coalesces into a couple of writes); pass `force=true` to flush the final state (run complete /
+# close). Best-effort — a failed snapshot must never disturb evaluation.
+function _save_preview!(nb::LiveNotebook; force::Bool = false)
+    do_save = lock(_PREVIEW_SAVE_LOCK) do
+        now = time()
+        last = get(_PREVIEW_SAVE_AT, nb.id, 0.0)
+        (force || now - last > _PREVIEW_DEBOUNCE_S) ? (_PREVIEW_SAVE_AT[nb.id] = now; true) : false
+    end
+    do_save || return nothing
+    try
+        cells = lock(nb.lock) do
+            _has_rich_display(nb) ? _render_cells(nb) : nothing
+        end
+        cells === nothing && return nothing   # nothing rich to preview — leave any stale sidecar for now
+        f = _preview_file(nb.path)
+        mkpath(dirname(f))
+        tmp = f * ".tmp"
+        open(tmp, "w") do io; JSON.print(io, cells); end
+        mv(tmp, f; force = true)
+        _prune_preview_blobs!(nb.id, _live_blob_hashes(cells))   # evict superseded figure rasters
+    catch e
+        @debug "KaimonSlate: preview snapshot failed" exception = (e, catch_backtrace())
+    end
+    return nothing
+end
+
+# The persisted interim render for `path`, marked up for hydration: each entry gets `preview=true`
+# (a stored-render marker → full-fidelity display + a "stored" badge) and `previewStale=true` when
+# the saved source hash no longer matches the freshly-parsed cell (edited since the snapshot, so the
+# figure may be out of date). Returns nothing when there's no usable sidecar.
+function _load_preview_marked(path::AbstractString, report)
+    f = _preview_file(path)
+    isfile(f) || return nothing
+    cells = try; JSON.parse(read(f, String)); catch; nothing; end
+    (cells isa AbstractVector && !isempty(cells)) || return nothing
+    live = Dict{String,String}()
+    for c in report.cells
+        live[c.id] = SlateHistory._sha(c.source)
+    end
+    for e in cells
+        e isa AbstractDict || continue
+        e["preview"] = true
+        id = String(get(e, "id", "")); h = String(get(e, "hash", ""))
+        e["previewStale"] = !(haskey(live, id) && live[id] == h)
+    end
+    return cells
 end
 
 # ── Overflow files (full results for truncated output) ───────────────────────────
@@ -826,8 +976,8 @@ function state_json(nb::LiveNotebook)
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
     bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
     figidx = figure_index(nb.report)            # caption numbering + [@fig:] cross-ref labels
-    meta["cells"] = [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibctx = bibctx, figidx = figidx, backref = br, report = nb.report) for c in nb.report.cells]
+    meta["cells"] = _render_cells(nb; bindref = bindref, hostednames = hostednames, md = md,
+        nbdir = nbdir, cited = cited, bibctx = bibctx, figidx = figidx, br = br)
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
     isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.

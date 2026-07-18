@@ -131,3 +131,41 @@ end
     @test occursin("table.cell(fill: gradient.linear", typ)                        # :bar per-cell gradient
     @test occursin("table.cell(fill: rgb(\"#58a6ff\").transparentize", typ)        # :heat per-cell fill
 end
+
+# Interim-render preview travelling with an EXPORT: externalized blob URLs must re-inline to
+# self-contained data URIs (the blob-serving server isn't there when the .jl is reopened elsewhere),
+# subject to the size caps; heavy animation manifests are dropped.
+@testset "preview blob re-inline (export travel)" begin
+    nbid = "previewtest_ci"
+    png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47], rand(UInt8, 96))     # a small figure blob in the durable store
+    h = string(hash(png); base = 16)
+    NS._blob_put_durable!(string(nbid, "/", h), "image/png", png)
+
+    cells = [Dict{String,Any}("id" => "a",
+                              "output" => "<img src=\"/api/$nbid/blob/$h\" width=\"12\">",
+                              "animations" => Any[Dict{String,Any}("frames" => 3)])]
+    NS._inline_preview_blobs!(nbid, cells)
+    @test occursin("data:image/png;base64,", cells[1]["output"])  # URL → self-contained data URI
+    @test !occursin("/blob/", cells[1]["output"])                 # no server-dependent URL left
+    @test cells[1]["animations"] == Any[]                         # heavy frame stacks dropped from the preview
+
+    # A total budget of 0 embeds nothing — every asset is left as a URL (recomputes on hydrate).
+    cells0 = [Dict{String,Any}("id" => "z", "output" => "<img src=\"/api/$nbid/blob/$h\">")]
+    NS._inline_preview_blobs!(nbid, cells0; budget = 0)
+    @test occursin("/blob/$h", cells0[1]["output"])
+
+    # The running total caps embedding: with room for exactly one asset, the first inlines and a
+    # second distinct asset is left as a URL.
+    png2 = vcat(UInt8[0x89, 0x50], rand(UInt8, 160)); h2 = string(hash(png2); base = 16)
+    NS._blob_put_durable!(string(nbid, "/", h2), "image/png", png2)
+    cells2 = [Dict{String,Any}("id" => "d",
+                               "output" => "<img src=\"/api/$nbid/blob/$h\"><img src=\"/api/$nbid/blob/$h2\">")]
+    NS._inline_preview_blobs!(nbid, cells2; budget = length(png))  # room for exactly the first
+    @test occursin("data:image/png;base64,", cells2[1]["output"])  # first inlined
+    @test occursin("/blob/$h2", cells2[1]["output"])               # second left — budget exhausted
+
+    # A blob absent from the store is left untouched (no crash).
+    cells3 = [Dict{String,Any}("id" => "e", "output" => "<img src=\"/api/$nbid/blob/deadbeef\">")]
+    NS._inline_preview_blobs!(nbid, cells3)
+    @test occursin("/blob/deadbeef", cells3[1]["output"])
+end
