@@ -646,7 +646,8 @@ end
 function _eval_one(source::String, filename::String, memo_key::String,
                    memo_names::Vector{String}, memo_threshold::Float64,
                    memo_force::Bool = false, memo_always::Bool = false,
-                   memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[])
+                   memo_unread::Vector{String} = String[], memo_safe::Vector{String} = String[];
+                   slate_ctx = nothing)
     cid = replace(filename, r"^cell:" => "")
     # The decision record for this eval (see _MEMO_TRACE): filled in as the memo layer acts,
     # committed at every exit — `slate.memo_trace` reads it back.
@@ -675,7 +676,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
     end
     local r
     try
-        r = run_capture(_NS[], source, filename; capture = DemuxCapture())
+        r = run_capture(_NS[], source, filename; capture = DemuxCapture(), slate_ctx = slate_ctx)
     catch e
         # Capture machinery itself threw (a worker/infra bug, NOT a normal cell error — those are
         # captured inside run_capture). Log it loudly and return an error wire so the cell shows the
@@ -738,14 +739,19 @@ function __slate_eval(source::String; filename::String = "string",
                      memo_key::String = "", memo_names::Vector{String} = String[],
                      memo_threshold::Float64 = 0.0, memo_force::Bool = false,
                      memo_always::Bool = false, memo_unread::Vector{String} = String[],
-                     memo_safe::Vector{String} = String[])
+                     memo_safe::Vector{String} = String[],
+                     ctx_region::String = "", ctx_notebook::String = "",
+                     ctx_regions::Vector{String} = String[])
     # Register this eval's task under its cell id so __slate_cancel can interrupt it (the server runs
     # parallel cells as concurrent __slate_eval calls; a stop throws InterruptException into them).
     cid = replace(filename, r"^cell:" => "")
     lock(_CANCEL_LOCK) do; _RUNNING_TASKS[cid] = current_task(); end
+    # Rebuild the Slate execution context from the hub's `ctx_*` args, adding this worker's own
+    # `slate_emit` (which PUBs on the gate stream) — cell code reads it via `slate_context()`.
+    ctx = _build_slate_ctx(_NS[], ctx_notebook, ctx_region, ctx_regions)
     try
         return _eval_one(source, filename, memo_key, memo_names, memo_threshold, memo_force,
-                         memo_always, memo_unread, memo_safe)
+                         memo_always, memo_unread, memo_safe; slate_ctx = ctx)
     finally
         lock(_CANCEL_LOCK) do; delete!(_RUNNING_TASKS, cid); end
     end
@@ -1829,6 +1835,36 @@ function _changed_names(queue)
     return collect(changed)
 end
 
+# Revise applies method changes but NEVER re-runs a package's `__init__`. So a dev package that GAINS or
+# CHANGES its `__init__` — e.g. to install a host-integration hook, register something, set up global
+# state — would silently miss it under Slate's hot-reload; a pool-adopted worker that first loaded the
+# package's OLDER source (before the `__init__` existed) has the same gap (`using` on an already-loaded
+# module is a no-op, so it never fires either). When a revise pass (re)defines an `__init__`, run it — but
+# ONLY for the packages actually revised in this pass (mapped from the queue), so we never blanket-re-run
+# unrelated inits. `__init__` is expected idempotent; a throw is logged, never fatal.
+function _run_revised_inits!(queue, changed)
+    ("__init__" in changed) || return nothing
+    ran = String[]; seen = Set{Module}()
+    for item in queue
+        try
+            pd = item[1]
+            id = pd.info.id                                   # Revise PkgData → PkgId
+            m = get(Base.loaded_modules, id, nothing)
+            (m isa Module && !(m in seen) && isdefined(m, :__init__)) || continue
+            push!(seen, m)
+            try
+                Base.invokelatest(getfield(m, :__init__))
+                push!(ran, String(nameof(m)))
+            catch e
+                @warn "slate hot-reload: package __init__ threw on re-run" pkg = string(m) exception = e
+            end
+        catch
+        end
+    end
+    isempty(ran) || @info "slate hot-reload: re-ran package __init__ after a revise that (re)defined one" packages = ran
+    return nothing
+end
+
 # A Revise apply error → a short message (the file + reason), best-effort across Revise versions.
 # Snapshot of the keys currently in Revise's (persistent) error queue.
 _qe_keys(R) = try; isdefined(R, :queue_errors) ? Set(collect(keys(R.queue_errors))) : Set{Any}(); catch; Set{Any}(); end
@@ -1926,6 +1962,7 @@ function _start_src_watcher()
             else
                 _LAST_SRC_ERR[] = ""
                 names = _changed_names(queue)
+                _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
                 @info "slate hot-reload: revised" files = length(queue) changed = names
                 isempty(names) || KaimonGate._publish_stream("slate_revise", join(names, ","))
                 _kick_bg_precompile!()   # the on-disk cache is now stale → refresh it in the background (worker log)
@@ -1943,7 +1980,9 @@ function __slate_revise()
     isdefined(Main, :Revise) || return String[]
     queue = try; collect(Main.Revise.revision_queue); catch; Tuple[]; end
     try; Main.Revise.revise(); catch; end
-    return _changed_names(queue)
+    names = _changed_names(queue)
+    _run_revised_inits!(queue, names)   # a dev pkg that (re)defined __init__ → run it (Revise won't)
+    return names
 end
 
 # GateTools exposed to the KaimonSlate server.

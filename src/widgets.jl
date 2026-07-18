@@ -461,6 +461,23 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const slate_refresh = $slate_refresh))
     Core.eval(m, :(const slate_progress = $slate_progress))   # slate_progress(frac; msg) → live cell progress
     Core.eval(m, :(const slate_emit = $slate_emit))           # slate_emit(channel, data) → live push to a cell's custom JS (cellstream:)
+    # code→Slate cell-effects channel: a cell (or a package it calls) DECLARES an effect, attributed to the
+    # executing statement, harvested into the wire (`CellOutput.effects`). `slate_effect` is transport-free
+    # (task-local push, same impl everywhere — unlike slate_emit). Ergonomic sugar: `slate_perside(names…)`
+    # and `@perside <stmt>` (wraps a statement so declaration + effect are ONE statement, attributed right).
+    Core.eval(m, :(const slate_effect = $_slate_effect))      # slate_effect(kind; names=…, data...) → declare a cell effect
+    Core.eval(m, :(slate_perside(names::Symbol...) = slate_effect(:per_side; names = collect(names))))
+    # `@perside <stmt>` — run the statement and declare it per-side in ONE statement (so the declaration is
+    # attributed to it). Injected from source text so the `$(esc(ex))` interpolation defers to macro-EXPANSION
+    # time (a nested `:(… quote … $(…) … end)` would wrongly interpolate at inject time).
+    Core.eval(m, Meta.parse("""
+        macro perside(ex)
+            quote
+                local _r = \$(esc(ex))
+                slate_effect(:per_side)
+                _r
+            end
+        end"""))
     # JS→Julia CALLS — the request/response counterpart to `slate_emit`'s push. A cell registers
     # `slate_on("channel", args -> result)`; browser JS calls `await window.slateCall("channel", args)`.
     # The `__slate_call` worker tool (dispatched off the page WebSocket on the interactive thread) looks

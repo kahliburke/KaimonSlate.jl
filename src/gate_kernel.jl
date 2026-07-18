@@ -761,14 +761,17 @@ function _wire_to_output(wire)
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in wire.binds]
     overflow = hasproperty(wire, :overflow) ? collect(wire.overflow) : Any[]
     animations = hasproperty(wire, :animations) ? collect(wire.animations) : Any[]
+    effects = hasproperty(wire, :effects) ? collect(wire.effects) : Any[]
     return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
                       binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms),
                       collect(wire.trace), String(wire.stderr), overflow, animations,
                       hasproperty(wire, :memo) ? String(wire.memo) : "",
-                      hasproperty(wire, :memo_why) ? String(wire.memo_why) : "")
+                      hasproperty(wire, :memo_why) ? String(wire.memo_why) : "",
+                      effects)
 end
 
-function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string")
+function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
+                      region::AbstractString = "", regions::AbstractVector = String[])
     wire = try
         # prepare! is INSIDE the try: a worker spawn/connect or env-reconstruction failure must
         # surface as this cell's error, NOT propagate up through eval_stale!/sync_from_file! and 500
@@ -776,7 +779,9 @@ function eval_capture(k::GateKernel, report::Report, source::AbstractString, fil
         prepare!(k, report)
         # `filename` is a kwarg on the worker tool — GateTool strips optional POSITIONAL args, so it
         # must ride as a keyword (Dict key → kwarg) to survive the hop. See worker.jl `__slate_eval`.
-        _tool(k, "__slate_eval", Dict("source" => String(source), "filename" => String(filename)); timeout = _eval_timeout())
+        # `ctx_*` seed the worker's task-local Slate execution context (see `_build_slate_ctx`).
+        _tool(k, "__slate_eval", Dict{String,Any}("source" => String(source), "filename" => String(filename),
+              _ctx_args(report, region, regions)...); timeout = _eval_timeout())
     catch e
         return CellOutput("", MimeChunk[], Any[], Any[], BindSpec[], "", sprint(showerror, e), nothing, 0.0)
     end
@@ -786,12 +791,22 @@ end
 # Memo-aware: ask the worker to restore an expensive cell from disk (no recompute) or persist it
 # after a run exceeding `memo.threshold` ms. The key digests this cell + its upstream sources +
 # bind inputs; the worker folds in the Revise'd src + Manifest digests (see worker.jl `__slate_eval`).
-function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo)
-    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename)
+# Build the `ctx_*` tool-args carrying the Slate execution context to the worker: the effective side
+# (`""` = main), the notebook id, and the declared region names — the worker rebuilds the full context
+# (adding its own `slate_emit`) from these. See worker.jl `__slate_eval` / `_build_slate_ctx`.
+_ctx_args(report::Report, region::AbstractString, regions::AbstractVector) = (
+    "ctx_region"   => String(region),
+    "ctx_notebook" => String(report.id),
+    "ctx_regions"  => String[String(r) for r in regions])
+
+function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
+                      region::AbstractString = "", regions::AbstractVector = String[])
+    (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions)
     wire = try
         prepare!(k, report)
         _tool(k, "__slate_eval", Dict{String,Any}(
             "source" => String(source), "filename" => String(filename),
+            _ctx_args(report, region, regions)...,
             "memo_key" => String(memo.key), "memo_names" => collect(String, memo.names),
             "memo_threshold" => Float64(memo.threshold),
             # ▶ force: skip the restore (an explicit play must re-evaluate) but still store the fresh

@@ -59,18 +59,22 @@ struct CellOutput
     animations::Vector{Any}       # animate(…) payloads (manifest + frame/LUT bytes); blob'd server-side
     memo::String                  # durable-cache outcome of this run: "" | "restored" | "stored" | "handle" | "uncacheable"
     memo_why::String              # human reason for a non-caching outcome (handle/uncacheable); "" otherwise
+    effects::Vector{Any}          # cell-DECLARED effects harvested this run — (; kind, names, stmt_src, data) per
+                                  # `slate_effect(...)` call; drives per-side classification + the durable effect store
 end
-# Back-compat constructors (callers that omit trace/stderr, or trace/stderr but not overflow/animations/memo/memo_why).
+# Back-compat constructors (callers that omit trailing fields — trace/stderr through effects — get empty defaults).
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[], Any[], "", "")
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, Any[], "", Any[], Any[], "", "", Any[])
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[], Any[], "", "")
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, Any[], Any[], "", "", Any[])
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, Any[], "", "")
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, Any[], "", "", Any[])
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, "", "")
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, "", "", Any[])
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo) =
-    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, "")
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, "", Any[])
+CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why) =
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, Any[])
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);

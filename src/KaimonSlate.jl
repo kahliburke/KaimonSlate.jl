@@ -29,6 +29,7 @@ import JSON
 include("engine.jl")    # module ReportEngine (+ eval / deps / bind / echarts)
 include("render.jl")    # module ReportRender
 include("slate_home.jl") # module SlateHome — KaimonSlate's own XDG config/data/cache homes
+include("effectstore.jl") # module EffectStore — durable per-cell declared-effect records (sibling of MemoStore)
 include("ledger.jl")    # module PublishLedger — the publish ledger + LedgerStore backends
 include("server.jl")    # module NotebookServer (uses ..ReportEngine, ..ReportRender, ..SlateHome)
 

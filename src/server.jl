@@ -20,6 +20,7 @@ import Pkg
 using ..ReportEngine
 using ..ReportRender
 import ..SlateHome
+import ..EffectStore
 import ..PublishLedger
 
 include("history.jl")   # module SlateHistory — durable content-addressed time machine
@@ -215,6 +216,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # Only overrides the FOOTER value when explicitly given; an empty runon leaves the file's own choice.
     isempty(strip(String(runon))) || (r.meta["runon"] = String(strip(String(runon))))
     build_dependencies!(r)
+    _reestablish_effects!(r)   # durable declared-effects: re-mark PER_SIDE cells before any run (cold-start safe)
     _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it
     # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
@@ -826,6 +828,57 @@ end
 
 _side_kernel!(nb::LiveNotebook, side::AbstractString) =
     isempty(side) ? nb.kernel : _region_kernel!(nb, String(side))
+
+# Tolerant field read of a harvested effect record — a NamedTuple locally, tolerant of a Dict/JSON3 shape.
+_effect_field(e, f::Symbol) = e isa AbstractDict ? get(e, f, get(e, String(f), nothing)) :
+                              (hasproperty(e, f) ? getproperty(e, f) : nothing)
+
+# Interpret a cell's harvested effect declarations (`out.effects`, from the code→Slate channel). v1: a
+# `:per_side` declaration marks the cell PER_SIDE (`_cell_effect`) so `_prime_namespace!` primes it on every
+# region worker — the generic replacement for the `import_scaffold`-piggyback + `_THEME_SENTINEL` special
+# cases. Unknown kinds are ignored (forward-compatible), noted once. Runs under `nb.lock` (mutates c.flags).
+# (Durable cross-session persistence + per-statement replay arrive with the effect store.)
+# Normalise a harvested effect record (NamedTuple, or Dict/JSON3 over the gate) to `(; kind, names, stmt_src)`.
+function _effect_record(e)
+    kind = _effect_field(e, :kind); kind = kind isa AbstractString ? Symbol(kind) : kind
+    names = _effect_field(e, :names); names = names === nothing ? Symbol[] : Symbol[Symbol(n) for n in names]
+    src = _effect_field(e, :stmt_src); src = src === nothing ? "" : String(src)
+    return (; kind = kind, names = names, stmt_src = src)
+end
+
+function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
+    (out === nothing || isempty(out.effects)) && return nothing
+    recs = [_effect_record(e) for e in out.effects]
+    for r in recs
+        if r.kind === :per_side
+            :per_side in c.flags || push!(c.flags, :per_side)
+        elseif r.kind !== nothing
+            ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
+        end
+    end
+    # Persist DURABLY, keyed by the cell's own source digest — so the classification + statement-scoped
+    # records survive a reload / fresh region worker WITHOUT this cell running on main again (see
+    # `_reestablish_effects!`). Best-effort; off the hot path but cheap (one small TOML).
+    try; EffectStore.store!(SlateHome.effects_dir(), string(c.src_hash), recs); catch e
+        ReportEngine._rlog("cell effects: persist for $(c.id) failed: $(first(sprint(showerror, e), 120))")
+    end
+    return nothing
+end
+
+# Re-establish durable effect classifications when a notebook (re)loads — BEFORE any cell runs. For each
+# code cell, load its persisted records (keyed by src digest); a stored `:per_side` re-marks the cell
+# PER_SIDE from t=0, so `_prime_namespace!` primes it on region workers without the declaring cell running
+# on main this session. Dissolves the cold-start gap durably. No-op when nothing is stored.
+function _reestablish_effects!(report)
+    root = SlateHome.effects_dir()
+    for c in report.cells
+        c.kind == CODE || continue
+        recs = try; EffectStore.load(root, string(c.src_hash)); catch; nothing; end
+        recs === nothing && continue
+        any(r -> r.kind === :per_side, recs) && (:per_side in c.flags || push!(c.flags, :per_side))
+    end
+    return nothing
+end
 
 # Read a table spec's declared id, tolerating both JSON3.Object (Symbol keys, as
 # deserialized off the gate) and a plain Dict{String,Any} (server-built specs).
@@ -1816,7 +1869,11 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         (s, cell.src_hash, m, locked)
     end
     out = try
-        ReportEngine.eval_capture(kernel, nb.report, src, "cell:" * cell.id, memo)
+        # `region`/`regions` seed the cell's task-local Slate execution context (`slate_context()`): the
+        # effective side it runs on ("" = main) + the notebook's declared regions. Generic — a region-aware
+        # package reads it to default its own args; no package-specific knowledge lives here.
+        ReportEngine.eval_capture(kernel, nb.report, src, "cell:" * cell.id, memo;
+                                  region = side, regions = _nb_region_names(nb))
     catch e
         ReportEngine.CellOutput("", ReportEngine.MimeChunk[], Any[], Any[], ReportEngine.BindSpec[],
                                 "", sprint(showerror, e), nothing, 0.0)
@@ -1854,6 +1911,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         end
         ReportEngine.mark_result!(c, out)
         c.binds = out.binds
+        _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :per_side classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
         # A successful `locked` run freezes ON this key: persist it (surviving a restart — the
@@ -2082,6 +2140,7 @@ function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::Abstract
         end
         ReportEngine.mark_result!(c, out)
         c.binds = out.binds
+        _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :per_side classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
     end

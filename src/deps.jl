@@ -718,8 +718,12 @@ function _cell_effect(cell)::CellEffect
     cell.kind == CODE || return PURE
     :resource in cell.flags && return RESOURCE
     :volatile in cell.flags && return VOLATILE
-    (_is_pure_using(cell.source) || :import_scaffold in cell.flags || _THEME_SENTINEL in cell.writes) &&
-        return PER_SIDE
+    # `:per_side` — a RUNTIME-DECLARED per-side effect (`slate_effect(:per_side)` harvested from the run,
+    # recorded on the cell by `_apply_cell_effects!`). Generalizes the static `import_scaffold`/theme cases:
+    # a cell that registers process-global state (a custom op, a global config) declares it and is primed
+    # on every region worker — no colocated `using` or hardcoded sentinel needed.
+    (_is_pure_using(cell.source) || :import_scaffold in cell.flags || :per_side in cell.flags ||
+        _THEME_SENTINEL in cell.writes) && return PER_SIDE
     return PURE
 end
 

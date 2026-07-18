@@ -157,14 +157,16 @@ end
 # Run a cell and capture its output. The capture machinery lives in `capture.jl`
 # (shared with the gate worker) and returns a wire-form NamedTuple; here we wrap
 # it into the engine's `CellOutput` (mapping mime tuples → `MimeChunk`).
-function _eval_capture(mod::Module, source::AbstractString, filename::AbstractString = "string")
-    r = run_capture(mod, source, filename)
+function _eval_capture(mod::Module, source::AbstractString, filename::AbstractString = "string"; slate_ctx = nothing)
+    r = run_capture(mod, source, filename; slate_ctx = slate_ctx)
     chunks = MimeChunk[MimeChunk(m, bytes) for (m, bytes) in r.mime]
     binds = BindSpec[BindSpec(b.name, b.kind, b.params, b.value) for b in r.binds]
     overflow = hasproperty(r, :overflow) ? collect(r.overflow) : Any[]   # full results saved to disk (gate worker too)
     animations = hasproperty(r, :animations) ? collect(r.animations) : Any[]
+    effects = hasproperty(r, :effects) ? collect(r.effects) : Any[]
     return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
-                      r.backtrace, r.duration_ms, collect(r.trace), r.stderr, overflow, animations)
+                      r.backtrace, r.duration_ms, collect(r.trace), r.stderr, overflow, animations,
+                      "", "", effects)   # in-process has no memo; effects harvested from the declaration channel
 end
 
 # ── Kernel: the execution backend ─────────────────────────────────────────────
@@ -199,15 +201,19 @@ prepare!(::InProcessKernel, report::Report) = report_module(report)
 "Discard the kernel's namespace (full rebuild); cells are marked stale by the caller."
 reset!(::InProcessKernel, report::Report) = reset_module!(report)
 
-"Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`."
-eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string") =
-    _eval_capture(report_module(report), source, filename)
+"Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`. `region`/`regions`
+seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"\"` ⇒ the main kernel."
+eval_capture(::InProcessKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
+             region::AbstractString = "", regions::AbstractVector = String[]) =
+    _eval_capture(report_module(report), source, filename;
+                  slate_ctx = _build_slate_ctx(report_module(report), report.id, region, regions))
 
 # Memo-aware entry (5-arg `memo` = (; key, names, threshold)). Default: ignore caching and just
 # evaluate — only the gate kernel (real notebooks) implements durable memoization. Keeps in-process
-# and test kernels working unchanged.
-eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo) =
-    eval_capture(k, report, source, filename)
+# and test kernels working unchanged. `region`/`regions` flow through to the execution context.
+eval_capture(k::Kernel, report::Report, source::AbstractString, filename::AbstractString, memo;
+             region::AbstractString = "", regions::AbstractVector = String[]) =
+    eval_capture(k, report, source, filename; region = region, regions = regions)
 
 """
     PendingKernel <: Kernel
@@ -254,10 +260,12 @@ end
 # fallbacks above/elsewhere and need no override here.)
 prepare!(k::PendingKernel, report::Report) = prepare!(_await_real(k), report)
 reset!(k::PendingKernel, report::Report) = reset!(_await_real(k), report)
-eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString = "string") =
-    eval_capture(_await_real(k), report, source, filename)
-eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString, memo) =
-    eval_capture(_await_real(k), report, source, filename, memo)
+eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
+             region::AbstractString = "", regions::AbstractVector = String[]) =
+    eval_capture(_await_real(k), report, source, filename; region = region, regions = regions)
+eval_capture(k::PendingKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
+             region::AbstractString = "", regions::AbstractVector = String[]) =
+    eval_capture(_await_real(k), report, source, filename, memo; region = region, regions = regions)
 complete(k::PendingKernel, report::Report, code::AbstractString, pos::Integer) =
     complete(_await_real(k), report, code, pos)
 assign_bind!(k::PendingKernel, report::Report, name::Symbol, value) =

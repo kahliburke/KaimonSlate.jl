@@ -60,6 +60,80 @@ end
         @test r.cells[1].output.value_repr == "5"
     end
 
+    @testset "Slate execution context (task-local :slate_ctx)" begin
+        # Pure builder: a region cell vs the main kernel. `emit` is the module's own slate_emit.
+        m = Module(:_CtxFixture); Core.eval(m, :(const slate_emit = (c, v) -> (c, v)))
+        ctx = ReportEngine._build_slate_ctx(m, "nb-7", "rega", ["rega", "regb"])
+        @test ctx.region == :rega
+        @test ctx.side == "rega"
+        @test ctx.notebook == "nb-7"
+        @test ctx.regions == [:rega, :regb]
+        @test ctx.emit isa Function
+        main = ReportEngine._build_slate_ctx(m, "nb-7", "", String[])
+        @test main.region === nothing          # nothing on main so a region-only API errors helpfully
+        @test main.side == "" && isempty(main.regions)
+
+        # Integration: a region cell SEES the context mid-eval, and it's CLEARED once eval returns
+        # (never leaks across cells sharing a task — the parallel batch reuses tasks).
+        r = parse_report("#%% code id=x\nCTX = get(task_local_storage(), :slate_ctx, nothing)")
+        ReportEngine.eval_capture(InProcessKernel(), r, r.cells[1].source, "cell:x";
+                                  region = "rega", regions = ["rega", "regb"])
+        got = Base.invokelatest(getfield, ReportEngine.report_module(r), :CTX)
+        @test got !== nothing
+        @test got.region == :rega
+        @test got.notebook == r.id
+        @test got.regions == [:rega, :regb]
+        @test got.emit isa Function
+        @test get(task_local_storage(), :slate_ctx, nothing) === nothing   # no leak after eval
+
+        # A main-kernel cell (no region kwarg) still gets a context, with region = nothing.
+        r2 = parse_report("#%% code id=y\nCTX2 = get(task_local_storage(), :slate_ctx, nothing)")
+        ReportEngine.eval_capture(InProcessKernel(), r2, r2.cells[1].source, "cell:y")
+        got2 = Base.invokelatest(getfield, ReportEngine.report_module(r2), :CTX2)
+        @test got2 !== nothing && got2.region === nothing && got2.side == ""
+    end
+
+    @testset "cell-effects channel (declare → harvest → CellOutput.effects)" begin
+        run1(src) = (r = parse_report("#%% code id=x\n" * src);
+                     eval_report!(r); r.cells[1].output)
+
+        # A bare declaration is harvested with its statement source as the replay unit.
+        o = run1("slate_effect(:per_side; names=[:foo])")
+        @test length(o.effects) == 1
+        @test o.effects[1].kind == :per_side
+        @test o.effects[1].names == [:foo]
+        @test occursin("slate_effect", o.effects[1].stmt_src)
+
+        # Per-statement attribution: the effect is tied to the statement that declared it, NOT the whole cell.
+        o2 = run1("a = 1\nb = 2\nslate_perside(:bar)\nc = 3")
+        @test length(o2.effects) == 1
+        @test o2.effects[1].kind == :per_side && o2.effects[1].names == [:bar]
+        @test occursin("slate_perside", o2.effects[1].stmt_src)
+        @test !occursin("a = 1", o2.effects[1].stmt_src) && !occursin("c = 3", o2.effects[1].stmt_src)
+
+        # `@perside <stmt>` runs the statement AND declares it per-side, attributed to that one statement.
+        o3 = run1("@perside (q = 41)")
+        @test any(e -> e.kind == :per_side, o3.effects)
+        @test o3.value_repr == "41"        # the wrapped statement's value flows through
+
+        # A cell that declares nothing harvests nothing; no task-local leak after eval.
+        o4 = run1("1 + 1")
+        @test isempty(o4.effects)
+        @test get(task_local_storage(), :slate_effects, nothing) === nothing
+        @test get(task_local_storage(), :slate_stmt, nothing) === nothing
+
+        # Dedup: the same declaration on the same statement collapses to one record.
+        o5 = run1("for _ in 1:3; slate_effect(:per_side; names=[:dup]); end")
+        @test count(e -> e.kind == :per_side && e.names == [:dup], o5.effects) == 1
+
+        # A recorded `:per_side` flag classifies the cell PER_SIDE (→ `_prime_namespace!` primes it on
+        # every region worker) — the generic replacement for the import_scaffold/theme special-cases.
+        rc = parse_report("#%% code id=z\n1 + 1"); zc = rc.cells[1]
+        @test ReportEngine._cell_effect(zc) == ReportEngine.PURE
+        push!(zc.flags, :per_side)
+        @test ReportEngine._cell_effect(zc) == ReportEngine.PER_SIDE
+    end
+
     @testset "stdout is captured" begin
         r = parse_report("#%% code id=a\nprintln(\"hello world\")")
         eval_report!(r)
@@ -186,9 +260,10 @@ end
         ReportEngine.reset!(::RecordingKernel, rep) = ReportEngine.reset_module!(rep)
         ReportEngine.assign_bind!(::RecordingKernel, rep, n::Symbol, v) =
             Base.invokelatest(getfield(ReportEngine.report_module(rep), :__slate_set_bind), n, v)
-        function ReportEngine.eval_capture(::RecordingKernel, rep, src::AbstractString, filename::AbstractString = "string")
+        function ReportEngine.eval_capture(::RecordingKernel, rep, src::AbstractString, filename::AbstractString = "string";
+                                           region::AbstractString = "", regions::AbstractVector = String[])
             push!(seen, src)
-            return ReportEngine.eval_capture(InProcessKernel(), rep, src, filename)
+            return ReportEngine.eval_capture(InProcessKernel(), rep, src, filename; region = region, regions = regions)
         end
 
         r2 = parse_report("#%% code id=a\nx = 4\n\n#%% md id=m\n# hi\n\n#%% code id=b\nx + 1")

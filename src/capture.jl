@@ -73,8 +73,35 @@ end
 # wrapper too, so a traced loop works without `local` exactly like an untraced one. Parse errors
 # surface as a catchable `ParseError`. `filename` becomes the backtrace location: the engine passes
 # `"cell:<id>"` so a frame reads `cell:<id>:N` (→ cross-cell error jump); defaults to `"string"`.
-_eval_cell_source(mod::Module, source::AbstractString, filename::AbstractString = "string") =
-    Core.eval(mod, REPL.softscope(Meta.parseall(String(source); filename = String(filename))))
+# Per-statement attribution for the cell-effects channel (see `_slate_effect`): set the task-local
+# "which top-level statement is executing" so a `slate_effect(…)` call made from inside statement `i`
+# (e.g. the `register_op!` a `@defop` expands to) is attributed to THAT statement — whose deparsed
+# source becomes the replay unit in the durable effect store. A trivial inert call; never errors.
+_slate_mark_stmt(i::Int) = (task_local_storage(:slate_stmt, i); nothing)
+
+# Evaluate a cell's `source` the way the REPL does — ONE `Core.eval` of the parsed `:toplevel` block so
+# world-advancement + softscope + last-value semantics are exactly today's — but with a `_slate_mark_stmt`
+# marker spliced before each real top-level statement (original `LineNumberNode`s kept, so backtraces are
+# unchanged; markers inherit the preceding line). The per-statement deparsed sources are stashed in
+# `:slate_stmt_srcs` for the harvest to resolve each declared effect's statement index → its source text.
+function _eval_cell_source(mod::Module, source::AbstractString, filename::AbstractString = "string")
+    ast = Meta.parseall(String(source); filename = String(filename))
+    (ast isa Expr && ast.head === :toplevel) ||
+        return Core.eval(mod, REPL.softscope(ast))   # a single-expr / non-toplevel parse: no per-statement marking
+    srcs = String[]
+    marked = Any[]
+    for a in ast.args
+        if a isa LineNumberNode
+            push!(marked, a)
+        else
+            push!(srcs, string(a))                                   # deparsed statement source (replay unit)
+            push!(marked, Expr(:call, _slate_mark_stmt, length(srcs)))   # mark before running it
+            push!(marked, a)
+        end
+    end
+    task_local_storage(:slate_stmt_srcs, srcs)
+    return Core.eval(mod, REPL.softscope(Expr(:toplevel, marked...)))
+end
 
 # Vector format captured *in addition* to a raster figure, for publication PDF export
 # (fonts embedded, scales crisply). The browser ignores this chunk; only the Typst
@@ -276,8 +303,57 @@ Returns the wire form:
   duration_ms::Float64)`. `binds` are the `@bind` controls declared this eval
 (`(name, kind, params, value)` each), for the host to render.
 """
+# Slate's task-local EXECUTION CONTEXT, exposed to cell code as `task_local_storage()[:slate_ctx]` — a
+# generic `(; region, notebook, side, emit, regions)` any package can read WITHOUT depending on
+# KaimonSlate (a zero-dependency convention: e.g. a region-aware DSL that defaults its `region`/`emit`
+# args from it). `emit` is the module's OWN `slate_emit` (worker → gate stream; in-process → SSE), so a
+# value pushed through it lands on the right transport. `region` is the effective side as a Symbol
+# (`nothing` on the main kernel), `side` its string spelling (`""` = main), `regions` the declared
+# region names. Built on the eval side (only there is the module's live `slate_emit` known).
+# The OUTBOUND half of the seam (code → Slate): a running cell / a package it calls DECLARES an effect
+# ("I established per-side state", "memoize me", …) which the hub harvests and acts on. Transport-free —
+# just pushes to the task-local `:slate_effects` sink, attributed to the executing statement
+# (`:slate_stmt`); `run_capture` resolves the statement index → source and returns the records in the wire.
+# A no-op outside a harvesting eval (no sink), so a package can call it unconditionally.
+function _slate_effect(kind::Symbol; names = Symbol[], data...)
+    sink = get(task_local_storage(), :slate_effects, nothing)
+    sink === nothing && return nothing
+    push!(sink, (; kind = Symbol(kind),
+                   names = Symbol[Symbol(n) for n in names],
+                   stmt = Int(get(task_local_storage(), :slate_stmt, 0)),
+                   data = NamedTuple(data)))
+    return nothing
+end
+
+# Resolve the raw `:slate_effects` records (statement INDEX) against the deparsed statement sources into
+# wire records (`stmt_src` — the replay unit), deduped by (kind, names, stmt_src). Empty when the cell
+# declared nothing. Robust to an out-of-range index (→ "") so a bad marker can't error the harvest.
+function _harvest_effects(raw, srcs::AbstractVector)
+    (raw === nothing || isempty(raw)) && return Any[]
+    out = Any[]; seen = Set{Tuple{Symbol,Vector{Symbol},String}}()
+    for e in raw
+        src = (1 <= e.stmt <= length(srcs)) ? String(srcs[e.stmt]) : ""
+        key = (e.kind, e.names, src)
+        key in seen && continue
+        push!(seen, key)
+        push!(out, (; kind = e.kind, names = e.names, stmt_src = src, data = e.data))
+    end
+    return out
+end
+
+function _build_slate_ctx(mod::Module, notebook::AbstractString, region::AbstractString,
+                          regions::AbstractVector)
+    emit = isdefined(mod, :slate_emit) ? getfield(mod, :slate_emit) : (channel, value) -> nothing
+    return (; region   = isempty(region) ? nothing : Symbol(region),
+              notebook = String(notebook),
+              side     = String(region),
+              emit     = emit,
+              regions  = Symbol[Symbol(r) for r in regions],
+              effect   = _slate_effect)          # code→Slate declaration channel (zero-dep for packages)
+end
+
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
-                     capture::OutputCapture = RedirectCapture())
+                     capture::OutputCapture = RedirectCapture(), slate_ctx = nothing)
     chunks = Tuple{String,Vector{UInt8}}[]
     # Begin output capture (stdout/stderr + display) via the strategy: process-global redirect for the
     # in-process/serial kernel, or task-local demux for the worker's parallel evaluators. The strategy
@@ -288,6 +364,16 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # evaluated cells (the parallel batch) never race on one shared vector. `__slate_bind` (widgets.jl)
     # pushes to `task_local_storage(:__slate_binds)`; bare modules that never bind just leave it empty.
     task_local_storage(:__slate_binds, NamedTuple[])
+
+    # Slate's task-local execution context for THIS eval (see `_build_slate_ctx`). Set here and cleared
+    # in the `finally` so it never leaks across cells that share a task (the parallel batch reuses tasks);
+    # `nothing` ⇒ leave it unset (a plain `run_capture` with no notebook context, e.g. `__slate_interp`).
+    slate_ctx === nothing || task_local_storage(:slate_ctx, slate_ctx)
+
+    # Cell-effects sink (see `_slate_effect`): declarations a cell / a package it calls makes during eval,
+    # attributed to the executing statement. Seeded here, harvested + cleared after the eval — like the
+    # `@bind` sink. `:slate_stmt`/`:slate_stmt_srcs` are (re)set by `_eval_cell_source`'s statement markers.
+    task_local_storage(:slate_effects, Any[])
 
     # `@trace` publishes its row buffer here (one per traced cell). Reset before eval; read after.
     tracesink = isdefined(mod, :__slate_trace_sink) ? getfield(mod, :__slate_trace_sink) : nothing
@@ -311,9 +397,17 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         btrace = catch_backtrace()
     finally
         raw_out, raw_err = _finish_capture!(capture)
+        slate_ctx === nothing || delete!(task_local_storage(), :slate_ctx)   # never outlive this eval
     end
     binds = copy(get(task_local_storage(), :__slate_binds, NamedTuple[]))
     delete!(task_local_storage(), :__slate_binds)
+    # Harvest the cell-effect declarations: resolve each record's statement index → its deparsed source
+    # (the replay unit), dedup by (kind, names, stmt_src). Then clear the eval-scoped task-local keys.
+    effects = _harvest_effects(get(task_local_storage(), :slate_effects, nothing),
+                               get(task_local_storage(), :slate_stmt_srcs, String[]))
+    for k in (:slate_effects, :slate_stmt, :slate_stmt_srcs)
+        haskey(task_local_storage(), k) && delete!(task_local_storage(), k)
+    end
     # Trace rows the cell recorded (empty unless it was `@trace`-wrapped). JSON-safe Dicts, like `tables`.
     trace = (tracesink === nothing || tracesink[] === nothing) ? Any[] : _trace_wire(tracesink[])
     tracesink === nothing || (tracesink[] = nothing)
@@ -402,5 +496,5 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
             duration_ms = dur_ms, trace = trace, stderr = stderr_str, overflow = overflow,
-            animations = animations)
+            animations = animations, effects = effects)
 end
