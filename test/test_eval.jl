@@ -98,23 +98,18 @@ end
                      eval_report!(r); r.cells[1].output)
 
         # A bare declaration is harvested with its statement source as the replay unit.
-        o = run1("slate_effect(:per_side; names=[:foo])")
+        o = run1("slate_effect(:everywhere; names=[:foo])")
         @test length(o.effects) == 1
-        @test o.effects[1].kind == :per_side
+        @test o.effects[1].kind == :everywhere
         @test o.effects[1].names == [:foo]
         @test occursin("slate_effect", o.effects[1].stmt_src)
 
         # Per-statement attribution: the effect is tied to the statement that declared it, NOT the whole cell.
-        o2 = run1("a = 1\nb = 2\nslate_perside(:bar)\nc = 3")
+        o2 = run1("a = 1\nb = 2\nslate_everywhere(:bar)\nc = 3")
         @test length(o2.effects) == 1
-        @test o2.effects[1].kind == :per_side && o2.effects[1].names == [:bar]
-        @test occursin("slate_perside", o2.effects[1].stmt_src)
+        @test o2.effects[1].kind == :everywhere && o2.effects[1].names == [:bar]
+        @test occursin("slate_everywhere", o2.effects[1].stmt_src)
         @test !occursin("a = 1", o2.effects[1].stmt_src) && !occursin("c = 3", o2.effects[1].stmt_src)
-
-        # `@perside <stmt>` runs the statement AND declares it per-side, attributed to that one statement.
-        o3 = run1("@perside (q = 41)")
-        @test any(e -> e.kind == :per_side, o3.effects)
-        @test o3.value_repr == "41"        # the wrapped statement's value flows through
 
         # A cell that declares nothing harvests nothing; no task-local leak after eval.
         o4 = run1("1 + 1")
@@ -123,15 +118,15 @@ end
         @test get(task_local_storage(), :slate_stmt, nothing) === nothing
 
         # Dedup: the same declaration on the same statement collapses to one record.
-        o5 = run1("for _ in 1:3; slate_effect(:per_side; names=[:dup]); end")
-        @test count(e -> e.kind == :per_side && e.names == [:dup], o5.effects) == 1
+        o5 = run1("for _ in 1:3; slate_effect(:everywhere; names=[:dup]); end")
+        @test count(e -> e.kind == :everywhere && e.names == [:dup], o5.effects) == 1
 
-        # A recorded `:per_side` flag classifies the cell PER_SIDE (→ `_prime_namespace!` primes it on
+        # A recorded `:everywhere` flag classifies the cell EVERYWHERE (→ `_prime_namespace!` primes it on
         # every region worker) — the generic replacement for the import_scaffold/theme special-cases.
         rc = parse_report("#%% code id=z\n1 + 1"); zc = rc.cells[1]
         @test ReportEngine._cell_effect(zc) == ReportEngine.PURE
-        push!(zc.flags, :per_side)
-        @test ReportEngine._cell_effect(zc) == ReportEngine.PER_SIDE
+        push!(zc.flags, :everywhere)
+        @test ReportEngine._cell_effect(zc) == ReportEngine.EVERYWHERE
     end
 
     @testset "stdout is captured" begin

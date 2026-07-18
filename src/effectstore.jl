@@ -2,7 +2,7 @@
     EffectStore
 
 Durable, per-cell record of the effects a cell DECLARED via the code→Slate channel (`slate_effect`) —
-so a cell's per-side classification and its statement-scoped re-establishment survive a hub restart /
+so a cell's everywhere classification and its statement-scoped re-establishment survive a hub restart /
 notebook reload WITHOUT the declaring cell having to run on main first this session.
 
 Sibling of `MemoStore`: PURE (stdlib `TOML` only — no gate, no KaimonSlate deps), content-addressed by the

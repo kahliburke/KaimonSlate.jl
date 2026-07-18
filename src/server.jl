@@ -216,7 +216,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # Only overrides the FOOTER value when explicitly given; an empty runon leaves the file's own choice.
     isempty(strip(String(runon))) || (r.meta["runon"] = String(strip(String(runon))))
     build_dependencies!(r)
-    _reestablish_effects!(r)   # durable declared-effects: re-mark PER_SIDE cells before any run (cold-start safe)
+    _reestablish_effects!(r)   # durable declared-effects: re-mark EVERYWHERE cells before any run (cold-start safe)
     _note_server_write!(rid, hash(serialize_report(r)))   # the as-opened state is OURS — a watcher
                                                           # tick reading it must not "revert" to it
     # Any self-contained `.jl`: open INSTANTLY and reconstruct + run the env in the BACKGROUND
@@ -834,7 +834,7 @@ _effect_field(e, f::Symbol) = e isa AbstractDict ? get(e, f, get(e, String(f), n
                               (hasproperty(e, f) ? getproperty(e, f) : nothing)
 
 # Interpret a cell's harvested effect declarations (`out.effects`, from the code→Slate channel). v1: a
-# `:per_side` declaration marks the cell PER_SIDE (`_cell_effect`) so `_prime_namespace!` primes it on every
+# `:everywhere` declaration marks the cell EVERYWHERE (`_cell_effect`) so `_prime_namespace!` primes it on every
 # region worker — the generic replacement for the `import_scaffold`-piggyback + `_THEME_SENTINEL` special
 # cases. Unknown kinds are ignored (forward-compatible), noted once. Runs under `nb.lock` (mutates c.flags).
 # (Durable cross-session persistence + per-statement replay arrive with the effect store.)
@@ -850,8 +850,8 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     (out === nothing || isempty(out.effects)) && return nothing
     recs = [_effect_record(e) for e in out.effects]
     for r in recs
-        if r.kind === :per_side
-            :per_side in c.flags || push!(c.flags, :per_side)
+        if r.kind === :everywhere
+            :everywhere in c.flags || push!(c.flags, :everywhere)
         elseif r.kind !== nothing
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end
@@ -866,8 +866,8 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
 end
 
 # Re-establish durable effect classifications when a notebook (re)loads — BEFORE any cell runs. For each
-# code cell, load its persisted records (keyed by src digest); a stored `:per_side` re-marks the cell
-# PER_SIDE from t=0, so `_prime_namespace!` primes it on region workers without the declaring cell running
+# code cell, load its persisted records (keyed by src digest); a stored `:everywhere` re-marks the cell
+# EVERYWHERE from t=0, so `_prime_namespace!` primes it on region workers without the declaring cell running
 # on main this session. Dissolves the cold-start gap durably. No-op when nothing is stored.
 function _reestablish_effects!(report)
     root = SlateHome.effects_dir()
@@ -875,7 +875,7 @@ function _reestablish_effects!(report)
         c.kind == CODE || continue
         recs = try; EffectStore.load(root, string(c.src_hash)); catch; nothing; end
         recs === nothing && continue
-        any(r -> r.kind === :per_side, recs) && (:per_side in c.flags || push!(c.flags, :per_side))
+        any(r -> r.kind === :everywhere, recs) && (:everywhere in c.flags || push!(c.flags, :everywhere))
     end
     return nothing
 end
@@ -967,13 +967,13 @@ end
 # tracked per LIVE kernel against the imports' signature, so it fires once per kernel and again only
 # if the notebook's imports change (a fresh/replaced kernel has a new objectid ⇒ re-primes).
 function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
-    # Cells that ESTABLISH per-side state — pure `using`/`import`, the import scaffold, a `set_theme!`
+    # Cells that ESTABLISH state on every side — pure `using`/`import`, the import scaffold, a `set_theme!`
     # setter — re-run (never transferred) in document order so imports precede a scaffold/effect that
-    # builds on them. This is exactly the `PER_SIDE` category of the single `_cell_effect` classifier
+    # builds on them. This is exactly the `EVERYWHERE` category of the single `_cell_effect` classifier
     # (deps.jl), so the region prime and the memo replay read the SAME definition — a standalone
-    # `set_theme!` can no longer silently miss the region. `RESOURCE` is per-side too but has data
+    # `set_theme!` can no longer silently miss the region. `RESOURCE` runs on every side too but has data
     # deps, so it replays at READ (`_ensure_resource_on!`), not here.
-    env = [c for c in nb.report.cells if ReportEngine._cell_effect(c) == ReportEngine.PER_SIDE]
+    env = [c for c in nb.report.cells if ReportEngine._cell_effect(c) == ReportEngine.EVERYWHERE]
     isempty(env) && return nothing
     sig = hash([c.src_hash for c in env])
     key = (nb.id, _worker_key(k))
@@ -1508,7 +1508,7 @@ end
 # opens ONCE per kernel and is re-opened only if its source changes or the kernel is replaced.
 const _REGION_RESOURCED = Dict{Tuple{String,UInt,UInt},Bool}()
 
-# Establish a `:resource` cell's per-side state (a live DB / file / socket handle) on `dst_k` by
+# Establish a `:resource` cell's per-worker state (a live DB / file / socket handle) on `dst_k` by
 # RE-RUNNING its source there — a live handle can't cross a region boundary (it deserializes to a
 # dangling pointer), so each side opens its OWN. Same reason the memo layer re-inits a resource on
 # restore instead of caching it (`_memoizable`); this is the region analogue, and it mirrors how
@@ -1532,7 +1532,7 @@ function _ensure_resource_on!(nb::LiveNotebook, cell::Cell, dst_k, dst_side::Abs
         end
         (writer === nothing || writer.output === nothing || r in writer.provides) && continue
         if ReportEngine._cell_effect(writer) == ReportEngine.RESOURCE
-            _ensure_resource_on!(nb, writer, dst_k, dst_side; seen)      # a per-side upstream → replay it too
+            _ensure_resource_on!(nb, writer, dst_k, dst_side; seen)      # a per-worker upstream → replay it too
         else
             src_k = _side_kernel!(nb, _cell_side(nb, writer))            # portable input → ship the value
             try
@@ -1569,7 +1569,7 @@ end
 # whose latest WRITER lives on the other kernel, skipped when the writer's freshness token says
 # the destination already holds that exact run's value (dedup makes a re-ship of an unchanged
 # value one round-trip even when the token is lost). A `:resource` writer is the exception — its
-# per-side handle is REPLAYED on the reader (see `_ensure_resource_on!`), never shipped. Runs BEFORE
+# per-worker handle is REPLAYED on the reader (see `_ensure_resource_on!`), never shipped. Runs BEFORE
 # the cell — DAG order guarantees writers already ran. Throws (→ the cell errors) if a value can't cross.
 function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::AbstractString = _cell_region(cell))
     _region_active(nb) || return nothing
@@ -1611,16 +1611,16 @@ function _region_presync!(nb::LiveNotebook, cell::Cell, dst_k; dst_side::Abstrac
         # into the import scaffold (`ylims!`, `Slider`, `Figure`, …) — is NAMESPACE, not data: it's
         # defined on EVERY kernel already (the using-mirror + helper injection). Shipping it errors
         # (assign-to-const, or JLS decode without the package). Only genuine data writes cross.
-        # More broadly: a value WRITTEN BY A PER_SIDE cell (pure `using`, an import SCAFFOLD like
+        # More broadly: a value WRITTEN BY A EVERYWHERE cell (pure `using`, an import SCAFFOLD like
         # `using X; render_graph(…) = …`, a theme setter) is re-established on each side by PRIMING
         # that cell's whole source (`_prime_namespace!`), so a FUNCTION/const it defines must not ship
         # either — such a value lives in the notebook's anonymous `NB` module, which JLS records as
         # `Main.NB.<name>` and the far side (no `Main.NB` binding) can't decode. Priming defines it
         # natively there instead. (Subsumes the old pure-`using` skip.)
-        (r in writer.provides || ReportEngine._cell_effect(writer) == ReportEngine.PER_SIDE) && continue
+        (r in writer.provides || ReportEngine._cell_effect(writer) == ReportEngine.EVERYWHERE) && continue
         src_side = _cell_side(nb, writer)
         src_k = _side_kernel!(nb, src_side)
-        # A `:resource` writer is a live per-side handle (DB / file / socket) — it must NOT cross the
+        # A `:resource` writer is a live per-worker handle (DB / file / socket) — it must NOT cross the
         # wire (it would land as a dangling pointer). Open it on THIS side instead: replay the resource
         # cell's source on `dst_k` so the reader gets its own handle (its upstreams staged inside).
         if ReportEngine._cell_effect(writer) == ReportEngine.RESOURCE
@@ -1911,7 +1911,7 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         end
         ReportEngine.mark_result!(c, out)
         c.binds = out.binds
-        _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :per_side classification)
+        _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
         # A successful `locked` run freezes ON this key: persist it (surviving a restart — the
@@ -2140,7 +2140,7 @@ function server_celldone(nb::LiveNotebook, run_id::AbstractString, cid::Abstract
         end
         ReportEngine.mark_result!(c, out)
         c.binds = out.binds
-        _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :per_side classification)
+        _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
     end
@@ -2159,16 +2159,16 @@ function _reestablish_fresh_namespace!(nb::LiveNotebook)
     try; ReportEngine.prepare!(nb.kernel, nb.report); catch; return nothing; end   # up (bumps ns_gen if fresh)
     wk = _worker_key(nb.kernel)
     lock(_MAIN_GEN_LOCK) do; get(_MAIN_GEN, nb.id, UInt(0)); end == wk && return nothing   # reattach → unchanged
-    # Genuinely re-execute PER_SIDE cells' full source on the main kernel — the SAME mechanism
+    # Genuinely re-execute EVERYWHERE cells' full source on the main kernel — the SAME mechanism
     # `_prepare_region_for_cell!` already uses for region kernels (`_prime_namespace!` is kernel-
     # agnostic: its own idempotency cache is keyed by `(nb.id, _worker_key(k))`, so calling it here
     # is safe and a no-op once already primed for this process). This establishes theme/using/
     # scaffold effects correctly EARLY, ahead of any dependent cell, rather than relying solely on
-    # `_eval_one!`'s memo-restore replay (`_replay_scaffold!`) to catch every PER_SIDE effect —
+    # `_eval_one!`'s memo-restore replay (`_replay_scaffold!`) to catch every EVERYWHERE effect —
     # that replay only recognizes specific syntax forms (imports, `@bind`, a fixed theme-call
-    # whitelist) and can silently miss one it wasn't taught about. PER_SIDE cells still go through
+    # whitelist) and can silently miss one it wasn't taught about. EVERYWHERE cells still go through
     # the ordinary drain below too (full bookkeeping: stats, broadcast, region `using` mirroring) —
-    # a harmless redundant re-run, since PER_SIDE cells are cheap/effect-only by definition.
+    # a harmless redundant re-run, since EVERYWHERE cells are cheap/effect-only by definition.
     try; _prime_namespace!(nb, nb.kernel, ""); catch e
         @debug "slate: main-kernel namespace prime failed" notebook = nb.id exception = e
     end

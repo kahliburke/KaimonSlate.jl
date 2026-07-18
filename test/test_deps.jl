@@ -42,11 +42,11 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         E = ReportEngine
         @test ce(Cell("p", CODE, "y = f(x)")) == E.PURE                    # plain compute → transfer/cache
         pu = Cell("u", CODE, "using LinearAlgebra"); infer_bindings!(pu)
-        @test ce(pu) == E.PER_SIDE                                         # pure `using` → re-run per side
+        @test ce(pu) == E.EVERYWHERE                                         # pure `using` → re-run everywhere
         scaf = Cell("s", CODE, "x = 1"); push!(scaf.flags, :import_scaffold)
-        @test ce(scaf) == E.PER_SIDE                                       # import scaffold → per side
+        @test ce(scaf) == E.EVERYWHERE                                       # import scaffold → everywhere
         thm = Cell("t", CODE, "set_theme!(theme_dark())"); push!(thm.writes, E._THEME_SENTINEL)
-        @test ce(thm) == E.PER_SIDE                                        # theme setter → per side (the regression)
+        @test ce(thm) == E.EVERYWHERE                                        # theme setter → everywhere (the regression)
         res = Cell("r", CODE, "db = DuckDB.DB(p)"); push!(res.flags, :resource)
         @test ce(res) == E.RESOURCE                                        # handle → replay at read
         vol = Cell("v", CODE, "t = rand()"); push!(vol.flags, :volatile)

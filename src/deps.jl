@@ -699,12 +699,12 @@ end
 # ── Cell effect classification ─────────────────────────────────────────────────────────────────
 # ONE source of truth for "what kind of thing does this cell PRODUCE", so the subsystems that decide
 # transfer-vs-rerun (regions) and cache-vs-recompute (memo) can't drift. That drift is a real bug
-# class: the memo layer knew `set_theme!` was per-side (it replays it on restore), but the region
+# class: the memo layer knew `set_theme!` was an everywhere effect (it replays it on restore), but the region
 # prime list didn't — so remote figures silently lost the theme until both were taught it separately.
 # Two orthogonal policies read off this one category:
 #   PURE      a deterministic function of source + inputs   → region: TRANSFER the value; memo: cache it.
-#   PER_SIDE  a process-local EFFECT with no data deps — pure `using`/`import`, the import scaffold, a
-#             `set_theme!`/`update_theme!` setter — self-sufficient, so it RE-RUNS on each side
+#   EVERYWHERE a process-local EFFECT with no data deps — pure `using`/`import`, the import scaffold, a
+#             `set_theme!`/`update_theme!` setter — self-sufficient, so it RE-RUNS on every side
 #             (never shipped) and primes at connect (`_prime_namespace!`); memo replays its source.
 #   RESOURCE  a live handle (DB/socket/file) opened FROM data deps → re-run per side but only once its
 #             inputs are staged, so it REPLAYS at read (`_ensure_resource_on!`); never cached.
@@ -713,17 +713,18 @@ end
 # Order matters: an explicit tag (`resource`/`volatile`) wins over the inferred using/scaffold/theme
 # shape. This is the classifier; each consumer maps a category to its own policy (region ≠ memo axis:
 # VOLATILE transfers but isn't cached, RESOURCE re-runs but isn't cached — hence a taxonomy, not a flag).
-@enum CellEffect PURE PER_SIDE RESOURCE VOLATILE IMPURE
+@enum CellEffect PURE EVERYWHERE RESOURCE VOLATILE IMPURE
 function _cell_effect(cell)::CellEffect
     cell.kind == CODE || return PURE
     :resource in cell.flags && return RESOURCE
     :volatile in cell.flags && return VOLATILE
-    # `:per_side` — a RUNTIME-DECLARED per-side effect (`slate_effect(:per_side)` harvested from the run,
-    # recorded on the cell by `_apply_cell_effects!`). Generalizes the static `import_scaffold`/theme cases:
-    # a cell that registers process-global state (a custom op, a global config) declares it and is primed
-    # on every region worker — no colocated `using` or hardcoded sentinel needed.
-    (_is_pure_using(cell.source) || :import_scaffold in cell.flags || :per_side in cell.flags ||
-        _THEME_SENTINEL in cell.writes) && return PER_SIDE
+    # `:everywhere` — a RUNTIME-DECLARED everywhere effect (`slate_effect(:everywhere)` harvested from the
+    # run, recorded on the cell by `_apply_cell_effects!`). Generalizes the static `import_scaffold`/theme
+    # cases: a cell that registers process-global state (a custom op, a global config) declares it and is
+    # established on every region worker — no colocated `using` or hardcoded sentinel needed. Conceptually
+    # the notebook/region analogue of `Distributed.@everywhere` (run this on every worker).
+    (_is_pure_using(cell.source) || :import_scaffold in cell.flags || :everywhere in cell.flags ||
+        _THEME_SENTINEL in cell.writes) && return EVERYWHERE
     return PURE
 end
 

@@ -734,6 +734,17 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
     # dataflow edges.
     (:opaque in c.flags) && (d["opaque"] = true)
     d["tags"] = sort!(String[string(f) for f in c.flags if f !== :opaque])
+    # Declared cell EFFECTS (the code→Slate channel): a compact list for the effect chip + the
+    # cell-metadata popup — what the cell announced it did to Slate (e.g. a everywhere op registration),
+    # which names it registered, and the statement that did it (deparse line-markers stripped for display).
+    if c.output !== nothing && !isempty(c.output.effects)
+        d["effects"] = [Dict{String,Any}(
+            "kind"  => (hasproperty(e, :kind) ? String(string(e.kind)) : ""),
+            "names" => String[string(n) for n in (hasproperty(e, :names) ? e.names : Symbol[])],
+            "stmt"  => first(strip(replace(String(hasproperty(e, :stmt_src) ? e.stmt_src : ""),
+                                           r"#=.*?=#" => "")), 200))
+            for e in c.output.effects]
+    end
     # Live run statistics (session-scoped, keyed by notebook id) — the DAG heat map + stats card.
     # Only present once the cell has completed at least one run this session.
     if !isempty(nbid)
