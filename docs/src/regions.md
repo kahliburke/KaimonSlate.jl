@@ -13,7 +13,7 @@ about defining a region, assigning cells to it, and how data crosses the boundar
 !!! note "New and evolving (v1)"
     Regions are a recent addition and still stabilizing. The single-worker path — running a *whole*
     notebook [on one host](remotes.md#run-a-notebook-on-a-remote) — is the settled option; per-cell
-    regions add power with the [caveats below](#current-limits-v1).
+    regions add power with the [caveats below](#current-limits).
 
 ## Assigning a cell to a region
 
@@ -31,6 +31,8 @@ You rarely type the tag by hand — three UI paths set it:
 - **The DAG node card's "Run on" picker** — a dropdown on any node in the [DAG pane](dag.md).
 - **Drag a node into a region zone** — when regions exist, the DAG splits into columns (local + one
   per region); drop a cell into a column to run it there.
+
+![The 🏷 tag editor's "Run on" section: radio rows for 💻 local, 🖧 gpu · gpu-box, and 🖧 db · db-box · direct (selected), plus ＋ Add destination…, above the caching/execution tags](./assets/tag-runon.png)
 
 ## Defining a region
 
@@ -66,6 +68,8 @@ notebook uses — you pick from the regions already defined on the front page. T
 the notebook's **`regions`** config footer (so the choice travels with the file); cells then tag
 `region=<name>`. Clearing all destinations brings the whole notebook back to the local kernel.
 
+![The Destinations manager: the regions enabled for this notebook (gpu, db) each with a warm-worker count and a remove button, and a defined-but-not-enabled region (bigmem) with an Enable button](./assets/destinations.png)
+
 !!! tip "Keep a region warm"
     A region with **warm > 0** keeps that many workers booted and idle; running a tagged cell then
     **adopts** a ready worker (~1 s) instead of cold-booting (~90 s). Set the region's `preload` to the
@@ -85,25 +89,15 @@ cell's kernel first, **just in time** — you never move data by hand.
   generation) collapses a repeat to nothing.
 - **Progress is visible.** A transfer past a size threshold drives the cell's own progress bar
   (`⇄ <name>: N/M MB ← host`), so a big move never looks like a hang.
-
-The DAG's **⇄ peer routing plan** shows how each region pair is wired — a resolved *direct* or *ssh-bridge*
-route worker-to-worker, or a *relay* through the hub — plus the per-host grants and host-key pins:
-
-![The peer routing plan panel: resolved routes between regions (gpu ← db direct, db ← gpu ssh-bridge, db ← local relay) and, under MESH, the per-host grants and pinned addresses](./assets/dag-peer-plan.png)
-
-The first time two regions on different hosts need a worker-to-worker link, Slate asks before exchanging
-keys — decline and transfers still work, just relayed through the hub:
-
-![The connect-regions consent dialog: it lists the region pair and hosts to bridge, explains exactly what it installs (an on-host ed25519 key, a locked-down single-port grant, a host-key pin), and offers Not now / Connect & exchange keys](./assets/mesh-consent.png)
-
-The DAG's **📊 transfers** dashboard summarizes every boundary move — total moved, throughput over time, a
-region-to-region grid, and the rate distribution:
-
-![The transfer summary dashboard: stat tiles (total moved, transfer count, average and peak MB/s), a throughput-over-time chart, a region peer-to-peer heatmap, and a rate-distribution curve](./assets/dag-transfers.png)
 - **Live handles aren't shipped.** A cell that produces a live DB connection / socket / open file
   (a [`resource`](cell-tags.md) cell) can't cross the wire — instead its setup is **replayed** on the
   destination so each side opens its own handle. If a live handle would cross, the run stops and names
   the fix: tag the producing cell `resource`.
+
+Where the values actually flow, how fast, and over which link is all visible from the
+[DAG pane](dag.md#steering-regions-from-the-dag) — its **⇄ peer routing plan**, **📊 transfers**
+dashboard, and the **mesh-connect** consent live there. See
+[The Dependency Graph → Steering regions from the DAG](dag.md#steering-regions-from-the-dag).
 
 ## Seeing where cells run
 
@@ -128,7 +122,7 @@ Restart a single region from its worker controls — it kills that region's work
 stale, and re-runs them, leaving the rest of the notebook untouched. Closing the notebook or
 restarting the main worker tears down region kernels too.
 
-## Current limits (v1)
+## Current limits
 
 Regions are powerful but still settling. Today:
 

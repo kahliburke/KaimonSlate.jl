@@ -19,6 +19,26 @@ new setting (the transcript is kept).
 
 ![The Settings modal](./assets/settings.png)
 
+## Notebook config
+
+The **⚙ Settings** above are per-browser and apply to every notebook. **Per-notebook** overrides
+live in a separate panel — **☰ → 🎚 Notebook config**. Each setting starts from your global default
+and can be **pinned to this notebook**; the pinned ones travel *in the `.jl`*, so the notebook
+reopens the same way anywhere.
+
+Typical per-notebook overrides:
+
+- **Worker threads** (`"<compute>,<interactive>"`) and **parallel** cell execution.
+- **Slides** — mark the notebook as a [slide deck](slides.md) and set its options.
+- **Agent model / permissions** — override the global agent defaults for this notebook (permissions
+  are remembered locally and never written to the file).
+- **Autorun** — whether the notebook runs its cells on open.
+
+Where a value crosses into other UI: the notebook's **run location** is the toolbar "Running on"
+picker (whole-notebook placement, [Remotes](remotes.md)), and its **regions** are the
+[Destinations](regions.md#using-a-region-in-a-notebook) it enables — both are saved in the same
+config footer.
+
 ## Serving
 
 The [`slate` app](installation.md) is the normal way to run the hub:

@@ -416,6 +416,12 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # ECharts renders CLIENT-SIDE from the embedded specs below (real charts with data), instead
               # of freezing to a server snapshot that headless exports can't capture.
               "<script src=\"https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js\"></script>",
+              # Same rationale for graph layout: a self-contained client widget mounted in a cell (the
+              # neuro/DAG canvas) carries its own JS + initial payload inline and boots itself, but it needs
+              # `dagre` for layout — which the live app loads globally and a standalone page otherwise lacks,
+              # so the widget bails (blank canvas). Load it here (sync, before the body widget scripts run)
+              # so such widgets FUNCTION in the export instead of being frozen to a snapshot.
+              "<script src=\"https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js\"></script>",
               "<style>", _export_css(palette, code), "</style></head><body><article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the

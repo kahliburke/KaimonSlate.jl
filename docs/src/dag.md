@@ -25,7 +25,7 @@ laid out automatically and updated as you edit and run.
 - **◨ dock** and the **grip** re-side and resize the pane.
 - **🔥 heat map** — color cells by accumulated compute time (hotter = more expensive), to find the
   bottleneck in a pipeline.
-- **🖧 region map** — color cells by *where they run* (see [Regions](#regions)).
+- **🖧 region map** — color cells by *where they run* (see [Regions](#regions-run-cells-on-another-kernel)).
 
 ## Manual edges
 
@@ -45,17 +45,64 @@ and flagged with a **🔗⚠** badge on the cell.
 ## Regions — run cells on another kernel
 
 When a notebook is split into **regions**, some cells run on a second kernel (usually on another
-host) while the rest stay local. The DAG pane is how you *see and steer* that split:
+host) while the rest stay local. The DAG pane is where you **see and steer** that split; the region
+model itself — defining regions, declaring destinations, how boundary values cross — is in
+**[Regions](regions.md)**.
 
-- it lays out **side-by-side zones** — `💻 local` and one per region — and you **drag a cell into a
-  zone** to run it there;
-- the **🖧 region map** toggle colors each node by where it runs (a legend names the hosts), and a
-  node wears a **🖧** badge when its last run executed on a region kernel.
+## Steering regions from the DAG
+
+Turn on the **🖧 region map** and the graph reorganizes into **side-by-side zones** — `💻 local` and
+one per region — with each node tinted by where it runs and the cross-zone edges drawn as the
+boundary hand-offs (labeled by transport: *direct* / *ssh-bridge* / *relay*). **Drag a node between
+zones** to reassign it. A node wears a **🖧** badge when its last run executed on a region kernel,
+and the legend along the bottom names the hosts and hosts the region toolbar.
 
 ![The DAG pane with the region map on: cells laid out in side-by-side zones (local · main kernel, db · db-box, gpu · gpu-box), each node tinted by where it runs, with the region hand-off edges labeled by transport (direct / relay)](./assets/dag-region-map.png)
 
-The full story — assigning cells, declaring destinations, how boundary values cross, and the
-provenance chips — is in **[Regions](regions.md)**.
+**Click any node** for its detail card. For a cell whose last run was remote it shows the
+**provenance**: a *last ran* `🖧 host` chip, a *moved* `⇄ N MB` chip for the inputs that had to
+cross the boundary, a per-transfer breakdown (size · route · throughput), and a **Run on** picker to
+reassign the cell to a different kernel in place.
+
+![A DAG node's detail card for a remote cell: timing chips, a "last ran 🖧 gpu (gpu-box)" chip, a "moved ⇄ 220 MB total" chip, a region-transfers breakdown (size · direct · MB/s), the region= tag, and a "Run on" picker set to gpu · gpu-box](./assets/dag-node-card.png)
+
+Each region **zone header** carries a live status dot — hover it for the region's worker card:
+connection status, host, transport, and CPU / RSS / running-cell telemetry, with **🪵 Log** and
+**✕ Reap** actions.
+
+![A region's worker hover card in the DAG: status OK, host gpu-box, port, transport tunnel, cpu/rss/running/memo chips, and Log / Reap buttons](./assets/region-hover-card.png)
+
+### The region toolbar
+
+The region-map legend hosts three tools for the cross-region plumbing.
+
+**⇄ peer routing plan** — how each region pair is wired: a resolved **direct** or **ssh-bridge**
+route worker-to-worker, or a **relay** through the hub, with per-host grants and host-key pins.
+**↻ recalculate** probes every pair live so throughput and route are measured *now* rather than on
+the next real transfer.
+
+![The peer routing plan panel: resolved routes between regions (gpu ← db direct, db ← gpu ssh-bridge, db ← local relay) with addresses and ages, and per-host grants and pinned addresses under MESH](./assets/dag-peer-plan.png)
+
+![The peer routing plan mid-recalculate: a "testing gpu → db (1/3)…" progress line above the route list as each pair is probed](./assets/dag-peer-plan-probing.png)
+
+**📊 transfers** — a dashboard of every boundary move: total moved, throughput over time, a
+region-to-region grid, and the rate distribution — to see where the data actually flows and how fast.
+
+![The transfer summary dashboard: stat tiles (total moved, transfer count, average and peak MB/s), a throughput-over-time chart, a region peer-to-peer heatmap, and a rate-distribution curve](./assets/dag-transfers.png)
+
+**⇄ connect** — the first time two regions on different hosts need a direct worker-to-worker link,
+Slate asks before exchanging keys (decline and transfers still work — they just relay through the
+hub). The dialog spells out exactly what it installs — an on-host **ed25519 key**, a locked-down
+**single-port grant**, a **host-key pin** — then arms the bridge with live progress.
+
+![The connect-regions consent dialog listing the region pair and hosts, what it installs (ed25519 key, single-port grant, host-key pin), and Not now / Connect & exchange keys buttons](./assets/mesh-consent.png)
+
+![The same dialog mid-connect: an "exchanging keys · gpu → db (1/2)" progress line and a disabled "Connecting…" button](./assets/mesh-connecting.png)
+
+While a value crosses the boundary, the **consuming cell** shows a live progress bar
+(`⇄ <name>: N/M MB ← host`) — driven on its own data channel, so a big move never looks like a hang.
+
+![A running cell with a boundary-transfer progress bar reading "⇄ feat: 79/210 MB ← 🖧 gpu-box · 38%" above the cell](./assets/cell-transfer-progress.png)
 
 ## See also
 
