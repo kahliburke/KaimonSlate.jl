@@ -1214,18 +1214,25 @@ end
 
 # The tail of a worker's LOG — local (read the file the spawn pump writes) or remote (ssh `tail` the
 # worker log on its host). For the worker/region status popups. Best-effort: "" on any miss.
+# Julia prints a benign "…while trying to print a failed Task notice; giving up" line to the worker's
+# raw fd-stderr when one of its OWN loader/precompile background tasks fails and the (custom-bound)
+# stderr can't take a byte-write at that task's loading-time world age (a Base robustness gap, not a
+# worker error). Harmless — the worker survives — but it reads as an alarming "exception/error" in the
+# log popup. Drop it from what we SHOW; the raw `worker-<port>.log` file still keeps it for debugging.
+_is_worker_log_noise(line::AbstractString) = occursin("trying to print a failed Task notice", line)
+
 function worker_log_tail(k::GateKernel; lines::Int = 300)
     lines = clamp(lines, 1, 5000)
     if k.target isa RemoteTarget
         host = k.target.ssh_host
         rlog = "$_REMOTE_WORKER/worker-$(k.port).log"
         ok, out = try; _ssh_capture(host, `tail -n $lines $rlog`); catch; (false, ""); end
-        return ok ? out : ""
+        return ok ? join(Iterators.filter(!_is_worker_log_noise, eachsplit(out, '\n')), "\n") : ""
     end
     p = try; k.logpath; catch; ""; end
     (isempty(p) || !isfile(p)) && return ""
     return try
-        ls = readlines(p)
+        ls = filter(!_is_worker_log_noise, readlines(p))
         join(@view(ls[max(1, length(ls) - lines + 1):end]), "\n")
     catch; ""; end
 end
