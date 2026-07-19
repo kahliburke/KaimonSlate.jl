@@ -366,8 +366,19 @@
     <div class="pubcol">
       <div class="setsec">Sites <span class="pubdim" style="font-weight:400">— a portfolio/blog this notebook belongs to</span></div>
       <div id="pubsites" class="pubpicks"></div>
+      <div class="puboptrow" id="pubopts">
+        <span class="puboptlbl">When publishing:</span>
+        <label title="Embed the reproducible bundle + a launch script so a visitor can run this notebook live (with the AI agent) on their machine"><input type="checkbox" id="pubopt_runnable"/> ▶ Run live (runnable bundle)</label>
+        <label title="Include cell source in the page (uncheck for a clean reading page)"><input type="checkbox" id="pubopt_source" checked/> Include source</label>
+        <label title="Ship the project's full git history in the runnable bundle so a visitor can branch &amp; PR with matching commits (off = source-only snapshot; safer for a public site)"><input type="checkbox" id="pubopt_history"/> Git history</label>
+        <label title="Which cell outputs appear on the page">Outputs <select id="pubopt_outputs"><option value="all">All</option><option value="figures">Figures only</option><option value="none">None</option></select></label>
+        <label title="As-is keeps the notebook's live palette; Light/Dark force one (and re-render native Makie figures to match)">Theme <select id="pubopt_theme"><option value="asis">As-is</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+      </div>
+      <div class="puboptrow" id="pubopts2">
+        <label title="URL path for THIS document under the site (/<path>/). Blank = auto from the title. Re-publishing the same path updates it in place.">Document path <input type="text" id="pubopt_slug" class="pubinp" placeholder="auto from title" autocomplete="off" spellcheck="false" style="font-family:monospace"/></label>
+      </div>
       <div id="pubsitesprog" class="publog" style="display:none;margin-top:8px"></div>
-      <div class="pubdim" style="margin-top:8px;font-size:.74rem">Tick a site to add this notebook; ★ makes it the site's front page; ☁ builds &amp; deploys it. Need theme / a runnable bundle / git history? <a class="publink" href="#" onclick="closePublishing();openWebsiteExport();return false">Advanced website export…</a> · New site or targets? <a class="publink" href="/#publishing" target="_blank" rel="noopener">Publishing manager</a></div>
+      <div class="pubdim" style="margin-top:8px;font-size:.74rem">Tick a site to add this notebook; ★ makes it the site's front page; ☁ builds &amp; deploys it with the options above. New site or targets? <a class="publink" href="/#publishing" target="_blank" rel="noopener">Publishing manager</a> · <a class="publink" href="#" onclick="closePublishing();openWebsiteExport();return false">More export options…</a></div>
     </div>
     <div class="pubcol">
       <div class="setsec">Already published</div>

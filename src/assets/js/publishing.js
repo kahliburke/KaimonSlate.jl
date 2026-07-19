@@ -6,6 +6,7 @@
   'use strict';
   let _view = null;   // ledger view (targets, ghUser)
   let _doc = null;    // this notebook's doc info (docId, slug, events)
+  let _sitesData = null;   // this notebook's per-site membership/front-page state (for the confirm-on-replace check)
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
     c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -16,12 +17,44 @@
   window.openPublishing = openPublishing;
   window.closePublishing = closePublishing;
 
-  async function refresh() { await Promise.all([loadLedger(), loadDoc(), loadSites()]); }
+  async function refresh() { pubRestoreOpts(); await Promise.all([loadLedger(), loadDoc(), loadSites()]); }
+
+  // Publish build options (Run-live bundle / source / git history / theme) — shared with the website
+  // EXPORT dialog via the same localStorage keys, so the two flows stay in sync.
+  function pubBuildOpts() {
+    const ck = id => !!(el(id) && el(id).checked);
+    const val = id => (el(id) && el(id).value) || '';
+    // Theme picker (As-is / Light / Dark) resolves the same way as the export dialog: page-chrome theme,
+    // Slate chart PALETTE, and whether native Makie figures are re-rendered under it (override).
+    const pick = val('pubopt_theme') || 'asis';
+    const t = (typeof _resolveExportTheme === 'function') ? _resolveExportTheme(pick)
+              : { theme: pick === 'light' ? 'light' : 'dark', charttheme: '', override: pick !== 'asis' };
+    const o = { bundle: ck('pubopt_runnable') ? '1' : '0', source: ck('pubopt_source') ? '1' : '0',
+                history: ck('pubopt_history') ? '1' : '0', outputs: val('pubopt_outputs') || 'all',
+                theme: t.theme, charttheme: t.charttheme || '', override: t.override ? '1' : '0',
+                slug: (el('pubopt_slug') && el('pubopt_slug').value.trim()) || '' };
+    try {
+      localStorage.setItem('slate_siterunnable', o.bundle); localStorage.setItem('slate_sitesource', o.source);
+      localStorage.setItem('slate_sitehistory', o.history); localStorage.setItem('slate_sitetheme', pick);
+      localStorage.setItem('slate_siteoutputs', o.outputs);
+    } catch (e) {}
+    return o;
+  }
+  function pubRestoreOpts() {
+    const g = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+    const set = (id, v) => { const e = el(id); if (e && v != null) e.checked = v === '1'; };
+    const sel = (id, v) => { const e = el(id); if (e && v) e.value = v; };
+    set('pubopt_runnable', g('slate_siterunnable')); set('pubopt_source', g('slate_sitesource'));
+    set('pubopt_history', g('slate_sitehistory'));
+    sel('pubopt_theme', g('slate_sitetheme')); sel('pubopt_outputs', g('slate_siteoutputs'));
+  }
 
   // ── Sites: this notebook's membership + front-page state across every site ───────────────────────
   async function loadSites() {
     let d = null;
     try { d = await api('GET', '/api/publish/sites'); } catch (e) {}
+    _sitesData = (d && d.sites) || [];
+    const slugIn = el('pubopt_slug'); if (slugIn && d && d.slug) slugIn.placeholder = d.slug;   // show the auto path
     renderSites(d);
   }
   function renderSites(d) {
@@ -35,13 +68,17 @@
     }
     box.innerHTML = sites.map(s => {
       const nm = esc(s.name), tgts = (s.targets || []).length ? esc(s.targets.join(', ')) : 'local only';
+      // A site can have ONE front page. If a DIFFERENT notebook already holds it, note who — ★ replaces it.
+      const otherHome = (s.hasHome && s.homeTitle) ? s.homeTitle : '';
+      const starTitle = otherHome ? ('Make this the front page — replaces “' + otherHome + '”') : 'Make this notebook the site’s front page (home)';
       return '<div class="pubsite' + (s.member ? ' is-member' : '') + '">'
         + '<label class="pubpick" style="flex:1" title="Add/remove this notebook to the site">'
         + '<input type="checkbox" ' + (s.member ? 'checked' : '') + ' onchange="pubToggleMember(\'' + nm + '\', this.checked)"/>'
         + '<span class="publ">' + esc(s.title || s.name) + '</span> <span class="pubdim">' + tgts + '</span></label>'
-        + '<label class="pubpick" title="Make this notebook the site’s front page (home)" style="opacity:' + (s.member ? '1' : '.4') + '">'
+        + '<label class="pubpick" title="' + esc(starTitle) + '" style="opacity:' + (s.member ? '1' : '.4') + '">'
         + '<input type="checkbox" ' + (s.isHome ? 'checked' : '') + (s.member ? '' : ' disabled')
         + ' onchange="pubToggleHome(\'' + nm + '\', this.checked)"/> ★ front page</label>'
+        + (otherHome ? '<span class="pubdim" style="font-size:.72rem" title="Current front page">↩ ' + esc(otherHome) + '</span>' : '')
         + (s.member ? '<button class="pubmini" onclick="pubPublishSite(\'' + nm + '\')">☁ Publish</button>' : '')
         + (s.url ? ' <a class="publink" href="' + esc(s.url) + '" target="_blank" rel="noopener">open ↗</a>' : '')
         + '</div>';
@@ -53,6 +90,13 @@
     loadSites();
   };
   window.pubToggleHome = async function (site, on) {
+    // Replacing an existing (different) front page is destructive to that notebook's home role — confirm.
+    if (on) {
+      const s = (_sitesData || []).filter(x => x.name === site)[0];
+      if (s && s.hasHome && s.homeTitle && !await confirmDark('“' + s.homeTitle + '” is currently the front page of “' + (s.title || site) + '”. Make this notebook the front page instead?', 'Replace front page')) {
+        loadSites(); return;
+      }
+    }
     try { await api('POST', '/api/publish/site-home', { site: site, home: on }); }
     catch (e) { toast('Could not update front page', 4000, 'warn'); }
     loadSites();
@@ -63,7 +107,13 @@
     log.style.display = 'block'; log.innerHTML = '';
     const line = (t, c) => { const n = document.createElement('div'); n.className = 'publogln ' + (c || ''); n.textContent = t; log.appendChild(n); log.scrollTop = log.scrollHeight; return n; };
     line('Publishing into ' + site + '…', 'st');
-    const es = new EventSource(_apipath('/api/site-publish') + '?site=' + encodeURIComponent(site));
+    const o = pubBuildOpts();
+    const q = new URLSearchParams({ site: site, theme: o.theme, source: o.source, bundle: o.bundle,
+                                    history: o.history, outputs: o.outputs });
+    if (o.charttheme) q.set('charttheme', o.charttheme);
+    if (o.override === '1') q.set('override', '1');
+    if (o.slug) q.set('slug', o.slug);
+    const es = new EventSource(_apipath('/api/site-publish') + '?' + q.toString());
     es.addEventListener('status', e => line(e.data, 'st'));
     es.addEventListener('log', e => line(e.data));
     es.addEventListener('done', e => { es.close(); let d = {}; try { d = JSON.parse(e.data); } catch (_) {} line(d.ok !== false ? '✓ Published' : '✗ Failed', d.ok !== false ? 'ok' : 'err'); loadSites(); });

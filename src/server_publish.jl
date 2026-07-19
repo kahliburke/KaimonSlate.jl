@@ -64,13 +64,29 @@ function notebook_docid(nb::LiveNotebook)
         okorg, origin = _git_run(dir, `git config --get remote.origin.url`)
         (okorg && !isempty(strip(origin))) && (sourceRepo = _repo_slug(origin))
     end
-    id = String(get(nb.report.meta, "docid", ""))
+    return (; docId = _ensure_docid!(nb), sourceRepo = sourceRepo, sourcePath = sourcePath)
+end
+
+# A canonical RFC-4122 v4 UUID string, without pulling in the UUIDs stdlib as a dep.
+function _uuid4_str()
+    b = rand(UInt8, 16)
+    b[7] = (b[7] & 0x0f) | 0x40      # version 4
+    b[9] = (b[9] & 0x3f) | 0x80      # variant 1 (RFC 4122)
+    h = bytes2hex(b)
+    return string(h[1:8], '-', h[9:12], '-', h[13:16], '-', h[17:20], '-', h[21:32])
+end
+
+# Lazily assign + persist the notebook's stable, file-carried identity (the Slate.config `docid`) if it
+# has none yet, and return it. Called on OPEN (silent upgrade) and at publish, so every notebook that's
+# been touched carries an id that publish/sync key off — independent of path/slug/title.
+function _ensure_docid!(nb::LiveNotebook)
+    id = strip(String(get(nb.report.meta, "docid", "")))
     if isempty(id)
-        id = string("nb_", bytes2hex(rand(UInt8, 12)))     # stable, file-carried identity
-        nb.report.meta["docid"] = id
+        id = _uuid4_str()
+        nb.report.meta["docid"] = String(id)
         try; _persist!(nb); catch e; @warn "slate: could not persist docid" exception = e; end
     end
-    return (; docId = id, sourceRepo = sourceRepo, sourcePath = sourcePath)
+    return String(id)
 end
 
 # Ensure a Document exists for `nb` in `ledger`, refreshing its slug/title/source metadata; returns
@@ -251,6 +267,15 @@ function _site_public_url(led, s)
     return ""
 end
 
+# Does site-manifest entry `d` (a doc or the homeDoc) correspond to notebook `nb`? Exact match on the
+# notebook's STABLE `docid` — the file-carried identity (`report.meta["docid"]`, in the Slate.config
+# footer) recorded into the entry at build time. No path/slug/title heuristics: identity is the id.
+function _doc_entry_is(nb::LiveNotebook, d)
+    d isa AbstractDict || return false
+    eid = strip(String(get(d, "id", "")))
+    return !isempty(eid) && eid == strip(String(get(nb.report.meta, "docid", "")))
+end
+
 "For THIS notebook: every site with `{member, isHome, targets, url}`, plus the known targets — the read
 model the notebook's Publish panel paints. Membership is matched by the site build's recorded source
 path (slug as a fallback for pre-migration builds); front page is the site's built home (`site_frontpage`)."
@@ -261,16 +286,15 @@ function publish_sites_info(nb::LiveNotebook)
     path = abspath(nb.path)
     sites = Any[]
     for s in values(led.sites)
-        member = any(site_docs(s.name)) do d
-            d isa AbstractDict || return false
-            src = String(get(d, "source", ""))
-            (String(get(d, "slug", "")) == slug) || (!isempty(src) && abspath(src) == path)
-        end
+        member = any(d -> _doc_entry_is(nb, d), site_docs(s.name))
         fp = site_frontpage(s.name)
         isHome = fp.home && !isempty(fp.homePath) && abspath(fp.homePath) == path
         push!(sites, Dict{String,Any}("name" => s.name,
             "title" => isempty(strip(s.title)) ? s.name : s.title,
             "targets" => copy(s.targets), "member" => member, "isHome" => isHome,
+            # Whether the site ALREADY has a front page, and which notebook — so the UI can warn that
+            # ticking ★ here will replace it (a site has exactly one front page).
+            "hasHome" => fp.home, "homeTitle" => isHome ? "" : String(fp.homeTitle),
             "url" => _site_public_url(led, s)))
     end
     sort!(sites; by = d -> lowercase(String(d["name"])))
@@ -395,12 +419,10 @@ end
 # notebooks were re-exported. Best-effort per member — one failed rebuild is logged, the rest proceed.
 function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; on_event = nothing)
     man = _read_site_manifest(dir)
-    # Match members to open notebooks by source path; fall back to slug so a manifest written before
-    # `source` was recorded (pre-migration) still resolves without a one-off re-publish.
-    live_by_path, live_by_slug = lock(hub.lock) do
-        nbs = collect(values(hub.notebooks))
-        (Dict(abspath(nb.path) => nb for nb in nbs), Dict(doc_slug(nb) => nb for nb in nbs))
-    end
+    # Match members to open notebooks by source path, then slug, then TITLE (see `_doc_entry_is`) — so a
+    # manifest written before `source` was recorded, or under a CUSTOM slug, still resolves to its open
+    # notebook without a one-off re-publish.
+    nbs = lock(hub.lock) do; collect(values(hub.notebooks)); end
     say(msg) = on_event === nothing || on_event(0, :status, msg)
     note(msg) = on_event === nothing || on_event(0, :log, msg)
     members = Any[]
@@ -411,10 +433,9 @@ function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; o
         push!(members, (; slug = String(get(d, "slug", "")), entry = d))
     end
     for m in members
-        src = String(get(m.entry, "path", get(m.entry, "source", "")))
         title = String(get(m.entry, "title", isempty(m.slug) ? "front page" : m.slug))
-        nb = isempty(src) ? nothing : get(live_by_path, abspath(src), nothing)
-        nb === nothing && !isempty(m.slug) && (nb = get(live_by_slug, m.slug, nothing))
+        idx = findfirst(nb -> _doc_entry_is(nb, m.entry), nbs)
+        nb = idx === nothing ? nothing : nbs[idx]
         if nb === nothing
             note("• $title — no open notebook to rebuild from, keeping last build")
             continue
@@ -426,6 +447,8 @@ function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; o
                            bundle = get(b, "bundle", false) === true,
                            history = get(b, "history", false) === true,
                            theme = String(get(b, "theme", "dark")),
+                           charttheme = String(get(b, "charttheme", "")),
+                           override = get(b, "override", false) === true,
                            outputs = String(get(b, "outputs", "all")),
                            include_source = get(b, "source", true) === true)
         catch e
@@ -737,7 +760,8 @@ function _sse_site_publish(stream::HTTP.Stream, h::Hub)
     nb === nothing && return _sse_stream(stream, _oe -> error("no such notebook: $id"))
     isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
     bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
-             theme = get(q, "theme", "dark"), outputs = get(q, "outputs", "all"),
+             theme = get(q, "theme", "dark"), charttheme = get(q, "charttheme", ""),
+             override = get(q, "override", "0") == "1", outputs = get(q, "outputs", "all"),
              include_source = get(q, "source", "1") == "1", bundle = get(q, "bundle", "0") == "1",
              history = get(q, "history", "0") == "1")
     _sse_stream(stream, on_event -> publish_to_site!(nb, String(site); on_event = on_event, bopts...))

@@ -2040,6 +2040,8 @@ function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = 
         return id
     end
     _persist_registry!(h)        # remember id→path so a restart can lazily re-open it
+    nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+    nb === nothing || _ensure_docid!(nb)     # silent lazy upgrade: stamp the stable `docid` if the file has none
     return id
 end
 
