@@ -148,3 +148,8 @@ Changing a control posts the new value to its defining cell, which restales and 
 readers (see [Reactive Cells](reactivity.md)). While you drag, updates are rate-limited and
 coalesced so the kernel isn't flooded; releasing flushes the final value. Every widget bound
 to the same variable — strip copies included — stays in lockstep.
+
+## Custom widgets
+
+Not enough with the built-ins? You can register your own widget type in JavaScript and bind it with
+`@bind x custom_widget("kind")` — see [Front-end Extensions](frontend-extensions.md).

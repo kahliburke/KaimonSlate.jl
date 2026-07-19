@@ -124,6 +124,7 @@ export default withMermaid(defineConfig({
           { text: 'Charts', link: '/visualization' },
           { text: 'Tables', link: '/tables' },
           { text: 'Animation', link: '/animation' },
+          { text: 'Front-end Extensions', link: '/frontend-extensions' },
           { text: 'Documents & Citations', link: '/documents' },
           { text: 'Slides & Present', link: '/slides' },
           { text: 'The AI Agent', link: '/agent' },

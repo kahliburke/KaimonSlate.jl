@@ -95,7 +95,6 @@ rows = @asset "data/measurements.csv"    # re-reads + recomputes when the file c
 - Paths resolve against the notebook's project dir, so an exported [self-contained
   `.jl`](export.md#self-contained-single-source-jl) or a published page carries them.
 
-!!! tip "Front-end modules — `@use`"
-    Advanced: `@use "name" => "url"` declares an ES-module import-map entry, merged into the page's
-    single import map so front-end JavaScript (loaded via `@asset`) can `import` it. Used for custom
-    in-page widgets and [portfolio](publishing.md) front-page scripts.
+!!! tip "Front-end code — `@use`, `WebPage`, `slateCall`"
+    Beyond files, a notebook can ship its own JavaScript, import ES modules with `@use`, call Julia
+    from the browser, and register custom widgets. See [Front-end Extensions](frontend-extensions.md).
