@@ -35,7 +35,7 @@ launcher for every notebook, and where you open or upload a document:
 
 Open one and you're in the notebook itself:
 
-![A KaimonSlate notebook: code, a slider widget, an inline ECharts chart, a table, and an error cell](./assets/overview.png)
+![A KaimonSlate notebook: a title, a frequency slider and toggle, and a live ECharts chart that redraws as you change them](./assets/hero.png)
 
 ## Add and run a cell
 
