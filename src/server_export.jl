@@ -842,7 +842,7 @@ end
 # a server-side raster (CairoMakie `image/png`), an interactive chart, or an animation. A plain
 # text/value cell has none of these; its browser snapshot is just a picture of the printed output
 # (e.g. a one-line string), which must NOT be mistaken for a figure when picking the og:image.
-function _cell_has_figure(c::Cell)
+function _cell_has_og_figure(c::Cell)
     o = c.output
     o === nothing && return false
     any(ch -> ch.mime == "image/png", o.display) && return true
@@ -855,7 +855,7 @@ function _first_figure_png(nb::LiveNotebook)
     for c in nb.report.cells
         c.kind == CODE || continue
         (:collapsed in c.flags) && continue
-        _cell_has_figure(c) || continue        # skip text/value cells — only real figures qualify
+        _cell_has_og_figure(c) || continue     # skip text/value cells — only real figures qualify
         img = cell_image(nb, c.id)
         img === nothing || return img
     end
