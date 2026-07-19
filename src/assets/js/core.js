@@ -189,6 +189,33 @@ window.Slate.assetPaths = function () {
   ((window.__slateState || {}).cells || []).forEach(_registerAssets);
   return Object.keys(window.__slateAssets);
 };
+// The runtime a web cell's `@web(...)` <script> calls: `Slate.runFragment(document.currentScript, fn)`.
+// It hands the fragment its own `root` (the cell's output element, captured from the running script) and
+// an `echo(...)` that prints a line into the cell (a `.weblog` block) plus the console; runs `fn(root,
+// echo)`; and renders any thrown/rejected error ONTO the cell (a `.web-err` block) so a broken fragment
+// shows why instead of going blank. Living here — normal JS — is why the macro emits one line, not a
+// blob; `root` scoping means no `getElementById` and no cross-cell id clashes. Mirrored in the static
+// export so a fragment behaves the same offline.
+window.Slate.runFragment = function (scriptEl, fn) {
+  const root = scriptEl && scriptEl.parentElement;
+  const echo = function () {
+    let g = root && root.querySelector('.weblog');
+    if (root && !g) { g = document.createElement('pre'); g.className = 'weblog'; root.appendChild(g); }
+    const line = Array.prototype.map.call(arguments, a =>
+      typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch (_) { return String(a); } })()
+    ).join(' ');
+    if (g) g.textContent += line + '\n';
+    try { console.log.apply(console, arguments); } catch (_) {}
+  };
+  Promise.resolve().then(() => fn(root, echo)).catch(function (e) {
+    console.error(e);
+    try {
+      const b = document.createElement('pre'); b.className = 'web-err';
+      b.textContent = '⚠ ' + ((e && e.stack) || e);
+      (root || document.body).appendChild(b);
+    } catch (_) {}
+  });
+};
 // Slate `height=`/`width=` chart kwargs ride as `__size` — apply to the chart's DIV (a number is
 // px; any CSS length string passes through), then let the instance re-measure. No-op when unchanged.
 function _applySize(el, inst, s) {

@@ -855,24 +855,17 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
             end
             isempty(chunks) ? "" : length(chunks) == 1 ? chunks[1] : Expr(:call, :string, chunks...)
         end
-        # Scope the JS in an async IIFE and hand it `root` — the cell's own output element (captured
-        # synchronously into `__r` from `document.currentScript`, valid because `runScripts` revives each
-        # script as a live element; kept in a closure the catch can reach, since `currentScript` is null
-        # by the time an async rejection fires). This (1) gives declarations their own scope so a top-level
-        # `const`/`let` can't collide across the re-runs of a reactive render, (2) permits top-level
-        # `await` (e.g. `await import(…)`, `await Slate.asset(…)`), and (3) lets a widget render into
-        # `root`/`root.querySelector(…)` — scoped, no `getElementById`, no cross-cell id collisions. A
-        # runtime error (failed import, thrown init, bad data) is rendered ONTO the cell (a `.web-err`
-        # block in its output) as well as logged, so a broken fragment shows why instead of silently going
-        # blank. (A JS *syntax* error can't be caught here — the script never parses — so it stays a
-        # console error.)
+        # Hand the JS off to the frontend runtime `Slate.runFragment` (core.js — the mirror lives in the
+        # static export too). It gives the fragment its own `root` (the cell's output element), an
+        # `echo(...)` printer, a private scope (so a top-level `const`/`let` can't collide across the
+        # re-runs of a reactive render), top-level `await` (`await import(…)`, `await Slate.asset(…)`), and
+        # renders any thrown/rejected error ONTO the cell. The macro emits just the CALL — the runtime is
+        # real, maintainable JS, not a string blob. (A JS *syntax* error can't be caught — the script never
+        # parses — so it stays a console error.)
         jsx = secexpr(:js)
         jsx = (jsx isa AbstractString && isempty(jsx)) ? "" :
               Expr(:call, :string,
-                   "(function(){var __r=document.currentScript&&document.currentScript.parentElement;" *
-                   "(async function(root){\n", jsx,
-                   "\n})(__r).catch(function(e){console.error(e);try{var b=document.createElement('pre');" *
-                   "b.className='web-err';b.textContent='⚠ '+((e&&e.stack)||e);(__r||document.body).appendChild(b);}catch(_){}});})();")
+                   "Slate.runFragment(document.currentScript, async function(root, echo){\n", jsx, "\n});")
         Expr(:call, :WebPage, Expr(:parameters,
             Expr(:kw, :html, secexpr(:html)),
             Expr(:kw, :css,  secexpr(:css)),

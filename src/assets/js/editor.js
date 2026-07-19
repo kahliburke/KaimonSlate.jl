@@ -10,6 +10,7 @@
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
           htmlLang, cssLang, jsLang, jsEmbed, scopeCompletionSource, localCompletionSource,
+          syntaxErrorLinter,
 
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
           completionStatus, startCompletion, acceptCompletion, snippet } = CM;
@@ -338,10 +339,12 @@
   };
   window.edSetText = (id, s) => {
     const w = window.webEditors && window.webEditors[id];
-    if (w) {                                              // external/agent edit → split back into the 3 panes
+    if (w) {                                              // external/agent edit → split back into the panes
       const p = window._webSections(s);
       for (const k of ['html', 'css', 'js']) {
-        const v = w.panes[k]; if (v && v.state.doc.toString() !== (p[k] || '')) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: p[k] || '' } });
+        const val = p[k] || '';
+        if (!w.panes[k] && val.trim() && w.addPane) w.addPane(k, val);   // a section that arrived → mount its pane
+        const v = w.panes[k]; if (v && v.state.doc.toString() !== val) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: val } });
       }
       return;
     }
@@ -545,6 +548,10 @@
         indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ...lang,
+        // Web panes: inline syntax-error diagnostics (a red underline) as you type, so a typo like
+        // `for x of …` is caught at author time instead of a cryptic runtime console error. No lint
+        // GUTTER — it would reserve a left column the other (gutterless) Slate editors don't have.
+        ...(webLang ? [syntaxErrorLinter] : []),
         // Markdown editors complete citations + fenced code only (never prose); code cells get Julia.
         // Don't pop the completion list WHILE typing — only after a brief pause — so it stops
         // flickering on/off mid-word (and Tab-to-indent can't accidentally land on a just-opened

@@ -90,12 +90,11 @@ end
         @test !occursin("</script>", wp.js)      # escaped — can't break out of the <script>
     end
 
-    @testset "JS wrapped in async IIFE receiving `root`" begin
+    @testset "JS handed to Slate.runFragment(root, echo)" begin
         wp = eval_web((n = 1,); js = "root.textContent = {{ n }};")
-        @test occursin("async function(root)", wp.js)         # own scope + top-level await
-        @test occursin("document.currentScript", wp.js)       # root = the cell's output element
-        @test occursin(".catch(", wp.js)                      # rejections surfaced, not swallowed
-        @test occursin("web-err", wp.js)                      # a runtime error renders ONTO the cell
+        @test occursin("Slate.runFragment(", wp.js)               # the frontend runtime (root/echo/error live in core.js)
+        @test occursin("document.currentScript", wp.js)           # captures the cell's output element
+        @test occursin("async function(root, echo)", wp.js)       # fragment gets `root` + the `echo` printer
     end
 
     @testset "_web_sections / _web_interp_exprs" begin
