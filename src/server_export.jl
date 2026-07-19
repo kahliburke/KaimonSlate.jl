@@ -794,10 +794,36 @@ end
 # ── Site publishing (a hosted web page: index.html + og-image.png) ────────────────────────────
 # The FIRST figure in the notebook as PNG bytes (a display raster or a client-rendered chart's
 # snapshot), or `nothing` if there is none / none captured.
+# A cell counts as a FIGURE for social-preview purposes only when it actually produced a visual —
+# a server-side raster (CairoMakie `image/png`), an interactive chart, or an animation. A plain
+# text/value cell has none of these; its browser snapshot is just a picture of the printed output
+# (e.g. a one-line string), which must NOT be mistaken for a figure when picking the og:image.
+function _cell_has_figure(c::Cell)
+    o = c.output
+    o === nothing && return false
+    any(ch -> ch.mime == "image/png", o.display) && return true
+    isempty(o.echarts) || return true
+    isempty(o.animations) || return true
+    return false
+end
+
 function _first_figure_png(nb::LiveNotebook)
     for c in nb.report.cells
         c.kind == CODE || continue
         (:collapsed in c.flags) && continue
+        _cell_has_figure(c) || continue        # skip text/value cells — only real figures qualify
+        img = cell_image(nb, c.id)
+        img === nothing || return img
+    end
+    return nothing
+end
+
+# An explicit social-preview override: the first code cell tagged `thumbnail` (or `og`) supplies the
+# og:image, whatever it renders — the author's manual choice wins over the automatic figure pick.
+function _tagged_thumbnail_png(nb::LiveNotebook)
+    for c in nb.report.cells
+        c.kind == CODE || continue
+        (:thumbnail in c.flags || :og in c.flags) || continue
         img = cell_image(nb, c.id)
         img === nothing || return img
     end
@@ -836,10 +862,14 @@ end
 """
     og_image(nb) -> Vector{UInt8} | nothing
 
-The social-preview image for the notebook: its first figure, else a generated title card, else
+The social-preview image for the notebook. In priority order: the figure of a cell explicitly
+tagged `thumbnail` (or `og`); else the first real figure in the notebook (a CairoMakie raster,
+chart, or animation — never a snapshot of text/value output); else a generated title card; else
 `nothing`. Used as the `og:image` for a published page.
 """
 function og_image(nb::LiveNotebook)
+    tagged = _tagged_thumbnail_png(nb)
+    tagged === nothing || return tagged    # an explicit `thumbnail`/`og` tag wins outright
     fig = _first_figure_png(nb)
     fig === nothing || return fig          # a real figure short-circuits the (slow) title-card render
     return _title_card_png(nb)
@@ -1214,6 +1244,15 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
                              "binds" => sum(c -> length(c.binds), cs; init = 0),
                              "packages" => pkgs)
     isempty(series) || (entry["series"] = String(series))
+    # Provenance for `sync_site!` to REBUILD this member from its live notebook (Sync = synchronize):
+    # the source `.jl` path (matched against the hub's open notebooks) + the build options this doc was
+    # last published with, so a re-sync reproduces it faithfully instead of shipping the frozen artifact.
+    entry["source"] = abspath(nb.path)
+    bkw = (; kwargs...)
+    entry["build"] = Dict{String,Any}("bundle" => bundle, "history" => history,
+                                      "theme" => String(get(bkw, :theme, "dark")),
+                                      "outputs" => String(get(bkw, :outputs, "all")),
+                                      "source" => get(bkw, :include_source, true) === true)
     return entry
 end
 
@@ -1454,9 +1493,15 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
         manifest["home"] = true
         # Provenance: WHICH notebook is the front page — the manager shows it and links back
         # to the source (before this, the UI could only say "home" with no origin).
+        hkw = (; kwargs...)
         manifest["homeDoc"] = Dict{String,Any}(
             "title" => isempty(strip(fm.title)) ? nb.id : strip(fm.title),
-            "path" => abspath(nb.path))
+            "path" => abspath(nb.path),
+            "build" => Dict{String,Any}("bundle" => bundle,
+                                        "history" => get(hkw, :history, false) === true,
+                                        "theme" => String(get(hkw, :theme, "dark")),
+                                        "outputs" => String(get(hkw, :outputs, "all")),
+                                        "source" => get(hkw, :include_source, true) === true))
         commit_title = "front page — $(isempty(strip(fm.title)) ? nb.id : strip(fm.title))"
         docUrl = su
     else
