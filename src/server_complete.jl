@@ -605,10 +605,31 @@ function _make_router(h::Hub)
         # the file's own choice / the global default. Only applied when the notebook isn't already open.
         # `autorun=false` opens WITHOUT the initial run (cells land STALE) — e.g. to tag a cell `locked`
         # or otherwise edit before anything runs. Also only applied on a fresh open.
+        # `inactive=true` opens DORMANT: show the embedded frozen render, spawn no worker, and wait for a
+        # click on the "Inactive — click to launch" pill (`/api/launch`). The default for downloaded/
+        # uploaded standalones (see run.jl); the author's own files open live.
         id = open_notebook!(h, path; runon = strip(String(get(b, "runon", ""))),
-                            autorun = get(b, "autorun", true) !== false)
+                            autorun = get(b, "autorun", true) !== false,
+                            inactive = get(b, "inactive", false) === true)
         _json(Dict("id" => id, "url" => "/n/$id", "path" => abspath(path)))
     end)
+    # Launch an INACTIVE (dormant) notebook: flip it to hydrating and kick off the standard standalone
+    # bring-up (`_hydrate_standalone!` — reconstruct env, spawn worker, restore locked/memo results, run).
+    # This is what the grey "Inactive — click to launch" pill hits. Idempotent + no-op once active.
+    HTTP.register!(router, "POST", "/api/{id}/launch", req -> _withnb(h, req, nb -> begin
+        launched = lock(nb.lock) do
+            (get(nb.report.meta, "inactive", false) === true) || return false
+            delete!(nb.report.meta, "inactive")
+            nb.report.meta["hydrating"] = true
+            nb.report.meta["hydratingKind"] = "env"
+            nb.version += 1
+            return true
+        end
+        launched || return _json(Dict("ok" => false, "note" => "already active"))
+        try; _broadcast(nb, string(nb.version)); catch; end   # flip the pill + show the banner at once
+        @async _hydrate_standalone!(nb, nb.path)
+        _json(Dict("ok" => true))
+    end))
     # Upload a `.jl` from the browser (the viewing machine) → save it under a persistent uploads dir and
     # return its server path; the front end then opens it via the normal open/import flow. Body: {name, content}.
     HTTP.register!(router, "POST", "/api/upload", req -> begin
@@ -1696,7 +1717,7 @@ _plainify(x) = x
 # Invoke a cell-registered `slate_on` handler on the notebook's kernel and normalize the outcome to a
 # JSON-able reply Dict (`ok`/`value` or `ok=false`/`error`). Never throws — a dead kernel / missing
 # channel / throwing handler all come back as a clean `error` so the browser Promise rejects cleanly.
-function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args)
+function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args, call_id::AbstractString = "")
     args = _plainify(args)   # strip JSON.jl types so ANY worker env can deserialize the request payload
     # A `slate_on` handler lives in the namespace of the kernel its cell RAN ON — under a region that may
     # be a region worker, not the main one. Try the main kernel, then each active region kernel, and use
@@ -1708,7 +1729,7 @@ function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args)
     end)
     lasterr = "no slate_on handler registered for channel '$channel'"
     for k in kernels
-        found, reply = _try_slate_call(nb, k, channel, args)
+        found, reply = _try_slate_call(nb, k, channel, args, call_id)
         found && return reply
         lasterr = get(reply, "error", lasterr)
     end
@@ -1718,24 +1739,29 @@ end
 # Attempt the call on ONE kernel. Returns (found, reply): found=true if this kernel owns the channel
 # (the handler returned a value or threw — either way, that's the answer); found=false only for
 # "no handler here" or an infra hiccup, so the caller tries the next kernel.
-function _try_slate_call(nb::LiveNotebook, k, channel::AbstractString, args)
+function _try_slate_call(nb::LiveNotebook, k, channel::AbstractString, args, call_id::AbstractString = "")
     _nohandler(e) = occursin("no slate_on handler", e) || occursin("handlers unavailable", e)
     try
         if k isa ReportEngine.GateKernel
             r = ReportEngine._tool(k, "__slate_call",
-                    Dict{String,Any}("channel" => String(channel), "args" => args); timeout = 30.0)
+                    Dict{String,Any}("channel" => String(channel), "args" => args, "call_id" => String(call_id)); timeout = 30.0)
             _gf(r, :ok, false) === true &&
                 return (true, Dict{String,Any}("ok" => true, "value" => _gf(r, :value, nothing)))
             err = string(_gf(r, :error, "call failed"))
             return (!_nohandler(err), Dict{String,Any}("ok" => false, "error" => err))
         end
-        # In-process kernel: invoke the handler directly in the report's namespace module.
+        # In-process kernel: invoke the handler directly in the report's namespace module. A 2-arg handler
+        # gets a `progress` closure that pushes on the reserved `__slate_call_progress` emit channel (routed
+        # to the caller's onProgress by call id) — the in-process twin of the worker's progress closure.
         m = ReportEngine.report_module(nb.report)
         hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
         (hs isa AbstractDict) || return (false, Dict{String,Any}("ok" => false, "error" => "call handlers unavailable"))
         f = get(hs, String(channel), nothing)
         f === nothing && return (false, Dict{String,Any}("ok" => false, "error" => "no slate_on handler registered for channel '$channel'"))
-        return (true, Dict{String,Any}("ok" => true, "value" => Base.invokelatest(f, args)))
+        progress = isempty(call_id) ? (p -> nothing) :
+            (p -> ReportEngine._do_emit(nb.report.id, "__slate_call_progress", (id = String(call_id), data = p)))
+        return (true, Dict{String,Any}("ok" => true,
+            "value" => ReportEngine._invoke_slate_handler(f, ReportEngine._slate_args(args), progress)))
     catch e
         return (false, Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300)))
     end
@@ -1895,7 +1921,7 @@ function _ws_calls(stream, nb::LiveNotebook)
                 cid === nothing && continue      # no id ⇒ not a call (a one-way send is reserved for later)
                 ch = string(get(req, "channel", "")); args = get(req, "args", nothing)
                 @async begin
-                    reply = _do_slate_call(nb, ch, args); reply["id"] = cid; reply["t"] = "reply"
+                    reply = _do_slate_call(nb, ch, args, string(cid)); reply["id"] = cid; reply["t"] = "reply"
                     payload = try
                         JSON.json(reply)
                     catch e    # non-JSON-serializable handler result → a clean error, not a client-side timeout
@@ -2011,14 +2037,14 @@ Load the notebook at `path` into the hub (reusing the existing entry if already
 open) and start its file watcher. Returns the hub id (its `/n/<id>` route).
 """
 function open_notebook!(h::Hub, path::AbstractString; threads::AbstractString = "", runon::AbstractString = "",
-                        autorun::Bool = true)
+                        autorun::Bool = true, inactive::Bool = false)
     file = abspath(path)
     id = lock(h.lock) do
         for nb in values(h.notebooks)
             abspath(nb.path) == file && return nb.id
         end
         id = _unique_id(h, file)
-        nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun)
+        nb = load_notebook(file; id = id, threads = threads, runon = runon, autorun = autorun, inactive = inactive)
         h.notebooks[id] = nb
         _start_watcher!(nb)
         return id

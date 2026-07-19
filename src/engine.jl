@@ -19,13 +19,16 @@ import Base64
 
 export Cell, CellOutput, MimeChunk, BindSpec, Report, CellKind, CellState
 export SlateTable, slate_table, SlatePagedTable, slate_query
-export MARKDOWN, CODE, FRESH, STALE, RUNNING, ERRORED
+export MARKDOWN, CODE, WEB, FRESH, STALE, RUNNING, ERRORED
 export parse_report, serialize_report, serialize_cells, source_text, cell_definitions
 export standalone!
 
 # ── Model ────────────────────────────────────────────────────────────────────
 
-@enum CellKind MARKDOWN CODE
+# A web cell's `source` IS a runnable `@web(html"…", css"…", js"…")` skin — so it EVALUATES
+# exactly like a code cell (→ a `WebPage`, captured as HTML). The distinct kind only drives the
+# 3-pane HTML/CSS/JS editor and the `#%% web` serialization token; body handling is verbatim (code).
+@enum CellKind MARKDOWN CODE WEB
 @enum CellState FRESH STALE RUNNING ERRORED   # never-run ≡ STALE
 
 "One representation of a cell's output (MIME-generic display bundle, §7)."
@@ -257,6 +260,8 @@ function _parse_header(rest::AbstractString)
             controls = _parse_controls(tok[10:end])
         elseif tok == "md" || tok == "markdown"
             kind = MARKDOWN
+        elseif tok == "web"
+            kind = WEB
         elseif tok == "code"
             kind = CODE
         else
@@ -507,7 +512,7 @@ end
 
 # ── Serialization ────────────────────────────────────────────────────────────
 
-_kind_token(k::CellKind) = k === MARKDOWN ? "md" : "code"
+_kind_token(k::CellKind) = k === MARKDOWN ? "md" : k === WEB ? "web" : "code"
 
 # Serialize control-strip columns back to the header grammar: single-control
 # columns as bare names, multi-control columns as `[a,b,…]`, columns joined by `,`.

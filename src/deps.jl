@@ -431,16 +431,19 @@ _strip_anon(names) = Iterators.filter(n -> !startswith(String(n), "__ExprExpl_an
 function _infer_bindings_uncached!(cell::Cell)
     empty!(cell.reads); empty!(cell.reads_now); empty!(cell.writes); empty!(cell.mutates); empty!(cell.inputs); empty!(cell.provides)
     delete!(cell.flags, :opaque); delete!(cell.flags, :macrocall)
-    if cell.kind == MARKDOWN
-        # A markdown cell "reads" the free variables of its `{{ expr }}` blocks, so
-        # it joins the reactive graph and re-renders when they change.
-        for e in _md_interp_exprs(cell.source)
+    if cell.kind == MARKDOWN || cell.kind == WEB
+        # A markdown or web cell "reads" the free variables of its `{{ expr }}` blocks, so it joins the
+        # reactive graph and re-renders when they change. (A web cell's source is a `@web(...)` macrocall;
+        # its interpolations live inside string sections, so harvest them here rather than via the CODE
+        # path, which would only see an opaque unknown macro.) Web cells define nothing → no writes.
+        exprs = cell.kind == MARKDOWN ? _md_interp_exprs(cell.source) : _web_interp_exprs(cell.source)
+        for e in exprs
             ast = try; Meta.parse(e); catch; nothing; end
             ast === nothing && continue
             try
                 union!(cell.reads, EE.compute_reactive_node(Expr(:block, ast)).references)
             catch e
-                @debug "deps: markdown {{ }} reactive-node analysis failed" cell = cell.id exception = e
+                @debug "deps: {{ }} reactive-node analysis failed" cell = cell.id kind = cell.kind exception = e
             end
         end
         union!(cell.reads_now, cell.reads)   # interpolations render immediately → all top-level
@@ -766,9 +769,9 @@ function build_dependencies!(report::Report)
     pending_reads = Dict{Symbol,String}() # name → FIRST cell to read it top-level with no prior writer
     priorcode = Set{String}()             # ids of earlier CODE cells — the only legal `needs=` targets
     for c in report.cells
-        if c.kind == MARKDOWN
-            # md cells depend on the writers of their interpolation vars (+ barrier),
-            # but never write, become a barrier, or enter `seen`.
+        if c.kind == MARKDOWN || c.kind == WEB
+            # md/web cells depend on the writers of their interpolation vars (+ barrier), but never
+            # write, become a barrier, or enter `seen`.
             for r in c.reads
                 haskey(writer, r) && push!(c.deps, writer[r])
             end
@@ -783,7 +786,9 @@ function build_dependencies!(report::Report)
             # Static markdown (no `{{ }}` interpolation reads) needs no computation — it renders
             # straight from its source — so it is FRESH, not STALE. Keeps prose from flashing "stale"
             # on open and from sitting stale behind code cells during a run (it never has to wait).
-            isempty(c.reads) && c.state == STALE && (c.state = FRESH)
+            # A web cell is exempt: even with no interpolations it must EVALUATE its `@web(...)` to
+            # produce the `WebPage`, so it stays STALE until run (like code).
+            c.kind == MARKDOWN && isempty(c.reads) && c.state == STALE && (c.state = FRESH)
             continue
         end
         c.kind == CODE || continue

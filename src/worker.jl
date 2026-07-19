@@ -901,14 +901,22 @@ end
 # rides the interactive path and stays responsive even while a compute batch runs. Returns
 # `(; ok, value)` (the hub JSON-encodes `value` for the socket) or `(; ok=false, error)` — a missing
 # channel or a throwing handler is a clean error, never a hang.
-function __slate_call(channel::String, args)
+function __slate_call(channel::String, args; call_id::String = "")
     m = _NS[]
     hs = try; Base.invokelatest(getglobal, m, :__slate_handlers); catch; nothing; end
     (hs isa AbstractDict) || return (; ok = false, error = "call handlers unavailable on this worker")
     f = get(hs, String(channel), nothing)
     f === nothing && return (; ok = false, error = "no slate_on handler registered for channel '$channel'")
+    # A 2-arg handler `(args, progress) -> …` gets a `progress` closure: it streams a frame on the reserved
+    # `__slate_call_progress` emit channel carrying THIS call's id, which the browser routes to the call's
+    # onProgress (no user-visible token). Reuses the slate_emit transport (publish → poller → WS).
+    progress = isempty(call_id) ? (p -> nothing) :
+        (p -> (try
+            KaimonGate._publish_stream("slate_emit", "__slate_call_progress\x1f" *
+                Base64.base64encode(Serialization.serialize, (id = call_id, data = p)))
+        catch; end; nothing))
     try
-        return (; ok = true, value = Base.invokelatest(f, _slate_args(args)))   # Dict → NamedTuple so the handler reads `args.field`
+        return (; ok = true, value = _invoke_slate_handler(f, _slate_args(args), progress))   # Dict → NamedTuple so the handler reads `args.field`
     catch e
         return (; ok = false, error = first(sprint(showerror, e), 400))
     end

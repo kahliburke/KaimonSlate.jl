@@ -240,6 +240,10 @@ body.hyd-preview #runstale, body.hyd-preview #addcellbtn { opacity:.7; }
    interactive plots without the source. */
 /* `!important` needed: CM6's base theme forces `.cm-editor { display:flex !important }`. */
 .cell.codehidden > textarea, .cell.codehidden .cm-editor { display:none !important; }
+/* A web cell's editor is the whole 3-pane block (labelled HTML/CSS/JS panes), so `hidecode` hides
+   that — not just the inner CM editors, which would leave empty labelled frames — showing only the
+   rendered widget. */
+.cell.web.codehidden .webedit { display:none !important; }
 .cellhead .hidecode.on { color:var(--accent); }
 
 /* ── Zen / reading mode ──────────────────────────────────────────────────────────────────────
@@ -597,6 +601,21 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .md > :last-child { margin-bottom:0; }
 .md h1 { font-size:1.7rem; border-bottom:1px solid var(--border); padding-bottom:.2em; }
 .md table { border-collapse:collapse; } .md td,.md th { border:1px solid var(--border); padding:4px 10px; }
+
+/* ── Web cell: 3-pane HTML/CSS/JS editor ── A stack of labelled section editors. Each pane has a small
+   language tab; empty panes stay compact so a JS-only widget isn't three tall boxes. */
+.webedit { display:flex; flex-direction:column; gap:6px; margin:2px 0 4px; }
+.webpane { border:1px solid var(--border); border-radius:6px; overflow:hidden; background:var(--bg2, rgba(255,255,255,.02)); }
+.webpane-label { font:600 10px/1.6 'Cascadia Code','Fira Code',monospace; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted,#8a90a2); padding:2px 8px; background:rgba(127,127,127,.10);
+  border-bottom:1px solid var(--border); user-select:none; }
+.webpane-ed .cm-editor { background:transparent; }
+.webpane-ed .cm-content { padding:4px 0; }
+/* A web fragment's runtime JS error, rendered onto the cell (by the @web async-IIFE catch) instead of
+   only hitting the console — so a broken widget shows why rather than going blank. */
+.web-err { margin:8px 0 0; padding:8px 10px; border-radius:6px; white-space:pre-wrap; overflow-x:auto;
+  background:rgba(255,80,80,.08); border:1px solid rgba(255,80,80,.32); color:#ff9b9b;
+  font:12px/1.5 ui-monospace,'Cascadia Code',monospace; }
 .md code { background:var(--bg3); padding:1px 5px; border-radius:4px; }
 .md .phantom { color:var(--dim); }
 .md .ival { color:var(--val); font-family:'Cascadia Code',monospace; }   /* {{ }} scalar */
@@ -1567,6 +1586,9 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
 .memoq input[type=range] { flex:0 0 42%; accent-color:var(--accent); }
 .memoreadout { color:var(--dim); font-size:.76rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .memoreadout b { color:var(--val); font-weight:600; }
+/* Locked/cached cells always embed regardless of the budget — flag the floor (and heavy pins). */
+.memo-pin { color:var(--val); cursor:help; }
+.memo-pin-heavy { color:var(--warn, #e0a020); font-weight:600; }
 #exportbg .row { position:sticky; bottom:-18px; background:var(--bg2); margin:8px -20px -18px; padding:12px 20px; border-top:1px solid var(--border); z-index:2; }
 /* Themed scrollbars for the publish/manager scroll areas (Firefox + WebKit), matching the dark UI. */
 #exportbg .modal, .publog, .pubmodal, .pubbody, .pubdash, .pdbody { scrollbar-width:thin; scrollbar-color:var(--border) transparent; }

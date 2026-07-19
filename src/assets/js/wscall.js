@@ -14,6 +14,7 @@
   let ws = null, ready = null;            // `ready` resolves when the socket is OPEN; null when there's no live socket
   let seq = 0;
   const pending = new Map();              // correlation id → { resolve, reject }
+  const progressCbs = new Map();          // correlation id → onProgress(frame) (a call with live progress)
   let _reconnT = null;
   function scheduleReconnect() {
     if (_reconnT) return;
@@ -30,6 +31,11 @@
       sock.onmessage = (ev) => {
         let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
         if (m.t === 'emit') {                                 // slate_emit push → the slateOnStream registry
+          if (m.channel === '__slate_call_progress') {        // framework progress → THIS call's onProgress (by id)
+            const d = m.data, cb = d && progressCbs.get(d.id);
+            if (cb) { try { cb(d.data); } catch (_) {} }
+            return;
+          }
           try { window.onCellStream && window.onCellStream(m.channel, m.data); } catch (_) {}
           return;
         }
@@ -61,6 +67,7 @@
         if (ws === sock) { ws = null; ready = null; }
         for (const [, p] of pending) p.reject(new Error('slateCall: socket closed'));   // fail in-flight
         pending.clear();
+        progressCbs.clear();                                  // no more progress can arrive on a dead socket
         scheduleReconnect();                                  // the socket must stay live for the emit stream
       };
       sock.onclose = drop;
@@ -71,19 +78,24 @@
 
   // Call a Julia `slate_on` handler and await its (JSON-serializable) result. Rejects on a throwing
   // handler, an unregistered channel, a timeout, or a dropped socket (just call again — it reconnects).
-  window.slateCall = async function (channel, args) {
+  // `onProgress` (optional): called with each progress frame a 2-arg Julia handler streams via its
+  // `progress(...)` closure during this call — correlated by the call id, framework-side (no token). The
+  // final result is still the resolved value. Progress frames after the reply/timeout are ignored.
+  window.slateCall = async function (channel, args, onProgress) {
     if (!NB_ID) throw new Error('slateCall: no notebook id in the page URL');
     await connect();
     const id = 'c' + (++seq);
+    if (typeof onProgress === 'function') progressCbs.set(id, onProgress);
+    const done = () => progressCbs.delete(id);
     const p = new Promise((resolve, reject) => {
       const to = setTimeout(() => {
-        if (pending.has(id)) { pending.delete(id); reject(new Error('slateCall timed out: ' + channel)); }
+        if (pending.has(id)) { pending.delete(id); done(); reject(new Error('slateCall timed out: ' + channel)); }
       }, CALL_TIMEOUT_MS);
-      pending.set(id, { resolve: (v) => { clearTimeout(to); resolve(v); },
-                        reject:  (e) => { clearTimeout(to); reject(e); } });
+      pending.set(id, { resolve: (v) => { clearTimeout(to); done(); resolve(v); },
+                        reject:  (e) => { clearTimeout(to); done(); reject(e); } });
     });
     try { ws.send(JSON.stringify({ id, channel: String(channel), args: args === undefined ? null : args })); }
-    catch (e) { const q = pending.get(id); if (q) { pending.delete(id); q.reject(e); } }
+    catch (e) { const q = pending.get(id); if (q) { pending.delete(id); done(); q.reject(e); } }
     return p;
   };
 
