@@ -169,3 +169,130 @@ end
     NS._inline_preview_blobs!(nbid, cells3)
     @test occursin("/blob/deadbeef", cells3[1]["output"])
 end
+
+# A geo echart references its map by a server URL (`registerMap`). A static page has no server, so the
+# export must carry the map itself — INLINE for a standalone HTML, a PAGE-LOCAL sibling file for a
+# published page. Build a notebook holding one geo spec and check both modes.
+const _RE = KaimonSlate.ReportEngine
+# A notebook whose one code cell renders `spec` as its only echart output (no live hub needed).
+_nb_with_echart(spec, id) = begin
+    out = _RE.CellOutput("", _RE.MimeChunk[], Any[spec], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0)
+    rep = _RE.parse_report("#%% md id=t title\n# $id\n\n#%% code id=c\nechart(1)\n")
+    rep.cells[end].output = out
+    NS.LiveNotebook(id, "/tmp/$id.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+end
+
+@testset "geo map assets in export" begin
+    _geo_spec() = Dict{String,Any}(
+        "registerMap" => Dict{String,Any}("name" => "world", "url" => "/assets/maps/world.json"),
+        "__size" => Dict{String,Any}("height" => 640),
+        "geo" => Dict{String,Any}("map" => "world"),
+        "series" => [Dict{String,Any}("type" => "scatter", "coordinateSystem" => "geo",
+                     "data" => [Dict{String,Any}("name" => "ATL", "value" => [-84.4, 33.6, 12.0])])])
+    _geo_nb() = _nb_with_echart(_geo_spec(), "geo")
+
+    # Spec-level helpers: recognise the request, resolve the vendored file, rewrite to a page-local path.
+    @test NS._spec_geomaps(_geo_spec()) == [("world", "/assets/maps/world.json")]
+    @test NS._geo_map_file("/assets/maps/world.json") !== nothing        # vendored world map resolves
+    @test NS._geo_map_file("https://cdn.example/x.json") === nothing     # external URL isn't a local asset
+    @test NS._geo_asset_path("/assets/maps/world.json") == "assets/maps/world.json"
+
+    # Standalone: the GeoJSON is INLINED (registered before setOption), no server URL is fetched, and the
+    # chart div takes the spec's height rather than the 340px default.
+    standalone = NS.export_html(_geo_nb(); inline_assets = true)
+    @test occursin("var _slateMaps=", standalone) && occursin("\"world\":", standalone)
+    @test occursin("_slateEnsureMaps", standalone)                       # registers maps before setOption
+    @test occursin("height:640px", standalone)                           # honours the spec height
+
+    # Published: no inline map (fetched instead), the `registerMap` URL is rewritten page-relative (no
+    # leading slash), and the map file is written as a page-local sibling.
+    published = NS.export_html(_geo_nb(); inline_assets = false)
+    @test occursin("var _slateMaps={};", published)
+    @test occursin("\"assets/maps/world.json\"", published) && !occursin("/assets/maps/world.json", published)
+
+    dir = mktempdir()
+    try
+        @test NS._write_page_assets!(dir, _geo_nb()) == 1
+        world = joinpath(dir, "assets", "maps", "world.json")
+        @test isfile(world) && filesize(world) > 100_000                 # the vendored world GeoJSON landed
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+
+    # A notebook with no geo chart writes no assets and inlines no maps.
+    plain = _nb_with_echart(Dict{String,Any}("series" => [Dict{String,Any}("type" => "line", "data" => [1, 2, 3])]), "plain")
+    @test NS._write_page_assets!(mktempdir(), plain) == 0
+    @test occursin("var _slateMaps={}", NS.export_html(plain; inline_assets = false))
+end
+
+# `save_asset` generated blobs: stored on a cell output, then served live and inlined (standalone) or
+# published as a page-local sibling — the write-side dual of `@asset`.
+@testset "save_asset export + serving" begin
+    # A cell output carrying one generated asset (as `_save_asset` would leave it).
+    _asset_nb() = begin
+        a = (; name = "airports.json", path = "data/airports-1d6b6d68.json",
+               mime = "application/json", bytes = Vector{UInt8}(codeunits("{\"ATL\":[33.6,-84.4]}")))
+        out = _RE.CellOutput("", _RE.MimeChunk[], Any[], Any[], _RE.BindSpec[], "", nothing, nothing, 1.0,
+                             Any[], "", Any[], Any[], "", "", Any[], Any[a])
+        rep = _RE.parse_report("#%% md id=t title\n# Asset\n\n#%% code id=c\nsave_asset(\"x\", d)\n")
+        rep.cells[end].output = out
+        NS.LiveNotebook("assetnb", "/tmp/anb.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+            ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    end
+
+    # Harvest at eval time: content-hashed page-local path, mime inference, dedup by content.
+    task_local_storage(:slate_assets, Any[])
+    ref = _RE._save_asset("airports.json", "{\"ATL\":[33.6,-84.4]}")
+    _RE._save_asset("airports.json", "{\"ATL\":[33.6,-84.4]}")     # identical content → dedup
+    _RE._save_asset("raw", UInt8[1, 2, 3]; mime = "application/octet-stream")
+    aref = _RE._save_asset("Ur", Float32[1 2 3; 4 5 6])           # numeric matrix → packed binary
+    dref = _RE._save_asset("cfg", Dict("a" => 1, "b" => [1, 2]))  # Dict → JSON (server-encoded)
+    nref = _RE._save_asset("nt", (msg = "hi", n = 42))            # NamedTuple → JSON
+    harvested = _RE._harvest_assets(task_local_storage(:slate_assets))
+    delete!(task_local_storage(), :slate_assets)
+    @test "$(ref)" == "data/airports-1d6b6d68.json"               # AssetRef interpolates to its path
+    @test ref.mime == "application/json"
+    @test length(harvested) == 5                                  # dup collapsed (6 saved → 5)
+    @test any(a -> endswith(a.path, ".bin"), harvested)           # raw bytes → .bin
+    # Numeric array: packed as column-major f32 with shape metadata on the ref + record.
+    @test aref.dtype == "f32" && aref.shape == [2, 3] && aref.nbytes == 24 && endswith(aref.path, ".f32.bin")
+    arec = only(a for a in harvested if a.path == aref.path)
+    @test NS._asset_bytes(arec) == reinterpret(UInt8, Float32[1, 4, 2, 5, 3, 6])   # col-major flatten
+    @test NS._asset_meta(arec)["dtype"] == "f32" && NS._asset_meta(arec)["shape"] == [2, 3]
+    # Dict / NamedTuple → JSON bytes (encoded server-side).
+    @test dref.mime == "application/json"
+    drec = only(a for a in harvested if a.path == dref.path)
+    @test occursin("\"a\":1", String(NS._asset_bytes(drec)))
+    nrec = only(a for a in harvested if a.path == nref.path)
+    @test occursin("\"msg\":\"hi\"", String(NS._asset_bytes(nrec)))
+    # A returned AssetRef renders a summary (path + array shape + load hint).
+    @test occursin("f32", sprint(show, MIME("text/plain"), aref)) && occursin("2×3", sprint(show, MIME("text/plain"), aref))
+
+    nb = _asset_nb()
+    @test length(NS._page_save_assets(nb)) == 1
+
+    # Live serving spec: bytes go to the blob store, exposed as {path, url, mime}.
+    spec = NS._asset_specs(nb.report.cells[end], "assetnb")
+    @test length(spec) == 1
+    @test spec[1]["path"] == "data/airports-1d6b6d68.json"
+    @test spec[1]["mime"] == "application/json"
+    @test occursin(r"^/api/assetnb/blob/", spec[1]["url"])
+
+    # Standalone: the `Slate.asset` shim + the bytes inlined (base64 `data`), keyed by the path.
+    std = NS.export_html(_asset_nb(); inline_assets = true)
+    @test occursin("Slate.asset=function", std)
+    @test occursin("\"data\":\"", std) && occursin("data/airports-1d6b6d68.json", std)
+
+    # Published: the registry points at the page-local sibling (`url`), no inlined bytes; the file lands.
+    pub = NS.export_html(_asset_nb(); inline_assets = false)
+    @test occursin("\"url\":\"data/airports-1d6b6d68.json\"", pub) && !occursin("\"data\":\"", pub)
+    dir = mktempdir()
+    try
+        @test NS._write_page_assets!(dir, _asset_nb()) == 1
+        f = joinpath(dir, "data", "airports-1d6b6d68.json")
+        @test isfile(f) && String(read(f)) == "{\"ATL\":[33.6,-84.4]}"
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end

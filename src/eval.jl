@@ -179,9 +179,10 @@ function _eval_capture(mod::Module, source::AbstractString, filename::AbstractSt
     overflow = hasproperty(r, :overflow) ? collect(r.overflow) : Any[]   # full results saved to disk (gate worker too)
     animations = hasproperty(r, :animations) ? collect(r.animations) : Any[]
     effects = hasproperty(r, :effects) ? collect(r.effects) : Any[]
+    assets = hasproperty(r, :assets) ? collect(r.assets) : Any[]
     return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
                       r.backtrace, r.duration_ms, collect(r.trace), r.stderr, overflow, animations,
-                      "", "", effects)   # in-process has no memo; effects harvested from the declaration channel
+                      "", "", effects, assets)   # in-process has no memo; effects/assets from their channels
 end
 
 # ── Kernel: the execution backend ─────────────────────────────────────────────

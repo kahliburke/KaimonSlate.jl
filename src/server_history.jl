@@ -274,6 +274,45 @@ function _animation_specs(c::Cell, nbid::AbstractString = "")
     end
     return specs
 end
+# A generated-asset record → its bytes. A byte/string/array asset carries `bytes`; a JSON-value asset
+# carries `value` and is encoded HERE (the worker has no JSON dep — mirrors echarts/tables). Shared by
+# state-serving and the static export so both agree on the exact bytes + their content hash.
+_asset_bytes(a) = hasproperty(a, :bytes) ? Vector{UInt8}(getfield(a, :bytes)) :
+                  Vector{UInt8}(codeunits(JSON.json(getfield(a, :value))))
+# Typed-array metadata for a packed numeric asset (`{dtype, shape, order}`), empty otherwise — rides in
+# the spec so the client hands back an ndarray-lite instead of a raw ArrayBuffer.
+_asset_meta(a) = hasproperty(a, :dtype) ?
+    Dict{String,Any}("dtype" => getfield(a, :dtype), "shape" => collect(getfield(a, :shape)), "order" => getfield(a, :order)) :
+    Dict{String,Any}()
+
+# Shared metadata for a generated asset — everything but the transport (`url`/`data`, set by each caller):
+# path, mime, original name, byte size, content sha, PRODUCING CELL, creation time, and typed-array
+# shape/dtype/order. Both live serving and the static export build their registry entries on this, so a
+# widget's `Slate.assetInfo(path)` reports the same facts everywhere. `sha` is the content hash (also the
+# blob key + a stable id).
+function _asset_common(a, bytes::Vector{UInt8}, cellid::AbstractString)
+    d = Dict{String,Any}("path" => String(getfield(a, :path)), "mime" => String(getfield(a, :mime)),
+                         "name" => String(getfield(a, :name)), "bytes" => length(bytes),
+                         "sha" => string(hash(bytes); base = 16), "cell" => String(cellid))
+    hasproperty(a, :created) && (d["created"] = getfield(a, :created))
+    merge!(d, _asset_meta(a))
+    return d
+end
+
+# Generated assets (`save_asset`) a cell produced → wire specs (see `_asset_common`) + the served blob
+# `url`. The bytes go into the content-addressed store (served at `/api/<id>/blob/<sha>`); the client
+# builds a `path → asset` registry from these so `Slate.asset(path)` resolves live. Mirrors `_animation_specs`.
+function _asset_specs(c::Cell, nbid::AbstractString = "")
+    (c.output === nothing || isempty(c.output.assets) || isempty(nbid)) && return Any[]
+    specs = Any[]
+    for a in c.output.assets
+        bytes = _asset_bytes(a); d = _asset_common(a, bytes, c.id)
+        _blob_put_durable!(string(nbid, "/", d["sha"]), d["mime"], bytes)
+        d["url"] = string("/api/", nbid, "/blob/", d["sha"])
+        push!(specs, d)
+    end
+    return specs
+end
 # Specs from a markdown cell's `{{ }}` interpolations, in document order (matches
 # the `.ichart`/`.itable` placeholder indices the renderer emits).
 _md_interp_echarts(c::Cell) = (e = Any[]; for o in c.interp, s in o.echarts; push!(e, _json_finite(s)); end; e)
@@ -446,7 +485,7 @@ function _live_blob_hashes(cells)
     live = Set{String}()
     for e in cells
         e isa AbstractDict || continue
-        for k in ("output", "animations", "echarts", "tables")
+        for k in ("output", "animations", "echarts", "tables", "assets")
             v = get(e, k, nothing); v === nothing && continue
             s = v isa AbstractString ? v : JSON.json(v)
             for m in eachmatch(_BLOBHASH_RE, s); push!(live, String(m.captures[1])); end
@@ -669,6 +708,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
+        "assets" => c.kind == MARKDOWN ? Any[] : _asset_specs(c, nbid),
         "duration" => c.output === nothing ? nothing : round(c.output.duration_ms; digits = 1),
         "deps"    => collect(c.deps),
         # Top-level names this cell defines — drives ⌘-click go-to-definition in the editor. A name the

@@ -32,6 +32,134 @@ var ax={axisLine:{lineStyle:{color:border}},axisTick:{lineStyle:{color:border}},
 return {color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:'inherit',fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text}},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};}
 """
 
+# ── Page assets in a static export ────────────────────────────────────────────────────────────
+# Some client-rendered outputs reference an asset by URL that the live SERVER provides — today a geo
+# echart's `registerMap=(name, url)` GeoJSON (served at `/assets/maps/<f>.json`). A static page has no
+# such server, so the export carries the asset itself, ONE of two ways decided purely by the export
+# mode (no size threshold): a STANDALONE HTML inlines it (self-contained download); a PUBLISHED page
+# writes it as a PAGE-LOCAL sibling file (referenced by a plain relative path — no leading slash, no
+# `..` — so it resolves wherever the site is mounted). Geo maps are the first producer; `save_asset`
+# data blobs will feed the same path. The render JS below registers/loads each asset before first paint
+# so the output renders complete offline instead of blank.
+
+# Resolve a Slate geo-map url ("/assets/maps/world.json") to its vendored local file, or `nothing`
+# when the url isn't a local Slate map (an external CDN GeoJSON → left alone, fetched at render time).
+function _geo_map_file(url::AbstractString)
+    m = match(r"^/assets/maps/([^/\\]+\.json)$", String(url))
+    m === nothing && return nothing
+    p = joinpath(dirname(_JS_DIR), "maps", m.captures[1])
+    return isfile(p) ? p : nothing
+end
+
+# Every `registerMap` request an echart spec carries → Vector of (name, url). The key is a single
+# {name,url} dict or a vector of them (a Slate extension, not an ECharts option — see echarts_dsl.jl).
+function _spec_geomaps(spec)
+    spec isa AbstractDict || return Tuple{String,String}[]
+    reqs = get(spec, "registerMap", nothing)
+    reqs === nothing && return Tuple{String,String}[]
+    out = Tuple{String,String}[]
+    for r in (reqs isa AbstractVector ? reqs : (reqs,))
+        r isa AbstractDict || continue
+        n, u = String(get(r, "name", "")), String(get(r, "url", ""))
+        (isempty(n) || isempty(u)) || push!(out, (n, u))
+    end
+    return out
+end
+
+# A geo map's PAGE-LOCAL asset path — where the published sibling lives (relative to the page's own
+# dir) and how a rewritten `registerMap` refers to it. Kept human-readable + collision-free by name.
+_geo_asset_path(url::AbstractString) = "assets/maps/" * basename(String(url))
+
+# Point a spec's `registerMap` entry at a new url (in place). The published path swaps the server
+# route for the page-local sibling. Only the matching entry is rewritten.
+function _rewrite_geomap_url!(spec, oldurl::AbstractString, newurl::AbstractString)
+    reqs = get(spec, "registerMap", nothing)
+    for r in (reqs isa AbstractVector ? reqs : (reqs,))
+        r isa AbstractDict && String(get(r, "url", "")) == oldurl && (r["url"] = newurl)
+    end
+    return spec
+end
+
+# The `save_asset` blobs a notebook produced → Vector of (spec, bytes), where `spec` is the shared
+# metadata dict (`_asset_common`: path, mime, name, size, sha, cell, created, dtype/shape/order). The
+# producing cell stored them on its output. Empty unless a cell called `save_asset`.
+function _page_save_assets(nb::LiveNotebook)
+    out = Tuple{Dict{String,Any},Vector{UInt8}}[]
+    for c in nb.report.cells
+        (c.kind == CODE && c.output !== nothing) || continue
+        for a in c.output.assets
+            bytes = _asset_bytes(a)
+            push!(out, (_asset_common(a, bytes, c.id), bytes))
+        end
+    end
+    return out
+end
+
+# The page-local assets a notebook's outputs reference → relative path => source (a local FILE path for
+# a vendored asset like a geo map, or raw BYTES for a `save_asset` blob). The site builders write these
+# into the PAGE's own dir so a published output doesn't depend on the server; standalone inlines them.
+function _referenced_page_assets(nb::LiveNotebook)
+    files = Dict{String,Union{String,Vector{UInt8}}}()
+    for c in nb.report.cells
+        c.kind == CODE || continue
+        for spec in _echarts_specs(c), (_, url) in _spec_geomaps(spec)     # geo maps → vendored file
+            p = _geo_map_file(url)
+            p === nothing || (files[_geo_asset_path(url)] = p)
+        end
+    end
+    for (spec, bytes) in _page_save_assets(nb)                             # save_asset → bytes
+        files[spec["path"]] = bytes
+    end
+    return files
+end
+
+# Write every asset a notebook's page references into `<page_dir>` at its relative path — so the
+# published page finds them as plain siblings. A file source is copied; raw bytes are written. Returns
+# how many were written. Page-local (not shared) keeps references prefix-free and robust to where the
+# site is mounted.
+function _write_page_assets!(page_dir::AbstractString, nb::LiveNotebook)
+    files = _referenced_page_assets(nb)
+    for (rel, src) in files
+        dst = joinpath(page_dir, rel)
+        mkpath(dirname(dst))
+        src isa AbstractVector{UInt8} ? write(dst, src) : cp(src, dst; force = true)
+    end
+    return length(files)
+end
+
+# The export chart div's CSS height: honour the spec's Slate `height=` (`__size`) so a geo/tall chart
+# gets its real height instead of the 340px default (a squished world map otherwise). Number → px.
+function _chart_css_height(spec)
+    sz = spec isa AbstractDict ? get(spec, "__size", nothing) : nothing
+    h = sz isa AbstractDict ? get(sz, "height", nothing) : nothing
+    h === nothing && return "340px"
+    return h isa Number ? string(h, "px") : String(h)
+end
+
+# The client `Slate.asset(path)` loader for a STATIC page — the self-contained mirror of core.js's live
+# one (an export can't load core.js). Resolves a `save_asset` path via `window.__slateAssets`: an inlined
+# blob (`data`, base64, standalone) or a page-local sibling (`url`, published). Returns a Promise of the
+# parsed JSON / decoded text / raw ArrayBuffer, keyed off the asset's mime — the SAME contract as live,
+# so a widget's code is identical in the notebook, a standalone file, and a hosted site.
+const _EXPORT_ASSET_JS = raw"""
+window.Slate=window.Slate||{};window.__slateAssets=window.__slateAssets||{};
+function _slateTyped(d,b){return d==="f32"?new Float32Array(b):d==="f64"?new Float64Array(b):d==="i32"?new Int32Array(b):d==="i16"?new Int16Array(b):new Uint8Array(b);}
+function _slateNdarray(a,buf){var data=_slateTyped(a.dtype,buf),rows=(a.shape&&a.shape[0])||data.length;
+return {data:data,dtype:a.dtype,shape:a.shape||[data.length],order:a.order||"col",rows:rows,
+col:function(k){return this.data.subarray(k*this.rows,(k+1)*this.rows);},at:function(i,j){return this.data[j*this.rows+i];}};}
+Slate.asset=function(path){var a=window.__slateAssets[path];
+if(!a)return Promise.reject(new Error("Slate.asset: unknown asset "+path));
+var get;if(a.data!==undefined){var b=atob(a.data),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);get=Promise.resolve(u.buffer);}
+else{get=fetch(a.url).then(function(r){return r.arrayBuffer();});}
+return get.then(function(buf){if(a.dtype)return _slateNdarray(a,buf);var m=a.mime||"";
+if(m.indexOf("json")>=0)return JSON.parse(new TextDecoder().decode(buf));
+if(m.indexOf("text/")===0)return new TextDecoder().decode(buf);return buf;});};
+Slate.assetInfo=function(path){var a=window.__slateAssets[path];if(!a)return null;var m=a.mime||"";
+var kind=a.dtype?"ndarray":m.indexOf("json")>=0?"json":m.indexOf("text/")===0?"text":"binary";
+return {path:path,kind:kind,mime:a.mime,dtype:a.dtype||null,shape:a.shape||null,order:a.order||null};};
+Slate.assetPaths=function(){return Object.keys(window.__slateAssets);};
+"""
+
 # Light-family Slate palettes — page chrome + code-highlight theme flip on these; all others are dark.
 const _LIGHT_PALETTES = Set(["daylight", "solarized-light"])
 _export_is_light(name::AbstractString) = String(name) in _LIGHT_PALETTES
@@ -379,7 +507,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      outputs::AbstractString = "all", og_image::AbstractString = "",
                      og_url::AbstractString = "", og_type::AbstractString = "article",
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
-                     memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL)
+                     memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL,
+                     inline_assets::Bool = true)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     # One Slate palette drives the page chrome, code AND the client-rendered ECharts (they read its CSS
     # vars) — As-is uses the notebook's live palette (charttheme), Light/Dark force one. A themed OVERRIDE
@@ -424,6 +553,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               "<script src=\"https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js\"></script>",
               "<style>", _export_css(palette, code), "</style></head><body><article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
+        # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
+        # (name => local file, read into the page). Otherwise (published page) the map rides as a
+        # page-local sibling `assets/maps/` file (written by the site builder) and `registerMap` is
+        # rewritten below to a plain relative path.
+        geomaps = Dict{String,String}()   # map name => local GeoJSON file (inline mode only)
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
         fm = fm0   # citation/figure context + the `rw` body rewriter were set up above (used for the OG desc too)
@@ -487,7 +621,18 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                     end
                     for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
                         did = string("chart-", c.id, "-", si)
-                        print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:340px\"></div>")
+                        # Geo maps: inline the GeoJSON (standalone) or repoint `registerMap` at the
+                        # published sibling asset (site). Only LOCAL Slate maps are handled; an external
+                        # GeoJSON url is left untouched (fetched at render time).
+                        for (nm, url) in _spec_geomaps(spec)
+                            _geo_map_file(url) === nothing && continue
+                            if inline_assets
+                                geomaps[nm] = _geo_map_file(url)
+                            else
+                                _rewrite_geomap_url!(spec, url, _geo_asset_path(url))
+                            end
+                        end
+                        print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:", _chart_css_height(spec), "\"></div>")
                         push!(charts, (did, JSON.json(spec)))
                     end
                     for spec in _table_specs(c)
@@ -539,17 +684,50 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # are emitted as a JS array; a resize handler keeps them responsive.
         print(io, "<script>")
         print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
+        # `save_asset` blobs → the client `Slate.asset` registry. Standalone inlines the bytes (base64);
+        # a published page points at the page-local sibling written by `_write_page_assets!`. Emitted even
+        # without charts (a WebPage widget may reference an asset with no echart on the page).
+        saveassets = _page_save_assets(nb)
+        if !isempty(saveassets)
+            entries = String[]
+            for (spec, bytes) in saveassets
+                entry = copy(spec)   # carries path/mime/name/bytes/sha/cell/created/dtype/shape/order
+                inline_assets ? (entry["data"] = Base64.base64encode(bytes)) :   # standalone → inline
+                                (entry["url"]  = spec["path"])                    # published → page-local sibling
+                push!(entries, string(JSON.json(spec["path"]), ":", JSON.json(entry)))
+            end
+            print(io, _EXPORT_ASSET_JS,
+                  "Object.assign(window.__slateAssets,{", join(entries, ","), "});")
+        end
         if !isempty(charts)
             # Register the Slate ECharts theme from the page's CSS vars (the SAME brand palette as the
             # chrome) and render every embedded spec under it — so an exported page's charts match the
             # notebook + PDF instead of ECharts' generic 'dark'/default.
+            # Geo-map GeoJSON inlined for a standalone page (name → GeoJSON; raw file bytes are already
+            # valid JSON). Empty on a site export, where the map rides as an `assets/maps/` sibling and
+            # `registerMap` (rewritten above) is fetched instead.
+            mapsjs = isempty(geomaps) ? "{}" :
+                     "{" * join((JSON.json(nm) * ":" * read(p, String) for (nm, p) in geomaps), ",") * "}"
             print(io, _EXPORT_ECHARTS_THEME_JS,
+                  "var _slateMaps=", mapsjs, ";",
                   "var _slateCharts=[", join(("['" * id * "'," * opt * "]" for (id, opt) in charts), ","), "];",
+                  # Register a chart's geo maps before its first paint: an inlined map (`_slateMaps`)
+                  # registers synchronously, otherwise fetch the (rewritten) url. A registered/absent map
+                  # resolves immediately, so a non-geo chart pays nothing.
+                  "function _slateEnsureMaps(reqs){return Promise.all((reqs||[]).map(function(r){",
+                  "if(!r||!r.name||(echarts.getMap&&echarts.getMap(r.name)))return Promise.resolve();",
+                  "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
+                  "if(!r.url)return Promise.resolve();",
+                  "return fetch(r.url).then(function(x){return x.json();}).then(function(j){echarts.registerMap(r.name,j);}).catch(function(){});}));}",
+                  # `registerMap`/`__size` are Slate extensions, not ECharts options — strip before setOption.
+                  "function _slateSansMaps(o){if(!o||(!o.registerMap&&!o.__size))return o;var c=Object.assign({},o);delete c.registerMap;delete c.__size;return c;}",
                   "function _slateRenderCharts(){if(!window.echarts)return;",
                   "try{echarts.registerTheme('slate',_slateExportTheme());}catch(e){}",
                   "_slateCharts.forEach(function(c){",
-                  "var el=document.getElementById(c[0]);if(!el)return;var ch=echarts.init(el,'slate');",
-                  "ch.setOption(c[1]);window.addEventListener('resize',function(){ch.resize();});});}",
+                  "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];var ch=echarts.init(el,'slate');",
+                  "var reqs=opt&&opt.registerMap?[].concat(opt.registerMap):[];",
+                  "_slateEnsureMaps(reqs).then(function(){ch.setOption(_slateSansMaps(opt));});",
+                  "window.addEventListener('resize',function(){ch.resize();});});}",
                   "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
         end
         if runnable
@@ -905,7 +1083,9 @@ function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = 
         write(joinpath(dir, _SITE_PS1), _run_ps1())
         write(joinpath(dir, _SITE_BAT), _run_bat())
     end
-    write(joinpath(dir, "index.html"), export_html(nb; og_image = ogpath, runnable = bundle, history = history, kwargs...))
+    _write_page_assets!(dir, nb)   # referenced assets → page-local siblings (this page IS at `dir`)
+    write(joinpath(dir, "index.html"),
+          export_html(nb; og_image = ogpath, runnable = bundle, history = history, inline_assets = false, kwargs...))
     write(joinpath(dir, ".nojekyll"), "")   # GitHub Pages: serve files verbatim (no Jekyll processing)
     return dir
 end
@@ -1005,8 +1185,12 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
         write(joinpath(docdir, _SITE_PS1), _run_ps1())
         write(joinpath(docdir, _SITE_BAT), _run_bat())
     end
+    # Referenced assets → this doc's OWN dir (<site>/<slug>/), so `registerMap` etc. use a plain
+    # page-relative path with no "../" — resolves wherever the site is mounted.
+    _write_page_assets!(docdir, nb)
     write(joinpath(docdir, "index.html"),
-          export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history, kwargs...))
+          export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history,
+                      inline_assets = false, kwargs...))
     m = _doc_meta(nb)
     cs = nb.report.cells
     md = count(c -> c.kind == MARKDOWN, cs)
@@ -1264,7 +1448,8 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
             write(joinpath(dir, "og-image.png"), himg)
             hogpath = isempty(su) ? "og-image.png" : su * "og-image.png"       # absolute when hosted
         end
-        write(htmpl, export_html(nb; runnable = false, og_image = hogpath,
+        _write_page_assets!(dir, nb)   # referenced assets → page-local siblings (home page IS at `dir`)
+        write(htmpl, export_html(nb; runnable = false, og_image = hogpath, inline_assets = false,
                                  og_url = su, og_type = "website", kwargs...))  # carries `docindex`
         manifest["home"] = true
         # Provenance: WHICH notebook is the front page — the manager shows it and links back

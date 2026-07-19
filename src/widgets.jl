@@ -469,6 +469,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # registering statement so the attribution lands there (a package's registrar self-declaring is the
     # zero-overhead path). No `@everywhere` MACRO is injected — it would clash with `Distributed.@everywhere`.
     Core.eval(m, :(const slate_effect = $_slate_effect))      # slate_effect(kind; names=…, data...) → declare a cell effect
+    Core.eval(m, :(const save_asset = $_save_asset))          # save_asset(name, data) → AssetRef (write-side dual of @asset)
     Core.eval(m, :(slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names = collect(names))))
     # JS→Julia CALLS — the request/response counterpart to `slate_emit`'s push. A cell registers
     # `slate_on("channel", args -> result)`; browser JS calls `await window.slateCall("channel", args)`.
