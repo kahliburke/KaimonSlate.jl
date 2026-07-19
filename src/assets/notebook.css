@@ -1668,6 +1668,11 @@ body.cdnd .plist::after { content:'drop here to remove'; color:var(--dim); font-
   animation:pubspin .7s linear infinite; }
 @keyframes pubspin { to { transform:rotate(360deg); } }
 .pubsite { margin:6px 0; }
+#pubsites .pubsite { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:4px 0;
+  padding:2px; border:1px solid transparent; border-radius:8px; }
+#pubsites .pubsite.is-member { border-color:var(--border); background:var(--bg3); }
+#pubsites .pubsite .pubpick { flex:0 0 auto; }
+#pubsites .pubsite .pubpick input[type=checkbox] { accent-color:var(--accent); flex:0 0 auto; }
 .pubpages { margin-left:14px; }
 .pubrow.pubsub2 { font-size:.8rem; margin:2px 0; }
 .pubpicks { display:flex; flex-direction:column; gap:4px; }

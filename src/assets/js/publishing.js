@@ -16,7 +16,60 @@
   window.openPublishing = openPublishing;
   window.closePublishing = closePublishing;
 
-  async function refresh() { await Promise.all([loadLedger(), loadDoc()]); }
+  async function refresh() { await Promise.all([loadLedger(), loadDoc(), loadSites()]); }
+
+  // ── Sites: this notebook's membership + front-page state across every site ───────────────────────
+  async function loadSites() {
+    let d = null;
+    try { d = await api('GET', '/api/publish/sites'); } catch (e) {}
+    renderSites(d);
+  }
+  function renderSites(d) {
+    const box = el('pubsites'); if (!box) return;
+    const sites = (d && d.sites) || [];
+    if (!sites.length) {
+      box.innerHTML = '<div class="pubdim" style="font-size:.82rem">No sites yet. Create one in the '
+        + '<a class="publink" href="/#publishing" target="_blank" rel="noopener">Publishing manager</a>'
+        + ' (a site deploys to your targets), then add this notebook to it here.</div>';
+      return;
+    }
+    box.innerHTML = sites.map(s => {
+      const nm = esc(s.name), tgts = (s.targets || []).length ? esc(s.targets.join(', ')) : 'local only';
+      return '<div class="pubsite' + (s.member ? ' is-member' : '') + '">'
+        + '<label class="pubpick" style="flex:1" title="Add/remove this notebook to the site">'
+        + '<input type="checkbox" ' + (s.member ? 'checked' : '') + ' onchange="pubToggleMember(\'' + nm + '\', this.checked)"/>'
+        + '<span class="publ">' + esc(s.title || s.name) + '</span> <span class="pubdim">' + tgts + '</span></label>'
+        + '<label class="pubpick" title="Make this notebook the site’s front page (home)" style="opacity:' + (s.member ? '1' : '.4') + '">'
+        + '<input type="checkbox" ' + (s.isHome ? 'checked' : '') + (s.member ? '' : ' disabled')
+        + ' onchange="pubToggleHome(\'' + nm + '\', this.checked)"/> ★ front page</label>'
+        + (s.member ? '<button class="pubmini" onclick="pubPublishSite(\'' + nm + '\')">☁ Publish</button>' : '')
+        + (s.url ? ' <a class="publink" href="' + esc(s.url) + '" target="_blank" rel="noopener">open ↗</a>' : '')
+        + '</div>';
+    }).join('');
+  }
+  window.pubToggleMember = async function (site, on) {
+    try { await api('POST', '/api/publish/site-membership', { site: site, member: on }); }
+    catch (e) { toast('Could not update membership', 4000, 'warn'); }
+    loadSites();
+  };
+  window.pubToggleHome = async function (site, on) {
+    try { await api('POST', '/api/publish/site-home', { site: site, home: on }); }
+    catch (e) { toast('Could not update front page', 4000, 'warn'); }
+    loadSites();
+  };
+  // Build this notebook into the site + sync — streaming per-notebook progress into the panel log.
+  window.pubPublishSite = function (site) {
+    const log = el('pubsitesprog'); if (!log) return;
+    log.style.display = 'block'; log.innerHTML = '';
+    const line = (t, c) => { const n = document.createElement('div'); n.className = 'publogln ' + (c || ''); n.textContent = t; log.appendChild(n); log.scrollTop = log.scrollHeight; return n; };
+    line('Publishing into ' + site + '…', 'st');
+    const es = new EventSource(_apipath('/api/site-publish') + '?site=' + encodeURIComponent(site));
+    es.addEventListener('status', e => line(e.data, 'st'));
+    es.addEventListener('log', e => line(e.data));
+    es.addEventListener('done', e => { es.close(); let d = {}; try { d = JSON.parse(e.data); } catch (_) {} line(d.ok !== false ? '✓ Published' : '✗ Failed', d.ok !== false ? 'ok' : 'err'); loadSites(); });
+    es.addEventListener('failed', e => { es.close(); line('✗ ' + e.data, 'err'); });
+    es.onerror = () => { try { es.close(); } catch (_) {} };
+  };
   async function loadLedger() {
     try { _view = await (await fetch('/api/publish/ledger', { cache: 'no-store' })).json(); }
     catch (e) { _view = { targets: [], ghUser: '' }; }
@@ -37,6 +90,7 @@
 
   // ── pick a destination: a saved GitHub target, or a new repo under your account ─────────────────
   function renderTargetPick() {
+    if (!el('pubtargetpick')) return;   // the GitHub-repo section was removed — sites are the one path now
     const ts = ghTargets(), user = (_view && _view.ghUser) || '';
     let h = ts.map((t, i) =>
       '<label class="pubpick"><input type="radio" name="pubtgt" value="saved:' + i + '"' + (i === 0 ? ' checked' : '') + '/>' +
@@ -64,6 +118,7 @@
   }
 
   function renderPlacement() {
+    if (!el('pubplacement')) return;    // placement hint belonged to the removed GitHub-repo section
     el('pubplacement').innerHTML = isHome()
       ? '🏠 Tagged <b>home</b> — publishes as the site\'s front page (root).'
       : 'Publishes as a card at <b>/' + esc((_doc && _doc.slug) || '') + '/</b> under the target\'s home page.';

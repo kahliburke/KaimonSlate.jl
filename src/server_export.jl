@@ -1692,6 +1692,22 @@ Remove doc `slug` from the persistent local site `name`: delete its `<slug>/` di
 `slate-site.json` entry, and regenerate the index (home template preserved). Idempotent — an unknown
 site or slug just reports `removed=false`.
 """
+# Clear a site's front page IF it currently points at `path`: drop the home flag/pointer + the home
+# template and regenerate the plain card index. The caller then rebuilds the notebook as a normal
+# `<slug>/` doc. Without this, a notebook that stops being home leaves a stale `homeDoc` behind.
+function clear_site_home_if!(name::AbstractString, path::AbstractString)
+    dir = _site_dir(name)
+    (dir === nothing || !isdir(dir)) && return false
+    man = _read_site_manifest(dir)
+    hd = get(man, "homeDoc", nothing)
+    (hd isa AbstractDict && abspath(String(get(hd, "path", ""))) == abspath(path)) || return false
+    delete!(man, "home"); delete!(man, "homeDoc")
+    rm(joinpath(dir, ".slate-home.html"); force = true)
+    write(joinpath(dir, _SITE_MANIFEST), JSON.json(man, 2))
+    write(joinpath(dir, "index.html"), _render_site_index(man))
+    return true
+end
+
 function unexport_from_site(name::AbstractString, slug::AbstractString)
     dir = _site_dir(name)
     (dir === nothing || !isdir(dir)) && return (; removed = false, docCount = 0)

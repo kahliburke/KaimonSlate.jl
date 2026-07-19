@@ -460,9 +460,11 @@ async function archiveZenodo() {
 }
 window.archiveZenodo = archiveZenodo;
 
-// Publish shortcut → the export dialog on its Website tab (publishing IS Export → Website).
-function openPublish() { openExport('website'); }
+// Publish → the unified Publish panel (site membership + front page + deploy). The richer website
+// EXPORT options (theme, runnable bundle, git history) stay reachable from inside it via openExport.
+function openPublish() { (window.openPublishing || (() => openExport('website')))(); }
 window.openPublish = openPublish;
+window.openWebsiteExport = () => openExport('website');   // "advanced options" link inside the Publish panel
 function openExport(preset) {
   let fmt = preset === 'slides' ? 'pdf' : preset === 'website' ? 'website' : (localStorage.getItem('slate_exfmt') || 'html');
   if (preset !== 'website' && fmt === 'website') fmt = 'html';   // Website is Publish now, not an Export format

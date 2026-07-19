@@ -237,6 +237,90 @@ function publish_doc_set_targets!(nb::LiveNotebook, names)
     return publish_doc_info(nb)
 end
 
+# ── Notebook ↔ site membership (the read/write model behind the notebook's unified Publish panel) ────
+# The notebook's Publish panel is a site-membership editor: it lists every site with whether THIS
+# notebook is a member, whether it's that site's front page, and where the site deploys — then lets the
+# user associate/disassociate and set/clear the front page before publishing.
+
+# Best-effort public URL for a site: the first destination target that carries a `url` in its config.
+function _site_public_url(led, s)
+    for tn in s.targets
+        t = get(led.targets, tn, nothing); t === nothing && continue
+        u = strip(String(get(t.config, "url", ""))); isempty(u) || return u
+    end
+    return ""
+end
+
+"For THIS notebook: every site with `{member, isHome, targets, url}`, plus the known targets — the read
+model the notebook's Publish panel paints. Membership is matched by the site build's recorded source
+path (slug as a fallback for pre-migration builds); front page is the site's built home (`site_frontpage`)."
+function publish_sites_info(nb::LiveNotebook)
+    store = PublishLedger.default_store()
+    led = PublishLedger.load(store)
+    slug = doc_slug(nb)
+    path = abspath(nb.path)
+    sites = Any[]
+    for s in values(led.sites)
+        member = any(site_docs(s.name)) do d
+            d isa AbstractDict || return false
+            src = String(get(d, "source", ""))
+            (String(get(d, "slug", "")) == slug) || (!isempty(src) && abspath(src) == path)
+        end
+        fp = site_frontpage(s.name)
+        isHome = fp.home && !isempty(fp.homePath) && abspath(fp.homePath) == path
+        push!(sites, Dict{String,Any}("name" => s.name,
+            "title" => isempty(strip(s.title)) ? s.name : s.title,
+            "targets" => copy(s.targets), "member" => member, "isHome" => isHome,
+            "url" => _site_public_url(led, s)))
+    end
+    sort!(sites; by = d -> lowercase(String(d["name"])))
+    return Dict{String,Any}("slug" => slug,
+        "title" => String(get(nb.report.meta, "title", slug)),
+        "homeTag" => _home_notebook(nb), "sites" => sites,
+        "targets" => [_target_view(t) for t in values(led.targets)],
+        "availableKinds" => _TARGET_KINDS, "ghUser" => gh_user())
+end
+
+# Toggle the notebook-global `home` tag that marks a notebook as a site's front page (model A). Setting
+# it tags the title/first cell; clearing it strips `home` from every cell. Persists only on a change.
+function _set_notebook_home!(nb::LiveNotebook, on::Bool)
+    changed = false
+    if on
+        if !any(c -> :home in c.flags, nb.report.cells) && !isempty(nb.report.cells)
+            idx = findfirst(c -> c.kind == MARKDOWN, nb.report.cells)
+            idx === nothing && (idx = firstindex(nb.report.cells))
+            push!(nb.report.cells[idx].flags, :home); changed = true
+        end
+    else
+        for c in nb.report.cells
+            :home in c.flags && (delete!(c.flags, :home); changed = true)
+        end
+    end
+    changed && _persist!(nb; source = "publish")
+    return changed
+end
+
+"Associate (build into) or disassociate (remove from) this notebook and a site's canonical local build.
+Local only — a subsequent Publish/Sync deploys. Returns the refreshed `publish_sites_info`."
+function publish_set_membership!(nb::LiveNotebook, site::AbstractString, member::Bool)
+    if member
+        export_to_site(nb, String(site))                   # build into the site → membership
+    else
+        unexport_from_site(String(site), doc_slug(nb))     # drop its subdir + manifest entry
+    end
+    return publish_sites_info(nb)
+end
+
+"Set/clear whether this notebook is `site`'s front page. Front page is driven by the `home` tag (model
+A): this toggles the tag and rebuilds the notebook into the site so its home reflects the change. Setting
+it as home for one site clears it as home elsewhere it's built (the tag is notebook-global for now)."
+function publish_set_home!(nb::LiveNotebook, site::AbstractString, home::Bool)
+    _set_notebook_home!(nb, home)
+    home || clear_site_home_if!(String(site), abspath(nb.path))   # drop the stale home pointer + template
+    export_to_site(nb, String(site))                       # rebuild so the site's home page reflects it
+    return publish_sites_info(nb)
+end
+
 # A site deploys to a LOCATION = (target, normalized subpath). Two sites writing the same location
 # would overwrite each other, so `publish_site_set!` refuses that. Returns the clashing site name,
 # or "" if the (target, subpath) is free.
@@ -677,6 +761,23 @@ function _register_publish_routes!(router, h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/publish/doc-targets", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         _json(publish_doc_set_targets!(nb, [String(t) for t in get(b, "targets", String[])]))
+    end))
+    # This notebook's site membership + front-page state (drives the notebook Publish panel).
+    HTTP.register!(router, "GET", "/api/{id}/publish/sites",
+                   req -> _withnb(h, req, nb -> _json(publish_sites_info(nb))))
+    # Associate/disassociate this notebook with a site's local build (member:true|false).
+    HTTP.register!(router, "POST", "/api/{id}/publish/site-membership", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        site = strip(String(get(b, "site", "")))
+        isempty(site) && return HTTP.Response(400, "missing site")
+        _json(publish_set_membership!(nb, site, get(b, "member", true) === true))
+    end))
+    # Set/clear this notebook as a site's front page (home:true|false).
+    HTTP.register!(router, "POST", "/api/{id}/publish/site-home", req -> _withnb(h, req, nb -> begin
+        b = _body(req)
+        site = strip(String(get(b, "site", "")))
+        isempty(site) && return HTTP.Response(400, "missing site")
+        _json(publish_set_home!(nb, site, get(b, "home", true) === true))
     end))
     # Add/update a target config (global).
     HTTP.register!(router, "POST", "/api/publish/target", req -> begin
