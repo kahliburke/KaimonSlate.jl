@@ -2782,7 +2782,13 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
     if !isinteractive() && stdin isa Base.TTY
         _wait_for_ctrl_c(on_key = b -> _serve_key(b, h, url))   # ^C / q / EOF quits; b / p act
         println("\n  Stopping the notebook server…")
-        cleanup()
+        # BOUND the graceful teardown: stop_hub (worker shutdown / SSE drain / closing the HTTP server
+        # with a live browser connection) can block on a condition/socket wait. Give it a short grace,
+        # then leave via `_exit` regardless so `q` never hangs — the worker is already SIGTERM'd by
+        # stop_hub, and any straggler is reaped by its own orphaned-hub spin-guard.
+        done = Ref(false)
+        @async (try; cleanup(); finally; done[] = true; end)
+        t0 = time(); while !done[] && time() - t0 < 3.0; sleep(0.05); end
         _hard_exit(0)
     end
     try
