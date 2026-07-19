@@ -171,10 +171,7 @@ function _wpFace(w) {
 // ALL workers ranked; lingering/hovering then reveals the detail popup (see the handlers below).
 function _wpPaintStrip(ws) {
   const box = document.getElementById('workerpills'); if (!box) return;
-  // The MAIN worker (side '') is already represented by the #runloc pill (with its own health overlay),
-  // so exclude it here — the strip is REGIONS only. Otherwise a lone starting/degraded main showed as
-  // two "local" pills side by side (#runloc + this strip).
-  ws = (ws || []).filter(w => (w.side || '') !== '');
+  ws = ws || [];
   if (!ws.length) { box.innerHTML = ''; return; }
   const ranked = ws.slice().sort((a, b) => _wpSeverity(b) - _wpSeverity(a));
   const top = ranked[0], side = top.side || '';
