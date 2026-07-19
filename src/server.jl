@@ -2753,8 +2753,9 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
     url = "$(_hub_url(h))/n/$id"
     _await_http_ready(_hub_url(h))          # wait until the server actually answers before announcing it
     # Interactive keys (b/p/q) only work on the raw-tty path below (a `julia run.jl` launch), not a REPL.
-    keys = !isinteractive() && stdin isa Base.TTY
-    _print_ready_banner(url; logpath = logio === nothing ? "" : logpath, keys = keys, inactive = inactive)
+    # (Named `showkeys`, not `keys` — a local `keys` would shadow `Base.keys` used just above.)
+    showkeys = !isinteractive() && stdin isa Base.TTY
+    _print_ready_banner(url; logpath = logio === nothing ? "" : logpath, keys = showkeys, inactive = inactive)
     _open_in_browser(url)                    # best-effort auto-open (a no-op under KAIMONSLATE_NO_OPEN, which run.jl sets so its b/p keys drive opening instead)
     # Block until stopped — and make Ctrl-C actually stop it. Signals are a dead end
     # here (verified against a live hub): once the threaded HTTP listener runs, a
