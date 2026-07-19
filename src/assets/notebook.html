@@ -364,11 +364,10 @@
     <button class="pubx" onclick="closePublishing()" title="Close">✕</button></div>
   <div class="pubbody">
     <div class="pubcol">
-      <div class="setsec">Publish to</div>
-      <div id="pubtargetpick" class="pubpicks"></div>
-      <div id="pubplacement" class="pubdim" style="margin-top:10px"></div>
-      <div class="pubrow" style="margin-top:14px"><button class="primary" id="pubrunbtn" onclick="runPublish()">☁ Publish</button></div>
-      <div id="pubprogress" class="publog" style="display:none"></div>
+      <div class="setsec">Sites <span class="pubdim" style="font-weight:400">— a portfolio/blog this notebook belongs to</span></div>
+      <div id="pubsites" class="pubpicks"></div>
+      <div id="pubsitesprog" class="publog" style="display:none;margin-top:8px"></div>
+      <div class="pubdim" style="margin-top:8px;font-size:.74rem">Tick a site to add this notebook; ★ makes it the site's front page; ☁ builds &amp; deploys it. Need theme / a runnable bundle / git history? <a class="publink" href="#" onclick="closePublishing();openWebsiteExport();return false">Advanced website export…</a> · New site or targets? <a class="publink" href="/#publishing" target="_blank" rel="noopener">Publishing manager</a></div>
     </div>
     <div class="pubcol">
       <div class="setsec">Already published</div>
