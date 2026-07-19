@@ -1296,10 +1296,13 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     # Provenance for `sync_site!` to REBUILD this member from its live notebook (Sync = synchronize):
     # the source `.jl` path (matched against the hub's open notebooks) + the build options this doc was
     # last published with, so a re-sync reproduces it faithfully instead of shipping the frozen artifact.
+    entry["id"] = notebook_docid(nb).docId      # the notebook's stable file-carried identity — Sync matches on this
     entry["source"] = abspath(nb.path)
     bkw = (; kwargs...)
     entry["build"] = Dict{String,Any}("bundle" => bundle, "history" => history,
                                       "theme" => String(get(bkw, :theme, "dark")),
+                                      "charttheme" => String(get(bkw, :charttheme, "")),
+                                      "override" => get(bkw, :override, false) === true,
                                       "outputs" => String(get(bkw, :outputs, "all")),
                                       "source" => get(bkw, :include_source, true) === true)
     return entry
