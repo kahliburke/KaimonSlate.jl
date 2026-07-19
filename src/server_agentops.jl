@@ -1030,6 +1030,7 @@ function set_cell_tags!(nb::LiveNotebook, id::AbstractString, tags)
         elseif !now_locked && had_locked
             old = ReportEngine._locked_key(c)
             ReportEngine._set_locked_key!(c, "")
+            ReportEngine._set_frozen_stamp!(c, "")   # no longer frozen → drop the freeze identity too
             isempty(old) || (unpin = (_region_route(nb, c)[1], old))
         end
         _persist!(nb; label = "tags · $id")

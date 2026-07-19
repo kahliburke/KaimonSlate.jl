@@ -43,9 +43,9 @@
   <a class="brand" href="/" title="all notebooks"><svg class="brandmark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2.5" y="2.5" width="43" height="43" rx="12" fill="#141828" stroke="#2a2e40" stroke-width="1.5"/><path d="M16 15 L33 20 M33 20 L22 34 M16 15 L22 34" stroke="#566089" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="15" r="4" fill="#7cc0ff"/><circle cx="33" cy="20" r="4" fill="#c586c0"/><circle cx="22" cy="34" r="4" fill="#56d364"/></svg>Slate</a>
   <span id="wdot" class="wdot" title=""></span>
   <h1 id="title" onclick="toggleFiles()" title="open Files — edit this notebook's package source" style="cursor:pointer">Notebook</h1>
-  <span id="runloc" class="runloc" style="display:none" onclick="openWorkerPop('', event)" title="worker — click for its live log &amp; status">
-    <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span id="runlocstat" class="wstat"></span> <span class="runloccaret" onclick="toggleRunLoc(event)" title="change where this notebook runs">▾</span></span>
-  <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span><span id="workerpills"></span>
+  <span id="runpill" class="runpill" style="display:none" onclick="onPillClick()" title="run status — click for the activity log (or to jump through errors)"></span>
+  <span id="runloc" class="runloc" style="display:none" onclick="onRunLocClick(event)" title="worker — click for its live log &amp; status">
+    <span id="runlocicon">💻</span> <span id="runloclabel">local</span> <span id="runlocsrc" class="runlocsrc" style="display:none"></span> <span id="runlocstat" class="wstat"></span> <span class="runloccaret" onclick="toggleRunLoc(event)" title="change where this notebook runs">▾</span></span><span id="workerpills"></span>
   <span id="healthbadge" class="healthbadge" style="display:none" onclick="window.__healthToggle && window.__healthToggle()" title="watchdog health — stalls &amp; runaway workers; click for details + recovery"></span>
   <span id="scratchrun" class="scratchrun" style="display:none" onclick="toggleScratch()" title="scratch activity — click to open the Scratchpad"><span class="scrdot"></span>🧪 <span class="scrlabel">scratch</span></span>
   <span class="hint" onclick="openPalette()" style="cursor:pointer" title="command palette — every action &amp; shortcut (⌘K)">⌘K</span>
@@ -92,6 +92,20 @@
     <div id="workerpop-stats" class="workerpop-stats"></div>
   </div>
   <div id="workerpop-log" class="workerpop-log">loading…</div>
+</div>
+<!-- Launch confirmation popover: anchored under the "Inactive — click to launch" pill. First click on
+     the pill opens this (precompile heads-up); the Launch button here is the second, deliberate click. -->
+<div id="launchpop" class="launchpop" style="display:none">
+  <div class="launchpop-head">▶ Launch this notebook</div>
+  <div class="launchpop-body">
+    Starts the live environment — installing and <b>precompiling</b> its packages can take a few minutes
+    on first load. Locked and expensive results are restored, not recomputed.
+    <div id="launchpop-deps" class="launchpop-deps"></div>
+  </div>
+  <div class="launchpop-row">
+    <button id="launchpop-go" class="primary" onclick="doLaunch()">Launch</button>
+    <button id="launchpop-cancel" onclick="closeLaunchPop()">Cancel</button>
+  </div>
 </div>
 <div class="modal-bg" id="runlocbg"><div class="modal runlocmodal">
   <div class="msg"><strong>Run location</strong> <span id="rlsourcebadge" class="rlbadge"></span>

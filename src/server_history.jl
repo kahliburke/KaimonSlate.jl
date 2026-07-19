@@ -1018,6 +1018,16 @@ function state_json(nb::LiveNotebook)
             [cell_json(c, bindref, hostednames) for c in nb.report.cells]
         end
         meta["inactive"] = true
+        meta["workers"] = Any[]   # nothing is running — suppress the worker-strip pill; the inactive pill stands alone
+        # The packages this notebook's env carries (from the reproducibility footer, parsed at load — no
+        # kernel needed) → the launch popover lists them, so the reader sees what a launch will bring up.
+        # We can't cheaply know WHICH will precompile ahead of instantiation (a fresh download has no env
+        # on disk yet), so this is the environment's package set, not a predicted stale-precompile subset.
+        let env = get(nb.report.meta, "env", nothing)
+            env isa AbstractVector &&
+                (meta["launchDeps"] = String[String(get(e, "name", "")) for e in env
+                                             if e isa AbstractDict && !isempty(String(get(e, "name", "")))])
+        end
         return meta
     end
     if get(nb.report.meta, "hydrating", false) === true

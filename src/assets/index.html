@@ -412,8 +412,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div class="openctl">
     <span class="ctllabel">Run on</span>
     <span id="openrunon-mount" style="display:contents"></span>
-    <label class="ctllabel" title="Uncheck to open without the initial run — cells land un-run so you can edit/tag first">
-      <input type="checkbox" id="openautorun" checked/> Run
+    <label class="ctllabel" title="Checked: boot the worker and run on open (live). Unchecked: open INACTIVE — a static preview of the stored results, no worker or precompile until you click the pill to launch.">
+      <input type="checkbox" id="openlaunch" checked onchange="_saveLaunchPref()"/> Launch worker on open
     </label>
     <button id="openbtn">Open</button>
     <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
@@ -484,12 +484,17 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function _runonOf(id){ var s=document.getElementById(id); if(!s) return '';
     if(s.value==='__custom__'){ var hi=document.getElementById(_runonHostId(id)); return hi?hi.value.trim():''; }
     return s.value||''; }
+  // The sticky "Launch worker on open" preference. Checked = open live (boot the worker + run);
+  // unchecked = open INACTIVE (a static preview, launch on demand from the pill). Applies to every
+  // open path — the Open button, Recents, and the standalone-import "Run" — since all route here.
+  function _saveLaunchPref(){try{localStorage.setItem('slateLaunchOnOpen',document.getElementById('openlaunch').checked?'1':'0');}catch(e){}}
+  (function(){try{var v=localStorage.getItem('slateLaunchOnOpen'),el=document.getElementById('openlaunch');if(el&&v!==null)el.checked=(v==='1');}catch(e){}})();
   function openPath(p, runon){p=(p||'').trim();if(!p)return;
     if(runon===undefined) runon=_runonOf('openrunon');
-    var autorunEl=document.getElementById('openautorun'), autorun=autorunEl?autorunEl.checked:true;
+    var launchEl=document.getElementById('openlaunch'), launch=launchEl?launchEl.checked:true;
     try{localStorage.setItem('slateLastDir', window.PLATFORM.dirOf(p));}catch(e){}   // remember the directory
-    showLoading((autorun?'Opening “':'Opening (paused) “')+p+'” — starting the worker'+(runon&&runon!=='local'?' on '+runon:'')+'…');
-    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon,autorun:autorun})})
+    showLoading((launch?('Opening “'+p+'” — starting the worker'+(runon&&runon!=='local'?' on '+runon:'')):('Opening “'+p+'” inactive — static preview'))+'…');
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,runon:runon,autorun:true,inactive:!launch})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
       .then(function(d){pushRecent(d.path||p);location.href=d.url;}).catch(function(e){hideLoading();alertDark('Open failed: '+e);});}
   // ── Import a self-contained .jl (one carrying a Slate.bundle footer) ─────────

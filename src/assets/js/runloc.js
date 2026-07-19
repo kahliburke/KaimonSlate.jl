@@ -7,6 +7,7 @@
 
 let _rlHosts = null;     // cached {hosts:[~/.ssh/config aliases], global:"default host"}
 let _rlSel = '';         // selected host in the open menu ('' = local, '__custom__' = typed)
+let _launching = false;  // guard against double-launch while the bring-up POST is in flight
 
 const gapi = async (method, path, body) => {
   const r = await fetch(path, { method, headers: { 'Content-Type': 'application/json' },
@@ -19,6 +20,23 @@ const _rlEsc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
 // Reflect the effective run-location into the toolbar pill (called from updateChrome on every state).
 function renderRunLoc(state) {
   const el = document.getElementById('runloc'); if (!el) return;
+  // INACTIVE (dormant standalone): by design no worker is running, so render a grey "click to launch"
+  // pill in place of the run-location/health chrome. The whole pill launches (onRunLocClick).
+  const caret = el.querySelector('.runloccaret');
+  if (state && state.inactive) {
+    el.style.display = '';   // reveal the pill even with no worker running (nothing else will here)
+    el.classList.add('inactive'); el.classList.remove('remote', 'reconnecting');
+    document.getElementById('runlocicon').textContent = '⏸';
+    document.getElementById('runloclabel').textContent = 'Inactive — click to launch';
+    const se = document.getElementById('runlocsrc'); if (se) se.style.display = 'none';
+    const rs = document.getElementById('runlocstat'); if (rs) rs.style.display = 'none';
+    if (caret) caret.style.display = 'none';   // no run-location picker while dormant
+    el.title = 'This notebook is dormant — no worker is running. Click to launch its live environment.';
+    return;
+  }
+  el.classList.remove('inactive');
+  if (caret) caret.style.display = '';
+  closeLaunchPop();   // a launch flipped it live — dismiss any lingering launch popover
   const loc = (state && state.runLocation) || '';
   const src = (state && state.runLocationSource) || 'default';
   const host = loc ? loc.split(',')[0] : '';
@@ -207,4 +225,62 @@ document.addEventListener('keydown', e => {
   const bg = document.getElementById('runlocbg');
   if (e.key === 'Escape' && bg && bg.classList.contains('show')) { e.stopPropagation(); closeRunLoc(); }
 }, true);
+// Pill click dispatcher: a dormant (inactive) notebook opens the launch popover (2-click launch);
+// a live one opens the worker log popup.
+function onRunLocClick(ev) {
+  // Use the pill's OWN class (set by renderRunLoc) — authoritative and local, unlike the `nbState`
+  // global which isn't reliably present on `window` here.
+  const el = document.getElementById('runloc');
+  if (el && el.classList.contains('inactive')) { toggleLaunchPop(ev); return; }
+  openWorkerPop('', ev);
+}
+// The launch popover expands under the pill (like the worker-status panel): FIRST click on the pill
+// opens it with the precompile heads-up; the "Launch" button here is the deliberate SECOND click.
+function toggleLaunchPop(ev) {
+  ev && ev.stopPropagation();
+  const pop = document.getElementById('launchpop'); if (!pop) return;
+  (pop.style.display !== 'none') ? closeLaunchPop() : openLaunchPop();
+}
+function openLaunchPop() {
+  const pop = document.getElementById('launchpop'), pill = document.getElementById('runloc');
+  if (!pop || !pill) return;
+  // Best-effort package hints (which packages may precompile) if the server provided them.
+  const deps = ((window.__slateState || {}).launchDeps) || [];
+  const box = document.getElementById('launchpop-deps');
+  if (box) box.innerHTML = deps.length
+    ? ('<div class="ldephead">' + deps.length + ' package' + (deps.length === 1 ? '' : 's') + ' in this environment</div>'
+       + deps.map(d => '<span class="ldep">' + _rlEsc(d) + '</span>').join(' ')) : '';
+  pop.style.display = 'block';
+  const r = pill.getBoundingClientRect();
+  pop.style.left = Math.round(r.left) + 'px';
+  pop.style.top = Math.round(r.bottom + 6) + 'px';
+  const pr = pop.getBoundingClientRect();   // nudge back on-screen if the pill sits near the right edge
+  if (pr.right > window.innerWidth - 8) pop.style.left = Math.max(8, window.innerWidth - 8 - pr.width) + 'px';
+}
+function closeLaunchPop() { const pop = document.getElementById('launchpop'); if (pop) pop.style.display = 'none'; }
+// The deliberate second click: flip the notebook live. The server runs the standard bring-up, which
+// RESTORES locked/expensive results from the bundle instead of recomputing them.
+async function doLaunch() {
+  closeLaunchPop();
+  if (_launching) return;
+  _launching = true;
+  try {
+    const r = await api('POST', '/api/launch', {});
+    if (r && r.ok === false) toast(r.note === 'already active' ? 'Already running' : 'Could not launch', 2200);
+  } catch (_) { toast('Could not launch the notebook', 2600); }
+  finally { _launching = false; }
+}
+// Dismiss the popover on outside click / Esc (but not when clicking the pill itself — that toggles).
+document.addEventListener('mousedown', e => {
+  const pop = document.getElementById('launchpop');
+  if (pop && pop.style.display !== 'none' && !e.target.closest('#launchpop') && !e.target.closest('#runloc')) closeLaunchPop();
+});
+document.addEventListener('keydown', e => {
+  const pop = document.getElementById('launchpop');
+  if (e.key === 'Escape' && pop && pop.style.display !== 'none') { e.stopPropagation(); closeLaunchPop(); }
+}, true);
+window.onRunLocClick = onRunLocClick;
+window.toggleLaunchPop = toggleLaunchPop;
+window.closeLaunchPop = closeLaunchPop;
+window.doLaunch = doLaunch;
 window.renderRunLoc = renderRunLoc;

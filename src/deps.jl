@@ -640,6 +640,28 @@ function _set_locked_key!(c::Cell, key::AbstractString)
     return c
 end
 
+# The `frozenat=<stamp>` header tag: a `locked` cell's FREEZE IDENTITY — bumped (from code-key + run
+# time) every time the cell establishes a NEW frozen value (a lock, or a forced re-run), never on a
+# plain restore. Locking exists for outputs that ISN'T reproducible from code (a benchmark, an ML
+# training run, sampled data), so a locked cell's identity for DOWNSTREAM memoization can't be its
+# source alone — two runs of identical code yield different frozen values. Downstream `_memo_key` folds
+# this stamp in, so a dependent re-keys (and re-stores) when the frozen value is refreshed and restores
+# consistently on reopen, instead of pulling a result computed against a stale frozen value. Persisted
+# in the `.jl` header so it's stable across a restart. Single-valued, like `lockedkey=`.
+function _frozen_stamp(flags::AbstractSet{Symbol})
+    for f in flags
+        s = String(f)
+        startswith(s, "frozenat=") && return chopprefix(s, "frozenat=")
+    end
+    return ""
+end
+_frozen_stamp(c::Cell) = _frozen_stamp(c.flags)
+function _set_frozen_stamp!(c::Cell, stamp::AbstractString)
+    filter!(f -> !startswith(String(f), "frozenat="), c.flags)
+    isempty(stamp) || push!(c.flags, Symbol("frozenat=" * stamp))
+    return c
+end
+
 # Shared guard for every upstream-change cascade (source edit, bind push, asset watcher, force-run,
 # reorder): a locked cell holding a FRESH frozen result stays put — only its OWN ▶ may restale it.
 # Returns whether the cell was actually restaled, so callers can track which cells changed.
