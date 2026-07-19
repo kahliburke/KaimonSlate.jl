@@ -124,6 +124,71 @@ function _sansMaps(s) {
   if (!s || (!s.registerMap && !s.__size)) return s;
   const c = Object.assign({}, s); delete c.registerMap; delete c.__size; return c;
 }
+
+// Generated assets (`save_asset`): a cell's `assets` specs — {path, url, mime} — populate a page-wide
+// path→asset registry so `Slate.asset(path)` resolves what a widget/chart references. Live, each asset
+// is fetched from its blob `url`; the SAME `Slate.asset` runs in a static export (mirrored there in
+// server_export.jl `_EXPORT_ASSET_JS`), where an inlined asset carries `data` instead — one contract in
+// the notebook, a standalone file, and a hosted site.
+window.Slate = window.Slate || {};
+window.__slateAssets = window.__slateAssets || {};
+function _registerAssets(c) {
+  (c && c.assets || []).forEach(a => { if (a && a.path) window.__slateAssets[a.path] = a; });   // whole spec
+}
+// A packed numeric asset (`save_asset` of an array) → an ndarray-lite: the TypedArray plus its shape and
+// COLUMN-MAJOR layout (Julia's), with cheap `.col(k)` (a contiguous column) and `.at(i,j)` accessors —
+// so a widget slices an eigenbasis column without a strided gather. `_slateTyped` mirrors `_asset_dtype`.
+function _slateTyped(dtype, buf) {
+  return dtype === 'f32' ? new Float32Array(buf) : dtype === 'f64' ? new Float64Array(buf) :
+    dtype === 'i32' ? new Int32Array(buf) : dtype === 'i16' ? new Int16Array(buf) : new Uint8Array(buf);
+}
+function _slateNdarray(a, buf) {
+  const data = _slateTyped(a.dtype, buf), rows = (a.shape && a.shape[0]) || data.length;
+  return {
+    data, dtype: a.dtype, shape: a.shape || [data.length], order: a.order || 'col', rows,
+    col(k) { return this.data.subarray(k * this.rows, (k + 1) * this.rows); },   // col-major → contiguous
+    at(i, j) { return this.data[j * this.rows + i]; },
+  };
+}
+// Resolve a path from the registry, falling back to a scan of the current notebook state — so
+// `Slate.asset` is ready no matter the render order (a widget can't race its own asset's registration).
+// A static export has no `__slateState`; there the registry is pre-populated, so this is just the lookup.
+function _lookupAsset(path) {
+  if (!window.__slateAssets[path]) ((window.__slateState || {}).cells || []).forEach(_registerAssets);
+  return window.__slateAssets[path];
+}
+window.Slate.asset = function (path) {
+  const a = _lookupAsset(path);
+  if (!a) return Promise.reject(new Error('Slate.asset: unknown asset ' + path));
+  let get;
+  if (a.data !== undefined) {                       // inlined (static export)
+    const b = atob(a.data), n = b.length, u = new Uint8Array(n);
+    for (let i = 0; i < n; i++) u[i] = b.charCodeAt(i);
+    get = Promise.resolve(u.buffer);
+  } else { get = fetch(a.url).then(r => r.arrayBuffer()); }   // served blob (live / published)
+  return get.then(buf => {
+    if (a.dtype) return _slateNdarray(a, buf);      // packed numeric array → ndarray-lite
+    const m = a.mime || '';
+    if (m.indexOf('json') >= 0) return JSON.parse(new TextDecoder().decode(buf));
+    if (m.indexOf('text/') === 0) return new TextDecoder().decode(buf);
+    return buf;                                     // other binary → ArrayBuffer
+  });
+};
+// Inspect an asset's format WITHOUT loading it: `{path, kind, mime, dtype, shape, order}` (or null if
+// unknown) — so a widget can branch on `ndarray`/`json`/`text`/`binary` and read a matrix's shape first.
+window.Slate.assetInfo = function (path) {
+  const a = _lookupAsset(path);
+  if (!a) return null;
+  const m = a.mime || '';
+  const kind = a.dtype ? 'ndarray' : m.indexOf('json') >= 0 ? 'json' : m.indexOf('text/') === 0 ? 'text' : 'binary';
+  return { path, kind, mime: a.mime, name: a.name, bytes: a.bytes, sha: a.sha, cell: a.cell,
+           created: a.created, dtype: a.dtype || null, shape: a.shape || null, order: a.order || null };
+};
+// Every asset path currently known to the page (registry + a state scan). Handy for discovery/debugging.
+window.Slate.assetPaths = function () {
+  ((window.__slateState || {}).cells || []).forEach(_registerAssets);
+  return Object.keys(window.__slateAssets);
+};
 // Slate `height=`/`width=` chart kwargs ride as `__size` — apply to the chart's DIV (a number is
 // px; any CSS length string passes through), then let the instance re-measure. No-op when unchanged.
 function _applySize(el, inst, s) {
@@ -224,6 +289,7 @@ window._onSlateThemeChange = () => {
 // Render/refresh a cell's ECharts. Instances persist across reactive updates, so
 // data changes animate in place (setOption) instead of swapping an image.
 function renderCharts(c) {
+  _registerAssets(c);                               // publish this cell's save_asset blobs → Slate.asset
   const specs = c.echarts || [];
   const host = document.querySelector('#cell-' + c.id + ' .echarts');
   if (host) {                                   // code-cell echarts host

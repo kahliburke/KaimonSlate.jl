@@ -768,12 +768,13 @@ function _wire_to_output(wire)
     overflow = hasproperty(wire, :overflow) ? collect(wire.overflow) : Any[]
     animations = hasproperty(wire, :animations) ? collect(wire.animations) : Any[]
     effects = hasproperty(wire, :effects) ? collect(wire.effects) : Any[]
+    assets = hasproperty(wire, :assets) ? collect(wire.assets) : Any[]
     return CellOutput(String(wire.stdout), chunks, collect(wire.echarts), collect(wire.tables),
                       binds, String(wire.value_repr), wire.exception, wire.backtrace, Float64(wire.duration_ms),
                       collect(wire.trace), String(wire.stderr), overflow, animations,
                       hasproperty(wire, :memo) ? String(wire.memo) : "",
                       hasproperty(wire, :memo_why) ? String(wire.memo_why) : "",
-                      effects)
+                      effects, assets)
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
