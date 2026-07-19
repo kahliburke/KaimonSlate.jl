@@ -67,6 +67,7 @@ makedocs(;
             "Charts" => "visualization.md",
             "Tables" => "tables.md",
             "Animation" => "animation.md",
+            "Front-end Extensions" => "frontend-extensions.md",
             "Documents & Citations" => "documents.md",
             "Slides & Present" => "slides.md",
             "The AI Agent" => "agent.md",

@@ -86,5 +86,8 @@ The route is `GET /api/<id>/export.standalone.jl`.
 - ECharts snapshots are captured from the live canvas as you view the notebook, so open a
   cell's chart at least once before exporting (HTML, PDF, or standalone) to ensure its snapshot
   is current.
+- A notebook's own front-end code is self-contained: [web cells](frontend-extensions.md), `WebPage`
+  output, and `@use` imports carry their HTML/CSS/JS (and import map) into the exported page, so
+  custom widgets and scripts keep working offline.
 - Markdown chart / table interpolations (double-brace `echart(…)` / `slate_table(…)`) are
   client-hydrated and appear as static placeholders in HTML; scalar and image interpolations embed directly.
