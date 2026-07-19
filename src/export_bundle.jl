@@ -457,7 +457,13 @@ end
 function _memo_specs(report)
     specs = Dict{String,Any}(); msof = Dict{String,Float64}()
     for cell in report.cells
-        key = ReportEngine._memo_key(report, cell)
+        # Key each entry by the key the RESTORE side will request (`_eval_one!` uses `target_key`),
+        # not the freshly-computed one: a `locked` cell that has drifted from its upstream restores
+        # by its frozen `lockedkey`, so the exported footer must carry the entry under THAT key or a
+        # fresh machine misses it and recomputes the frozen result away. Same-machine reopen hides
+        # this (the local store keeps the pinned entry); the export footer is the only carrier that
+        # must agree with the restore key. For every non-locked cell this equals `_memo_key`.
+        key = ReportEngine.target_key(cell, report)
         isempty(key) && continue
         # `defs` = genuinely-defined values (drop import names and the synthetic theme sentinel).
         # Empty ⇒ a WIRE-ONLY cell (a self-theming plot / pure display): no data binding to embed,
@@ -507,13 +513,25 @@ end
 # Build the `Slate.memo` footer for `nb`: pack the ranked subset that fits `budget` bytes (densest
 # first, so a small budget still banks the most expensive solves). "" when nothing fits / to embed.
 function _build_memo_footer(nb::LiveNotebook; budget::Integer = typemax(Int))
-    budget <= 0 && return ""
     ranked = _memo_ranked(nb)
     isempty(ranked) && return ""
+    # A `locked`/`cache` cell's entry is a DURABILITY guarantee, not a discretionary cache: it must
+    # ride in the bundle regardless of `budget` — even at `budget <= 0` ("embed nothing") — or a
+    # fresh machine recomputes a frozen result (or can't — a gated resource / a heavy solve the
+    # reader won't reproduce). The budget governs only the discretionary rest, filled densest-first
+    # after the mandatory pins are banked.
+    pinned = Set{String}(c.id for c in nb.report.cells if :locked in c.flags || :cache in c.flags)
     chosen = String[]; used = 0
-    for (_, fk, by, _ms) in ranked
-        used + by > budget && continue                    # skip this one; a later denser/smaller may still fit
-        push!(chosen, fk); used += by
+    for (id, fk, by, _ms) in ranked
+        (id in pinned) || continue
+        push!(chosen, fk); used += by                     # pins ALWAYS ride — no budget check
+    end
+    if budget > 0
+        for (id, fk, by, _ms) in ranked
+            (id in pinned) && continue                    # already banked above
+            used + by > budget && continue                # skip this one; a later denser/smaller may still fit
+            push!(chosen, fk); used += by
+        end
     end
     isempty(chosen) && return ""
     packed = try; MemoStore.pack(_memo_root(), chosen); catch; UInt8[]; end
@@ -525,11 +543,17 @@ end
 # JPEG-quality slider over it (cumulative bytes vs seconds-saved as the budget grows).
 function memo_catalog(nb::LiveNotebook)
     ranked = _memo_ranked(nb)
-    entries = [Dict{String,Any}("cell" => id, "bytes" => by, "ms" => round(ms; digits = 1))
+    # `pinned` = `locked`/`cache` cells whose entry ALWAYS embeds (budget-exempt, see
+    # `_build_memo_footer`). Surface it per-entry + as a floor so the export UI can show WHICH cells
+    # force the bundle size — a 1 GB locked result should be visible, not a silent surprise.
+    pinned = Set{String}(c.id for c in nb.report.cells if :locked in c.flags || :cache in c.flags)
+    entries = [Dict{String,Any}("cell" => id, "bytes" => by, "ms" => round(ms; digits = 1),
+                                "pinned" => (id in pinned))
                for (id, _fk, by, ms) in ranked]
     return Dict{String,Any}("entries" => entries,
                             "total_bytes" => sum(t -> t[3], ranked; init = 0),
-                            "total_ms" => round(sum(t -> t[4], ranked; init = 0.0); digits = 1))
+                            "total_ms" => round(sum(t -> t[4], ranked; init = 0.0); digits = 1),
+                            "pinned_bytes" => sum((t[3] for t in ranked if t[1] in pinned); init = 0))
 end
 
 # `memo_budget` bytes caps the embedded precomputed results (default: all memoizable results;
@@ -543,7 +567,15 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true, histo
             error("this notebook has no project environment to bundle (in-process kernel)")
         cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
         b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells; history = history)
-        out = cells * "\n" * _bundle_footer(b64)
+        out = cells
+        # Carry the reproducibility env footer (the notebook's declared package delta) so a reopened
+        # standalone can LIST its packages at parse time — no instantiation needed (the inactive launch
+        # popover reads `meta["env"]`). The full env still rides in the bundle; this is the human-readable
+        # summary. Emitted before the bundle footer (matches serialize_report's ordering).
+        let envf = ReportEngine._render_env_footer(get(nb.report.meta, "env", Dict{String,Any}[]))
+            isempty(envf) || (out *= "\n" * envf)
+        end
+        out *= "\n" * _bundle_footer(b64)
         (include_preview && preview_budget > 0) && try
             # Re-inline blob URLs → data URIs so the frozen render travels self-contained (capped).
             pcells = _inline_preview_blobs!(nb.id, state_json(nb)["cells"]; budget = preview_budget)

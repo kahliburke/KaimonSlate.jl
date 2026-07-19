@@ -585,6 +585,17 @@ function _memo_key(report::Report, cell::Cell)
     closure = _dep_closure(byid, cell)
     _key_poisoned(byid, closure) && return ""    # an impure upstream makes the key non-total
     depsrc = sort!([(id, byid[id].src_hash) for id in closure])
+    # Locked upstreams contribute their FREEZE STAMP (code + run-time identity), not just their source:
+    # a `locked` cell's value isn't reproducible from its code (benchmark / training run / sampled data),
+    # so a dependent must re-key when the frozen value is refreshed — else it restores a result computed
+    # against a stale frozen value (seen: refresh a locked cell, its dependent updates live, then reopens
+    # showing the OLD downstream value). Only cells WITH a locked-upstream stamp change key here; every
+    # other cell keeps its existing key (no mass invalidation).
+    frozen = Tuple{String,String}[]
+    for id in closure
+        st = _frozen_stamp(byid[id]); isempty(st) || push!(frozen, (id, st))
+    end
+    sort!(frozen)
     readnames = copy(cell.reads); for id in closure; union!(readnames, byid[id].reads); end
     bvals = Tuple{String,Any}[]
     for c in report.cells, b in c.binds
@@ -605,7 +616,9 @@ function _memo_key(report::Report, cell::Cell)
         push!(assets, (rel, h))
     end
     core = (cell.source, (:trace in cell.flags), depsrc, bvals)
-    return string(hash(isempty(assets) ? core : (core..., assets)); base = 16)   # asset-free cells keep their old key
+    isempty(frozen) || (core = (core..., frozen))   # locked-upstream freeze stamps (cells with none keep their old key)
+    isempty(assets) || (core = (core..., assets))   # @asset file content (asset-free cells keep their old key)
+    return string(hash(core); base = 16)
 end
 
 # ── Memo status for the UI cache badge ─────────────────────────────────────────────────────────

@@ -617,17 +617,7 @@ function _make_router(h::Hub)
     # bring-up (`_hydrate_standalone!` — reconstruct env, spawn worker, restore locked/memo results, run).
     # This is what the grey "Inactive — click to launch" pill hits. Idempotent + no-op once active.
     HTTP.register!(router, "POST", "/api/{id}/launch", req -> _withnb(h, req, nb -> begin
-        launched = lock(nb.lock) do
-            (get(nb.report.meta, "inactive", false) === true) || return false
-            delete!(nb.report.meta, "inactive")
-            nb.report.meta["hydrating"] = true
-            nb.report.meta["hydratingKind"] = "env"
-            nb.version += 1
-            return true
-        end
-        launched || return _json(Dict("ok" => false, "note" => "already active"))
-        try; _broadcast(nb, string(nb.version)); catch; end   # flip the pill + show the banner at once
-        @async _hydrate_standalone!(nb, nb.path)
+        launch_notebook!(nb) || return _json(Dict("ok" => false, "note" => "already active"))
         _json(Dict("ok" => true))
     end))
     # Upload a `.jl` from the browser (the viewing machine) → save it under a persistent uploads dir and

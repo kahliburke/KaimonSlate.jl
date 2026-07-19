@@ -185,7 +185,10 @@ function _memoPlan() {   // {count, bytes, ms, total} at the current slider budg
   const ents = (_memoCat && _memoCat.entries) || [];
   const budget = (q / 100) * ((_memoCat && _memoCat.total_bytes) || 0);
   let count = 0, bytes = 0, ms = 0;
-  for (const e of ents) { if (bytes + e.bytes > budget) continue; count++; bytes += e.bytes; ms += e.ms || 0; }
+  // Pins (locked/cache) ALWAYS ride — a durability guarantee, exempt from the budget (mirrors the
+  // server's `_build_memo_footer`). Bank them first, then fill the discretionary rest densest-first.
+  for (const e of ents) { if (!e.pinned) continue; count++; bytes += e.bytes; ms += e.ms || 0; }
+  for (const e of ents) { if (e.pinned) continue; if (bytes + e.bytes > budget) continue; count++; bytes += e.bytes; ms += e.ms || 0; }
   return { count, bytes, ms, total: ents.length };
 }
 function _fmtBytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
@@ -196,7 +199,17 @@ function _memoSyncReadout() {
   const p = _memoPlan();
   if (p.count === 0) { ro.innerHTML = '<b>off</b> — cells recompute on import'; return; }
   const s = p.ms / 1000;
-  ro.innerHTML = `<b>${p.count}</b> of ${p.total} · <b>${_fmtBytes(p.bytes)}</b> · saves ~${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
+  let html = `<b>${p.count}</b> of ${p.total} · <b>${_fmtBytes(p.bytes)}</b> · saves ~${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
+  // Locked/cached cells always embed regardless of the slider — show that floor and WHICH cells set
+  // it, so a heavy frozen result (e.g. a 1 GB solve) is visible rather than a silent bundle blow-up.
+  const pins = ((_memoCat && _memoCat.entries) || []).filter(e => e.pinned).sort((a, b) => b.bytes - a.bytes);
+  const pinBytes = (_memoCat && _memoCat.pinned_bytes) || 0;
+  if (pins.length) {
+    const list = pins.map(e => `${e.cell} (${_fmtBytes(e.bytes)})`).join(', ');
+    const heavy = pinBytes >= 52428800;   // ~50 MB+ of locked results always ride — worth flagging
+    html += ` · <span class="memo-pin${heavy ? ' memo-pin-heavy' : ''}" title="Locked/cached cells always embed, regardless of this budget:\n${list}">🔒 ${_fmtBytes(pinBytes)} locked${heavy ? ' — large' : ''}</span>`;
+  }
+  ro.innerHTML = html;
 }
 // The `memo=<MB>` value for the export URL: "" = all (slider max / nothing to embed), "0" = none,
 // else the budget in MB (server re-derives bytes and fills densest-first within it).

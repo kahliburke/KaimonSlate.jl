@@ -204,7 +204,7 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
 end
 
 function load_notebook(path::AbstractString; id::AbstractString = "", threads::AbstractString = "",
-                       runon::AbstractString = "", autorun::Bool = true)
+                       runon::AbstractString = "", autorun::Bool = true, inactive::Bool = false)
     src = read(path, String)
     base = splitext(basename(path))[1]
     rid = replace(base, r"[^A-Za-z0-9]" => "_")
@@ -228,13 +228,22 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     if ReportEngine.gate_available() && _has_bundle(src)
         p = _read_preview(src)
         p === nothing || (r.meta["preview"] = p)
-        r.meta["hydrating"] = true
         nb = LiveNotebook(nbid, String(path), r, PendingKernel(), 0, String[], String[],
                           ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                           Dict{String,String}())
         _wire_callbacks!(nb)
         _load_chat_log!(nb)
-        @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
+        if inactive
+            # INACTIVE open (the download/upload default): show the embedded frozen render and spawn
+            # NOTHING — no worker, no env reconstruct, no precompile, no resource access. The static
+            # preview is exactly what the exported page already showed; a grey "Inactive — click to
+            # launch" pill defers the (possibly heavy) bring-up to `/api/launch` → `_hydrate_standalone!`,
+            # which is the moment the notebook becomes live + interactive. See `launch`/`state_json`.
+            r.meta["inactive"] = true
+        else
+            r.meta["hydrating"] = true
+            @async _hydrate_standalone!(nb, String(path))   # reconstruct + run live, then push
+        end
         return nb
     end
     # Open INSTANTLY: hand the browser the notebook with cells un-run and boot the kernel + do the
@@ -246,13 +255,6 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     # get INTO the notebook (e.g. to tag a cell `locked` first) before anything expensive runs; a
     # manual ▶/"Run stale" starts it whenever the user is ready.
     #
-    # `hydrating` (+`hydratingKind = "boot"`) is set UNCONDITIONALLY here, regardless of `autorun` —
-    # a cold worker spawn can mean a multi-minute Julia precompile with zero other feedback, and that
-    # was genuinely invisible before (looked identical to a hang). This doesn't gate anything (editing
-    # already works immediately via `PendingKernel`); it's purely a status banner narrating the boot
-    # via the same `bringup:` streaming the remote-provision path already uses.
-    r.meta["hydrating"] = true
-    r.meta["hydratingKind"] = "boot"
     # Interim render: if we persisted a snapshot of this notebook's last rendered figures, show it
     # AT ONCE while the worker boots + the initial run recomputes — the notebook springs to life
     # instead of showing every cell un-run. Marked entries carry a stored/stale badge; live cells
@@ -260,12 +262,38 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
     let p = _load_preview_marked(path, r)
         p === nothing || (r.meta["preview"] = p)
     end
-    pending = PendingKernel()
-    nb = LiveNotebook(nbid, String(path), r, pending, 0, String[], String[],
+    nb = LiveNotebook(nbid, String(path), r, PendingKernel(), 0, String[], String[],
                       ReentrantLock(), Channel{String}[], ReentrantLock(), "", false,
                       Dict{String,String}())
     _wire_callbacks!(nb)
     _load_chat_log!(nb)                  # restore any prior agent transcript (survives server restart)
+    if inactive
+        # INACTIVE open of a plain notebook: show the last-rendered preview (if any) and boot NOTHING —
+        # a grey "Inactive — click to launch" pill defers the (possibly heavy) worker spawn + run to
+        # `launch_notebook!`. Distinct from `autorun=false`, which still boots the worker (editing/
+        # completion want it live) and only skips the initial run.
+        r.meta["inactive"] = true
+    else
+        # `hydrating` (+`hydratingKind="boot"`) is set regardless of `autorun` — a cold worker spawn can
+        # be a multi-minute precompile that was invisible before (looked identical to a hang). It gates
+        # nothing (editing works immediately via `PendingKernel`); it's a status banner narrating the
+        # boot via the same `bringup:` stream the remote-provision path uses.
+        r.meta["hydrating"] = true
+        r.meta["hydratingKind"] = "boot"
+        _boot_and_run!(nb; autorun = autorun)
+    end
+    return nb
+end
+
+# Boot `nb`'s worker (cold spawn / remote attach) and, when `autorun`, run the initial full pass — all
+# in the BACKGROUND, streaming boot progress + results live. The plain-notebook counterpart to
+# `_hydrate_standalone!` (which reconstructs a bundle env first). Shared by `load_notebook` (live open)
+# and `launch_notebook!` (launching a notebook that was opened inactive). Assumes `nb.kernel` is the
+# PendingKernel placeholder installed at open, and `hydrating`/`hydratingKind="boot"` are already set.
+function _boot_and_run!(nb::LiveNotebook; autorun::Bool = true)
+    pending = nb.kernel
+    path = nb.path
+    r = nb.report
     @async begin
         try
             # `online`: a cold local spawn's stdout/stderr streamed line-by-line into the boot banner
@@ -274,7 +302,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
             # via `_bringup_note`/`_run_streamed` on its own "remote" hydratingKind).
             kernel = _select_kernel(path, r; online = line -> (try; _broadcast(nb, "bringup:" * line); catch; end))
             lock(nb.lock) do; nb.kernel = kernel; nb.version += 1; end
-            ReportEngine._resolve!(pending, kernel)   # unblock anyone who raced the boot window (edit/run before the worker existed)
+            pending isa PendingKernel && ReportEngine._resolve!(pending, kernel)   # unblock anyone who raced the boot window
             if autorun
                 lock(nb.lock) do; delete!(nb.report.meta, "hydratingKind"); end   # boot done → falls back to the (bannerless) "run" default
                 try; _broadcast(nb, string(nb.version)); catch; end   # worker is up → refresh the dot to "connected" BEFORE the (possibly long) run, so it's not stale
@@ -313,7 +341,7 @@ function load_notebook(path::AbstractString; id::AbstractString = "", threads::A
                 delete!(nb.report.meta, "hydratingKind")
                 nb.version += 1
             end
-            pending.real === nothing && pending.err === nothing &&
+            pending isa PendingKernel && pending.real === nothing && pending.err === nothing &&
                 ReportEngine._reject!(pending, "notebook failed to start: " * sprint(showerror, e))
             @warn "KaimonSlate: initial run failed" exception = (e, catch_backtrace())
         end
@@ -328,10 +356,30 @@ end
 # drop the hydrating state (the preview stays visible as the last-known render).
 function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
     pending = nb.kernel   # the PendingKernel placeholder installed by load_notebook, unblocked below
+    # The env reconstruct + precompile can run for minutes on a fresh machine — narrate it with the SAME
+    # structured "Precompiling k/N · <pkg>" banner the local/remote worker boot uses, not just a raw log.
+    # `hydratingKind="env"` guarantees the banner shows (a bundle with no embedded preview would otherwise
+    # default hydratingKind to "run", which suppresses it). `online` runs each raw Pkg line through the
+    # shared prepare classifier → a `prepare:` headline, and tucks the raw line into the collapsible log —
+    # the piece the standalone path was missing (it precompiles in `_instantiate_env!`, outside the worker's
+    # own `_prepare_env!` classifier, so without this only unstructured `bringup:` lines reached the banner).
+    lock(nb.lock) do
+        delete!(nb.report.meta, "inactive")   # launching supersedes the dormant state (defensive)
+        nb.report.meta["hydratingKind"] = "env"
+    end
+    tr = ReportEngine.PrepareTracker(time())
+    online = line -> begin
+        s = strip(String(line)); isempty(s) && return nothing
+        try
+            (ReportEngine.prepare_feed!(tr, s) && ReportEngine.prepare_active(tr)) &&
+                _broadcast(nb, "prepare:" * ReportEngine.prepare_json(tr))
+        catch; end
+        startswith(s, "@@SLATE_PREP") || (try; _broadcast(nb, "bringup:" * first(s, 200)); catch; end)
+        return nothing
+    end
     try
         rc = _reconstruct_bundle!(path)
-        rc.fresh && _instantiate_env!(rc.envdir;
-            online = line -> (try; _broadcast(nb, "bringup:" * line); catch; end))
+        rc.fresh && _instantiate_env!(rc.envdir; online = online)
         # Embedded precomputed results → unpack into the local memo store BEFORE the drain, so the
         # expensive cells RESTORE instead of recompute (content-addressed: existing blobs are kept).
         # host-portable keys (manifest/src digests) make the exporter's fullkeys match here.
@@ -345,7 +393,7 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
             @warn "KaimonSlate: embedded memo unpack failed (cells will recompute)" exception = (e, catch_backtrace())
         end
         kernel = GateKernel(rc.envdir; parent = rc.parent, envdir = rc.envdir, label = basename(abspath(path)),
-                            online = line -> (try; _broadcast(nb, "bringup:" * line); catch; end))
+                            online = online)
         lock(nb.lock) do
             nb.kernel = kernel
             # A durable INSTALL (SLATE_INSTALL_DIR) → serve the notebook FROM the installed project, so
@@ -1952,14 +2000,27 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         _apply_cell_effects!(nb, c, out)                 # code→Slate declarations (e.g. :everywhere classification)
         _stats_record!(nb, c)                            # before the broadcast — the push carries fresh stats
         _broadcast_progress(nb, c)
-        # A successful `locked` run freezes ON this key: persist it (surviving a restart — the
-        # `.jl` footer round-trips `c.flags`) and swap the durable-store pin, outside the lock
-        # (a gate RPC — see `memo_pin!`). No-op re-persist when the key didn't move.
-        if locked && c.state == FRESH && memo.key != ReportEngine._locked_key(c)
+        # A successful `locked` run freezes ON this key: persist it (surviving a restart — the `.jl`
+        # footer round-trips `c.flags`) and swap the durable-store pin, outside the lock (a gate RPC —
+        # see `memo_pin!`). A forced re-run or the first freeze also bumps the FREEZE STAMP (code-key +
+        # run time) so downstream memo keys track a new frozen value even when the source (hence the
+        # computed key) didn't move — the benchmark / training-run case: same code, new output. A plain
+        # restore-run is never forced and already has a key, so it leaves both untouched.
+        if locked && c.state == FRESH
             old = ReportEngine._locked_key(c)
-            ReportEngine._set_locked_key!(c, memo.key)
-            _persist!(nb; label = "locked · $(c.id)")
-            (old, memo.key)
+            moved = memo.key != old
+            moved && ReportEngine._set_locked_key!(c, memo.key)
+            # Freeze identity = a hash of the OUTPUT: stable across restores (same value → same stamp),
+            # and it changes whenever the frozen value is refreshed (a force ▶, or any fresh compute that
+            # yields a new value). Downstream memo keys fold this in, so a dependent re-keys ONLY when the
+            # frozen value actually changes — the benchmark / training-run case (same code, new output).
+            # Output-based, so it's independent of HOW the run was triggered (no reliance on the force
+            # marker, which a non-`▶` re-run path may not set).
+            oldstamp = ReportEngine._frozen_stamp(c)
+            newstamp = string(hash(out === nothing ? "" : out.value_repr); base = 16)
+            newstamp == oldstamp || ReportEngine._set_frozen_stamp!(c, newstamp)
+            (moved || newstamp != oldstamp) && _persist!(nb; label = "locked · $(c.id)")
+            (moved && !isempty(old)) ? (old, memo.key) : nothing
         else
             nothing
         end
@@ -2513,11 +2574,31 @@ Start a hub and open the single notebook at `path`. Non-blocking; returns the
 `Hub` (stop it with [`stop_hub`](@ref)). The notebook is served at `/n/<id>`
 (printed); `/` is the index. For a blocking launcher use [`serve_notebook`](@ref).
 """
-function start_server(path::AbstractString; host = "127.0.0.1", port = 8765)
+function start_server(path::AbstractString; host = "127.0.0.1", port = 8765, inactive::Bool = false)
     h = start_hub(; host = host, port = port)
-    id = open_notebook!(h, path)
+    id = open_notebook!(h, path; inactive = inactive)
     @info "Notebook" url = "$(_hub_url(h))/n/$id" file = abspath(path)
     return h
+end
+
+# Flip a dormant (inactive) notebook to live and kick off its bring-up: a self-contained bundle
+# reconstructs its env first (`_hydrate_standalone!`); a plain notebook just boots its worker + runs
+# (`_boot_and_run!`). Both restore locked/memo results instead of recomputing. Returns true if it
+# actually launched (false = already active). Shared by `/api/{id}/launch` and serve_notebook's `b` key.
+function launch_notebook!(nb::LiveNotebook)
+    hasbundle = try; _has_bundle(read(nb.path, String)); catch; false; end
+    launched = lock(nb.lock) do
+        (get(nb.report.meta, "inactive", false) === true) || return false
+        delete!(nb.report.meta, "inactive")
+        nb.report.meta["hydrating"] = true
+        nb.report.meta["hydratingKind"] = hasbundle ? "env" : "boot"
+        nb.version += 1
+        return true
+    end
+    launched || return false
+    try; _broadcast(nb, string(nb.version)); catch; end   # flip the pill + show the banner at once
+    hasbundle ? (@async _hydrate_standalone!(nb, nb.path)) : _boot_and_run!(nb; autorun = true)
+    return true
 end
 
 "Stop a hub started by [`start_server`](@ref) (drains SSE, frees the port)."
@@ -2541,13 +2622,27 @@ end
 
 # A prominent, framed "your notebook is live" banner with the openable URL emphasized (bold + underline,
 # the terminal's default hyperlinking makes it clickable). Printed once the hub answers HTTP.
-function _print_ready_banner(url::AbstractString; logpath::AbstractString = "")
+function _print_ready_banner(url::AbstractString; logpath::AbstractString = "",
+                             keys::Bool = false, inactive::Bool = false)
     rule = "─"^72
     printstyled("\n", rule, "\n"; color = :green)
-    printstyled("  ✓  Your Kaimon Slate notebook is live\n\n"; color = :green, bold = true)
+    printstyled(inactive ? "  ✓  Your Kaimon Slate notebook is ready (inactive)\n\n" :
+                           "  ✓  Your Kaimon Slate notebook is live\n\n"; color = :green, bold = true)
     print("      →  ")
     printstyled(url; color = :cyan, bold = true, underline = true)
-    print("\n\n  Open the link above in a browser. Press q or Ctrl-C here to stop the server.\n")
+    if keys
+        print("\n\n")
+        inactive && print("  It opens as a static preview — nothing runs until you launch it.\n\n")
+        print("  Press  ")
+        printstyled("b"; color = :cyan, bold = true); print(" browser + launch (go live)    ")
+        printstyled("p"; color = :cyan, bold = true); print(" browser, stay a preview    ")
+        printstyled("q"; color = :cyan, bold = true); print(" stop the server\n")
+        print("  Tip: set ")
+        printstyled("SLATE_BROWSER"; color = :light_black)
+        print(" (e.g. \"Google Chrome\") to choose which browser b/p open.\n")
+    else
+        print("\n\n  Open the link above in a browser. Press q or Ctrl-C here to stop the server.\n")
+    end
     if !isempty(logpath)
         print("  Detailed server log: ")
         printstyled(logpath, "\n"; color = :light_black)
@@ -2582,21 +2677,46 @@ function Logging.handle_message(l::_FileDemuxLogger, lvl, msg, _mod, grp, id, fi
     return nothing
 end
 
-# Open `url` in the viewer's default browser, best-effort. This is what makes a Windows double-click
-# (run.bat → run.ps1 → run.jl) actually land in a browser rather than a bare console. Cross-platform:
-# `start` on Windows, `open` on macOS, `xdg-open` on Linux. Opt out with KAIMONSLATE_NO_OPEN=1 (e.g.
-# a headless/CI serve). Never fatal — if it fails, the printed URL still stands.
-function _open_in_browser(url::AbstractString)
-    get(ENV, "KAIMONSLATE_NO_OPEN", "0") == "1" && return false
+# Open `url` in a browser, best-effort. This is what makes a Windows double-click (run.bat → run.ps1 →
+# run.jl) actually land in a browser rather than a bare console. Cross-platform: `start` on Windows,
+# `open` on macOS, `xdg-open` on Linux. `SLATE_BROWSER` picks a SPECIFIC browser instead of the OS
+# default (macOS `open -a "Google Chrome"`; elsewhere the executable name) — for the common "my default
+# is Safari but I want Chrome" case. `KAIMONSLATE_NO_OPEN=1` opts out of AUTOMATIC opens (headless/CI, or
+# run.jl which drives its own `b`/`p` keys); `force=true` is an explicit user action (a key press) and
+# ignores it. Never fatal — if it fails, the printed URL still stands.
+function _open_in_browser(url::AbstractString; force::Bool = false)
+    (!force && get(ENV, "KAIMONSLATE_NO_OPEN", "0") == "1") && return false
+    br = strip(get(ENV, "SLATE_BROWSER", ""))
     try
-        cmd = Sys.iswindows() ? `cmd /c start "" $url` :
-              Sys.isapple()   ? `open $url` :
-                                `xdg-open $url`
+        cmd = if !isempty(br)
+            Sys.isapple()   ? `open -a $br $url` :
+            Sys.iswindows() ? `cmd /c start "" $br $url` :
+                              `$br $url`
+        else
+            Sys.iswindows() ? `cmd /c start "" $url` :
+            Sys.isapple()   ? `open $url` :
+                              `xdg-open $url`
+        end
         run(pipeline(cmd; stdout = devnull, stderr = devnull))
         return true
     catch
         return false
     end
+end
+
+# serve_notebook's interactive keys (raw-tty path): `b` opens the browser AND launches (go live);
+# `p` opens the browser but leaves it inactive (a preview). Both honor SLATE_BROWSER and are explicit
+# (force) opens, so they work even though run.jl sets KAIMONSLATE_NO_OPEN to suppress the auto-open.
+function _serve_key(b::UInt8, h, url::AbstractString)
+    c = Char(b)
+    if c == 'b' || c == 'B'
+        _open_in_browser(url; force = true)
+        nbs = try; lock(h.lock) do; collect(values(h.notebooks)); end; catch; LiveNotebook[]; end
+        for nb in nbs; try; launch_notebook!(nb); catch; end; end
+    elseif c == 'p' || c == 'P'
+        _open_in_browser(url; force = true)
+    end
+    return nothing
 end
 
 """
@@ -2609,7 +2729,8 @@ bare port). With `quiet=true` (default) the console stays clean after the banner
 detail (worker spawns, connects, warnings) goes to a file in the same tmp dir as the worker logs —
 the banner shows the path; only errors still print.
 """
-function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, quiet::Bool = true)
+function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, quiet::Bool = true,
+                        inactive::Bool = false)
     # Swap the logger BEFORE anything spawns so worker-spawn infos land in the file.
     logpath = joinpath(tempdir(), "kaimonslate", "hub-$port.log")
     logio = nothing
@@ -2627,12 +2748,14 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
             logio = nothing                  # log hygiene must never block serving
         end
     end
-    h = start_server(path; host = host, port = port)
+    h = start_server(path; host = host, port = port, inactive = inactive)
     id = isempty(h.notebooks) ? "" : first(keys(h.notebooks))
     url = "$(_hub_url(h))/n/$id"
     _await_http_ready(_hub_url(h))          # wait until the server actually answers before announcing it
-    _print_ready_banner(url; logpath = logio === nothing ? "" : logpath)
-    _open_in_browser(url)                    # best-effort: land a double-click launch straight in a browser
+    # Interactive keys (b/p/q) only work on the raw-tty path below (a `julia run.jl` launch), not a REPL.
+    keys = !isinteractive() && stdin isa Base.TTY
+    _print_ready_banner(url; logpath = logio === nothing ? "" : logpath, keys = keys, inactive = inactive)
+    _open_in_browser(url)                    # best-effort auto-open (a no-op under KAIMONSLATE_NO_OPEN, which run.jl sets so its b/p keys drive opening instead)
     # Block until stopped — and make Ctrl-C actually stop it. Signals are a dead end
     # here (verified against a live hub): once the threaded HTTP listener runs, a
     # SIGINT is never delivered into this process at all in a `julia -e` run — ^C was
@@ -2656,7 +2779,7 @@ function serve_notebook(path::AbstractString; host = "127.0.0.1", port = 8765, q
         return
     end
     if !isinteractive() && stdin isa Base.TTY
-        _wait_for_ctrl_c()                   # ^C / q (or ^Q / stdin EOF) as a raw byte
+        _wait_for_ctrl_c(on_key = b -> _serve_key(b, h, url))   # ^C / q / EOF quits; b / p act
         println("\n  Stopping the notebook server…")
         cleanup()
         _hard_exit(0)
@@ -2691,7 +2814,7 @@ end
 # mode is re-asserted on a timer: anything else touching the tty (a spawned child
 # inheriting it, a stty from the shell) can knock it back to cooked, which would
 # turn ^C back into an undeliverable SIGINT.
-function _wait_for_ctrl_c()
+function _wait_for_ctrl_c(; on_key = nothing)
     term = REPL.Terminals.TTYTerminal(get(ENV, "TERM", "dumb"), stdin, stdout, stderr)
     ok = try; REPL.Terminals.raw!(term, true); true; catch; false; end
     ok || (try; wait(Condition()); catch; end; return nothing)
@@ -2707,6 +2830,7 @@ function _wait_for_ctrl_c()
                 rethrow()
             end
             (b == 0x03 || b == 0x11 || b == UInt8('q') || b == UInt8('Q')) && return nothing
+            on_key === nothing || (try; on_key(b); catch; end)   # other keys (b/p) act without ending the wait
         end
     finally
         close(keepraw)
