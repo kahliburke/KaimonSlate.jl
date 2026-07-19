@@ -80,4 +80,4 @@ On first run `slate` offers to register as a Kaimon extension (so the agent gets
 tools). No Kaimon? `slate --own` runs standalone. See [Installation](installation.md) and
 [Getting Started](getting-started.md).
 
-![A KaimonSlate notebook — reactive cells, a slider, an inline ECharts chart, a table, and an error](./assets/overview.png)
+![A reactive KaimonSlate notebook — a frequency slider and a toggle driving a live ECharts chart](./assets/hero.png)
