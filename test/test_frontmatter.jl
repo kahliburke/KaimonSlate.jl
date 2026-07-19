@@ -231,6 +231,36 @@ x = 1
         fc = fnb.report.cells[findfirst(x -> x.id == "f", fnb.report.cells)]
         fc.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
         @test NS._first_figure_png(fnb) == UInt8[0x89, 0x50]
+        # a text/value cell is NOT a figure: its output has no raster/chart/animation, so the picker
+        # skips it (regression — a plain-string cell's browser snapshot must never become the og:image)
+        vnb = _mknb("#%% code id=v\n(a=1,)\n#%% code id=f\n1\n")
+        vc = vnb.report.cells[findfirst(x -> x.id == "v", vnb.report.cells)]
+        ff = vnb.report.cells[findfirst(x -> x.id == "f", vnb.report.cells)]
+        vc.output = RE.CellOutput("", RE.MimeChunk[], Any[], Any[], RE.BindSpec[], "(a = 1,)", nothing, nothing, 0.0)
+        ff.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x89, 0x50])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        @test NS._cell_has_figure(vc) == false
+        @test NS._cell_has_figure(ff) == true
+        @test NS._first_figure_png(vnb) == UInt8[0x89, 0x50]     # value cell skipped, real figure picked
+        # an echarts-only (no raster) cell still counts as a figure
+        enb = _mknb("#%% code id=e\n1\n")
+        ec = enb.report.cells[findfirst(x -> x.id == "e", enb.report.cells)]
+        ec.output = RE.CellOutput("", RE.MimeChunk[], Any[Dict("series" => [])], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        @test NS._cell_has_figure(ec) == true
+        # a `thumbnail` (or `og`) tag overrides the auto pick — the tagged cell's figure wins
+        tnb = _mknb("#%% code id=first\n1\n#%% code id=pick thumbnail\n2\n")
+        t1 = tnb.report.cells[findfirst(x -> x.id == "first", tnb.report.cells)]
+        t2 = tnb.report.cells[findfirst(x -> x.id == "pick", tnb.report.cells)]
+        t1.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x01])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        t2.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x02])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        @test :thumbnail in t2.flags                             # free-form tag parsed into flags
+        @test NS._first_figure_png(tnb) == UInt8[0x01]           # auto pick is still the first figure
+        @test NS.og_image(tnb) == UInt8[0x02]                    # but the tag wins outright
+        onb = _mknb("#%% code id=a\n1\n#%% code id=b og\n2\n")
+        oa = onb.report.cells[findfirst(x -> x.id == "a", onb.report.cells)]
+        ob = onb.report.cells[findfirst(x -> x.id == "b", onb.report.cells)]
+        oa.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x01])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        ob.output = RE.CellOutput("", [RE.MimeChunk("image/png", UInt8[0x03])], Any[], Any[], RE.BindSpec[], "", nothing, nothing, 0.0)
+        @test NS.og_image(onb) == UInt8[0x03]                    # `og` is an accepted alias for `thumbnail`
         # the site tarball is a valid gzip stream (starts with the gzip magic)
         site = NS.export_site(fnb)
         @test length(site) > 20 && site[1] == 0x1f && site[2] == 0x8b

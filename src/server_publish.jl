@@ -305,20 +305,72 @@ function publish_site_delete!(name::AbstractString; purge::Bool = false)
     return view
 end
 
+# Rebuild every LIVE member of the site (matched to an open notebook by source path) from its current
+# source, using the build options recorded in the manifest at its last publish. Non-live members are
+# reported and left untouched. Emits per-member `:status` lines so the publish stream names exactly which
+# notebooks were re-exported. Best-effort per member — one failed rebuild is logged, the rest proceed.
+function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; on_event = nothing)
+    man = _read_site_manifest(dir)
+    # Match members to open notebooks by source path; fall back to slug so a manifest written before
+    # `source` was recorded (pre-migration) still resolves without a one-off re-publish.
+    live_by_path, live_by_slug = lock(hub.lock) do
+        nbs = collect(values(hub.notebooks))
+        (Dict(abspath(nb.path) => nb for nb in nbs), Dict(doc_slug(nb) => nb for nb in nbs))
+    end
+    say(msg) = on_event === nothing || on_event(0, :status, msg)
+    note(msg) = on_event === nothing || on_event(0, :log, msg)
+    members = Any[]
+    hd = get(man, "homeDoc", nothing)
+    hd isa AbstractDict && !isempty(String(get(hd, "path", ""))) && push!(members, (; slug = "", entry = hd))
+    for d in get(man, "docs", Any[])
+        d isa AbstractDict || continue
+        push!(members, (; slug = String(get(d, "slug", "")), entry = d))
+    end
+    for m in members
+        src = String(get(m.entry, "path", get(m.entry, "source", "")))
+        title = String(get(m.entry, "title", isempty(m.slug) ? "front page" : m.slug))
+        nb = isempty(src) ? nothing : get(live_by_path, abspath(src), nothing)
+        nb === nothing && !isempty(m.slug) && (nb = get(live_by_slug, m.slug, nothing))
+        if nb === nothing
+            note("• $title — no open notebook to rebuild from, keeping last build")
+            continue
+        end
+        b = get(m.entry, "build", Dict{String,Any}()); b isa AbstractDict || (b = Dict{String,Any}())
+        say("Exporting $title …")
+        try
+            export_to_site(nb, name; slug = m.slug,
+                           bundle = get(b, "bundle", false) === true,
+                           history = get(b, "history", false) === true,
+                           theme = String(get(b, "theme", "dark")),
+                           outputs = String(get(b, "outputs", "all")),
+                           include_source = get(b, "source", true) === true)
+        catch e
+            @warn "slate: sync rebuild of member failed" site = name member = title exception = (e, catch_backtrace())
+            note("✗ $title — rebuild failed: $(sprint(showerror, e))")
+        end
+    end
+    return nothing
+end
+
 """
-    sync_site!(name; on_event=nothing) -> summary
+    sync_site!(name; on_event=nothing, hub=nothing) -> summary
 
 Deploy a site's ONE canonical local build (`_site_dir(name)`) to every one of its destination targets,
 concurrently and identically. `on_event(i, phase, payload)` streams per-target progress. Throws if the
 site has no local build yet or no configured destinations. Zenodo/non-host targets report an error row.
 """
-function sync_site!(name::AbstractString; on_event = nothing)
+function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
     site = get(led.sites, String(name), nothing)
     site === nothing && error("no site '$name'")
     dir = _site_dir(String(name))
     (dir === nothing || !isdir(dir)) && error("site '$name' has no local build yet — publish a notebook to it first")
+    # Sync = SYNCHRONIZE: rebuild every member whose notebook is open from its CURRENT source before
+    # deploying, so the bytes shipped reflect the notebooks as they are now — not the frozen artifact
+    # from the last Publish. Members whose notebook isn't open are left as-is (a rebuild needs its live
+    # kernel for figures). Streams an "Exporting <title>…" line per member so the UI shows what moved.
+    hub === nothing || _resync_live_members!(dir, String(name), hub; on_event = on_event)
     tnames = [n for n in site.targets if haskey(led.targets, n)]
     isempty(tnames) && error("site '$name' has no configured destinations — add some in the manager")
     secrets = _secrets_load()
@@ -347,7 +399,7 @@ end
 The site publish action: build `nb` into the site's canonical local dir (accumulating it as a member),
 then sync the whole build to every destination. `kwargs` are the site-build options (bundle/history/…).
 """
-function publish_to_site!(nb::LiveNotebook, siteName::AbstractString; on_event = nothing, kwargs...)
+function publish_to_site!(nb::LiveNotebook, siteName::AbstractString; on_event = nothing, hub = nothing, kwargs...)
     led = PublishLedger.load(PublishLedger.default_store())
     site = get(led.sites, String(siteName), nothing)
     # The SITE owns its display title — persisted on the SiteGroup, falling back to the site
@@ -360,7 +412,7 @@ function publish_to_site!(nb::LiveNotebook, siteName::AbstractString; on_event =
     tnames = site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
     isempty(tnames) && return Dict{String,Any}("ok" => true, "localOnly" => true,
         "url" => built.url, "docCount" => built.docCount, "results" => Any[])
-    return sync_site!(String(siteName); on_event = on_event)  # push the whole build to all destinations
+    return sync_site!(String(siteName); on_event = on_event, hub = hub)  # push the whole build to all destinations
 end
 
 # The ledger name to use for a github-pages `repo` — an existing target for that repo, else a fresh
@@ -553,7 +605,11 @@ function _sse_stream(stream::HTTP.Stream, run_fn)
     task = @async begin
         try
             on_event = function (_i, phase, payload)
-                if phase === :start
+                if phase === :status
+                    put!(ch, ("status", String(payload)))
+                elseif phase === :log
+                    put!(ch, ("log", String(payload)))
+                elseif phase === :start
                     put!(ch, ("status", "Deploying to $(target_name(payload))…"))
                 else
                     r = payload; tag = r.ok ? "✓" : "✗"
@@ -607,7 +663,7 @@ end
 function _sse_site_sync(stream::HTTP.Stream, h::Hub)
     site = get(HTTP.queryparams(HTTP.URI(stream.message.target)), "site", "")
     isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
-    _sse_stream(stream, on_event -> sync_site!(String(site); on_event = on_event))
+    _sse_stream(stream, on_event -> sync_site!(String(site); on_event = on_event, hub = h))
 end
 
 # ── HTTP routes (called from `_make_router`) ─────────────────────────────────────────────────────────
