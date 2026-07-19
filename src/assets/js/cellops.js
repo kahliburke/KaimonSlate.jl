@@ -7,6 +7,11 @@ async function runCell(id, force = false) {
   // the whole point is to retry it. A clean cell with unchanged source is still skipped (advance-only).
   if (!force && before && before.state === 'errored') force = true;
   setState(id, 'running');
+  // A DELIBERATE run (⇧⏎ / ▶) must re-execute even if the output is byte-identical: clear the output-swap
+  // dedupe marker so `_swapOutput` re-renders (and re-runs a web fragment's <script>) instead of skipping
+  // it. Automatic/reactive renders keep the marker, so an unchanged output still doesn't double-run.
+  const _out = document.querySelector('#cell-' + id + ' .output');
+  if (_out) _out.__slateOut = undefined;
   const state = await api('POST', '/api/cell/' + id, { source: editors[id] ? edText(id) : (srcMap[id] || ''), force: !!force });
   const after = (state.cells || []).find(c => c.id === id);
   // A code cell that gains (or loses) @bind widgets — or flips kind — changes its DOM

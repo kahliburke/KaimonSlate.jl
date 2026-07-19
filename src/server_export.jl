@@ -158,6 +158,12 @@ Slate.assetInfo=function(path){var a=window.__slateAssets[path];if(!a)return nul
 var kind=a.dtype?"ndarray":m.indexOf("json")>=0?"json":m.indexOf("text/")===0?"text":"binary";
 return {path:path,kind:kind,mime:a.mime,dtype:a.dtype||null,shape:a.shape||null,order:a.order||null};};
 Slate.assetPaths=function(){return Object.keys(window.__slateAssets);};
+Slate.runFragment=function(scriptEl,fn){var root=scriptEl&&scriptEl.parentElement;
+var echo=function(){var g=root&&root.querySelector(".weblog");if(root&&!g){g=document.createElement("pre");g.className="weblog";root.appendChild(g);}
+var line=Array.prototype.map.call(arguments,function(a){return typeof a==="string"?a:(function(){try{return JSON.stringify(a);}catch(_){return String(a);}})();}).join(" ");
+if(g)g.textContent+=line+"\n";try{console.log.apply(console,arguments);}catch(_){}};
+Promise.resolve().then(function(){return fn(root,echo);}).catch(function(e){console.error(e);
+try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠ "+((e&&e.stack)||e);(root||document.body).appendChild(b);}catch(_){}});};
 """
 
 # Light-family Slate palettes — page chrome + code-highlight theme flip on these; all others are dark.
@@ -1075,10 +1081,15 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     # And don't fire the agent doc-index background service just to VIEW a notebook (it would harvest the
     # whole package doc set). The in-notebook agent can still index on demand.
     get(ENV, "KAIMONSLATE_NO_AUTOINDEX", "") == "" && (ENV["KAIMONSLATE_NO_AUTOINDEX"] = "1")
+    # Don't auto-open a browser. Land in the terminal with b/p/q keys instead, so you open in YOUR
+    # browser — set SLATE_BROWSER (e.g. "Google Chrome") to override the OS default — and choose whether
+    # to go live (b) or just preview the stored render (p). Explicit b/p key opens ignore this flag.
+    get(ENV, "KAIMONSLATE_NO_OPEN", "") == "" && (ENV["KAIMONSLATE_NO_OPEN"] = "1")
     import Kaimon        # defines Main.Kaimon → the compute gate that spawns the worker + reconstructs the env
     using KaimonSlate
-    # serve_notebook blocks; once the hub answers HTTP it prints a framed banner with the live URL.
-    KaimonSlate.serve_notebook(NB; port = port)
+    # serve_notebook blocks; once the hub answers HTTP it prints a framed banner with the URL + keys.
+    # `inactive=true`: open as a static preview (no worker/precompile) until you press `b` to go live.
+    KaimonSlate.serve_notebook(NB; port = port, inactive = true)
     """
 end
 

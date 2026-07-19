@@ -42,7 +42,9 @@ function setEditing(id, on) {
 }
 function enterEdit(id) {
   const c = _cellById(id); if (!c) return;
-  if (c.kind === 'code' && !hasBinds(c)) { const ed = window.ensureEditor ? window.ensureEditor(id) : editors[id]; if (ed) ed.focus(); }
+  // A web cell has an inline editor too (its first pane, registered in editors[id]), so Enter focuses it
+  // like a code cell — not the markdown/source overlay.
+  if ((c.kind === 'code' || c.kind === 'web') && !hasBinds(c)) { const ed = window.ensureEditor ? window.ensureEditor(id) : editors[id]; if (ed) ed.focus(); }
   else editSource(id, c.kind === 'md' ? 'markdown' : 'julia');
 }
 document.addEventListener('keydown', e => {
@@ -77,6 +79,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'v') { e.preventDefault(); pasteCells(); }             // paste below the active cell
   else if (k === 'm') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'md') toggleType(selectedId, 'md'); }
   else if (k === 'y') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'code') toggleType(selectedId, 'code'); }
+  else if (k === 'w') { e.preventDefault(); const c = _cellById(selectedId); if (c && c.kind !== 'web') toggleType(selectedId, 'web'); }   // convert to a web (HTML/CSS/JS) cell
   else if (k === 'M') { e.preventDefault(); mergeBelow(selectedId); }    // Shift-M: merge with cell below
   else if (k === 'd') { e.preventDefault();
     if (_dPending) { _dPending = false; clearTimeout(_dTimer); delCell(selectedId); }   // delCell deletes the whole selection

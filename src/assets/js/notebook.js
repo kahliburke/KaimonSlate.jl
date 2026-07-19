@@ -137,35 +137,68 @@ function Editor({ cell }) {
   return html`<div ref=${ref} class="srchost"></div>`;
 }
 
-// <WebEditor>: a web cell's three-pane HTML/CSS/JS editor. Each pane is a CM6 view with its native
-// grammar; on any edit they're reassembled into the `@web(...)` source (via _webSkin) so run/save see
-// ONE source. The panes' sections come from the server-split `cell.web`; the html pane is registered in
-// `window.editors[id]` so the generic cell logic (edited-state, reveal-measure) works, while edText/
-// edSetText route through `window.webEditors[id]` to assemble/split. Mounted eagerly (web cells are few).
+// <WebEditor>: a web cell's HTML/CSS/JS editor. Not all web cells need all three panes, so only the ones
+// with content are mounted (a fresh cell opens JS-only — most widgets render into `root`); absent panes
+// show a `+ HTML`/`+ CSS`/`+ JS` chip to add one, and each mounted pane has a `×` to remove it. Panes stay
+// in HTML→CSS→JS order regardless of add order. Each pane is a CM6 view with its native grammar; on any
+// edit they reassemble into the `@web(...)` source (via _webSkin, which OMITS empty sections) so run/save
+// see ONE source. The first mounted pane is registered in `window.editors[id]` so the generic cell logic
+// (edited-state, reveal-measure) works; edText/edSetText route through `window.webEditors[id]`.
+const _WEB_LANGS = [['html', 'HTML'], ['css', 'CSS'], ['js', 'JS']];
 function WebEditor({ cell }) {
   const ref = useRef(null);
   useEffect(() => {
     const host = ref.current;
     host.querySelector('.webedit')?.remove();
     const wrap = document.createElement('div'); wrap.className = 'webedit';
+    host.appendChild(wrap);
+    const chips = document.createElement('div'); chips.className = 'webadd';
+    wrap.appendChild(chips);                              // add-chips row stays LAST
     const secs = cell.web || window._webSections(cell.source) || { html: '', css: '', js: '' };
-    const panes = {};
+    const idx = l => _WEB_LANGS.findIndex(x => x[0] === l);
+    const label = l => (_WEB_LANGS.find(x => x[0] === l) || [, ''])[1];
+    const panes = {};   // lang → EditorView (mounted only)
+    const boxes = {};   // lang → pane element
     let primed = false;
+
+    // Only mounted panes contribute — a removed pane's content is dropped from the assembled source.
     const assemble = () => window._webSkin({
-      html: panes.html ? panes.html.state.doc.toString() : (secs.html || ''),
-      css:  panes.css  ? panes.css.state.doc.toString()  : (secs.css || ''),
-      js:   panes.js   ? panes.js.state.doc.toString()   : (secs.js || ''),
+      html: panes.html ? panes.html.state.doc.toString() : '',
+      css:  panes.css  ? panes.css.state.doc.toString()  : '',
+      js:   panes.js   ? panes.js.state.doc.toString()   : '',
     });
     const onAnyDoc = () => {
       if (primed && assemble() !== (window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); }
     };
-    const mkpane = (langTag, label, code) => {
-      const box = document.createElement('div'); box.className = 'webpane webpane-' + langTag;
-      const lbl = document.createElement('div'); lbl.className = 'webpane-label'; lbl.textContent = label;
+    const setPrimary = () => {                            // a real view for edited-state/measure
+      const first = _WEB_LANGS.map(x => x[0]).find(l => panes[l]);
+      if (first) window.editors[cell.id] = panes[first]; else delete window.editors[cell.id];
+    };
+    const refreshChips = () => {
+      chips.innerHTML = '';
+      for (const [l, lab] of _WEB_LANGS) {
+        if (panes[l]) continue;
+        const b = document.createElement('button');
+        b.className = 'webadd-chip'; b.type = 'button'; b.textContent = '+ ' + lab;
+        b.onclick = () => { addPane(l, ''); const v = panes[l]; v && v.focus(); };
+        chips.appendChild(b);
+      }
+    };
+    function addPane(lang, code) {
+      if (panes[lang]) return;
+      const box = document.createElement('div'); box.className = 'webpane webpane-' + lang;
+      const head = document.createElement('div'); head.className = 'webpane-label';
+      const name = document.createElement('span'); name.textContent = label(lang);
+      const rm = document.createElement('button'); rm.className = 'webpane-rm'; rm.type = 'button';
+      rm.title = 'remove this pane'; rm.textContent = '×'; rm.onclick = () => removePane(lang);
+      head.appendChild(name); head.appendChild(rm);
       const edhost = document.createElement('div'); edhost.className = 'webpane-ed';
-      box.appendChild(lbl); box.appendChild(edhost); wrap.appendChild(box);
-      return window.mkEditor(edhost, {
-        doc: code || '', lang: langTag,
+      box.appendChild(head); box.appendChild(edhost);
+      boxes[lang] = box;
+      const later = _WEB_LANGS.map(x => x[0]).find(l => idx(l) > idx(lang) && boxes[l]);
+      wrap.insertBefore(box, later ? boxes[later] : chips);   // keep HTML→CSS→JS order, before the chips
+      panes[lang] = window.mkEditor(edhost, {
+        doc: code || '', lang,
         onDoc: onAnyDoc,
         onFocus: () => window.setEditing(cell.id, true),
         onBlur: () => window.setEditing(cell.id, false),
@@ -175,18 +208,27 @@ function WebEditor({ cell }) {
           { key: 'Shift-Ctrl-Enter', run: () => window.runAndAddBelow(cell.id) },
         ],
       });
-    };
-    panes.html = mkpane('html', 'HTML', secs.html);
-    panes.css  = mkpane('css', 'CSS', secs.css);
-    panes.js   = mkpane('js', 'JS', secs.js);
-    host.appendChild(wrap);
-    window.editors[cell.id] = panes.html;                 // generic paths (edited-state, measure) act on a real view
-    (window.webEditors || (window.webEditors = {}))[cell.id] = { panes, assemble };
+      setPrimary(); refreshChips(); onAnyDoc();
+    }
+    function removePane(lang) {
+      const v = panes[lang]; if (!v) return;
+      try { v.destroy(); } catch (_) {}
+      delete panes[lang];
+      if (boxes[lang]) { boxes[lang].remove(); delete boxes[lang]; }
+      setPrimary(); refreshChips(); onAnyDoc();           // dropping a pane changes the assembled source
+    }
+
+    // Initial panes: the sections that have content, else JS-only for a fresh web cell.
+    const activeLangs = _WEB_LANGS.map(x => x[0]).filter(l => (secs[l] || '').trim() !== '');
+    if (!activeLangs.length) activeLangs.push('js');
+    for (const [l] of _WEB_LANGS) if (activeLangs.includes(l)) addPane(l, secs[l] || '');
+
+    (window.webEditors || (window.webEditors = {}))[cell.id] = { panes, assemble, addPane };
     setTimeout(() => { primed = true; }, 0);
     return () => {
+      if (window.editors[cell.id] && Object.values(panes).includes(window.editors[cell.id])) delete window.editors[cell.id];
       Object.values(panes).forEach(v => { try { v.destroy(); } catch (_) {} });
       if (window.webEditors) delete window.webEditors[cell.id];
-      if (window.editors[cell.id] === panes.html) delete window.editors[cell.id];
     };
   }, []);
   return html`<div ref=${ref} class="srchost webhost"></div>`;

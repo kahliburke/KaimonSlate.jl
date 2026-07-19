@@ -18,6 +18,31 @@ import { html as htmlLang, htmlLanguage } from "@codemirror/lang-html";
 import { css as cssLang, cssLanguage } from "@codemirror/lang-css";
 import { javascript as jsLang, javascriptLanguage, scopeCompletionSource, localCompletionSource } from "@codemirror/lang-javascript";
 import { parseMixed } from "@lezer/common";
+import { linter, lintGutter } from "@codemirror/lint";
+
+// Cheap syntax linter: each language's Lezer parser already marks unparseable spans as ERROR nodes, so
+// surface those as inline diagnostics (a red underline + "syntax error" on hover) — no external checker.
+// Works for any Lezer grammar (the HTML/CSS/JS panes). Lints after a short pause so an incomplete line
+// mid-typing doesn't flash; error nodes can be zero-width, so give them a visible 1-char span. Capped so
+// a badly-broken doc can't flood the gutter.
+const syntaxErrorLinter = linter((view) => {
+  const doc = view.state.doc.toString();
+  // Slate's `{{ expr }}` interpolation isn't valid JS/CSS/HTML on its own (it's substituted at eval, not
+  // in the editor), so the parser flags it. Collect the `{{ … }}` spans and drop any error that overlaps
+  // one — real syntax errors elsewhere still surface.
+  const interp = []; const re = /\{\{[\s\S]*?\}\}/g; let m;
+  while ((m = re.exec(doc))) interp.push([m.index, m.index + m[0].length]);
+  const inInterp = (from, to) => interp.some(([a, b]) => from < b && to > a);
+  const diags = [];
+  syntaxTree(view.state).iterate({
+    enter: (node) => {
+      if (!node.type.isError) return;
+      const from = node.from, to = node.to > from ? node.to : Math.min(node.from + 1, doc.length);
+      if (!inInterp(from, to)) diags.push({ from, to, severity: "error", message: "Syntax error" });
+    },
+  });
+  return diags.slice(0, 40);
+}, { delay: 500 });
 
 // ── Embedded HTML/CSS in tagged template literals (htm / lit) ──────────────────────────────────
 // A Preact/htm component writes its markup as `html`…`` inside the JS pane. Wrap the JS parser with
@@ -232,6 +257,7 @@ export {
   syntaxHighlighting, julia, juliaLanguage, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
   htmlLang, cssLang, jsLang, jsEmbed,   // web-cell section grammars (JS pane = jsEmbed: html`…`/css`…` highlighted)
   scopeCompletionSource, localCompletionSource,   // JS-pane completion: real globals + in-scope locals
+  syntaxErrorLinter, lintGutter,        // inline syntax-error diagnostics for the web panes
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,
   startCompletion, acceptCompletion,
   // Full module namespaces for editor extensions (see the import note above).

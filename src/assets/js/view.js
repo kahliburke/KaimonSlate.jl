@@ -280,7 +280,6 @@ function _effectBadge(c) {
 }
 function cellHeaderInner(c) {
   const isCode = (c.kind === 'code' || c.kind === 'web') && !hasBinds(c);   // web cells run too (▶)
-  const other = c.kind === 'md' ? 'code' : 'md';
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
   const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
@@ -318,7 +317,10 @@ function cellHeaderInner(c) {
       editSrc +
       `<button onclick="moveCell('${c.id}','up')" title="move up">↑</button>` +
       `<button onclick="moveCell('${c.id}','down')" title="move down">↓</button>` +
-      `<button onclick="toggleType('${c.id}','${other}')" title="to ${other}">${c.kind === 'md' ? '{·}' : 'M↓'}</button>` +
+      // Kind switch: show the TWO kinds this cell ISN'T, each converting on click. Markdown is always
+      // last (code · web · md), so the prose toggle sits in a consistent spot.
+      ['code', 'web', 'md'].filter(k => k !== c.kind).map(k =>
+        `<button class="kindbtn" onclick="toggleType('${c.id}','${k}')" title="convert to ${k === 'md' ? 'markdown' : k} cell">${k === 'code' ? '{·}' : k === 'md' ? 'M↓' : '&lt;/&gt;'}</button>`).join('') +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
@@ -681,13 +683,15 @@ function updateChrome(state) {
     // notebook only. So a not-yet-connected gate worker shows a "starting" blue pulse during hydration,
     // and an md-only notebook shows green (not the alarming red) — the tooltip says there's no worker.
     const hasCode = (state.cells || []).some(c => c.kind === 'code');
-    const cls = w.kind === 'inproc' ? 'inproc'
+    const cls = state.inactive ? 'inproc'    // dormant BY DESIGN — a calm (blue) dot, never the alarming red
+              : w.kind === 'inproc' ? 'inproc'
               : w.connected ? 'up'
               : state.hydrating ? 'inproc busy'
               : hasCode ? 'down'          // a genuine disconnect of a runnable notebook
               : 'up';                     // md-only: nothing to run → healthy (green), never red
     dot.className = 'wdot ' + cls + (_busy > 0 ? ' busy' : '');
-    dot.title = !hasCode && !w.connected ? 'markdown only — nothing to run'
+    dot.title = state.inactive ? 'inactive — no worker running; click the pill to launch'
+              : !hasCode && !w.connected ? 'markdown only — nothing to run'
               : w.kind === 'gate'
               ? ('worker :' + w.port + (w.connected ? ' · connected' : (state.hydrating ? ' · starting…' : ' · disconnected')))
               : 'in-process kernel';
@@ -866,6 +870,13 @@ function setState(id, s) { window.slateStore && window.slateStore.setLiveState(i
 // this the output collapses to ~0 height mid-swap; Safari then clamps scrollTop to
 // the now-shorter page and the figure scrolls out of view (the P2 scroll bug).
 function _swapOutput(out, html) {
+  // A single run swaps the output TWICE — the `celldone:` push (patchCells) AND the run's HTTP-response
+  // render (the Preact <Cell> effect) both carry the SAME output. Re-running its <script> twice re-boots a
+  // figure needlessly and, for a side-effecting web-cell fragment, fires its effect twice (a double
+  // `alert`, a double append). Skip a swap whose output already matches what's mounted: identical output
+  // never needs to re-render or re-run. A genuinely new output (or a real change on re-run) still swaps.
+  if (out.__slateOut === html) return;
+  out.__slateOut = html;
   out.style.minHeight = out.offsetHeight + 'px';
   out.innerHTML = html;
   runScripts(out);   // <script> set via innerHTML is inert — re-create so figures boot
@@ -891,7 +902,21 @@ async function runScripts(root) {
     for (const a of old.attributes) s.setAttribute(a.name, a.value);
     if (old.textContent) s.textContent = old.textContent;
     const loaded = s.src ? new Promise(res => { s.onload = s.onerror = res; }) : null;
-    old.replaceWith(s);
+    const parent = old.parentNode;
+    try {
+      old.replaceWith(s);   // an inline script runs on insert — a SYNTAX error throws HERE, synchronously
+    } catch (e) {
+      // A parse error is the one failure a fragment's own `catch` can't reach (the code never runs). It
+      // used to throw out through patchCells' render loop (breaking other cells in the batch); instead
+      // surface it ONTO the cell, tied to this output, and keep rendering.
+      console.error(e);
+      try {
+        const b = document.createElement('pre'); b.className = 'web-err';
+        b.textContent = '⚠ ' + ((e && e.message) || e);
+        (parent || root).appendChild(b);
+      } catch (_) {}
+      continue;
+    }
     if (loaded) await loaded;
   }
 }
