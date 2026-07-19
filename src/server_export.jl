@@ -501,6 +501,43 @@ function _export_importmap(imports)
     return string("<script type=\"importmap\">", JSON.json(m), "</script>")
 end
 
+# Slate's own vendored front-end stack (Preact/htm/signals) → CDN URLs, so an EXPORTED web-cell fragment
+# resolves the SAME bare specifiers it used live (`import { html } from "htm/preact"`, `@preact/signals`).
+# Versions come from vendor.json (a bump flows through), and the URLs are the jsdelivr files the live
+# `/assets/vendor/*` cache is itself populated from — so live and export load byte-identical modules. The
+# whole stack shares one Preact instance because each module imports the others by the SAME bare specifier,
+# re-resolved through this map. (Consistent with the export's existing CDN use of katex/echarts; a fully
+# self-contained/offline export would inline these as data: URLs — a follow-up.)
+function _slate_ui_imports()
+    v = try
+        JSON.parse(read(joinpath(@__DIR__, "assets", "vendor.json"), String))
+    catch
+        return Dict{String,String}()
+    end
+    ver(p) = String(get(get(v, p, Dict{String,Any}()), "version", ""))
+    P, S, SC, H = ver("preact"), ver("signals"), ver("signals-core"), ver("htm")
+    (isempty(P) || isempty(S) || isempty(SC) || isempty(H)) && return Dict{String,String}()
+    cdn = "https://cdn.jsdelivr.net/npm/"
+    return Dict{String,String}(
+        "preact"               => "$(cdn)preact@$(P)/dist/preact.module.js",
+        "preact/hooks"         => "$(cdn)preact@$(P)/hooks/dist/hooks.module.js",
+        "@preact/signals-core" => "$(cdn)@preact/signals-core@$(SC)/dist/signals-core.module.js",
+        "@preact/signals"      => "$(cdn)@preact/signals@$(S)/dist/signals.module.js",
+        "htm"                  => "$(cdn)htm@$(H)/dist/htm.module.js",
+        "htm/preact"           => "$(cdn)htm@$(H)/preact/index.module.js",
+    )
+end
+
+# The export's full importmap: the Slate UI stack (only when a web cell is present — it's what imports
+# those specifiers) MERGED UNDER the notebook's `@use` declarations (a `@use` wins on a key clash).
+function _export_importmap_for(nb::LiveNotebook)
+    uses = get(nb.report.meta, "imports", nothing)
+    usemap = uses === nothing ? Dict{String,String}() : Dict{String,String}(String(k) => String(v) for (k, v) in uses)
+    uimap = any(c -> c.kind == ReportEngine.WEB, nb.report.cells) ? _slate_ui_imports() : Dict{String,String}()
+    merged = merge(uimap, usemap)
+    return _export_importmap(isempty(merged) ? nothing : merged)
+end
+
 function export_html(nb::LiveNotebook; include_source::Bool = true,
                      theme::AbstractString = "dark", charttheme::AbstractString = "",
                      override::Bool = false, code::AbstractString = "normal",
@@ -535,9 +572,10 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         io = IOBuffer()
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
-              # The notebook's `@use` import map (if any) → so an exported page's front-end JS can
-              # `import` the same CDN modules it used live. Emitted in <head> before any body module runs.
-              _export_importmap(get(nb.report.meta, "imports", nothing)),
+              # The page's import map → so an exported page's front-end JS resolves the same bare
+              # specifiers it used live: the notebook's `@use` modules PLUS Slate's Preact/htm/signals
+              # stack when a web cell uses it. Emitted in <head> before any body module runs.
+              _export_importmap_for(nb),
               _og_tags(; title = fm0.title, desc = rawdesc, image = og_image, url = og_url, type = og_type),
               "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
               "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",

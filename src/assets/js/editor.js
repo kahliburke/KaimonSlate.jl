@@ -9,6 +9,8 @@
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
+          htmlLang, cssLang, jsLang, jsEmbed, scopeCompletionSource, localCompletionSource,
+
           autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
           completionStatus, startCompletion, acceptCompletion, snippet } = CM;
 
@@ -310,10 +312,41 @@
     if (!editors[id] && m) m();                                  // belt-and-suspenders if it wasn't queued
     return editors[id] || null;
   };
+  // ── Web cell: assemble/split the `@web(...)` skin (JS mirror of Julia `_web_skin`/`_web_sections`) ──
+  // A web cell's "source" is the runnable `@web(html"…", css"…", js"…")` skin; the 3-pane editor holds
+  // the sections and this reconstructs the skin byte-for-byte the way the engine does, so a save/parse
+  // round-trips stably. `webEditors[id] = { panes:{html,css,js}, assemble() }` is registered by the
+  // <WebEditor> component; `edText`/`edSetText` route through it so run/save/reconcile see one source.
+  window._webSkin = ({ html = '', css = '', js = '' } = {}) => {
+    const secs = [];
+    if (String(html).trim()) secs.push('html"""\n' + html + '\n"""');
+    if (String(css).trim())  secs.push('css"""\n' + css + '\n"""');
+    if (String(js).trim())   secs.push('js"""\n' + js + '\n"""');
+    if (!secs.length) secs.push('html""""""');
+    return '@web(' + secs.join(',\n') + ')';
+  };
+  window._webSections = (src) => {
+    const grab = tag => { const m = new RegExp(tag + '"""([\\s\\S]*?)"""').exec(src || ''); return m ? m[1].replace(/^\n/, '').replace(/\n$/, '') : ''; };
+    return { html: grab('html'), css: grab('css'), js: grab('js') };
+  };
   // edText falls back to the last server source for a not-yet-mounted (lazy) editor — an unmounted
   // cell has no local edits, so its text IS its source. Keeps save/run/backup correct pre-hydration.
-  window.edText = id => { const v = editors[id]; return v ? v.state.doc.toString() : ((window.srcMap && window.srcMap[id]) || ''); };
-  window.edSetText = (id, s) => { const v = editors[id]; if (v && v.state.doc.toString() !== s) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: s } }); };
+  window.edText = id => {
+    const w = window.webEditors && window.webEditors[id];
+    if (w) return w.assemble();
+    const v = editors[id]; return v ? v.state.doc.toString() : ((window.srcMap && window.srcMap[id]) || '');
+  };
+  window.edSetText = (id, s) => {
+    const w = window.webEditors && window.webEditors[id];
+    if (w) {                                              // external/agent edit → split back into the 3 panes
+      const p = window._webSections(s);
+      for (const k of ['html', 'css', 'js']) {
+        const v = w.panes[k]; if (v && v.state.doc.toString() !== (p[k] || '')) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: p[k] || '' } });
+      }
+      return;
+    }
+    const v = editors[id]; if (v && v.state.doc.toString() !== s) v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: s } });
+  };
   // Standalone CM6 editor for the Files tab. Delegates to the full cell factory `mkEditor` so a
   // source file gets the SAME feature set as a cell — Julia autocomplete (server `/api/complete`,
   // which keys off the code + cursor, not a cell id), snippets, comment-toggle (⌘/), bracket
@@ -485,15 +518,31 @@
     // matter for code, but the compartment is harmless on a markdown editor (no Julia tree).
     const cur = curSyntaxTheme();
     const themed = [chromeComp.of(chromeFor(cur)), themeComp.of(styleFor(cur))];
-    const lang = opts.markdown ? themed : [julia(), ...themed];
+    // `opts.lang` names a web-cell section grammar ('html'/'css'/'js'); default is Julia (markdown gets
+    // no language tree, just the theme). The web section grammars carry their own native completion
+    // (HTML tags/attrs, CSS props, JS), so those panes use plain `autocompletion()` instead of the
+    // Julia/markdown override below.
+    // The JS pane uses `jsEmbed` (highlights html`…`/css`…` template literals); html/css use their
+    // own grammar. Completion: the JS pane completes in-scope locals + real page globals (document.,
+    // Slate., root., Math.…); html/css use their grammar's native completion (tags/attrs, properties).
+    const webLang = !opts.markdown && ({ html: htmlLang, css: cssLang, js: jsEmbed }[opts.lang]);
+    const lang = opts.markdown ? themed : webLang ? [webLang(), ...themed] : [julia(), ...themed];
+    const acompExt = !webLang ? _acompExt(!!opts.markdown)
+      : opts.lang === 'js'
+        ? autocompletion({ icons: true, activateOnTypingDelay: _completeDelay(),
+            override: [localCompletionSource, scopeCompletionSource(globalThis)] })
+        : autocompletion({ icons: true, activateOnTypingDelay: _completeDelay() });
     const cellKeys = (opts.keys || []).map(k => ({ key: k.key, run: () => { k.run(); return true; } }));
     const _edctx = { markdown: !!opts.markdown, cellId: opts.cellId };   // for registered editor extensions
+    // Web-cell panes (HTML/CSS/JS) indent 2 spaces — the web convention — vs Julia's 4. Drives
+    // auto-indent (Enter / indentOnInput) and Tab; the language's indent service reads `indentUnit`.
+    const _indent = webLang ? '  ' : '    ';
     const view = new EditorView({
       parent,
       doc: opts.doc || '',
       extensions: [
         history(), drawSelection(), bracketMatching(), closeBrackets(), indentOnInput(),
-        indentUnit.of('    '), EditorState.tabSize.of(4), errField, originField, flashField,
+        indentUnit.of(_indent), EditorState.tabSize.of(webLang ? 2 : 4), errField, originField, flashField,
         wrapComp.of(_wrapExt(!!opts.markdown)),
         ...lang,
         // Markdown editors complete citations + fenced code only (never prose); code cells get Julia.
@@ -501,7 +550,7 @@
         // flickering on/off mid-word (and Tab-to-indent can't accidentally land on a just-opened
         // popup). Manual triggers (Tab / Ctrl-Space / Alt-Space) are immediate regardless. Tunable
         // via window.slateCompleteDelay (a settings hook); default 500ms.
-        acompComp.of(_acompExt(!!opts.markdown)),
+        acompComp.of(acompExt),
         // Registered editor extensions (e.g. inline-math rendering), in a compartment so a
         // later registration can reconfigure this open editor. Before the keymap below so a
         // returned keymap out-precedences the defaults.

@@ -12,6 +12,22 @@ _doc(slug, date; series = nothing) = begin
 end
 _pos(needle, hay) = first(findfirst(needle, hay))
 
+@testset "web-cell export importmap (Preact/htm/signals)" begin
+    ui = NS._slate_ui_imports()
+    # the bare specifiers a web-cell fragment imports, mapped to pinned-version CDN modules
+    for k in ("preact", "preact/hooks", "@preact/signals", "@preact/signals-core", "htm", "htm/preact")
+        @test haskey(ui, k)
+        @test startswith(ui[k], "https://")
+    end
+    @test occursin("preact@10.24.3", ui["preact"])         # version pinned in vendor.json
+    @test occursin("htm@3.1.1/preact", ui["htm/preact"])
+    # rendered as a <script type="importmap"> carrying those specifiers
+    tag = NS._export_importmap(ui)
+    @test occursin("type=\"importmap\"", tag)
+    @test occursin("htm/preact", tag) && occursin("@preact/signals", tag)
+    @test isempty(NS._export_importmap(nothing))           # no imports ⇒ no tag
+end
+
 @testset "site export — series grouping" begin
     @testset "_series_groups buckets & ordering" begin
         docs = [_doc("a", "2026-01-01"; series = "Optics"),

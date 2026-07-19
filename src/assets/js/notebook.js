@@ -137,6 +137,61 @@ function Editor({ cell }) {
   return html`<div ref=${ref} class="srchost"></div>`;
 }
 
+// <WebEditor>: a web cell's three-pane HTML/CSS/JS editor. Each pane is a CM6 view with its native
+// grammar; on any edit they're reassembled into the `@web(...)` source (via _webSkin) so run/save see
+// ONE source. The panes' sections come from the server-split `cell.web`; the html pane is registered in
+// `window.editors[id]` so the generic cell logic (edited-state, reveal-measure) works, while edText/
+// edSetText route through `window.webEditors[id]` to assemble/split. Mounted eagerly (web cells are few).
+function WebEditor({ cell }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const host = ref.current;
+    host.querySelector('.webedit')?.remove();
+    const wrap = document.createElement('div'); wrap.className = 'webedit';
+    const secs = cell.web || window._webSections(cell.source) || { html: '', css: '', js: '' };
+    const panes = {};
+    let primed = false;
+    const assemble = () => window._webSkin({
+      html: panes.html ? panes.html.state.doc.toString() : (secs.html || ''),
+      css:  panes.css  ? panes.css.state.doc.toString()  : (secs.css || ''),
+      js:   panes.js   ? panes.js.state.doc.toString()   : (secs.js || ''),
+    });
+    const onAnyDoc = () => {
+      if (primed && assemble() !== (window.srcMap[cell.id] || '')) { window.setState(cell.id, 'edited'); window._backupSoon && window._backupSoon(); }
+    };
+    const mkpane = (langTag, label, code) => {
+      const box = document.createElement('div'); box.className = 'webpane webpane-' + langTag;
+      const lbl = document.createElement('div'); lbl.className = 'webpane-label'; lbl.textContent = label;
+      const edhost = document.createElement('div'); edhost.className = 'webpane-ed';
+      box.appendChild(lbl); box.appendChild(edhost); wrap.appendChild(box);
+      return window.mkEditor(edhost, {
+        doc: code || '', lang: langTag,
+        onDoc: onAnyDoc,
+        onFocus: () => window.setEditing(cell.id, true),
+        onBlur: () => window.setEditing(cell.id, false),
+        keys: [
+          { key: 'Shift-Enter', run: () => window.runCell(cell.id) },
+          { key: 'Shift-Mod-Enter', run: () => window.runAndAddBelow(cell.id) },
+          { key: 'Shift-Ctrl-Enter', run: () => window.runAndAddBelow(cell.id) },
+        ],
+      });
+    };
+    panes.html = mkpane('html', 'HTML', secs.html);
+    panes.css  = mkpane('css', 'CSS', secs.css);
+    panes.js   = mkpane('js', 'JS', secs.js);
+    host.appendChild(wrap);
+    window.editors[cell.id] = panes.html;                 // generic paths (edited-state, measure) act on a real view
+    (window.webEditors || (window.webEditors = {}))[cell.id] = { panes, assemble };
+    setTimeout(() => { primed = true; }, 0);
+    return () => {
+      Object.values(panes).forEach(v => { try { v.destroy(); } catch (_) {} });
+      if (window.webEditors) delete window.webEditors[cell.id];
+      if (window.editors[cell.id] === panes.html) delete window.editors[cell.id];
+    };
+  }, []);
+  return html`<div ref=${ref} class="srchost webhost"></div>`;
+}
+
 function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
@@ -289,7 +344,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   // you author flows naturally in the notebook and exports interpret the role for placement.
   const roleCls = (c.roleTitle ? ' role-title' : '') + (c.roleAbstract ? ' role-abstract' : '')
     + (c.roleBib ? ' role-bib' : '') + (c.roleCaption ? ' role-caption' : '');
-  const cls = 'cell ' + (c.kind === 'md' ? 'md' : (isBind ? 'bind' : 'code')) + ' state-' + state
+  const cls = 'cell ' + (c.kind === 'md' ? 'md' : c.kind === 'web' ? 'web' : (isBind ? 'bind' : 'code')) + ' state-' + state
     + (c.collapsed ? ' collapsed' : '') + (c.codeHidden ? ' codehidden' : '')
     + roleCls + selCls + (focusId === c.id ? ' dep-focus' : '');
   const header = html`<div class="cellhead" dangerouslySetInnerHTML=${raw(window.cellHeaderInner(c))}></div>`;
@@ -298,6 +353,10 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   let body;
   if (c.kind === 'md') {
     body = html`<div class="md" title="double-click to edit" ondblclick=${() => window.editSource(c.id, 'markdown')}></div>${srcedit}`;
+  } else if (c.kind === 'web') {
+    // Web cell: the 3-pane HTML/CSS/JS editor, then the same output/controls hosts a code cell uses
+    // (the rendered WebPage swaps into `.output`).
+    body = html`<${WebEditor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><div class="echarts"></div><div class="anim"></div>`;
   } else if (isBind) {
     // A bind/MIXED cell: its own @bind rows, the surfaced-control strip (so controls surfaced
     // here — including its own @bind — actually render), then the toggle source editor + output.

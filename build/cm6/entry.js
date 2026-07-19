@@ -12,6 +12,47 @@ import { styleTags, tags as t } from "@lezer/highlight";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap,
          completionStatus, snippet, startCompletion, acceptCompletion } from "@codemirror/autocomplete";
 import { parser as juliaParser } from "@plutojl/lezer-julia";
+// Web-cell section languages — an `html"…"`/`css"…"`/`js"…"` pane gets its native CM6 grammar.
+// lang-html embeds lang-css + lang-javascript for `<style>`/`<script>` regions, so all three ride in.
+import { html as htmlLang, htmlLanguage } from "@codemirror/lang-html";
+import { css as cssLang, cssLanguage } from "@codemirror/lang-css";
+import { javascript as jsLang, javascriptLanguage, scopeCompletionSource, localCompletionSource } from "@codemirror/lang-javascript";
+import { parseMixed } from "@lezer/common";
+
+// ── Embedded HTML/CSS in tagged template literals (htm / lit) ──────────────────────────────────
+// A Preact/htm component writes its markup as `html`…`` inside the JS pane. Wrap the JS parser with
+// parseMixed so a TemplateString tagged `html`/`css` is parsed by the HTML/CSS grammar — highlighting
+// tags, attributes and properties — while `${…}` interpolations are carved back out and stay JS. The
+// tag is the TaggedTemplateExpression's first child (`html`/`css`); anything else is left as a plain
+// string. Falls back cleanly (returns null) when the shape isn't a recognized tagged template.
+const _embeddedParser = (node, input) => {
+  if (node.name !== "TemplateString") return null;
+  const parent = node.node.parent;
+  if (!parent || parent.name !== "TaggedTemplateExpression") return null;
+  const tagNode = parent.firstChild;
+  const tag = tagNode ? input.read(tagNode.from, tagNode.to) : "";
+  const parser = tag === "html" ? htmlLanguage.parser : tag === "css" ? cssLanguage.parser : null;
+  if (!parser) return null;
+  // Overlay the embedded grammar only on the literal-text spans, leaving `${…}` holes to JS.
+  const ranges = [];
+  let from = node.from + 1;                       // skip the opening backtick
+  const cur = node.node.cursor();
+  if (cur.firstChild()) {
+    do {
+      if (cur.name === "Interpolation") {          // ${ … } — a hole the JS parser keeps
+        if (cur.from > from) ranges.push({ from, to: cur.from });
+        from = cur.to;
+      }
+    } while (cur.nextSibling());
+  }
+  const end = node.to - 1;                         // skip the closing backtick
+  if (end > from) ranges.push({ from, to: end });
+  return ranges.length ? { parser, overlay: ranges } : null;
+};
+const jsEmbedLanguage = javascriptLanguage.configure({ wrap: parseMixed(_embeddedParser) });
+// A JS pane's LanguageSupport: the mixed parser + the html/css SUPPORT extensions (so the embedded
+// regions get their completion/indent data too), reusing the base js support's own extensions.
+const jsEmbed = () => new LanguageSupport(jsEmbedLanguage, [jsLang().support, htmlLang().support, cssLang().support]);
 
 // Whole-module namespaces — the EDITOR-EXTENSION surface (window.CM6.cmView.MatchDecorator, …). A
 // registered editor extension (slateRegisterEditorExtension) must build against the HOST's single CM6
@@ -91,6 +132,15 @@ const _mkStyle = (c) => HighlightStyle.define([
   { tag: t.function(t.variableName), color: c.fn },
   { tag: t.propertyName, color: c.prop },
   { tag: t.variableName, color: c.vr },
+  // HTML / CSS tokens (web-cell panes + embedded html`…`/css`…` template literals). Reuses the
+  // palette so the colours read as one system: tags/at-rules as macros, attributes/props as fields,
+  // attribute + selector values as strings, brackets/operators as operators, units/colours as numbers.
+  { tag: [t.tagName, t.standard(t.tagName)], color: c.mac },
+  { tag: t.angleBracket, color: c.op },
+  { tag: [t.attributeName, t.definitionKeyword], color: c.prop },
+  { tag: [t.attributeValue, t.special(t.string)], color: c.str },
+  { tag: t.className, color: c.fn },
+  { tag: [t.unit, t.color], color: c.num },
 ]);
 // Editor chrome from a `ui` palette. The cell container keeps its own background; the editor
 // paints `ui.bg` so each theme reads as a coherent code panel. Selection selectors cover both
@@ -180,6 +230,8 @@ export {
   undoDepth, redoDepth,
   indentUnit, bracketMatching, indentOnInput, syntaxTree,
   syntaxHighlighting, julia, juliaLanguage, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
+  htmlLang, cssLang, jsLang, jsEmbed,   // web-cell section grammars (JS pane = jsEmbed: html`…`/css`…` highlighted)
+  scopeCompletionSource, localCompletionSource,   // JS-pane completion: real globals + in-scope locals
   autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, completionStatus, snippet,
   startCompletion, acceptCompletion,
   // Full module namespaces for editor extensions (see the import note above).

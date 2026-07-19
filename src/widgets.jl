@@ -73,6 +73,160 @@ end
 
 _md_interp_exprs(src::AbstractString) = _md_template(src)[2]
 
+# ── Web cell: `{{ }}` interpolation, per-section escaping, and the `@web` skin ──────────────────
+# A web cell is authored as tagged sections — `html"…"`, `css"…"`, `js"…"` — whose PREFIX names the
+# language (the editor keys its CM6 mode off it). Notebook data reaches them ONLY through `{{ expr }}`
+# (the same brace-balanced scanner markdown uses, so `$`/`${}` stay literal for JS), and the engine
+# escapes each interpolated value for the section's language so a value can never break out of its
+# context: HTML → entity-escaped text; CSS → a validated token; JS → a JSON literal. Values that
+# "stringify easily" (String/Real/Bool/nothing, and Vector/Tuple/Dict/NamedTuple of those) round-trip
+# faithfully; anything else falls back to its `string(...)` form as a safe JS/HTML string (the binary /
+# large-array path is `save_asset`, not this). `_slate_json` is a tiny stdlib-only encoder (no JSON dep)
+# so it works identically in the engine AND the Base+stdlib standalone worker, and it escapes `<`/`>`/
+# U+2028/9 so a value is safe to embed inside a `<script>`.
+
+function _slate_json_string(io::IO, s::AbstractString)
+    print(io, '"')
+    for c in s
+        if c == '"';       print(io, "\\\"")
+        elseif c == '\\';  print(io, "\\\\")
+        elseif c == '\n';  print(io, "\\n")
+        elseif c == '\r';  print(io, "\\r")
+        elseif c == '\t';  print(io, "\\t")
+        elseif c == '<';   print(io, "\\u003c")   # so a value can't spell `</script>` and break out
+        elseif c == '>';   print(io, "\\u003e")
+        elseif UInt32(c) == 0x2028 || UInt32(c) == 0x2029   # JS line terminators — invalid raw in a JS string
+            print(io, "\\u", string(UInt32(c); base = 16, pad = 4))
+        elseif c < ' '
+            print(io, "\\u", string(UInt16(c); base = 16, pad = 4))
+        else               print(io, c)
+        end
+    end
+    print(io, '"')
+end
+
+function _slate_json_to(io::IO, x)
+    if x === nothing || x === missing
+        print(io, "null")
+    elseif x isa Bool                       # before Real — Bool <: Integer
+        print(io, x ? "true" : "false")
+    elseif x isa Integer
+        print(io, x)
+    elseif x isa Real
+        isfinite(x) ? print(io, Float64(x)) : print(io, "null")   # NaN/Inf aren't valid JSON
+    elseif x isa AbstractString
+        _slate_json_string(io, x)
+    elseif x isa Symbol
+        _slate_json_string(io, string(x))
+    elseif x isa NamedTuple
+        print(io, '{')
+        first = true
+        for k in keys(x)
+            first || print(io, ','); first = false
+            _slate_json_string(io, string(k)); print(io, ':'); _slate_json_to(io, x[k])
+        end
+        print(io, '}')
+    elseif x isa AbstractDict
+        print(io, '{')
+        first = true
+        for (k, v) in x
+            first || print(io, ','); first = false
+            _slate_json_string(io, string(k)); print(io, ':'); _slate_json_to(io, v)
+        end
+        print(io, '}')
+    elseif x isa Union{AbstractVector,Tuple,AbstractSet}
+        print(io, '[')
+        first = true
+        for v in x
+            first || print(io, ','); first = false
+            _slate_json_to(io, v)
+        end
+        print(io, ']')
+    else
+        _slate_json_string(io, string(x))   # not JSON-shaped → its string form, as a safe JS/HTML string
+    end
+end
+
+"Minimal stdlib-only JSON encoding of a `{{ }}` value, safe to embed inside a `<script>`."
+_slate_json(x)::String = (io = IOBuffer(); _slate_json_to(io, x); String(take!(io)))
+
+# Per-section escapers — chosen by the section's language so an interpolated value stays confined.
+_web_esc_html(x)::String =
+    replace(string(x), '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;", '\'' => "&#39;")
+_web_esc_js(x)::String = _slate_json(x)
+# CSS has no string-literal quoting for a bare value; keep numbers verbatim and drop the characters that
+# could close a declaration/rule/comment so a value can't inject a new rule.
+_web_esc_css(x)::String = x isa Real ? string(x) : replace(string(x), r"[{}();:<>\"'\\@]" => "")
+
+const _WEB_SECTION_MACROS = (Symbol("@html_str") => :html,
+                             Symbol("@css_str")  => :css,
+                             Symbol("@js_str")   => :js)
+_web_section_lang(nm) = (for (m, l) in _WEB_SECTION_MACROS; nm === m && return l; end; nothing)
+
+# The tagged sections `(lang => raw)` of a `@web(...)` macrocall AST, in order — the shared reader for
+# BOTH the editor (split into panes) and dependency analysis (harvest `{{ }}` reads). Returns `nothing`
+# for anything that isn't a `@web` call. Tolerates a `:block`/`:toplevel` wrapper (parsed source).
+function _web_macrocall_sections(ex)
+    if ex isa Expr && ex.head in (:block, :toplevel)
+        for a in ex.args
+            s = _web_macrocall_sections(a)
+            s === nothing || return s
+        end
+        return nothing
+    end
+    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@web")) || return nothing
+    out = Tuple{Symbol,String}[]
+    for a in ex.args[2:end]
+        a isa LineNumberNode && continue
+        (a isa Expr && a.head === :macrocall) || continue
+        lang = _web_section_lang(a.args[1])
+        raw = a.args[end]
+        (lang === nothing || !(raw isa AbstractString)) && continue
+        push!(out, (lang, String(raw)))
+    end
+    return out
+end
+
+# Every `{{ expr }}` string across a web cell's sections — used to compute the cell's reads (deps).
+function _web_interp_exprs(src::AbstractString)
+    ex = try; Base.Meta.parse(String(src)); catch; nothing; end
+    secs = ex === nothing ? nothing : _web_macrocall_sections(ex)
+    secs === nothing && return String[]
+    exprs = String[]
+    for (_, raw) in secs; append!(exprs, _md_interp_exprs(raw)); end
+    return exprs
+end
+
+# Split a web cell's `@web(...)` source into its three panes for the editor. RAW text extraction (not
+# `Base.Meta.parse`, which would triple-quote-DEDENT the sections) using the same regex + strip-one-
+# leading/trailing-newline convention as `_web_skin` and the browser's `_webSkin`/`_webSections`, so the
+# panes reassemble to the exact stored source — otherwise the reassembly drifts and the cell reads as
+# spuriously "edited". Non-`@web` source (e.g. a freshly-converted code cell) falls back to the HTML pane.
+function _web_sections(src::AbstractString)
+    s = String(src)
+    grab(tag) = begin
+        m = match(Regex(tag * "\"\"\"([\\s\\S]*?)\"\"\""), s)
+        m === nothing ? "" : replace(replace(String(m.captures[1]), r"^\n" => ""), r"\n$" => "")
+    end
+    html, css, js = grab("html"), grab("css"), grab("js")
+    # No tagged sections at all → treat the whole body as HTML (the convert-to-web landing pane).
+    (isempty(html) && isempty(css) && isempty(js) && !occursin("\"\"\"", s)) && (html = s)
+    return (html = html, css = css, js = js)
+end
+
+# Assemble a runnable `@web(...)` skin from editor panes — the on-disk source of a web cell. Parenthesized
+# and comma-separated so the sections (triple-quoted, multi-line) parse as one expression. Only non-empty
+# sections are emitted; an entirely empty cell keeps an empty html section so it still parses.
+function _web_skin(; html::AbstractString = "", css::AbstractString = "", js::AbstractString = "")
+    secs = String[]
+    for (tag, body) in (("html", html), ("css", css), ("js", js))
+        isempty(strip(String(body))) && continue
+        push!(secs, string(tag, "\"\"\"\n", body, "\n\"\"\""))
+    end
+    isempty(secs) && push!(secs, "html\"\"\"\"\"\"")
+    return string("@web(", join(secs, ",\n"), ")")
+end
+
 # A widget spec: its kind (UI tag), display params, and default value. Built by the
 # constructors below at runtime — no syntactic parsing, no `Slider`-name matching.
 struct Widget
@@ -438,6 +592,15 @@ _slate_args(x::AbstractDict) = NamedTuple{Tuple(Symbol.(keys(x)))}(Tuple(_slate_
 _slate_args(x::AbstractVector) = Any[_slate_args(v) for v in x]
 _slate_args(x) = x
 
+# Invoke a `slate_on` handler with the (NamedTuple-shaped) call args. A 2-parameter handler
+# `(args, progress) -> …` ALSO receives a `progress` closure it calls to stream progress frames back to
+# the JS caller (framework-side, correlated to THIS call — the handler never sees a token or channel); a
+# 1-parameter handler `args -> …` is called with just the args, so the 1-arg form keeps working. Arity is
+# read from the handler's first method (an anonymous handler has exactly one).
+_slate_handler_nparams(f) = try; first(methods(f)).nargs - 1; catch; 1; end
+_invoke_slate_handler(f, sargs, progress) =
+    _slate_handler_nparams(f) >= 2 ? Base.invokelatest(f, sargs, progress) : Base.invokelatest(f, sargs)
+
 # ── The namespace contract ────────────────────────────────────────────────────
 # Inject the COMPLETE, identical set of notebook-namespace names into module `m`.
 # Context-specific helper *implementations* (echart/tables/refresh) are passed in;
@@ -484,7 +647,9 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(function slate_call(channel, args = nothing)
         f = get(__slate_handlers, string(channel), nothing)
         f === nothing && error("no slate_on handler registered for channel '" * string(channel) * "'")
-        return f($(_slate_args)(args))   # NamedTuple-shape, same as the JS call path — `args.field`
+        # NamedTuple-shape args (same as the JS call path — `args.field`); a 2-arg handler gets a no-op
+        # progress here (in-process test invoke has no browser to stream to).
+        return $(_invoke_slate_handler)(f, $(_slate_args)(args), (p) -> nothing)
     end))
     Core.eval(m, :(const slate_fingerprint = $slate_fingerprint))   # canonical value hash (fingerprint.jl)
     Core.eval(m, :(const slate_memo_stats = $slate_memo_stats))     # durable memo store: shape
@@ -646,6 +811,72 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         end
         push!(blk.args, Expr(:call, $(_standalone_show_md), Expr(:call, mdparse, :__md_s)))
         blk
+    end))
+    # ── Web cell (`@web html"…" css"…" js"…"`) ────────────────────────────────────
+    # A web cell's SOURCE is a `@web(...)` call, so it evaluates like any code cell → a `WebPage`
+    # (captured as HTML), live and standalone alike. The section macros name the language (the editor's
+    # CM6 mode reads the prefix); `@web` expands each section's `{{ expr }}` into a per-language-escaped
+    # substitution — HTML entity-escaped, CSS token-validated, JS as a JSON literal — so an interpolated
+    # value can't break out of its context. `$`/`${}` are untouched (only `{{ }}` interpolates). The
+    # bare section macros return their raw text, so `html"…"` used alone is just the string.
+    Core.eval(m, :(macro html_str(s); s; end))
+    Core.eval(m, :(macro css_str(s);  s; end))
+    Core.eval(m, :(macro js_str(s);   s; end))
+    Core.eval(m, :(macro web(args...)
+        tmplfn = $(_md_template)
+        tokfn  = $(_interp_token)
+        langfn = $(_web_section_lang)
+        escs   = (html = $(_web_esc_html), css = $(_web_esc_css), js = $(_web_esc_js))
+        parts = Tuple{Symbol,String}[]
+        for a in args
+            a isa LineNumberNode && continue
+            (a isa Expr && a.head === :macrocall) ||
+                error("@web sections must be tagged string literals — html\"\"\"…\"\"\", css\"\"\"…\"\"\", js\"\"\"…\"\"\"")
+            lang = langfn(a.args[1])
+            lang === nothing && error("@web: unknown section $(a.args[1]) — use html/css/js")
+            raw = a.args[end]
+            raw isa AbstractString || error("@web section must be a string literal")
+            push!(parts, (lang, String(raw)))
+        end
+        # Build the string-valued expr for one language: concatenate its (possibly repeated) sections,
+        # each with its `{{ }}` tokens replaced by the escaped, evaluated value.
+        secexpr = function (lang)
+            escfn = getfield(escs, lang)
+            chunks = Any[]
+            for (l, raw) in parts
+                l === lang || continue
+                tmpl, exprs = tmplfn(raw)
+                blk = Expr(:block, :(local __w = $tmpl))
+                for (i, e) in enumerate(exprs)
+                    push!(blk.args, :(__w = replace(__w, $(tokfn(i)) => $(escfn)($(esc(Base.Meta.parse(e)))))))
+                end
+                push!(blk.args, :__w)
+                push!(chunks, blk)
+            end
+            isempty(chunks) ? "" : length(chunks) == 1 ? chunks[1] : Expr(:call, :string, chunks...)
+        end
+        # Scope the JS in an async IIFE and hand it `root` — the cell's own output element (captured
+        # synchronously into `__r` from `document.currentScript`, valid because `runScripts` revives each
+        # script as a live element; kept in a closure the catch can reach, since `currentScript` is null
+        # by the time an async rejection fires). This (1) gives declarations their own scope so a top-level
+        # `const`/`let` can't collide across the re-runs of a reactive render, (2) permits top-level
+        # `await` (e.g. `await import(…)`, `await Slate.asset(…)`), and (3) lets a widget render into
+        # `root`/`root.querySelector(…)` — scoped, no `getElementById`, no cross-cell id collisions. A
+        # runtime error (failed import, thrown init, bad data) is rendered ONTO the cell (a `.web-err`
+        # block in its output) as well as logged, so a broken fragment shows why instead of silently going
+        # blank. (A JS *syntax* error can't be caught here — the script never parses — so it stays a
+        # console error.)
+        jsx = secexpr(:js)
+        jsx = (jsx isa AbstractString && isempty(jsx)) ? "" :
+              Expr(:call, :string,
+                   "(function(){var __r=document.currentScript&&document.currentScript.parentElement;" *
+                   "(async function(root){\n", jsx,
+                   "\n})(__r).catch(function(e){console.error(e);try{var b=document.createElement('pre');" *
+                   "b.className='web-err';b.textContent='⚠ '+((e&&e.stack)||e);(__r||document.body).appendChild(b);}catch(_){}});})();")
+        Expr(:call, :WebPage, Expr(:parameters,
+            Expr(:kw, :html, secexpr(:html)),
+            Expr(:kw, :css,  secexpr(:css)),
+            Expr(:kw, :js,   jsx)))
     end))
     return m
 end

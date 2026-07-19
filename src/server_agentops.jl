@@ -76,12 +76,15 @@ end
 
 _index_of(cells, id) = findfirst(c -> c.id == id, cells)
 
+# Cell-kind token ("md"/"web"/"code") → CellKind, shared by cell creation and kind-conversion.
+_cellkind(k::AbstractString) = k == "md" ? MARKDOWN : k == "web" ? WEB : CODE
+
 function add_cell!(nb::LiveNotebook, after_id::AbstractString, kind::AbstractString; before::Bool = false)
     nid = _gen_id(nb.report)                          # generated up front so the undo label can name it
     _snapshot!(nb; label = "add $nid")
     cells = nb.report.cells
     i = isempty(after_id) ? length(cells) : something(_index_of(cells, after_id), length(cells))
-    cell = Cell(nid, kind == "md" ? MARKDOWN : CODE, "")
+    cell = Cell(nid, _cellkind(kind), "")
     ReportEngine.mark_fresh!(cell)                    # empty cell: nothing to run (don't show it stale)
     pos = before ? max(1, i) : i + 1                 # insert above (at `i`) or below the reference
     insert!(cells, pos, cell)
@@ -592,7 +595,7 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
             nid = _gen_id(nb.report)
         end
         i = isempty(after) ? length(cells) : something(_index_of(cells, after), length(cells))
-        cell = Cell(nid, kind == "md" ? MARKDOWN : CODE, String(source))
+        cell = Cell(nid, _cellkind(kind), String(source))
         union!(cell.flags, _parse_tag_symbols(tags))   # optional user tags on the fresh cell
         _snapshot!(nb)
         insert!(cells, i + 1, cell)
@@ -911,7 +914,14 @@ end
 # restale the cell so it re-runs. `:collapsed` is the only flag that applies to markdown cells too.
 const _EVAL_FLAGS = Set{Symbol}((:trace, :cache, :nocache, :resource, :volatile))
 flag_reruns(flag::Symbol) = flag in _EVAL_FLAGS
-_flag_code_only(flag::Symbol) = flag !== :collapsed
+# Which cell kinds a flag applies to: `:collapsed` folds any cell; `:hidecode` hides a CODE or WEB
+# cell's editor (both have one — a web cell's is the 3-pane block); every other (eval) flag is
+# code-only. Returns true when the flag should be SKIPPED for this kind.
+function _flag_skips(flag::Symbol, kind::CellKind)
+    flag === :collapsed && return false
+    flag === :hidecode  && return !(kind == CODE || kind == WEB)
+    return kind != CODE
+end
 
 # Set (`value=true`) or clear a single flag across one or many cells in ONE persist. `ids === nothing`
 # ⇒ every applicable cell; a list ⇒ just those (e.g. "all plot cells"). Persisted in the `.jl` header
@@ -931,12 +941,12 @@ end
 
 function set_cell_flag!(nb::LiveNotebook, flag::Symbol, value::Bool; ids::Union{Nothing,AbstractVector} = nothing)
     idset = ids === nothing ? nothing : Set(String(x) for x in ids)
-    codeonly = _flag_code_only(flag); restale = flag_reruns(flag)
+    restale = flag_reruns(flag)
     return lock(nb.lock) do
         changed = String[]
         for c in nb.report.cells
             (idset === nothing || c.id in idset) || continue
-            (codeonly && c.kind != CODE) && continue
+            _flag_skips(flag, c.kind) && continue
             (flag in c.flags) == value && continue           # already in the wanted state → skip
             value ? push!(c.flags, flag) : delete!(c.flags, flag)
             restale && (c.state = STALE)
@@ -1037,7 +1047,7 @@ function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; s
     # discards edits. Convert + restale the cell and its dependents, but DON'T evaluate: changing a
     # cell's kind must not run the code (the user runs it when ready) — unlike _commit_structure!.
     src = source === nothing ? old.source : String(source)
-    cells[i] = Cell(old.id, kind == "md" ? MARKDOWN : CODE, src)
+    cells[i] = Cell(old.id, _cellkind(kind), src)
     build_dependencies!(nb.report)
     stale = dependents_of(nb.report, [old.id])
     for c in nb.report.cells

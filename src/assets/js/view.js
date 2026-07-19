@@ -279,7 +279,7 @@ function _effectBadge(c) {
   return `<span class="effectbadge" title="${_esc(tip)}">⚙ ${_esc(label + shown)}</span>`;
 }
 function cellHeaderInner(c) {
-  const isCode = c.kind === 'code' && !hasBinds(c);
+  const isCode = (c.kind === 'code' || c.kind === 'web') && !hasBinds(c);   // web cells run too (▶)
   const other = c.kind === 'md' ? 'code' : 'md';
   const editSrc = (c.kind === 'md' || hasBinds(c))
     ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';

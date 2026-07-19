@@ -37,7 +37,9 @@ The output fragment for a code cell (stdout / value / rich display / error),
 escaped and embedded. Used by the live notebook server to update a cell in place.
 """
 function output_html(cell::Cell)
-    cell.kind == CODE || return ""
+    # A web cell renders like a code cell — its `@web(...)` evaluates to a `WebPage`, captured as an
+    # HTML display chunk — so the same output pipeline (display/stdout/error) applies.
+    (cell.kind == CODE || cell.kind == WEB) || return ""
     o = cell.output
     o === nothing && return ""
     io = IOBuffer()

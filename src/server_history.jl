@@ -698,7 +698,7 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
                            figrefs = figrefs, figemit = _fig_link_emit) : c.source
     d = Dict{String,Any}(
         "id"      => c.id,
-        "kind"    => c.kind == MARKDOWN ? "md" : "code",
+        "kind"    => c.kind == MARKDOWN ? "md" : c.kind == WEB ? "web" : "code",
         "source"  => c.source,
         # Canonical per-cell content hash (the SAME SHA the history uses) — a version token the browser
         # keys reconcile off, instead of a fuzzy string comparison that can drift.
@@ -715,6 +715,12 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         # cell only MUTATES (`prog[] = …`) isn't defined here, so it's excluded (go-to-def lands on the definer).
         "defs"    => c.kind == CODE ? sort!(String[string(w) for w in cell_definitions(c)]) : String[],
     )
+    # A web cell ships its three panes (split from the `@web(...)` source) so the editor can mount a
+    # per-language HTML/CSS/JS editor instead of showing the raw skin.
+    if c.kind == WEB
+        s = ReportEngine._web_sections(c.source)
+        d["web"] = Dict{String,Any}("html" => s.html, "css" => s.css, "js" => s.js)
+    end
     # Durable-cache badge. The RUNTIME verdict wins ("restored" = came back from the memo cache without
     # recompute, "stored" = computed then persisted, "handle" = a live handle, "uncacheable" = keyed +
     # expensive but the store failed — with a reason). When a cell has no runtime verdict (ran cheap, or
@@ -1000,6 +1006,20 @@ function state_json(nb::LiveNotebook)
     meta["workers"] = _workers_json(nb)                                     # ACTIVE workers (main + each region) → topbar pills + log/status popup
     meta["undoLabel"] = undo_label(nb)   # next undoable action ("paste 3 cells"/…) — labels the Undo button
     meta["redoLabel"] = redo_label(nb)
+    if get(nb.report.meta, "inactive", false) === true
+        # INACTIVE (dormant): show the embedded frozen render (or parsed cells un-run) with NO worker
+        # running — the grey "click to launch" pill drives the bring-up (`/api/launch`). Distinct from
+        # `hydrating` (which narrates an in-flight bring-up); the client reads `inactive` to render the
+        # pill and treat cells as a static preview until launched.
+        meta["cells"] = if haskey(nb.report.meta, "preview")
+            nb.report.meta["preview"]
+        else
+            bindref, hostednames = _bind_index(nb.report)
+            [cell_json(c, bindref, hostednames) for c in nb.report.cells]
+        end
+        meta["inactive"] = true
+        return meta
+    end
     if get(nb.report.meta, "hydrating", false) === true
         # While the env reconstructs: show the embedded frozen render if present (already
         # cell_json-shaped), else the parsed cells un-run. Live cells replace these on hydrate.
