@@ -459,6 +459,40 @@ function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; o
     return nothing
 end
 
+# Non-destructive PLAN for a Sync: per member, whether it will be RE-EXPORTED (its notebook is open) or
+# KEPT (not open / not linked), plus the destinations — the "arm → review" view the UI shows before it
+# actually runs. Same matching (`_doc_entry_is`) the real sync uses, so the plan is truthful.
+function sync_site_plan(name::AbstractString, hub)
+    store = PublishLedger.default_store()
+    led = PublishLedger.load(store)
+    site = get(led.sites, String(name), nothing)
+    targets = site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
+    dir = _site_dir(String(name))
+    (site === nothing || dir === nothing || !isdir(dir)) &&
+        return Dict{String,Any}("site" => name, "members" => Any[], "targets" => targets,
+                                "error" => site === nothing ? "no such site" : "no local build yet")
+    man = _read_site_manifest(dir)
+    nbs = lock(hub.lock) do; collect(values(hub.notebooks)); end
+    entries = Any[]
+    hd = get(man, "homeDoc", nothing)
+    hd isa AbstractDict && !isempty(String(get(hd, "path", ""))) && push!(entries, (slug = "", entry = hd, home = true))
+    for d in get(man, "docs", Any[])
+        d isa AbstractDict && push!(entries, (slug = String(get(d, "slug", "")), entry = d, home = false))
+    end
+    members = Any[]
+    for e in entries
+        title = String(get(e.entry, "title", isempty(e.slug) ? "front page" : e.slug))
+        matched = any(nb -> _doc_entry_is(nb, e.entry), nbs)
+        hasid = !isempty(strip(String(get(e.entry, "id", ""))))
+        push!(members, Dict{String,Any}("title" => title, "slug" => e.slug, "home" => e.home,
+            "action" => matched ? "rebuild" : "keep",
+            "reason" => matched ? "open — re-export from current source" :
+                        hasid  ? "notebook not open — keep last build" :
+                                 "not linked yet — publish it once to enable rebuild"))
+    end
+    return Dict{String,Any}("site" => name, "members" => members, "targets" => targets)
+end
+
 """
     sync_site!(name; on_event=nothing, hub=nothing) -> summary
 
@@ -778,6 +812,13 @@ end
 function _register_publish_routes!(router, h::Hub)
     # Read the whole ledger (global — the manager's main view model).
     HTTP.register!(router, "GET", "/api/publish/ledger", _req -> _json(publish_ledger_view()))
+    # A Sync PLAN (non-destructive): what a `site-sync` will rebuild vs keep, + destinations. Drives the
+    # two-stage "arm → review → sync" UI.
+    HTTP.register!(router, "GET", "/api/publish/site-sync-plan", req -> begin
+        site = get(HTTP.queryparams(HTTP.URI(req.target)), "site", "")
+        isempty(site) && return HTTP.Response(400, "no site")
+        _json(sync_site_plan(String(site), h))
+    end)
     # This notebook's document info (scoped).
     HTTP.register!(router, "GET", "/api/{id}/publish/doc",
                    req -> _withnb(h, req, nb -> _json(publish_doc_info(nb))))
