@@ -119,6 +119,22 @@ manifest_path(root::AbstractString, key::AbstractString) =
 
 has_blob(root::AbstractString, h::AbstractString) = _validhash(h) && isfile(blob_path(root, h))
 
+# Atomically write to `dest`: `f(io)` streams into a temp file in `dir`, which is then renamed over
+# `dest` (rename is atomic on the same filesystem). On any failure the temp file is cleaned up and the
+# error rethrown. (`put_blob` open-codes its own variant — its destination is content-derived and it
+# dedups an already-present blob, so it can't name `dest` up front.)
+function _atomic_write(f, dir::AbstractString, dest::AbstractString)
+    tmp = tempname(dir)
+    try
+        open(f, tmp, "w")
+        mv(tmp, dest; force = true)
+    catch
+        try; rm(tmp; force = true); catch; end
+        rethrow()
+    end
+    return nothing
+end
+
 """
     put_blob(f, root) -> (sha256_hex, bytes)
 
@@ -177,14 +193,7 @@ function write_manifest(root::AbstractString, key::AbstractString, manifest::Abs
     mkpath(mdir)
     d = Dict{String,Any}(String(k) => v for (k, v) in manifest)
     d["fmt"] = FMT
-    tmp = tempname(mdir)
-    try
-        open(io -> TOML.print(io, d), tmp, "w")
-        mv(tmp, manifest_path(root, key); force = true)
-    catch
-        try; rm(tmp; force = true); catch; end
-        rethrow()
-    end
+    _atomic_write(io -> TOML.print(io, d), mdir, manifest_path(root, key))
     return nothing
 end
 
@@ -294,14 +303,7 @@ function set_pin!(root::AbstractString, key::AbstractString, pin::Bool)
     isdir(root) || mkpath(root)
     pins = _read_pins(root)
     pin ? push!(pins, key) : delete!(pins, key)
-    tmp = tempname(root)
-    try
-        open(io -> TOML.print(io, Dict("keys" => sort!(collect(pins)))), tmp, "w")
-        mv(tmp, _pins_path(root); force = true)
-    catch
-        try; rm(tmp; force = true); catch; end
-        rethrow()
-    end
+    _atomic_write(io -> TOML.print(io, Dict("keys" => sort!(collect(pins)))), root, _pins_path(root))
     return nothing
 end
 

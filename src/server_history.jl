@@ -607,7 +607,7 @@ end
 const _BIB_CARD_LIMIT = 10
 function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited,
                         numbers::Dict{String,Int} = Dict{String,Int}())
-    esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+    esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
     ncited = Base.count(e -> e.key in cited, entries)
     meta(e) = strip(join(filter(!isempty, [String(e.author), String(e.title)]), " · "))
     # Cited entries get their [N] (matching the in-text numbers); uncited get a hollow marker.
@@ -655,7 +655,7 @@ _fig_link_emit(num, anchor) =
 _cite_literal(key, sup, _form) = isempty(strip(sup)) ? string("[@", key, "]") : string("[@", key, ", ", strip(sup), "]")
 
 function _cite_link_emit(ctx)
-    esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+    esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
     return (key, sup, _form) -> begin
         core = get(ctx.labels, String(key), String(key))
         inner = isempty(strip(sup)) ? core : string(core, ", ", strip(sup))
@@ -968,6 +968,14 @@ function _worker_log(nb::LiveNotebook, side::AbstractString, lines::Int)
     return merge(_worker_entry(nb, side, k), Dict{String,Any}("log" => log))
 end
 
+# The cells payload for a NON-live state (inactive/hydrating): the embedded frozen render if present
+# (already `cell_json`-shaped), else the parsed cells rendered un-run.
+function _static_cells(nb::LiveNotebook)
+    haskey(nb.report.meta, "preview") && return nb.report.meta["preview"]
+    bindref, hostednames = _bind_index(nb.report)
+    return [cell_json(c, bindref, hostednames) for c in nb.report.cells]
+end
+
 function state_json(nb::LiveNotebook)
     meta = Dict{String,Any}(
         "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
@@ -1012,12 +1020,7 @@ function state_json(nb::LiveNotebook)
         # running — the grey "click to launch" pill drives the bring-up (`/api/launch`). Distinct from
         # `hydrating` (which narrates an in-flight bring-up); the client reads `inactive` to render the
         # pill and treat cells as a static preview until launched.
-        meta["cells"] = if haskey(nb.report.meta, "preview")
-            nb.report.meta["preview"]
-        else
-            bindref, hostednames = _bind_index(nb.report)
-            [cell_json(c, bindref, hostednames) for c in nb.report.cells]
-        end
+        meta["cells"] = _static_cells(nb)
         meta["inactive"] = true
         meta["workers"] = Any[]   # nothing is running — suppress the worker-strip pill; the inactive pill stands alone
         # The packages this notebook's env carries (from the reproducibility footer, parsed at load — no
@@ -1034,12 +1037,7 @@ function state_json(nb::LiveNotebook)
     if get(nb.report.meta, "hydrating", false) === true
         # While the env reconstructs: show the embedded frozen render if present (already
         # cell_json-shaped), else the parsed cells un-run. Live cells replace these on hydrate.
-        meta["cells"] = if haskey(nb.report.meta, "preview")
-            nb.report.meta["preview"]
-        else
-            bindref, hostednames = _bind_index(nb.report)
-            [cell_json(c, bindref, hostednames) for c in nb.report.cells]
-        end
+        meta["cells"] = _static_cells(nb)
         meta["hydrating"] = true
         # "env" = reconstructing a self-contained bundle's environment (shows a frozen preview);
         # "run" = a normal open whose initial full run is happening in the background;

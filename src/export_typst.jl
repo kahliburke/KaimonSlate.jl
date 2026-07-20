@@ -408,21 +408,18 @@ function _typst_table(spec; theme::AbstractString = "light")::String
     isempty(cols) && return ""
     ncol = length(cols)
     p = _palette(theme)
-    _cname(c)  = c isa AbstractDict ? string(get(c, "name", "")) : string(c)
-    _calign(c) = c isa AbstractDict ? string(get(c, "align", "left")) : "left"
-    _cfmt(c)   = c isa AbstractDict ? get(c, "format", nothing) : nothing
     _typalign(a) = a == "right" ? "right" : (a == "center" ? "center" : "left")
-    fmts = Any[_cfmt(c) for c in cols]
+    fmts = Any[_col_format(c) for c in cols]   # _col_* column-spec accessors are shared (server_export.jl)
     inner(v, fmt) = "[#text(size: 8pt, \"" * _typ_str(ReportEngine._format_cell(v, fmt)) * "\")]"
     cell(v, col, fmt) = _typ_viz_cell(v, col, inner(v, fmt))
     io = IOBuffer()
     # per-column alignment (numbers right, bools center) + a themed grid stroke
     print(io, "#align(center)[\n")   # center the table block on the page
-    print(io, "#table(columns: ", ncol, ", inset: 5pt, align: (", join((_typalign(_calign(c)) for c in cols), ", "), "), stroke: 0.4pt + $(p.tablestroke),\n")
+    print(io, "#table(columns: ", ncol, ", inset: 5pt, align: (", join((_typalign(_col_align(c)) for c in cols), ", "), "), stroke: 0.4pt + $(p.tablestroke),\n")
     # zebra: header shaded (row 0), odd body rows a subtle stripe
     print(io, "  fill: (_, row) => if row == 0 { $(p.tableheadbg) } else if calc.odd(row) { $(p.tablestripe) },\n")
     # repeat the header on every page a long table spills onto
-    print(io, "  table.header(repeat: true, ", join(["[#text(size: 8.5pt, weight: \"bold\", \"" * _typ_str(_cname(c)) * "\")]" for c in cols], ", "), "),\n")
+    print(io, "  table.header(repeat: true, ", join(["[#text(size: 8.5pt, weight: \"bold\", \"" * _typ_str(_col_name(c)) * "\")]" for c in cols], ", "), "),\n")
     maxr = Int(something(get(opts, "export_rows", nothing), 200))   # per-table export_rows hint, else default cap
     for (ri, r) in enumerate(rows)
         ri > maxr && break

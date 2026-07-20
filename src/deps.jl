@@ -577,6 +577,33 @@ end
 
 # ── Dependency graph (most-recent-prior-writer) ──────────────────────────────
 
+# Header-tag readers/writers share three shapes. `_tag_list` collects a comma-split multi-value tag
+# (`prefix=a,b`) into strings; `_tag_value` reads a single-valued tag (`prefix=x`); `_set_tag_value!`
+# replaces a single-valued tag in-place (dropping any prior copy, omitting an empty value).
+_tag_list(flags::AbstractSet{Symbol}, prefix::AbstractString) = begin
+    out = String[]
+    for f in flags
+        s = String(f)
+        startswith(s, prefix) || continue
+        for t in eachsplit(chopprefix(s, prefix), ',')
+            isempty(t) || push!(out, String(t))
+        end
+    end
+    out
+end
+_tag_value(flags::AbstractSet{Symbol}, prefix::AbstractString) = begin
+    for f in flags
+        s = String(f)
+        startswith(s, prefix) && return chopprefix(s, prefix)
+    end
+    return ""
+end
+function _set_tag_value!(flags::AbstractSet{Symbol}, prefix::AbstractString, value::AbstractString)
+    filter!(f -> !startswith(String(f), prefix), flags)
+    isempty(value) || push!(flags, Symbol(prefix * value))
+    return flags
+end
+
 # Manual edges (`needs=id1,id2` header tag): user-asserted dependencies for effects no binding
 # carries — a cell that reads a DuckDB TABLE another cell CREATEs shares no variable with it, so
 # dataflow analysis sees no edge and staleness/scheduling/memo-keys all miss the coupling. The tag
@@ -586,17 +613,7 @@ end
 # storage; the DAG view's link gesture is just an editor for them. Only an EARLIER CODE cell can
 # be named (document order IS topological order — a forward/unknown id adds no edge; the UI flags
 # it on the cell so a deleted upstream degrades loudly, not silently).
-function _manual_needs(flags::AbstractSet{Symbol})
-    out = String[]
-    for f in flags
-        s = String(f)
-        startswith(s, "needs=") || continue
-        for t in eachsplit(chopprefix(s, "needs="), ',')
-            isempty(t) || push!(out, String(t))
-        end
-    end
-    return out
-end
+_manual_needs(flags::AbstractSet{Symbol}) = _tag_list(flags, "needs=")
 _manual_needs(c::Cell) = _manual_needs(c.flags)
 
 # Manual mutation declarations (`mutates=name1,name2` header tag): user-asserted in-place effects
@@ -607,17 +624,7 @@ _manual_needs(c::Cell) = _manual_needs(c.flags)
 # invalidation (an undeclared hidden mutation there doesn't just go stale, it FORKS the replicas,
 # which is why this tag exists). The sibling of `needs=`: that asserts an edge, this asserts what
 # the edge means.
-function _manual_mutates(flags::AbstractSet{Symbol})
-    out = Symbol[]
-    for f in flags
-        s = String(f)
-        startswith(s, "mutates=") || continue
-        for t in eachsplit(chopprefix(s, "mutates="), ',')
-            isempty(t) || push!(out, Symbol(t))
-        end
-    end
-    return out
-end
+_manual_mutates(flags::AbstractSet{Symbol}) = Symbol[Symbol(t) for t in _tag_list(flags, "mutates=")]
 _manual_mutates(c::Cell) = _manual_mutates(c.flags)
 
 # The `lockedkey=<key>` header tag: a `locked` cell's memo key AS OF the run it froze on — set
@@ -626,17 +633,10 @@ _manual_mutates(c::Cell) = _manual_mutates(c.flags)
 # the freshly-computed one, so a locked cell survives upstream drift across a process restart (not
 # just the live in-memory FRESH state `update_source!`'s restale-skip protects). Single-valued —
 # unlike `needs=`/`mutates=`, a cell has at most one locked key at a time.
-function _locked_key(flags::AbstractSet{Symbol})
-    for f in flags
-        s = String(f)
-        startswith(s, "lockedkey=") && return chopprefix(s, "lockedkey=")
-    end
-    return ""
-end
+_locked_key(flags::AbstractSet{Symbol}) = _tag_value(flags, "lockedkey=")
 _locked_key(c::Cell) = _locked_key(c.flags)
 function _set_locked_key!(c::Cell, key::AbstractString)
-    filter!(f -> !startswith(String(f), "lockedkey="), c.flags)
-    isempty(key) || push!(c.flags, Symbol("lockedkey=" * key))
+    _set_tag_value!(c.flags, "lockedkey=", key)
     return c
 end
 
@@ -648,17 +648,10 @@ end
 # this stamp in, so a dependent re-keys (and re-stores) when the frozen value is refreshed and restores
 # consistently on reopen, instead of pulling a result computed against a stale frozen value. Persisted
 # in the `.jl` header so it's stable across a restart. Single-valued, like `lockedkey=`.
-function _frozen_stamp(flags::AbstractSet{Symbol})
-    for f in flags
-        s = String(f)
-        startswith(s, "frozenat=") && return chopprefix(s, "frozenat=")
-    end
-    return ""
-end
+_frozen_stamp(flags::AbstractSet{Symbol}) = _tag_value(flags, "frozenat=")
 _frozen_stamp(c::Cell) = _frozen_stamp(c.flags)
 function _set_frozen_stamp!(c::Cell, stamp::AbstractString)
-    filter!(f -> !startswith(String(f), "frozenat="), c.flags)
-    isempty(stamp) || push!(c.flags, Symbol("frozenat=" * stamp))
+    _set_tag_value!(c.flags, "frozenat=", stamp)
     return c
 end
 
