@@ -1,7 +1,11 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=intro
+@md"""
 # Charts — `echart`
 
 Slate's ECharts DSL. Express (`echart(:kind, x, y)`), composable (`series(…)`), or raw.
+"""
 
 #%% code id=line
 echart(:line, ["Mon", "Tue", "Wed", "Thu", "Fri"], [120, 200, 150, 80, 70];
@@ -47,3 +51,7 @@ t = range(0, 2π; length = 140)
 echart(series(:line, collect(t), sin.(t); name = "sin", smooth = true),
        series(:bar,  collect(t), 0.3 .* sin.(2 .* t); name = "0.3·sin 2t");
        title = "Composable", legend = true)
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = eb195579-b887-490d-ae2a-36fe058470fb
+# ╚═╡

@@ -1,7 +1,11 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=intro
+@md"""
 # Tables — `slate_table`
 
 Interactive tables: sort, filter, page — with per-column formatting and in-cell viz.
+"""
 
 #%% code id=formatted
 rows = [(product = "Widget",   revenue = 128_400.0, margin = 0.42, units = 3_400, size = 1_048_576),
@@ -14,3 +18,7 @@ slate_table(rows;
     format = (revenue = :currency, margin = (kind = :percent, digits = 1),
               units = :integer, size = :bytes),
     viz    = (revenue = :bar, margin = :heat))
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = 48554993-937f-4628-9bff-bc5c31b07b4d
+# ╚═╡
