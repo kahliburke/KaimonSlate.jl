@@ -84,6 +84,76 @@ function _has_bundle_footer(path::AbstractString)
     return false
 end
 
+# ── Classifying whatever the open box points at ──────────────────────────────
+# A user can hand us any file — a Slate notebook, a self-contained bundle, a RUNNABLE HTML export
+# (which carries the bundle inside it), a plain Julia script, or something unrelated. `_source_kind`
+# names which, so the front end can route each to the right flow instead of blindly opening it.
+
+# Pull the embedded standalone `.jl` out of a runnable HTML export. `export_html(...; embed_bundle=true)`
+# inlines the whole self-contained notebook as a base64 string (`var _bb64="…"`); decode it back to
+# the `.jl` source. Returns the source text, or `nothing` when the page carries no bundle (a static
+# export, or a foreign HTML file).
+function _html_bundle_source(path::AbstractString)
+    isfile(path) || return nothing
+    txt = try; read(path, String); catch; return nothing; end
+    m = match(r"var _bb64=\"([A-Za-z0-9+/=]+)\"", txt)
+    m === nothing && return nothing
+    src = try; String(Base64.base64decode(m.captures[1])); catch; return nothing; end
+    occursin(_BUNDLE_OPEN, src) || return nothing   # sanity: a real self-contained bundle
+    return src
+end
+
+# True if `path` looks like a Slate HTML export (our export chrome) — used only to tailor the
+# "no runnable bundle" message for a static export vs an unrelated HTML file.
+function _is_slate_export_html(path::AbstractString)
+    isfile(path) || return false
+    try
+        for line in eachline(path)
+            (occursin("exp-titleblock", line) || occursin("class=\"export\"", line)) && return true
+        end
+    catch
+    end
+    return false
+end
+
+# True if a `.jl` carries Slate structure — an explicit `#%%` cell header or a `# ╔═╡ Slate.` footer.
+# A file with neither is a plain Julia script (offered as a NEW notebook rather than opened in place).
+# Scans a bounded line prefix so a huge file stays cheap.
+function _looks_like_notebook(path::AbstractString)
+    isfile(path) || return false
+    try
+        n = 0
+        for line in eachline(path)
+            startswith(lstrip(line), "#%%") && return true
+            startswith(line, "# ╔═╡ Slate.") && return true
+            (n += 1) > 4000 && break
+        end
+    catch
+    end
+    return false
+end
+
+# Classify a path the open box points at, so the front end can route it:
+#   "bundle"      self-contained `.jl` (Slate.bundle footer)   → import helper
+#   "notebook"    a Slate `.jl` notebook (has #%% cells)        → open live / inactive
+#   "plain"       a plain Julia script, no Slate structure      → offer a new notebook (a copy)
+#   "html-bundle" a RUNNABLE HTML export (bundle embedded)      → extract → import helper
+#   "html-static" a static HTML export (no embedded bundle)     → clear error (re-export runnable)
+#   "foreign"     anything else                                 → clear error
+#   "none"        not a file
+function _source_kind(path::AbstractString)
+    isfile(path) || return "none"
+    ext = lowercase(splitext(path)[2])
+    if ext == ".jl"
+        _has_bundle_footer(path) && return "bundle"
+        return _looks_like_notebook(path) ? "notebook" : "plain"
+    elseif ext == ".html" || ext == ".htm"
+        _html_bundle_source(path) === nothing || return "html-bundle"
+        return _is_slate_export_html(path) ? "html-static" : "foreign"
+    end
+    return "foreign"
+end
+
 # SSE handler for `GET /api/import-standalone?path=&target=` — the **Import** flow: expand the
 # bundle into `target` (a real project the user owns) and open it, streaming progress. ("Run
 # (temporary)" is a plain open instead: load_notebook hydrates against the depot cache, so it
