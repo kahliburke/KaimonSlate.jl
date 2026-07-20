@@ -249,12 +249,22 @@ function publish_ledger_view_cached()
 end
 
 # ── target / secret / doc mutations (load → mutate → save; structure is authoritative) ─────────────
-function publish_target_set!(name::AbstractString, kind::AbstractString, config::AbstractDict)
+# Open the default publish ledger, run `f(led)`, then PERSIST it — the load→mutate→save envelope these
+# mutations share. Returns whatever `f` returns (so a caller can thread a value — e.g. a purge log — back
+# out). `f` throwing propagates WITHOUT saving, so a validation `error` leaves the on-disk ledger intact.
+function _with_ledger(f)
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
-    led.targets[String(name)] = PublishLedger.Target(String(name), String(kind);
-                                                      config = Dict{String,Any}(config))
+    result = f(led)
     PublishLedger.save(store, led)
+    return result
+end
+
+function publish_target_set!(name::AbstractString, kind::AbstractString, config::AbstractDict)
+    _with_ledger() do led
+        led.targets[String(name)] = PublishLedger.Target(String(name), String(kind);
+                                                          config = Dict{String,Any}(config))
+    end
     return publish_ledger_view()
 end
 
@@ -263,39 +273,38 @@ reference (documents AND sites) is detached — deployed content stays live. `pu
 down the deployed side where feasible (see `purge_deployed!`; rsync-serve stops its remote server
 and removes the served dir). The view gains a `purgeLog` entry when a purge ran."""
 function publish_target_delete!(name::AbstractString; purge::Bool = false)
-    store = PublishLedger.default_store()
-    led = PublishLedger.load(store)
-    plog = nothing
-    if purge
-        t = get(led.targets, String(name), nothing)
-        if t !== nothing
-            r = try
-                purge_deployed!(target_from_ledger(t; secrets = _secrets_load()))
-            catch e
-                (; ok = false, log = sprint(showerror, e))
+    plog = _with_ledger() do led
+        p = nothing
+        if purge
+            t = get(led.targets, String(name), nothing)
+            if t !== nothing
+                r = try
+                    purge_deployed!(target_from_ledger(t; secrets = _secrets_load()))
+                catch e
+                    (; ok = false, log = sprint(showerror, e))
+                end
+                p = "$(String(name)): $(strip(r.log))"
+                r.ok || @warn "slate: purge of deployed content failed (target removed anyway)" target = name log = r.log
             end
-            plog = "$(String(name)): $(strip(r.log))"
-            r.ok || @warn "slate: purge of deployed content failed (target removed anyway)" target = name log = r.log
         end
+        delete!(led.targets, String(name))
+        for d in values(led.documents)
+            filter!(!=(String(name)), d.targets)
+        end
+        for s in values(led.sites)                       # sites too — a deleted target must not linger
+            filter!(!=(String(name)), s.targets)         # as a dangling site destination
+        end
+        p
     end
-    delete!(led.targets, String(name))
-    for d in values(led.documents)
-        filter!(!=(String(name)), d.targets)
-    end
-    for s in values(led.sites)                       # sites too — a deleted target must not linger
-        filter!(!=(String(name)), s.targets)         # as a dangling site destination
-    end
-    PublishLedger.save(store, led)
     view = publish_ledger_view()
     plog === nothing || (view["purgeLog"] = [plog])
     return view
 end
 
 function publish_doc_delete!(docId::AbstractString)
-    store = PublishLedger.default_store()
-    led = PublishLedger.load(store)
-    delete!(led.documents, String(docId))
-    PublishLedger.save(store, led)
+    _with_ledger() do led
+        delete!(led.documents, String(docId))
+    end
     return publish_ledger_view()
 end
 
@@ -314,11 +323,10 @@ end
 
 "Assign/replace the set of target names on this notebook's document (persisted)."
 function publish_doc_set_targets!(nb::LiveNotebook, names)
-    store = PublishLedger.default_store()
-    led = PublishLedger.load(store)
-    di = _ensure_doc!(led, nb)
-    led.documents[di.docId].targets = collect(String, names)
-    PublishLedger.save(store, led)
+    _with_ledger() do led
+        di = _ensure_doc!(led, nb)
+        led.documents[di.docId].targets = collect(String, names)
+    end
     return publish_doc_info(nb)
 end
 
@@ -434,18 +442,17 @@ optional per-target subpaths (target → path within that target; "" ⇒ its roo
 Membership/order/sections live in its local build."""
 function publish_site_set!(name::AbstractString, targets, home::AbstractString = "",
                            title::AbstractString = ""; paths = Dict{String,String}())
-    store = PublishLedger.default_store()
-    led = PublishLedger.load(store)
-    tlist = collect(String, targets)
-    pmap = Dict{String,String}(String(k) => _norm_subpath(v) for (k, v) in pairs(paths) if String(k) in tlist)
-    for t in tlist
-        clash = _location_clash(led, name, t, get(pmap, t, ""))
-        isempty(clash) || error("target '$t'" * (isempty(get(pmap, t, "")) ? " (root)" : " path '$(pmap[t])'") *
-            " is already used by site '$clash' — give this site a different subpath on '$t' so they don't overwrite each other")
+    _with_ledger() do led
+        tlist = collect(String, targets)
+        pmap = Dict{String,String}(String(k) => _norm_subpath(v) for (k, v) in pairs(paths) if String(k) in tlist)
+        for t in tlist
+            clash = _location_clash(led, name, t, get(pmap, t, ""))
+            isempty(clash) || error("target '$t'" * (isempty(get(pmap, t, "")) ? " (root)" : " path '$(pmap[t])'") *
+                " is already used by site '$clash' — give this site a different subpath on '$t' so they don't overwrite each other")
+        end
+        led.sites[String(name)] = PublishLedger.SiteGroup(String(name); targets = tlist,
+                                                          home = String(home), title = String(title), paths = pmap)
     end
-    led.sites[String(name)] = PublishLedger.SiteGroup(String(name); targets = tlist,
-                                                      home = String(home), title = String(title), paths = pmap)
-    PublishLedger.save(store, led)
     return publish_ledger_view()
 end
 
@@ -453,28 +460,28 @@ end
 away. `purge=true` additionally tears down deployed content on each of the site's targets where
 feasible (see `purge_deployed!`). The view gains a `purgeLog` entry when a purge ran."""
 function publish_site_delete!(name::AbstractString; purge::Bool = false)
-    store = PublishLedger.default_store()
-    led = PublishLedger.load(store)
-    site = get(led.sites, String(name), nothing)
-    logs = String[]
-    if purge && site !== nothing
-        secrets = _secrets_load()
-        for tn in site.targets
-            t = get(led.targets, tn, nothing)
-            t === nothing && continue
-            r = try
-                # Purge THIS site's subpath within the target — not the whole target (a sibling
-                # site may share it at a different path).
-                purge_deployed!(with_subpath(target_from_ledger(t; secrets = secrets), get(site.paths, tn, "")))
-            catch e
-                (; ok = false, log = sprint(showerror, e))
+    logs = _with_ledger() do led
+        site = get(led.sites, String(name), nothing)
+        ls = String[]
+        if purge && site !== nothing
+            secrets = _secrets_load()
+            for tn in site.targets
+                t = get(led.targets, tn, nothing)
+                t === nothing && continue
+                r = try
+                    # Purge THIS site's subpath within the target — not the whole target (a sibling
+                    # site may share it at a different path).
+                    purge_deployed!(with_subpath(target_from_ledger(t; secrets = secrets), get(site.paths, tn, "")))
+                catch e
+                    (; ok = false, log = sprint(showerror, e))
+                end
+                push!(ls, "$tn: $(strip(r.log))")
+                r.ok || @warn "slate: purge of deployed content failed (site removed anyway)" site = name target = tn log = r.log
             end
-            push!(logs, "$tn: $(strip(r.log))")
-            r.ok || @warn "slate: purge of deployed content failed (site removed anyway)" site = name target = tn log = r.log
         end
+        delete!(led.sites, String(name))
+        ls
     end
-    delete!(led.sites, String(name))
-    PublishLedger.save(store, led)
     dir = _site_dir(String(name))                    # the canonical local build is part of the site
     dir === nothing || rm(dir; recursive = true, force = true)
     view = publish_ledger_view()
@@ -528,6 +535,11 @@ function _resync_live_members!(dir::AbstractString, name::AbstractString, hub; o
     return nothing
 end
 
+# The publish targets a `site` declares that are actually configured in the ledger (`led.targets`), in
+# the site's own order. A `nothing` site ⇒ no live targets.
+_live_target_names(led, site) =
+    site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
+
 # Non-destructive PLAN for a Sync: per member, whether it will be RE-EXPORTED (its notebook is open) or
 # KEPT (not open / not linked), plus the destinations — the "arm → review" view the UI shows before it
 # actually runs. Same matching (`_doc_entry_is`) the real sync uses, so the plan is truthful.
@@ -535,7 +547,7 @@ function sync_site_plan(name::AbstractString, hub)
     store = PublishLedger.default_store()
     led = PublishLedger.load(store)
     site = get(led.sites, String(name), nothing)
-    targets = site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
+    targets = _live_target_names(led, site)
     dir = _site_dir(String(name))
     (site === nothing || dir === nothing || !isdir(dir)) &&
         return Dict{String,Any}("site" => name, "members" => Any[], "targets" => targets,
@@ -599,7 +611,7 @@ function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
     # Sync = COPY the STAGED artifact to the destinations, verbatim. The rebuild (re-exporting open
     # members) happens at STAGE time, not here — so what ships is exactly the local copy you staged and
     # can review, with no surprise re-render at deploy time. (`hub`/`on_event` kept for the API shape.)
-    tnames = [n for n in site.targets if haskey(led.targets, n)]
+    tnames = _live_target_names(led, site)
     isempty(tnames) && error("site '$name' has no configured destinations — add some in the manager")
     secrets = _secrets_load()
     results = Vector{PublishResult}(undef, length(tnames))
@@ -655,7 +667,7 @@ function publish_to_site!(nb::LiveNotebook, siteName::AbstractString;
     end
     built = export_to_site(nb, String(siteName); slug = slg, kwargs..., site_title = stitle)   # stage this doc into the copy
     # Stage-only, or a site with no live destinations (a local staging area): built, nothing to deploy.
-    tnames = site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
+    tnames = _live_target_names(led, site)
     (deploy === false || isempty(tnames)) && return Dict{String,Any}("ok" => true, "localOnly" => true,
         "staged" => true, "url" => built.url, "docCount" => built.docCount, "results" => Any[])
     return sync_site!(String(siteName); on_event = on_event, hub = hub)  # push the whole build to all destinations
@@ -775,28 +787,15 @@ function run_publish(nb::LiveNotebook, target_names; archive::Bool = false, on_e
 end
 
 # The SSE handler (wired into the top-level `HTTP.listen!` dispatcher, not the router). Streams
-# `status`/`log`/`done`/`failed` events; the actual publish runs in a task feeding a channel so the
-# stream has a single writer even though targets deploy concurrently.
+# `status`/`log`/`done`/`failed` events over the shared `_sse_stream`, running `run_publish` as its
+# task body. `start_verb="Publishing"` gives the deposit its own wording (deploy/sync say "Deploying").
 function _sse_publish(stream::HTTP.Stream, h::Hub)
     uri = HTTP.URI(stream.message.target)
     q = HTTP.queryparams(uri)
     m = match(r"^/api/([^/]+)/publish-run", uri.path)
     id = m === nothing ? "" : String(m.captures[1])
     nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
-    HTTP.setheader(stream, "Content-Type" => "text/event-stream")
-    HTTP.setheader(stream, "Cache-Control" => "no-cache")
-    HTTP.startwrite(stream)
-    emit = function (ev::AbstractString, data::AbstractString)
-        io = IOBuffer()
-        println(io, "event: ", ev)
-        for ln in split(data, '\n'); println(io, "data: ", ln); end
-        println(io)
-        try; write(stream, String(take!(io))); return true; catch; return false; end
-    end
-    if nb === nothing
-        emit("failed", "no such notebook: $id")
-        return
-    end
+    nb === nothing && return _sse_stream(stream, _oe -> error("no such notebook: $id"))
     names = filter(!isempty, strip.(split(get(q, "targets", ""), ',')))
     # `archive=1` marks a deliberate deposit (the 📄 Archive button) — see run_publish.
     is_archive = get(q, "archive", "0") == "1"
@@ -805,39 +804,15 @@ function _sse_publish(stream::HTTP.Stream, h::Hub)
              theme = get(q, "theme", "dark"), outputs = get(q, "outputs", "all"),
              source = get(q, "source", "1") != "0", bundle = get(q, "bundle", "0") == "1",
              history = get(q, "history", "0") == "1")
-    ch = Channel{Tuple{String,String}}(128)
-    task = @async begin
-        try
-            on_event = function (_i, phase, payload)
-                if phase === :start
-                    put!(ch, ("status", "Publishing to $(target_name(payload))…"))
-                else
-                    r = payload
-                    tag = r.ok ? "✓" : "✗"
-                    detail = !isempty(r.doi) ? r.doi : !isempty(r.url) ? r.url : r.status
-                    put!(ch, ("log", "$tag $detail"))
-                    r.ok || isempty(strip(r.log)) || put!(ch, ("log", first(split(strip(r.log), '\n'))))
-                end
-            end
-            summary = run_publish(nb, names; archive = is_archive, on_event = on_event, slug = bopts.slug,
-                                  site_title = bopts.site_title, theme = bopts.theme, outputs = bopts.outputs,
-                                  source = bopts.source, bundle = bopts.bundle, history = bopts.history)
-            put!(ch, ("done", JSON.json(summary)))
-        catch e
-            put!(ch, ("failed", sprint(showerror, e)))
-        finally
-            close(ch)
-        end
-    end
-    for (ev, data) in ch
-        emit(ev, data) || break
-    end
-    try; wait(task); catch; end
-    return
+    return _sse_stream(stream, on_event -> run_publish(nb, names; archive = is_archive, on_event = on_event,
+                       slug = bopts.slug, site_title = bopts.site_title, theme = bopts.theme,
+                       outputs = bopts.outputs, source = bopts.source, bundle = bopts.bundle,
+                       history = bopts.history); start_verb = "Publishing")
 end
 
 # Shared SSE streamer: run `run_fn(on_event)` in a task feeding a channel, emit status/log/done/failed.
-function _sse_stream(stream::HTTP.Stream, run_fn)
+# `start_verb` is the verb in the per-target `:start` status line ("Deploying to …" / "Publishing to …").
+function _sse_stream(stream::HTTP.Stream, run_fn; start_verb::AbstractString = "Deploying")
     HTTP.setheader(stream, "Content-Type" => "text/event-stream")
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
     HTTP.startwrite(stream)
@@ -856,7 +831,7 @@ function _sse_stream(stream::HTTP.Stream, run_fn)
                 elseif phase === :log
                     put!(ch, ("log", String(payload)))
                 elseif phase === :start
-                    put!(ch, ("status", "Deploying to $(target_name(payload))…"))
+                    put!(ch, ("status", "$start_verb to $(target_name(payload))…"))
                 else
                     r = payload; tag = r.ok ? "✓" : "✗"
                     detail = !isempty(r.doi) ? r.doi : !isempty(r.url) ? r.url : r.status

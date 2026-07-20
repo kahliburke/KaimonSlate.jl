@@ -2422,10 +2422,6 @@ end
 #   :auto   — try :direct when viable, transparently fall back to :relay on any failure.
 # :direct is STRICT (errors if not viable / the pull fails) — for tests + observability; :auto is the
 # forgiving mode the region runner uses. Return gains `mode` (the path actually taken).
-_direct_viable(src_k, dst_k) =
-    src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget &&
-    getfield(src_k.target, :transport) === :direct && src_k !== dst_k
-
 # ── Peer route resolution (PEER_TUNNEL_PLAN §3) ───────────────────────────────────────────────
 # How should dst (B) pull the boundary blob from src (A)? Only B can test B→A reachability, so the hub
 # asks B to probe A's blob endpoint (`__slate_probe_peer`) and picks: :direct (CURVE straight to A) when
@@ -3507,7 +3503,7 @@ function reap_remote_worker(host, port::Int)
     try; _evict_data_tunnels!(host; port = _blob_data_port_cached(host, port)); catch; end   # real port — a relocated tunnel worker's data forward isn't at gate+2
     try; _blob_dport_forget!(host, port); catch; end          # …and drop its discovered-port cache (topology changed)
     try; _attach_clear_port!(host, port); catch; end          # …and its notebook's attach record, so the next open skips a ~9s dial into the corpse
-    try; _release_pool_claim!(host, port); catch; end
+    try; _release_region_claim!(host, port); catch; end       # release the in-flight adoption claim for this port
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
     # supersede-reap targets — never processes SIGTERM (a stopped process queues it; a signal-ignoring one
     # drops it), so the SIGKILL escalation is what actually frees its LISTEN port and RAM. Synchronous, so

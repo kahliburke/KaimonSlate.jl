@@ -1176,9 +1176,9 @@ end
 
 # Emit one slide fragment (a whole cell, or a `---`-split markdown chunk) into the doc.
 function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, charttheme = "", override = false, show_source, include_params, citekeys = Set{String}(), outputs::AbstractString = "all")
-    c, override = frag
+    c, srcoverride = frag                    # frag[2] is a per-frag SOURCE override (String/nothing), NOT the themed-render Bool `override`
     if c.kind == MARKDOWN
-        md = _md_for_typst(c, override === nothing ? c.source : override; citekeys = citekeys)
+        md = _md_for_typst(c, srcoverride === nothing ? c.source : srcoverride; citekeys = citekeys)
         isempty(strip(md)) && return
         write(joinpath(dir, base * ".md"), md)
         print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")

@@ -244,7 +244,6 @@ async function histSelect(hash) {
 async function histRestore(hash) {
   const st = await api('POST', '/api/history/restore', { hash });
   if (st && st.cells) { renderAll(st); lastVersion = st.version; }
-  _histSrcCache[hash] = _histSrcCache[hash];          // keep cache
   await loadHistory(); histSelect(histCurrent);
 }
 async function histReplay() {

@@ -781,12 +781,6 @@ function renderPalette() {
       `<span class="pval" data-pname="${c.name}">${c.value}</span></span></div>`;
   }).join('');
 }
-function updatePaletteValues(state) {
-  state.cells.forEach(c => (c.binds || []).forEach(b => {
-    const v = document.querySelector('#palette-list .pval[data-pname="' + b.name + '"]');
-    if (v) v.textContent = b.value;
-  }));
-}
 
 // Keep every widget bound to a variable in lockstep (a control may be surfaced in
 // multiple cells). Skips the element being actively dragged so we never fight it.
@@ -926,5 +920,5 @@ async function runScripts(root) {
 // properties. So ONLY the consts go here (the functions are already on window). `editors`/
 // `charts`/`srcMap` are shared by reference, so the module's mutations stay in sync. (All of
 // these are defined in core.js or earlier in view.js, so they exist when this runs.)
-Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditHTML, srcEditInner, bindsInner, hasBinds });
+Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditInner, bindsInner, hasBinds });
 

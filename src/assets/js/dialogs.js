@@ -60,9 +60,10 @@ async function reload()  { const s = await api('GET', '/api/state'); lastVersion
 // last format + option choices are remembered. Backends are the per-format routes (export.html /
 // export.pdf / export.typ / export.standalone.jl); this is the front-end consolidation.
 function _dlName(ext) { return (nbState && nbState.title || 'notebook') + ext; }
-function _saveBlob(blob, ext) {
+// Download `blob` as a file. Filename is the explicit `name` when given, else `_dlName(ext)`.
+function _saveBlob(blob, ext, name) {
   const url = URL.createObjectURL(blob), a = document.createElement('a');
-  a.href = url; a.download = _dlName(ext); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  a.href = url; a.download = name || _dlName(ext); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 // The shared Outputs filter (all | figures | none) — appends `&outputs=` when not the default.
 function _outputsQS() { const v = (document.getElementById('exoutputs') || {}).value || 'all'; return v === 'all' ? '' : '&outputs=' + v; }
@@ -175,10 +176,7 @@ async function exportMarkdown(mode) {
     md = await _compactMarkdownImages(md, mw);
     const readme = document.getElementById('mdreadme');
     const name = readme && readme.checked ? 'README.md' : _dlName('.md');
-    const save = () => {                                  // download the markdown as `name`
-      const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), a = document.createElement('a');
-      a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-    };
+    const save = () => _saveBlob(new Blob([md], { type: 'text/markdown' }), '.md', name);   // download the markdown as `name`
     if (mode === 'copy') {
       try {
         await navigator.clipboard.writeText(md);
