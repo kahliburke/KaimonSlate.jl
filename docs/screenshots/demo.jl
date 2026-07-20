@@ -1,8 +1,12 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=intro
+@md"""
 # KaimonSlate
 
 A **reactive** Julia notebook in the browser. Edit a cell or drag a widget and only the
 *downstream* cells recompute. The source round-trips to this plain `.jl` file.
+"""
 
 #%% code id=highlight
 # Tree-based Julia syntax highlighting (CodeMirror 6 + the Lezer Julia grammar).
@@ -33,11 +37,13 @@ showcos && push!(waves, series(:line, collect(x), round.(cos.(freq .* x); digits
 echart(waves...; title = "frequency = $freq", legend = true)
 
 #%% md id=mdinterp
+@md"""
 ## Markdown + interpolation
 
 Markdown cells render GFM tables, LaTeX math, and **double-brace interpolation** of live
 Julia values. At frequency **{{ freq }}** the wave's period is
 {{ round(2π / freq; digits = 2) }} — and the math typesets: $\int_0^\pi \sin x \, dx = 2$.
+"""
 
 #%% code id=table
 slate_table([(x = round(x; digits = 2), sinx = round(sin(x); digits = 3))
@@ -48,3 +54,7 @@ slate_table([(x = round(x; digits = 2), sinx = round(sin(x); digits = 3))
 total = 0
 total = total + missing_value
 total
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = da21e6d1-3528-457f-951f-9b768a16a585
+# ╚═╡

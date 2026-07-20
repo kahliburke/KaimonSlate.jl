@@ -1,8 +1,12 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=intro
+@md"""
 # Animation — `animate`
 
 Precompute a stack of frames **once**, then play them back in the browser on a WebGL
 canvas — nothing touches Julia during playback, so a slow simulation still plays at 60 fps.
+"""
 
 #%% code id=frames
 # A little moving-gaussian field: heavy-ish to compute, cheap to play back.
@@ -19,3 +23,7 @@ anim = animate(frames; x = xs, y = xs, title = "moving gaussian", clim = :global
 
 #%% code id=readout
 "frame $fr / $(length(frames))"
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = 5050792c-ae09-432e-b9ff-17206e17fda0
+# ╚═╡

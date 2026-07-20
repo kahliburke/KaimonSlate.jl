@@ -1,8 +1,12 @@
+try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — running it as plain Julia needs the KaimonSlate runtime in this environment. Add it with `import Pkg; Pkg.add(\"KaimonSlate\")`, or open it in Kaimon Slate."); end; KaimonSlate.standalone!(@__MODULE__; dir=@__DIR__)
+
 #%% md id=intro
+@md"""
 # Widgets — `@bind name Widget(…)`
 
 Declare a control in a cell; the bound name holds its live value, and any cell that
 *reads* it recomputes when the control changes.
+"""
 
 #%% code id=slider
 @bind n Slider(0:100; default = 42, label = "samples")
@@ -45,3 +49,7 @@ Declare a control in a cell; the bound name holds its live value, and any cell t
 
 #%% code id=button
 @bind go Button("Run")
+
+# ╔═╡ Slate.config · per-notebook settings (Settings panel)
+#   docid = 5708a77f-2c25-4842-ac37-6c80bae5987e
+# ╚═╡
