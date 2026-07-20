@@ -875,8 +875,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       return '<div class="pdtile" onclick="pdEditSite(\''+esc(s.name)+'\')">'+
         '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+dirty+
           '<span style="margin-left:auto;display:flex;gap:6px" onclick="event.stopPropagation()">'+
-          (s.hasLocal?'<button class="pdbtn pdmini" onclick="pdPreviewSite(\''+esc(s.name)+'\',this)" title="Build the local mirror &amp; open it — no deploy">👁 Preview</button>':'')+
-          '<button class="pdbtn pdmini primary" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Deploy the build to all destinations">▶ Sync</button></span></div>'+
+          (s.hasLocal?'<button class="pdbtn pdmini" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy &amp; open it — no deploy">⤒ Stage</button>':'')+
+          '<button class="pdbtn pdmini primary" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button></span></div>'+
         '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
         '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+'</div></div>';
     }).join('');
@@ -1034,11 +1034,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       (s
         ? ('<div class="pdrow" style="margin-top:14px;gap:8px;align-items:center;flex-wrap:wrap">'+
              '<button class="pdbtn primary" onclick="pdSaveSite(this,\''+esc(s.name)+'\')" title="Store this site’s settings — no deploy">Save settings</button>'+
-             (s.hasLocal?'<button class="pdbtn" onclick="pdPreviewSite(\''+esc(s.name)+'\',this)" title="Build the local mirror &amp; open it — no deploy">👁 Preview</button>':'')+
-             '<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Deploy the build to all destinations">▶ Sync</button>'+
+             (s.hasLocal?'<button class="pdbtn" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy &amp; open it — no deploy">⤒ Stage</button>':'')+
+             '<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button>'+
            '</div>'+
-           '<div class="pddim" style="font-size:.72rem;margin-top:5px;line-height:1.5"><b style="color:#9aa3c0">Save</b> stores settings · <b style="color:#9aa3c0">Preview</b> builds the local mirror (no deploy) · <b style="color:#9aa3c0">Sync</b> deploys to destinations.</div>'+
-           (s.dirty?'<div class="pdchip warn" style="display:inline-block;margin-top:8px">● Local changes aren’t deployed yet — Sync to push them.</div>':''))
+           '<div class="pddim" style="font-size:.72rem;margin-top:5px;line-height:1.5"><b style="color:#9aa3c0">Save</b> stores settings · <b style="color:#9aa3c0">Stage</b> builds the local deploy copy (no deploy) · <b style="color:#9aa3c0">Sync</b> copies that to the destinations.</div>'+
+           (s.dirty?'<div class="pdchip warn" style="display:inline-block;margin-top:8px">● Staged changes aren’t deployed yet — Sync to push them.</div>':''))
         : '<div class="pdrow" style="margin-top:14px;gap:8px"><button class="pdbtn primary" onclick="pdSaveSite(this,\'\')">Create</button></div>')+
       '<div id="pdsitelog" class="pdsync-log" style="display:none"></div>'+
       (s?'<div class="pdrow" style="margin-top:22px;padding-top:10px;border-top:1px solid #232739">'+
@@ -1064,16 +1064,16 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       .then(function(v){_pdView=v;pdBack();}).catch(function(e){alertDark('Save site failed: '+e);}).finally(done);
   }
   window.pdSaveSite=pdSaveSite;
-  // Preview: build the LOCAL mirror only (re-export open members) and open it — no deploy. The site
-  // stays "unsynced" until an actual Sync, since Preview never touches a destination.
-  function pdPreviewSite(name,btn){
+  // Stage: (re)build the LOCAL deploy copy (re-export open members, keep the rest) and open it — no
+  // deploy. This is exactly what Sync will copy to the destinations. Leaves the site "unsynced".
+  function pdStageSite(name,btn){
     var done=btn?pdBusy(btn):function(){};
-    fetch('/api/publish/site-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:name})})
+    fetch('/api/publish/site-stage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:name})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
       .then(function(d){done();loadPubDash();if(d.url)window.open(d.url,'_blank','noopener');})
-      .catch(function(e){done();alertDark('Preview failed: '+e);});
+      .catch(function(e){done();alertDark('Stage failed: '+e);});
   }
-  window.pdPreviewSite=pdPreviewSite;
+  window.pdStageSite=pdStageSite;
   // Remove a document from a site's local build (Sync afterward to update the destinations).
   function pdRemoveSiteDoc(btn,site,slug){
     confirmDark('Remove this document from “'+site+'”?\nIt\'s deleted from the local build — hit ▶ Sync to update the destinations.','Remove','danger').then(function(ok){if(!ok)return;
@@ -1189,31 +1189,26 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pdPublishInto(btn,site,ref){
     var s=pdSiteByName(site); if(!s)return;
     var done=pdBusy(btn);
-    var url=ref.id ? ('/api/'+encodeURIComponent(ref.id)+'/site-publish?site='+encodeURIComponent(site))
-                   : ('/api/_/site-publish?site='+encodeURIComponent(site)+'&path='+encodeURIComponent(ref.path));
-    document.getElementById('pdsynctitle').textContent='Publishing “'+(ref.label||'notebook')+'” → “'+site+'”';
+    // Add = STAGE into the local copy only (deploy=0). It stamps the source (linking the doc); Sync
+    // deploys later. Re-uses an existing member's slug server-side, so re-adding re-links in place.
+    var url=(ref.id ? ('/api/'+encodeURIComponent(ref.id)+'/site-publish?site='+encodeURIComponent(site))
+                    : ('/api/_/site-publish?site='+encodeURIComponent(site)+'&path='+encodeURIComponent(ref.path)))
+            +'&deploy=0';
+    document.getElementById('pdsynctitle').textContent='Adding “'+(ref.label||'notebook')+'” → “'+site+'”';
     document.getElementById('pdsyncsub').textContent='';
-    var tgs=s.targets||[];
-    _syncBanner('run','<span class="pdspin"></span> Building the notebook into “'+esc(site)+'”'+(tgs.length?', then deploying to '+tgs.length+' destination'+(tgs.length===1?'':'s'):' (local-only — no destinations)')+'…');
-    document.getElementById('pdsyncrows').innerHTML=tgs.map(function(n){var t=pdTargetByName(n)||{kind:''};
-      return '<div class="pdsyncrow"><div class="r1"><span class="st"><span class="pdspin"></span></span>'+
-        '<span class="pl">'+esc(n)+'</span>'+(t.kind?'<span class="pdchip">'+esc(t.kind)+'</span>':'')+
-        '<span class="pddim" id="syncst-'+_slugId(n)+'" style="margin-left:6px">waiting for build…</span></div></div>';}).join('')
-      ||'<div class="pddim" style="margin:6px 0">Local-only site — the build lands under /sites/'+esc(site)+'/ with nothing to deploy.</div>';
+    _syncBanner('run','<span class="pdspin"></span> Staging “'+esc(ref.label||'notebook')+'” into the local copy of “'+esc(site)+'”…');
+    document.getElementById('pdsyncrows').innerHTML='<div class="pddim" style="margin:6px 10px">Building into the staged site — nothing deploys yet.</div>';
     _syncRunning(true);
     document.getElementById('pdsyncbg').classList.add('show');
     if(_syncES){try{_syncES.close();}catch(_){}}
     var es=_syncES=new EventSource(url);
-    es.addEventListener('status',function(e){var m=/(?:Deploying|Publishing) to (.+)…/.exec(e.data);
-      if(m){var st=document.getElementById('syncst-'+_slugId(m[1]));if(st)st.textContent='deploying…';}});
-    es.addEventListener('done',function(e){es.close();_syncES=null;done();var d;try{d=JSON.parse(e.data);}catch(_){d={results:[]};}
-      if(d.localOnly){_syncBanner('ok','✓ <b>Built “'+esc(ref.label||'notebook')+'” into “'+esc(site)+'”.</b> Local-only — add destinations to deploy it.');
-        document.getElementById('pdsyncrows').innerHTML='';_syncRunning(false);}
-      else _syncResults(site,d);
-      loadPubDash();});
+    es.addEventListener('done',function(e){es.close();_syncES=null;done();
+      _syncBanner('ok','✓ <b>Staged “'+esc(ref.label||'notebook')+'” into “'+esc(site)+'”.</b> It’s in the local copy — ▶ Sync to deploy it.');
+      document.getElementById('pdsyncrows').innerHTML='';_syncRunning(false);
+      loadPubDash(function(){pdRender();});});   // refresh the docs page behind the modal (source now linked)
     es.addEventListener('failed',function(e){es.close();_syncES=null;done();
-      _syncBanner('err','✗ <b>Publish failed.</b><div class="pdsyncdetail">'+esc(e.data)+'</div>');_syncRunning(false);});
-    es.onerror=function(){es.close();_syncES=null;done();_syncBanner('err','✗ <b>Connection lost</b> before publishing finished.');_syncRunning(false);};
+      _syncBanner('err','✗ <b>Staging failed.</b><div class="pdsyncdetail">'+esc(e.data)+'</div>');_syncRunning(false);});
+    es.onerror=function(){es.close();_syncES=null;done();_syncBanner('err','✗ <b>Connection lost</b> before staging finished.');_syncRunning(false);};
   }
   window.pdPublishInto=pdPublishInto;
   // STAGE 1 — arm/review: open the modal and show a PLAN (what will re-export vs keep, + destinations),
@@ -1238,47 +1233,54 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       .then(pdRenderPlan)
       .catch(function(e){_syncBanner('err','✗ Could not plan the sync.<div class="pdsyncdetail">'+esc(String(e))+'</div>');_syncRunning(false);});
   }
-  // Per-doc provenance line: where the source .jl lives (or that it isn't recorded) and where/when the
-  // built HTML was produced — so "rebuild vs keep" is legible and you can see what actually ships.
+  // Open a doc's source notebook in a NEW TAB (spawns its worker), pre-opening the window so the async
+  // /api/open doesn't get popup-blocked. Used by the Sync review to fix a stale staged doc.
+  function pdOpenNotebookTab(path){
+    var w=window.open('','_blank'); if(w)w.document.write('Opening notebook…');
+    fetch('/api/open',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(r){if(w)w.location=r.url;else window.open(r.url,'_blank','noopener');})
+      .catch(function(e){if(w)w.close();alertDark('Open failed: '+e);});
+  }
+  window.pdOpenNotebookTab=pdOpenNotebookTab;
+  // Per-doc provenance line for the Sync review: source .jl + where/when it was staged.
   function _planProv(m){
     var mono='font-family:ui-monospace,Menlo,monospace;font-size:.72rem;color:#b8c0d8';
     var src = m.source
-      ? ('source <span style="'+mono+'">'+esc(m.source)+'</span>'+(m.sourceExists?'':' <span style="color:#e0a33a">(file missing)</span>'))
-      : '<span style="color:#e0a33a">source not recorded</span> — Slate can’t re-export this one; open its notebook &amp; Publish into this site once to link it';
+      ? ('source <span style="'+mono+'">'+esc(m.source)+'</span>'+
+         (m.sourceExists?(m.stale?(' — <a class="pdlink" onclick="pdOpenNotebookTab(\''+esc(m.source)+'\')" title="open in a new tab to re-export">open ↗</a>'):''):' <span style="color:#e0a33a">(file missing)</span>'))
+      : '<span style="color:#e0a33a">source not recorded</span> — Slate can’t verify this one is current';
     var bt = m.built
-      ? ('built '+(m.builtAt?relTime(m.builtAt):'')+' · <span style="'+mono+'">'+esc(m.buildPath)+'</span>')
-      : '<span style="color:#e0a33a">not built yet</span>';
+      ? ('staged '+(m.builtAt?relTime(m.builtAt):'')+' · <span style="'+mono+'">'+esc(m.buildPath)+'</span>')
+      : '<span style="color:#e0a33a">not staged</span>';
     return '<div class="pdsyncdetail" style="color:#8a90a8;border-left-color:#2a2e40;margin-top:4px">'+src+'<br>'+bt+'</div>';
   }
   function pdRenderPlan(p){
     if(p&&p.error){_syncBanner('err','✗ '+esc(p.error));_syncRunning(false);return;}
     var members=(p&&p.members)||[], targets=(p&&p.targets)||[];
-    var reb=members.filter(function(m){return m.action==='rebuild';});
-    var keep=members.filter(function(m){return m.action==='keep';});
+    var ship=members.filter(function(m){return m.action==='ship'&&!m.stale;});
+    var stale=members.filter(function(m){return m.action==='ship'&&m.stale;});
     var unb=members.filter(function(m){return m.action==='unbuilt';});
     var row=function(m,ic){return '<div class="pdsyncrow"><div class="r1"><span class="st">'+ic+'</span>'+
       '<span class="pl">'+esc(m.title)+(m.home?' <span class="pdchip">front page</span>':'')+'</span>'+
       '<span class="pddim" style="margin-left:6px">'+esc(m.reason)+'</span></div>'+_planProv(m)+'</div>';};
-    // A one-line mental model up top — the question the plan kept failing to answer.
-    var html='<div class="pddim" style="padding:0 10px 9px;line-height:1.55">Sync re-exports any notebook that’s '+
-      '<b style="color:#cdd3e6">open right now</b> (fresh from its live state), <b style="color:#cdd3e6">keeps the last build</b> '+
-      'for the rest, then deploys the whole site folder to its destinations. Re-open a notebook first only if you want its '+
-      'latest source changes in this deploy.</div>';
-    html+='<div class="pdsyncsec">↻ Re-export from open notebooks ('+reb.length+')</div>'+
-      (reb.map(function(m){return row(m,'↻');}).join('')||'<div class="pddim" style="padding:2px 10px">none open — nothing gets rebuilt this run</div>');
-    html+='<div class="pdsyncsec" style="margin-top:8px">• Keep the last build ('+keep.length+')</div>'+
-      (keep.map(function(m){return row(m,'•');}).join('')||'<div class="pddim" style="padding:2px 10px">none</div>');
-    if(unb.length) html+='<div class="pdsyncsec" style="margin-top:8px;color:#e0a33a">⚠ Not built yet — will be skipped ('+unb.length+')</div>'+
+    // Mental model up top: Sync COPIES the staged build — it doesn't rebuild. Stage first to refresh.
+    var html='<div class="pddim" style="padding:0 10px 9px;line-height:1.55">Sync <b style="color:#cdd3e6">copies the staged build</b> to the destinations — it doesn’t rebuild. To ship newer source, <b style="color:#cdd3e6">Stage</b> the site first (open the notebook, then Stage).</div>';
+    html+='<div class="pdsyncsec">✓ Up to date — will be copied ('+ship.length+')</div>'+
+      (ship.map(function(m){return row(m,'✓');}).join('')||'<div class="pddim" style="padding:2px 10px">none</div>');
+    if(stale.length) html+='<div class="pdsyncsec" style="margin-top:8px;color:#e0a33a">⚠ Staged copy is out of date ('+stale.length+') — its source changed; open &amp; re-Stage to ship the latest</div>'+
+      stale.map(function(m){return row(m,'⚠');}).join('');
+    if(unb.length) html+='<div class="pdsyncsec" style="margin-top:8px;color:#e0a33a">⚠ Not staged — will be skipped ('+unb.length+')</div>'+
       unb.map(function(m){return row(m,'⚠');}).join('');
-    // Destinations, with kind + live URL, and where the build folder lives on disk.
+    // Destinations, with kind + live URL, and where the staged copy lives on disk.
     var dests=targets.map(function(n){var t=pdTargetByName(n)||{kind:'',config:{}};var u=(typeof _pubSiteUrl==='function')?_pubSiteUrl(t):'';
       return '<div class="pdrow pdsub2" style="padding:2px 10px"><span class="pl">'+esc(n)+'</span>'+(t.kind?'<span class="pdchip">'+esc(t.kind)+'</span>':'')+
         (u?'<a class="pdlink" style="margin-left:auto" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+' ↗</a>':'<span class="pddim" style="margin-left:auto">no public URL</span>')+'</div>';
     }).join('')||'<div class="pddim" style="padding:2px 10px">no destinations — add one to deploy</div>';
-    html+='<div class="pdsyncsec" style="margin-top:8px">☁ Deploy the whole site to</div>'+dests;
-    if(p&&p.buildDir) html+='<div class="pddim" style="padding:6px 10px 0;font-size:.72rem">Build folder: <span style="font-family:ui-monospace,Menlo,monospace;color:#8a90a8">'+esc(p.buildDir)+'</span></div>';
+    html+='<div class="pdsyncsec" style="margin-top:8px">☁ Copy the staged site to</div>'+dests;
+    if(p&&p.buildDir) html+='<div class="pddim" style="padding:6px 10px 0;font-size:.72rem">Staged copy: <span style="font-family:ui-monospace,Menlo,monospace;color:#8a90a8">'+esc(p.buildDir)+'</span></div>';
     document.getElementById('pdsyncrows').innerHTML=html;
-    _syncBanner('','Review the plan, then ▶ Sync now — nothing deploys until you do.');
+    _syncBanner('', stale.length?('⚠ '+stale.length+' staged doc'+(stale.length===1?'':'s')+' out of date — Sync copies as-is, or Stage first to refresh.'):'Review the plan, then ▶ Sync now — nothing deploys until you do.');
     _syncRunning(false);
     var done=document.getElementById('pdsyncdone'); done.disabled=false; done.textContent='Cancel';
     var go=document.getElementById('pdsyncgo'); go.style.display=''; go.disabled=(targets.length===0);

@@ -186,16 +186,18 @@ function _site_view(s)
 end
 
 """
-    preview_site!(name; hub=nothing) -> {ok,url,buildDir}
+    stage_site!(name; hub=nothing) -> {ok,url,buildDir}
 
-Build the site's LOCAL mirror only: re-export any open members into the canonical build (the same
-refresh Sync does first), but deploy NOWHERE — so the result can be reviewed at `/sites/<slug>/`
-before it's pushed. Leaves the site "dirty" (the stamp is untouched), since nothing was deployed.
+STAGE the site: (re)build the local copy that is EXACTLY what Sync will deploy. Re-exports every member
+whose notebook is open (fresh from its live state) and keeps the existing build for the rest (a closed
+notebook can't be rebuilt without its kernel). Deploys NOWHERE — the staged copy is local + unexposed,
+viewable at `/sites/<slug>/`. Sync later just COPIES this artifact to the destinations. Leaves the site
+"unsynced" (the sync stamp is untouched), since nothing was deployed.
 """
-function preview_site!(name::AbstractString; hub = nothing)
+function stage_site!(name::AbstractString; hub = nothing)
     dir = _site_dir(String(name))
     (dir === nothing || !isdir(dir)) &&
-        error("site '$name' has no local build yet — publish a notebook to it first")
+        error("site '$name' has no local build yet — add a notebook to it first")
     hub === nothing || _resync_live_members!(dir, String(name), hub)
     return Dict{String,Any}("ok" => true, "url" => "/sites/" * _slugify(String(name)) * "/", "buildDir" => dir)
 end
@@ -560,14 +562,19 @@ function sync_site_plan(name::AbstractString, hub)
         built = isfile(bfile)
         builtat = built ? round(Int, mtime(bfile)) : 0
         bdir = e.home ? dir : joinpath(dir, e.slug)
-        action = matched ? "rebuild" : (built ? "keep" : "unbuilt")
-        reason = matched ? "Notebook is open — re-export from its current live state." :
-                 !built  ? "No build on disk yet — it will be skipped. Publish it into this site first." :
-                 hasid   ? "Not open — deploy the last build. Open the notebook before syncing to refresh it from source." :
-                           "Not open, and no source is recorded — deploy the existing build as-is. Open its notebook and Publish into this site once to link the source (then Sync can re-export it)."
+        # Sync COPIES the staged artifact — the plan just reviews what will ship. "Stale" = the source
+        # .jl has newer edits than the staged HTML (only detectable for LINKED docs with an existing
+        # recorded source); rebuild is manual (open the notebook → re-Stage), so the UI links to it.
+        srcmt = srcok ? round(Int, mtime(src)) : 0
+        stale = built && srcok && srcmt > builtat
+        action = !built ? "unbuilt" : "ship"
+        reason = !built ? "Not staged yet — it will be skipped. Stage the site (or add the notebook) first." :
+                 stale  ? "Staged copy is OLDER than its source — open the notebook and re-Stage to ship the latest." :
+                 (!srcok ? "Will be copied as staged. (No source recorded — Slate can't verify it's current.)" :
+                           "Will be copied as staged — up to date.")
         push!(members, Dict{String,Any}(
             "title" => title, "slug" => e.slug, "home" => e.home,
-            "action" => action, "reason" => reason,
+            "action" => action, "reason" => reason, "stale" => stale,
             "open" => matched, "linked" => hasid,
             "source" => src, "sourceExists" => srcok,
             "built" => built, "builtAt" => builtat, "buildPath" => bdir))
@@ -588,12 +595,10 @@ function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
     site = get(led.sites, String(name), nothing)
     site === nothing && error("no site '$name'")
     dir = _site_dir(String(name))
-    (dir === nothing || !isdir(dir)) && error("site '$name' has no local build yet — publish a notebook to it first")
-    # Sync = SYNCHRONIZE: rebuild every member whose notebook is open from its CURRENT source before
-    # deploying, so the bytes shipped reflect the notebooks as they are now — not the frozen artifact
-    # from the last Publish. Members whose notebook isn't open are left as-is (a rebuild needs its live
-    # kernel for figures). Streams an "Exporting <title>…" line per member so the UI shows what moved.
-    hub === nothing || _resync_live_members!(dir, String(name), hub; on_event = on_event)
+    (dir === nothing || !isdir(dir)) && error("site '$name' has no local build yet — Stage it first")
+    # Sync = COPY the STAGED artifact to the destinations, verbatim. The rebuild (re-exporting open
+    # members) happens at STAGE time, not here — so what ships is exactly the local copy you staged and
+    # can review, with no surprise re-render at deploy time. (`hub`/`on_event` kept for the API shape.)
     tnames = [n for n in site.targets if haskey(led.targets, n)]
     isempty(tnames) && error("site '$name' has no configured destinations — add some in the manager")
     secrets = _secrets_load()
@@ -618,12 +623,15 @@ function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
 end
 
 """
-    publish_to_site!(nb, siteName; on_event=nothing, kwargs...) -> summary
+    publish_to_site!(nb, siteName; on_event=nothing, deploy=true, slug="", kwargs...) -> summary
 
-The site publish action: build `nb` into the site's canonical local dir (accumulating it as a member),
-then sync the whole build to every destination. `kwargs` are the site-build options (bundle/history/…).
+Build `nb` into the site's canonical local copy (staging it as a member — stamping its source + id), and
+when `deploy=true` also Sync the whole build to every destination. `deploy=false` STAGES only (the local
+copy is built, nothing is deployed) — the "add a notebook" path under the Stage→Sync model. `kwargs` are
+the site-build options (bundle/history/…).
 """
-function publish_to_site!(nb::LiveNotebook, siteName::AbstractString; on_event = nothing, hub = nothing, kwargs...)
+function publish_to_site!(nb::LiveNotebook, siteName::AbstractString;
+                          on_event = nothing, hub = nothing, deploy::Bool = true, slug::AbstractString = "", kwargs...)
     led = PublishLedger.load(PublishLedger.default_store())
     site = get(led.sites, String(siteName), nothing)
     # The SITE owns its display title — persisted on the SiteGroup, falling back to the site
@@ -631,11 +639,25 @@ function publish_to_site!(nb::LiveNotebook, siteName::AbstractString; on_event =
     # stale "portfolio" title leaked into other sites' manifests).
     stitle = site === nothing ? String(siteName) :
              (isempty(strip(site.title)) ? site.name : site.title)
-    built = export_to_site(nb, String(siteName); kwargs..., site_title = stitle)   # accumulate this doc into the canonical build
-    # A site with no live destinations is a local staging area — build it, but there's nothing to sync.
+    # Re-link in place: if the site already has a member with this notebook's TITLE (e.g. a legacy entry
+    # built before source-tracking, under a custom slug), reuse ITS slug so we UPDATE that entry — stamping
+    # the now-recorded source/id — instead of adding a duplicate under a fresh title-derived slug.
+    slg = String(slug)
+    if isempty(slg)
+        d0 = _site_dir(String(siteName))
+        if d0 !== nothing && isdir(d0)
+            want = lowercase(strip(report_frontmatter(nb.report).title))
+            isempty(want) || for d in get(_read_site_manifest(d0), "docs", Any[])
+                (d isa AbstractDict && lowercase(strip(String(get(d, "title", "")))) == want) || continue
+                slg = String(get(d, "slug", "")); break
+            end
+        end
+    end
+    built = export_to_site(nb, String(siteName); slug = slg, kwargs..., site_title = stitle)   # stage this doc into the copy
+    # Stage-only, or a site with no live destinations (a local staging area): built, nothing to deploy.
     tnames = site === nothing ? String[] : [n for n in site.targets if haskey(led.targets, n)]
-    isempty(tnames) && return Dict{String,Any}("ok" => true, "localOnly" => true,
-        "url" => built.url, "docCount" => built.docCount, "results" => Any[])
+    (deploy === false || isempty(tnames)) && return Dict{String,Any}("ok" => true, "localOnly" => true,
+        "staged" => true, "url" => built.url, "docCount" => built.docCount, "results" => Any[])
     return sync_site!(String(siteName); on_event = on_event, hub = hub)  # push the whole build to all destinations
 end
 
@@ -883,7 +905,8 @@ function _sse_site_publish(stream::HTTP.Stream, h::Hub)
              include_source = get(q, "source", "1") == "1", bundle = get(q, "bundle", "0") == "1",
              history = get(q, "history", "0") == "1",
              width = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v))
-    _sse_stream(stream, on_event -> publish_to_site!(nb, String(site); on_event = on_event, bopts...))
+    dep = get(q, "deploy", "1") != "0"   # deploy=0 ⇒ STAGE only (build into the local copy, no Sync)
+    _sse_stream(stream, on_event -> publish_to_site!(nb, String(site); on_event = on_event, deploy = dep, bopts...))
 end
 
 # Re-sync a site (deploy its current canonical build to all destinations) — no notebook needed.
@@ -904,12 +927,12 @@ function _register_publish_routes!(router, h::Hub)
         isempty(site) && return HTTP.Response(400, "no site")
         _json(sync_site_plan(String(site), h))
     end)
-    # Preview: build the site's LOCAL mirror only (re-export open members), deploy nowhere. Returns the
-    # local `/sites/<slug>/` URL to open. Distinct from Sync — this never touches a destination.
-    HTTP.register!(router, "POST", "/api/publish/site-preview", req -> begin
+    # Stage: (re)build the site's LOCAL deploy copy (re-export open members, keep the rest), deploy
+    # nowhere. Returns the local `/sites/<slug>/` URL to view. Sync later just COPIES this artifact.
+    HTTP.register!(router, "POST", "/api/publish/site-stage", req -> begin
         name = strip(String(get(_body(req), "site", "")))
         isempty(name) && return HTTP.Response(400, "missing site")
-        try; _json(preview_site!(String(name); hub = h)); catch e; HTTP.Response(422, sprint(showerror, e)); end
+        try; _json(stage_site!(String(name); hub = h)); catch e; HTTP.Response(422, sprint(showerror, e)); end
     end)
     # This notebook's document info (scoped).
     HTTP.register!(router, "GET", "/api/{id}/publish/doc",
