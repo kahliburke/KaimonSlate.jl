@@ -1702,7 +1702,10 @@ const _EVENTS_RE = r"^/api/([^/]+)/events$"
 const _WS_RE = r"^/api/([^/]+)/ws$"           # per-page WebSocket for JS→Julia calls (window.slateCall)
 const _PUBLISH_RE = r"^/api/([^/]+)/publish-run\b"
 const _SITE_PUBLISH_RE = r"^/api/([^/]+)/site-publish\b"
-const _SITE_SYNC_RE = r"^/api/publish/site-sync\b"
+# Anchored to `?`/end so it matches the SSE endpoint `/api/publish/site-sync[?…]` but NOT its sibling
+# `/api/publish/site-sync-plan` (a JSON route) — a bare `\b` also matched the `-plan` path, hijacking
+# the plan request into the SSE stream handler (client then failed to JSON-parse `event: log…`).
+const _SITE_SYNC_RE = r"^/api/publish/site-sync(?:\?|$)"
 
 # ── Cross-origin defense (CSRF / DNS-rebinding) ───────────────────────────────
 # The API evaluates arbitrary Julia by design, so a browser page from ANY origin
