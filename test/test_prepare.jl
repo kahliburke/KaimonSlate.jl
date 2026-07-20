@@ -73,4 +73,17 @@ include(joinpath(@__DIR__, "..", "src", "prepare.jl"))
         @test occursin("Weird\\\\Name", j)                # one JSON-escaped backslash
         @test !occursin('\n', j)                          # single-line (safe as an SSE frame)
     end
+
+    @testset "error marker keeps the note after the space (regression)" begin
+        # `@@SLATE_PREP error <msg>` → the note is the text AFTER the space, not a fixed offset that
+        # dropped the first character (the old bug turned "the env failed" into "he env failed").
+        tr = PrepareTracker(0.0)
+        @test prepare_feed!(tr, "@@SLATE_PREP error the environment failed to build")
+        @test tr.phase == "error" && tr.err
+        @test tr.note == "the environment failed to build"
+        # A bare "error" with no trailing message leaves the note untouched (the `m === nothing` branch).
+        tr2 = PrepareTracker(0.0)
+        @test prepare_feed!(tr2, "@@SLATE_PREP error")
+        @test tr2.err && isempty(tr2.note)
+    end
 end
