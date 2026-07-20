@@ -746,6 +746,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // Render the Sites section from a ledger view (sites+targets) and a set of names with a local build.
   // Synchronous, so it can paint the server-inlined ledger in the first frame. Destination chips + the
   // Preview link live in the collapsed .scdests, so a later refresh that fills them causes no shift.
+  // URL/dir slug from a site name — mirrors the server's `_slugify` (lowercase, non-alphanum → '-').
+  function _slug(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');}
   function _renderSites(v, hasLocal){
     var box=document.getElementById('published'); if(!box) return;
     v=v||{}; hasLocal=hasLocal||{};
@@ -758,11 +760,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         return '<a class="pubdest" href="'+esc(u||'#')+'"'+(u?' target="_blank" rel="noopener"':' onclick="return false"')+
           ' onclick="event.stopPropagation()" title="'+esc(n)+(u?(' — '+esc(u)):' (no live URL)')+'">'+_pubIcon(t.kind)+' '+esc(_destLabel(t.kind))+(u?' ↗':'')+'</a>';
       }).filter(Boolean).join('');
-      var preview=hasLocal[s.name]?('<a class="pubdest" href="/sites/'+encodeURIComponent(s.name)+'/" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="the staged local build (what Sync deploys)">👁 Staged site ↗</a>'):'';
+      // "has a local build" — use the site's own field (ledger view) first, then the /api/sites map by
+      // name OR slug (that map is keyed by the build-dir SLUG, so a spaced name like "Stat Mech" missed it).
+      var isLocal = s.hasLocal || !!hasLocal[s.name] || !!hasLocal[_slug(s.name)];
+      var purl = s.previewUrl || ('/sites/'+encodeURIComponent(_slug(s.name))+'/');
+      var preview=isLocal?('<a class="pubdest" href="'+esc(purl)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="the staged local build (what Sync deploys)">👁 Staged site ↗</a>'):'';
       var body=preview+dests, nd=(s.docs||[]).length, ndest=(s.targets||[]).length;
       return '<div class="sitecard sitecard-site'+(openNames[s.name]?' open':'')+'" data-site="'+esc(s.name)+'" onclick="this.classList.toggle(\'open\')">'+
         '<span class="si">🌐</span><span class="sn">'+esc(s.name)+'<span class="scchev">›</span></span>'+
-        '<span class="su">'+nd+' doc'+(nd===1?'':'s')+' · '+ndest+' destination'+(ndest===1?'':'s')+(hasLocal[s.name]?'':' · not built')+'</span>'+
+        '<span class="su">'+nd+' doc'+(nd===1?'':'s')+' · '+ndest+' destination'+(ndest===1?'':'s')+(isLocal?'':' · not built')+'</span>'+
         '<div class="scdests">'+(body||'<span class="su">not built yet — publish a notebook into it</span>')+'</div></div>';
     }).join('');
     box.innerHTML = cards ? '<h2 class="sect">Sites</h2><div class="sitecards">'+cards+'</div>' : '';
