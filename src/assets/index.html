@@ -779,6 +779,17 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // ── Publishing manager (master-detail): targets overview → drill into Content / Config / Policies ─
   var pubdashBg=document.getElementById('pubdashbg');
   var _pdView={documents:[],targets:[],secretRefs:[],availableKinds:[],ghUser:''};
+  var _pdOpenNbs=[];   // open notebooks (path+title) — lets the UI tell when Stage would re-export something
+  // True if Stage would re-export anything: a site member (or its home page) matches an OPEN notebook by
+  // source path or title. If nothing's open, Stage is a no-op (the build is already current), so disable it.
+  function _pdStageable(s){
+    var nbs=_pdOpenNbs||[]; if(!nbs.length||!s||!s.hasLocal) return false;
+    var paths={}, titles={};
+    nbs.forEach(function(n){ if(n.path)paths[String(n.path).toLowerCase()]=1; if(n.title)titles[String(n.title).toLowerCase()]=1; });
+    var hit=function(src,title){ return !!((src&&paths[String(src).toLowerCase()]) || (title&&titles[String(title).toLowerCase()])); };
+    if(s.hasHome && hit(s.homePath, s.homeTitle)) return true;
+    return (s.docs||[]).some(function(d){ return hit(d.source, d.title); });
+  }
   var _pdSel=null;          // open target detail (name), or null
   var _pdSite=null;         // open site editor: null = none, '' = the New-site form, else the site name
   var _pdDocs=null;         // open a site's Documents drill-down (site name), or null
@@ -793,9 +804,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function closePubDash(){ pubdashBg.classList.remove('show'); }
   window.openPubDash=openPubDash; window.closePubDash=closePubDash;
   function loadPubDash(done,fail){
-    fetch('/api/publish/ledger',{cache:'no-store'}).then(function(r){return r.json();}).then(function(v){
-      _pdView=v;
-      var bk=document.getElementById('pdbackend');
+    Promise.all([
+      fetch('/api/publish/ledger',{cache:'no-store'}).then(function(r){return r.json();}),
+      fetch('/api/notebooks',{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return [];})
+    ]).then(function(res){
+      _pdView=res[0]; _pdOpenNbs=res[1]||[];
+      var v=_pdView, bk=document.getElementById('pdbackend');
       if(bk)bk.innerHTML=v.backend?(v.backendUrl
         ?('— synced via <a class="pdlink" href="'+esc(v.backendUrl)+'" target="_blank" rel="noopener">'+esc(v.backend)+' ↗</a>')
         :('— '+esc(v.backend))):'';
@@ -891,7 +905,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       return '<div class="pdtile" onclick="pdEditSite(\''+esc(s.name)+'\')">'+
         '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+dirty+
           '<span style="margin-left:auto;display:flex;gap:6px" onclick="event.stopPropagation()">'+
-          (s.hasLocal?'<button class="pdbtn pdmini" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy — no deploy, no tab">⤒ Stage</button>':'')+
+          (s.hasLocal?(_pdStageable(s)
+            ?'<button class="pdbtn pdmini" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Re-export the open member notebook(s) into the local deploy copy — no deploy">⤒ Stage</button>'
+            :'<span title="Already current — open a member notebook to re-export its latest content"><button class="pdbtn pdmini" disabled>⤒ Stage</button></span>'):'')+
           '<button class="pdbtn pdmini primary" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button></span></div>'+
         '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
         '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+'</div></div>';
@@ -1050,7 +1066,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       (s
         ? ('<div class="pdrow" style="margin-top:14px;gap:8px;align-items:center;flex-wrap:wrap">'+
              '<button class="pdbtn primary" onclick="pdSaveSite(this,\''+esc(s.name)+'\')" title="Store this site’s settings — no deploy">Save settings</button>'+
-             (s.hasLocal?'<button class="pdbtn" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy — no deploy, no tab">⤒ Stage</button>':'')+
+             (s.hasLocal?(_pdStageable(s)
+               ?'<button class="pdbtn" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Re-export the open member notebook(s) into the local deploy copy — no deploy">⤒ Stage</button>'
+               :'<span title="Already current — open a member notebook to re-export its latest content"><button class="pdbtn" disabled>⤒ Stage</button></span>'):'')+
              (s.hasLocal&&s.previewUrl?'<button class="pdbtn" onclick="window.open(\''+esc(s.previewUrl)+'\',\'_blank\',\'noopener\')" title="open the staged local copy in a new tab">View ↗</button>':'')+
              '<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button>'+
            '</div>'+
@@ -1087,7 +1105,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var done=btn?pdBusy(btn):function(){};
     fetch('/api/publish/site-stage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:name})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(d){done();toast('✓ Staged “'+name+'” — ▶ Sync to deploy, or View ↗ to preview','ok');loadPubDash();})
+      .then(function(d){done();toast('✓ Staged “'+name+'” — ▶ Sync to deploy','ok');loadPubDash();})
       .catch(function(e){done();alertDark('Stage failed: '+e);});
   }
   window.pdStageSite=pdStageSite;
