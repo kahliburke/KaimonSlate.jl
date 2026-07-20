@@ -305,6 +305,71 @@ _is_md_line(l::AbstractString) = l == "#" || startswith(l, "# ")
 "Strip the `# ` / `#` prefix from a Literate markdown line."
 _strip_md(l::AbstractString) = l == "#" ? "" : String(l[3:end])
 
+# A Literate comment line that reads as PROSE rather than an attached code comment: it carries a
+# markdown heading (`# ##…`), a list item, a blockquote, or a horizontal rule. The outer `# ` is the
+# Literate prefix; `_strip_md` drops it, leaving the markdown to inspect.
+function _is_md_prose_marker(l::AbstractString)
+    s = _strip_md(l)
+    isempty(s) && return false
+    startswith(s, "#") && return true                                  # ATX heading: `## Section`
+    (startswith(s, "- ") || startswith(s, "* ") || startswith(s, "+ ")) && return true  # bullet list
+    startswith(s, "> ") && return true                                 # blockquote
+    (s == "---" || s == "***" || s == "___") && return true            # horizontal rule
+    occursin(r"^\d+[.)]\s", s) && return true                          # ordered list: `1. ` / `1) `
+    return false
+end
+
+# Parse the Literate-IMPLICIT region (everything before the first `#%%` header) into cells.
+#
+# A run of consecutive comment lines becomes a MARKDOWN cell only when it reads as prose — it carries
+# a heading/list/rule marker, is set off from the following code by a blank line, or has no code after
+# it. Otherwise the comment is "attached": it opens a CODE cell and the code beneath it joins that same
+# cell, so ordinary source `# explain this` lines stay inline comments on their code instead of each
+# exploding into its own markdown cell (which shattered adopted `.jl` files). A bare code run with no
+# leading comment is its own CODE cell.
+function _append_implicit_cells!(report::Report, lines, used_ids::Set{String})
+    n = length(lines)
+    emit! = function (kind::CellKind, body)
+        trimmed = _strip_blank_edges(body)
+        isempty(trimmed) && return
+        src = join(trimmed, "\n")
+        kind === MARKDOWN && (src = _unwrap_md(src))
+        id_ = _unique_auto_id(kind, src, length(report.cells) + 1, used_ids)
+        push!(used_ids, id_)
+        push!(report.cells, Cell(id_, kind, src))
+        return nothing
+    end
+    i = 1
+    while i <= n
+        while i <= n && isempty(strip(lines[i])); i += 1; end       # skip blank lines between cells
+        i > n && break
+        if _is_md_line(lines[i])
+            j = i
+            while j <= n && _is_md_line(lines[j]); j += 1; end       # maximal comment run: lines[i:j-1]
+            k = j
+            while k <= n && isempty(strip(lines[k])); k += 1; end    # peek past blanks to the next content
+            blank_gap = k > j                                        # a blank line sets the comment off from code
+            code_follows = k <= n                                    # the next non-blank can only be code here
+            prose = blank_gap || !code_follows ||
+                    any(t -> _is_md_prose_marker(lines[t]), i:(j - 1))
+            if prose
+                emit!(MARKDOWN, String[_strip_md(lines[t]) for t in i:(j - 1)])
+                i = j
+            else
+                body = String[lines[t] for t in i:(j - 1)]           # attached comment opens a code cell…
+                while j <= n && !_is_md_line(lines[j]); push!(body, String(lines[j])); j += 1; end  # …+ the code below it
+                emit!(CODE, body)
+                i = j
+            end
+        else
+            body = String[]
+            while i <= n && !_is_md_line(lines[i]); push!(body, String(lines[i])); i += 1; end
+            emit!(CODE, body)
+        end
+    end
+    return report
+end
+
 """
     parse_report(text; id="r", title="") -> Report
 
@@ -314,9 +379,11 @@ explicit `#%%` form):
 
 - **Explicit percent cells:** a `#%% [code|md] [id=…]` header introduces a cell
   whose body runs verbatim until the next header.
-- **Literate-style (implicit):** before any header, `#`-prefixed lines form a
-  markdown cell and bare lines form a code cell; a boundary falls wherever the
-  line kind changes.
+- **Literate-style (implicit):** before any header, a run of comment lines becomes
+  a markdown cell only when it reads as *prose* (a heading/list/rule marker, a
+  blank line before the code, or no code after it); an ordinary comment that hugs
+  the code below it stays an inline comment on that code cell. Bare code runs are
+  code cells. See [`_append_implicit_cells!`].
 
 Pure-Literate files, pure-percent files, and Literate-then-percent mixes all
 parse. (Once a `#%%` header appears, subsequent cells should also use headers —
@@ -344,15 +411,22 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         lines = lines[(pi + 1):end]
     end
 
-    explicit = false                      # inside an explicit #%% cell?
-    kind::CellKind = CODE                 # implicit default is code (Literate)
+    used_ids = Set{String}()              # every id assigned so far this parse (explicit or auto)
+
+    # Split at the first explicit `#%%` header: everything before it is Literate-implicit content
+    # (grouped into cells by the prose/attached-comment heuristic), everything from the header on is
+    # explicit — header-introduced cells whose bodies run verbatim.
+    firsthdr = findfirst(l -> match(_HEADER, l) !== nothing, lines)
+    implicit_end = firsthdr === nothing ? length(lines) : firsthdr - 1
+    _append_implicit_cells!(report, view(lines, 1:implicit_end), used_ids)
+    firsthdr === nothing && return report
+
+    kind::CellKind = CODE
     cid::Union{String,Nothing} = nothing
     ctrls = Vector{String}[]              # `controls=` columns of the current explicit cell
+    tags = Symbol[]                       # header tag flags of the current explicit cell
     had_header = false                    # current cell came from an explicit header
     body = String[]
-
-    tags = Symbol[]                       # header tag flags of the current explicit cell
-    used_ids = Set{String}()              # every id assigned so far this parse (explicit or auto)
     function flush!()
         trimmed = _strip_blank_edges(body)
         if !isempty(trimmed) || had_header   # keep explicit cells even when empty
@@ -372,25 +446,14 @@ function parse_report(text::AbstractString; id::AbstractString = "r", title::Abs
         tags = Symbol[]
     end
 
-    for line in lines
+    for line in view(lines, firsthdr:length(lines))
         m = match(_HEADER, line)
         if m !== nothing                  # explicit header → start a new explicit cell
             flush!()
             kind, cid, ctrls, tags = _parse_header(m.captures[1])
-            explicit = true
             had_header = true
-        elseif explicit                   # verbatim body of an explicit cell
+        else                              # verbatim body of the current explicit cell
             push!(body, line)
-        elseif isempty(strip(line))       # implicit: blanks ride along (edge-trimmed)
-            push!(body, line)
-        else                              # implicit: classify; boundary on kind change
-            linekind = _is_md_line(line) ? MARKDOWN : CODE
-            if !isempty(body) && linekind != kind
-                flush!()
-                cid = nothing
-            end
-            kind = linekind
-            push!(body, linekind == MARKDOWN ? _strip_md(line) : line)
         end
     end
     flush!()                              # close the final cell
