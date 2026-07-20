@@ -620,21 +620,63 @@ function _make_router(h::Hub)
         launch_notebook!(nb) || return _json(Dict("ok" => false, "note" => "already active"))
         _json(Dict("ok" => true))
     end))
-    # Upload a `.jl` from the browser (the viewing machine) → save it under a persistent uploads dir and
-    # return its server path; the front end then opens it via the normal open/import flow. Body: {name, content}.
+    # Upload a file from the browser (the viewing machine) → save it under a persistent uploads dir and
+    # return its server path; the front end then classifies + opens it via the normal open/import flow.
+    # Accepts a `.jl` (notebook or self-contained bundle) OR a runnable `.html` export (whose embedded
+    # bundle we extract on open) — the extension is preserved so classification can tell them apart.
+    # Body: {name, content}.
     HTTP.register!(router, "POST", "/api/upload", req -> begin
         b = _body(req)
         content = String(get(b, "content", ""))
         isempty(strip(content)) && return HTTP.Response(400, "empty upload")
         name = basename(replace(String(get(b, "name", "notebook.jl")), r"[^\w.\-]" => "_"))
         isempty(name) && (name = "notebook.jl")
-        endswith(lowercase(name), ".jl") || (name *= ".jl")
+        stem, ext = splitext(name); ext = lowercase(ext)
+        ext in (".jl", ".html", ".htm") || return HTTP.Response(400,
+            "Unsupported file type “$(isempty(ext) ? "?" : ext)”. Upload a .jl notebook or bundle, or a runnable .html export.")
         dir = joinpath(homedir(), "KaimonSlate", "uploads"); mkpath(dir)
-        stem = replace(name, r"\.jl$"i => "")
         path = joinpath(dir, name); i = 1
-        while ispath(path); i += 1; path = joinpath(dir, "$(stem)-$(i).jl"); end   # never overwrite an existing file
+        while ispath(path); i += 1; path = joinpath(dir, "$(stem)-$(i)$(ext)"); end   # never overwrite an existing file
         write(path, content)
         _json(Dict("path" => abspath(path)))
+    end)
+    # Extract the embedded standalone bundle from a RUNNABLE HTML export into a real `.jl` under the
+    # uploads dir, returning its path — the front end then routes it through the standalone import flow,
+    # exactly like a downloaded `.jl` bundle. Body: {path}.
+    HTTP.register!(router, "POST", "/api/extract-html-bundle", req -> begin
+        p = expanduser(strip(String(get(_body(req), "path", ""))))
+        src = _html_bundle_source(p)
+        src === nothing && return HTTP.Response(422,
+            "This HTML has no embedded runnable bundle (it's a static export). Re-export with the “Runnable” option to get a launchable notebook.")
+        dir = joinpath(homedir(), "KaimonSlate", "uploads"); mkpath(dir)
+        stem = replace(splitext(basename(p))[1], r"[^\w.\-]" => "_"); isempty(stem) && (stem = "notebook")
+        out = joinpath(dir, "$(stem).jl"); i = 1
+        while ispath(out); i += 1; out = joinpath(dir, "$(stem)-$(i).jl"); end
+        write(out, src)
+        _json(Dict("path" => abspath(out)))
+    end)
+    # Create a NEW notebook from a plain Julia script (no Slate structure), leaving the original
+    # untouched: copy it beside the source as `<stem>-notebook.jl` (falling back to the uploads dir if
+    # that directory isn't writable). The copy opens as an ordinary notebook — `parse_report` turns a
+    # plain script into cells, and the first save rewrites it in canonical `#%%` form. Body: {path}.
+    HTTP.register!(router, "POST", "/api/notebook-from-script", req -> begin
+        p = expanduser(strip(String(get(_body(req), "path", ""))))
+        isfile(p) || return HTTP.Response(404, "no such file: $p")
+        content = read(p, String)
+        stem = splitext(basename(p))[1]; isempty(stem) && (stem = "notebook")
+        _dest(base) = begin
+            o = joinpath(base, "$(stem)-notebook.jl"); i = 1
+            while ispath(o); i += 1; o = joinpath(base, "$(stem)-notebook-$(i).jl"); end
+            o
+        end
+        out = _dest(dirname(abspath(p)))
+        try
+            write(out, content)
+        catch
+            dir = joinpath(homedir(), "KaimonSlate", "uploads"); mkpath(dir)
+            out = _dest(dir); write(out, content)
+        end
+        _json(Dict("path" => abspath(out)))
     end)
     HTTP.register!(router, "POST", "/api/close", req -> begin
         file = abspath(expanduser(strip(String(get(_body(req), "path", "")))))
@@ -656,9 +698,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/path-info", req -> begin
         p = expanduser(strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "q", ""))))
         # `standalone`: a self-contained `.jl` (Slate.bundle footer) → the open box offers the
-        # import-into-a-project helper instead of opening it bare.
+        # import-into-a-project helper instead of opening it bare. `kind` is the fuller classification
+        # (bundle / notebook / plain / html-bundle / html-static / foreign) that the open box routes on.
         _json(Dict("path" => p, "exists" => ispath(p), "isdir" => isdir(p), "isfile" => isfile(p),
-                   "standalone" => isfile(p) && _has_bundle_footer(p)))
+                   "standalone" => isfile(p) && _has_bundle_footer(p),
+                   "kind" => _source_kind(p)))
     end)
     # Close a notebook by id (the index's per-session shutdown button).
     HTTP.register!(router, "POST", "/api/{id}/shutdown", req -> begin
@@ -1091,18 +1135,33 @@ function _make_router(h::Hub)
         pv = get(qp, "preview", "")            # interim-render budget (MB) for the embedded bundle's preview
         pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
                   (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
+        wq = get(qp, "width", "")                   # content column width: px, "full" (=100%), or unset ⇒ default
+        pw = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
                            theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
                            override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
                            outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run,
                            history = get(qp, "history", "0") == "1",   # source-only by default (public page)
-                           memo_budget = budget, preview_budget = pbudget)
+                           memo_budget = budget, preview_budget = pbudget, width = pw)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
             fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
             push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
         end
         HTTP.Response(200, headers, html)
+    end))
+    # Secret GitHub gist of the HTML export (via the `gh` CLI). Same page options as export.html
+    # (theme/charttheme/override/code/outputs/width/source); returns {ok,url,preview,error} as JSON.
+    HTTP.register!(router, "POST", "/api/{id}/export.gist", req -> _withnb(h, req, nb -> begin
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        wq = get(qp, "width", "")
+        pw = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
+        r = export_gist(nb; include_source = get(qp, "source", "1") != "0",
+                        theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
+                        override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
+                        outputs = get(qp, "outputs", "all"), width = pw)
+        _json(Dict{String,Any}("ok" => r.ok, "url" => r.url, "preview" => r.preview,
+                               "raw" => r.raw, "curl" => r.curl, "error" => r.error))
     end))
     # GitHub-flavored Markdown for copy-paste (Discourse / Slack / GitHub / Obsidian). `?source=0`
     # omits code cells. Figures/charts embed as data-URI images; tables as GFM tables.
