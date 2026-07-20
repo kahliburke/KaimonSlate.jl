@@ -66,8 +66,9 @@ function _saveBlob(blob, ext) {
 }
 // The shared Outputs filter (all | figures | none) — appends `&outputs=` when not the default.
 function _outputsQS() { const v = (document.getElementById('exoutputs') || {}).value || 'all'; return v === 'all' ? '' : '&outputs=' + v; }
-// Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
-function exportHtml(dl) {
+// The shared page-render options for an HTML export (theme/palette/override/code/outputs/width/source)
+// — everything EXCEPT the runnable-bundle params. Used by the download, the open-in-tab, and the gist.
+function _htmlBaseParts() {
   const src = document.getElementById('htmlsource');
   const { theme, charttheme, override } = _resolveExportTheme((document.getElementById('htmltheme') || {}).value || 'asis');
   const code = (document.getElementById('htmlcode') || {}).value || 'normal';
@@ -76,7 +77,13 @@ function exportHtml(dl) {
   parts.push('theme=' + theme, 'charttheme=' + charttheme);
   if (override) parts.push('override=1');
   if (code !== 'normal') parts.push('code=' + code);
+  const wqs = _htmlWidthQS(); if (wqs) parts.push('width=' + wqs);
   const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
+  return parts;
+}
+// Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
+function exportHtml(dl) {
+  const parts = _htmlBaseParts();
   if ((document.getElementById('htmlrunnable') || {}).checked) {
     parts.push('bundle=1');
     if ((document.getElementById('htmlhistory') || {}).checked) parts.push('history=1');   // ship full git history
@@ -88,6 +95,43 @@ function exportHtml(dl) {
   const a = document.createElement('a');
   a.href = _apipath('/api/export.html' + (q ? q + '&dl=1' : '?dl=1')); a.download = _dlName('.html');
   document.body.appendChild(a); a.click(); a.remove();
+}
+// Share via Gist — create a SECRET gist of the HTML export (needs the `gh` CLI, authenticated) and copy
+// a `curl` download one-liner to the clipboard. The gist also carries a README signposting the page.
+async function exportGist() {
+  if (!await confirmDark('Create a secret GitHub gist of this HTML export, and copy a download command to your clipboard?\n\nThe page is uploaded to GitHub as a secret gist — unlisted, but anyone with the link can view. Remove it anytime with `gh gist delete`.', 'Share via Gist')) return;
+  const q = _htmlBaseParts();
+  showLoading('Creating secret gist…');
+  try {
+    const r = await fetch(_apipath('/api/export.gist') + (q.length ? '?' + q.join('&') : ''), { method: 'POST' });
+    const d = await r.json().catch(() => ({ ok: false, error: 'malformed response' }));
+    hideLoading();
+    if (!d.ok) { await alertDark('Could not create the gist:\n\n' + (d.error || 'unknown error')); return; }
+    let copied = false;
+    try { await navigator.clipboard.writeText(d.curl || d.raw || d.url); copied = true; } catch (_) {}
+    if (copied) toast('Gist created — download command copied to clipboard', 5000);
+    await alertDark((copied ? '✓ Copied this download command to your clipboard:\n\n' : 'Secret gist created. Download command:\n\n')
+      + (d.curl || ('raw: ' + d.raw)) + '\n\nGist: ' + d.url + (d.preview ? '\nView rendered: ' + d.preview : ''), 'Shared via Gist');
+  } catch (e) { hideLoading(); await alertDark('Could not create the gist: ' + e); }
+}
+// Page-width slider → the exported `.export` column max-width. The px value caps line length (and
+// already shrinks on a narrow screen); the slider's far stop (== max) is a "Full width" sentinel that
+// maps to `width=full` (→ max-width:100%). Element-generic so the Export dialog (`htmlwidth`) and the
+// Publish panel (`pubopt_width`) share ONE stored preference (`slate_htmlwidth`).
+// The `width=` query value for a slider: '' at the 900 default (keeps the URL clean), 'full' at the far
+// stop, else the px number.
+function _htmlWidthQS(el) {
+  el = el || document.getElementById('htmlwidth'); if (!el) return '';
+  const w = +el.value || 900;
+  return w >= +el.max ? 'full' : (w === 900 ? '' : String(w));
+}
+// Update a width slider's `<id>out` readout and persist the shared preference. Pass the slider element
+// (defaults to the export dialog's).
+function _htmlWidthSync(el) {
+  el = el || document.getElementById('htmlwidth'); if (!el) return;
+  const w = +el.value || 900, out = document.getElementById(el.id + 'out');
+  if (out) out.textContent = w >= +el.max ? 'Full width' : w + 'px';
+  localStorage.setItem('slate_htmlwidth', String(w));
 }
 // Downscale one `data:image/…;base64,…` URI to `maxW` px wide (canvas re-encode, PNG kept for
 // transparency). Returns the original if it's already narrow enough or anything fails.
@@ -292,6 +336,9 @@ function _exSyncRows() {
       const el = document.getElementById(id); const row = el && el.closest('.exrow');
       if (row) row.style.display = run ? '' : 'none';
     });
+    // "Share via Gist" only when a `gh` CLI is present on the server (ghAvailable in state meta).
+    const gr = document.getElementById('htmlgistrow');
+    if (gr) gr.style.display = (typeof nbState !== 'undefined' && nbState && nbState.ghAvailable) ? '' : 'none';
   }
   // Standalone / runnable-HTML can embed precomputed results — measure the catalog once the row shows.
   if ((f === 'standalone' || f === 'html') && _memoCat === null) _memoLoadCatalog();
@@ -436,14 +483,16 @@ async function publishToSite() {
   localStorage.setItem('slate_siterunnable', (document.getElementById('siterunnable') || {}).checked ? '1' : '0');
   localStorage.setItem('slate_sitehistory', (document.getElementById('sitehistory') || {}).checked ? '1' : '0');
   const slug = _slug(((document.getElementById('siteslug') || {}).value || '').trim()) || _slug((nbState && nbState.title) || (nbState && nbState.id) || '');
-  _streamSite(site, {
+  const bopts = {
     slug: slug, siteTitle: ((document.getElementById('sitetitle') || {}).value || '').trim(),
     theme: (document.getElementById('sitetheme') || {}).value || 'dark',
     outputs: (document.getElementById('exoutputs') || {}).value || 'all',
     source: (document.getElementById('sitesource') || {}).checked ? '1' : '0',
     bundle: (document.getElementById('siterunnable') || {}).checked ? '1' : '0',
     history: (document.getElementById('sitehistory') || {}).checked ? '1' : '0'
-  });
+  };
+  const _w = _htmlWidthQS(); if (_w) bopts.width = _w;   // page-width slider (shared with the HTML export)
+  _streamSite(site, bopts);
 }
 window.publishToSite = publishToSite;
 
@@ -488,6 +537,7 @@ function openExport(preset) {
   const srn = document.getElementById('siterunnable'); if (srn) srn.checked = localStorage.getItem('slate_siterunnable') === '1';
   const sh = document.getElementById('sitehistory'); if (sh) sh.checked = localStorage.getItem('slate_sitehistory') === '1';
   ['htmltheme', 'htmlcode', 'exoutputs', 'mdimg', 'sitetheme'].forEach(id => { const el = document.getElementById(id), v = localStorage.getItem('slate_' + id); if (el && v != null) el.value = v; });
+  const hw = document.getElementById('htmlwidth'); if (hw) hw.value = localStorage.getItem('slate_htmlwidth') || '900'; _htmlWidthSync();
   if (preset === 'slides') document.getElementById('pdflayout').value = 'slides|1';
   _memoCat = null;                                          // re-measure precomputed results per dialog open
   const mq = document.getElementById('memoquality'); if (mq) mq.value = localStorage.getItem('slate_memoquality') || '100';

@@ -95,9 +95,30 @@ function _page_save_assets(nb::LiveNotebook)
     return out
 end
 
+# The `@asset` JS MODULES a web cell imports — `Slate.assetUrl("…")` (preferred) or the legacy
+# `location.pathname + "/asset/…"` — as `relative-path => file bytes`, read from the notebook's asset
+# root. So a static export ships the widget's CODE (not just its `save_asset` DATA) and loads it offline.
+# (Cell-source scan; one level — a module that itself imports another `@asset` module isn't followed yet.)
+function _web_asset_modules(nb::LiveNotebook)
+    out = Dict{String,Vector{UInt8}}()
+    base = String(get(nb.report.meta, "assetbase", "")); isempty(base) && return out
+    rootn = normpath(base)
+    pats = (r"location\.pathname\s*\+\s*[\"']/asset/([^\"']+)[\"']", r"assetUrl\(\s*[\"']([^\"']+)[\"']")
+    for c in nb.report.cells                       # scan ALL cells — a `@web` cell is its own kind, not CODE
+        for pat in pats, m in eachmatch(pat, c.source)
+            rel = String(m.captures[1]); haskey(out, rel) && continue
+            p = normpath(joinpath(rootn, strip(rel, '/')))
+            (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) && isfile(p) || continue
+            out[rel] = read(p)
+        end
+    end
+    return out
+end
+
 # The page-local assets a notebook's outputs reference → relative path => source (a local FILE path for
-# a vendored asset like a geo map, or raw BYTES for a `save_asset` blob). The site builders write these
-# into the PAGE's own dir so a published output doesn't depend on the server; standalone inlines them.
+# a vendored asset like a geo map, or raw BYTES for a `save_asset` blob / an `@asset` JS module). The site
+# builders write these into the PAGE's own dir so a published output doesn't depend on the server;
+# standalone inlines them.
 function _referenced_page_assets(nb::LiveNotebook)
     files = Dict{String,Union{String,Vector{UInt8}}}()
     for c in nb.report.cells
@@ -109,6 +130,9 @@ function _referenced_page_assets(nb::LiveNotebook)
     end
     for (spec, bytes) in _page_save_assets(nb)                             # save_asset → bytes
         files[spec["path"]] = bytes
+    end
+    for (rel, bytes) in _web_asset_modules(nb)                             # @asset JS modules → bytes
+        files[rel] = bytes
     end
     return files
 end
@@ -158,6 +182,10 @@ Slate.assetInfo=function(path){var a=window.__slateAssets[path];if(!a)return nul
 var kind=a.dtype?"ndarray":m.indexOf("json")>=0?"json":m.indexOf("text/")===0?"text":"binary";
 return {path:path,kind:kind,mime:a.mime,dtype:a.dtype||null,shape:a.shape||null,order:a.order||null};};
 Slate.assetPaths=function(){return Object.keys(window.__slateAssets);};
+Slate.isLive=function(){return false;};
+Slate.assetUrl=function(path){var a=window.__slateAssets[path];if(!a)return path;
+if(a.data!==undefined)return "data:"+(a.mime||"application/octet-stream")+";base64,"+a.data;return a.url||path;};
+
 Slate.runFragment=function(scriptEl,fn){var root=scriptEl&&scriptEl.parentElement;
 var echo=function(){var g=root&&root.querySelector(".weblog");if(root&&!g){g=document.createElement("pre");g.className="weblog";root.appendChild(g);}
 var line=Array.prototype.map.call(arguments,function(a){return typeof a==="string"?a:(function(){try{return JSON.stringify(a);}catch(_){return String(a);}})();}).join(" ");
@@ -189,15 +217,18 @@ function _export_palette_root(name::AbstractString)
                   ";--teal:", p.teal, ";--titlefg:", titlefg, ";")
 end
 
-function _export_css(theme::AbstractString = "dark", code::AbstractString = "normal")
+function _export_css(theme::AbstractString = "dark", code::AbstractString = "normal", width::Integer = 900)
     name = _resolve_export_theme(theme)                       # a Slate palette name (charttheme or dark/light)
     root = _export_palette_root(name)                         # full Slate palette → page + chart colours match
     t = _EXPORT_THEMES[_export_is_light(name) ? "light" : "dark"]   # code-highlight theme by family
+    # Content column width from the export/publish slider: a px cap (already responsive DOWN — max-width
+    # shrinks on a narrow screen), or `≤ 0` = full-width (100%, the slider's far "Full" stop).
+    mw = Int(width) <= 0 ? "100%" : string(clamp(Int(width), 480, 2400), "px")
     return """
 :root{$(root)}
 *{box-sizing:border-box;} body{background:var(--bg);color:var(--text);margin:0;
   font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
-.export{max-width:900px;margin:0 auto;padding:36px 24px 80px;}
+.export{max-width:$(mw);margin:0 auto;padding:36px 24px 80px;}
 .exp-title{color:var(--titlefg);font-size:1.9rem;margin:0 0 2px;}
 .exp-titleblock{text-align:center;padding:8px 0 4px;}
 .exp-subtitle{color:var(--text);font-size:1.2rem;margin-top:4px;}
@@ -551,7 +582,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      og_url::AbstractString = "", og_type::AbstractString = "article",
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
                      memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL,
-                     inline_assets::Bool = true)
+                     inline_assets::Bool = true, width::Integer = 900)
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     # One Slate palette drives the page chrome, code AND the client-rendered ECharts (they read its CSS
     # vars) — As-is uses the notebook's live palette (charttheme), Light/Dark force one. A themed OVERRIDE
@@ -595,7 +626,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # so the widget bails (blank canvas). Load it here (sync, before the body widget scripts run)
               # so such widgets FUNCTION in the export instead of being frozen to a snapshot.
               "<script src=\"https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js\"></script>",
-              "<style>", _export_css(palette, code), "</style></head><body><article class=\"export\">")
+              "<style>", _export_css(palette, code, width), "</style></head><body><article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
         # (name => local file, read into the page). Otherwise (published page) the map rides as a
@@ -732,13 +763,20 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # a published page points at the page-local sibling written by `_write_page_assets!`. Emitted even
         # without charts (a WebPage widget may reference an asset with no echart on the page).
         saveassets = _page_save_assets(nb)
-        if !isempty(saveassets)
+        webmods = _web_asset_modules(nb)   # @asset JS modules a web cell imports → shipped so the widget loads offline
+        if !isempty(saveassets) || !isempty(webmods)
             entries = String[]
             for (spec, bytes) in saveassets
                 entry = copy(spec)   # carries path/mime/name/bytes/sha/cell/created/dtype/shape/order
                 inline_assets ? (entry["data"] = Base64.base64encode(bytes)) :   # standalone → inline
                                 (entry["url"]  = spec["path"])                    # published → page-local sibling
                 push!(entries, string(JSON.json(spec["path"]), ":", JSON.json(entry)))
+            end
+            for (rel, bytes) in webmods
+                entry = Dict{String,Any}("path" => rel, "name" => basename(rel), "mime" => "text/javascript")
+                inline_assets ? (entry["data"] = Base64.base64encode(bytes)) :    # standalone → data: URL
+                                (entry["url"]  = rel)                             # published → page-local sibling
+                push!(entries, string(JSON.json(rel), ":", JSON.json(entry)))
             end
             print(io, _EXPORT_ASSET_JS,
                   "Object.assign(window.__slateAssets,{", join(entries, ","), "});")
@@ -1138,6 +1176,65 @@ function _run_bat()
         "rem script (e.g. locked-down machine), so the error is readable rather than flashing shut.",
         "pause",
     ], "\r\n") * "\r\n"
+end
+
+"""
+    export_gist(nb; kwargs...) -> NamedTuple
+
+Create a **secret** GitHub gist holding this notebook's self-contained HTML export, via the
+authenticated `gh` CLI. `kwargs` are the `export_html` options (theme/charttheme/override/code/
+outputs/**width**/include_source). The gist carries the `<slug>.html` page plus a `README.md` that
+signposts it as a downloadable HTML page (a raw gist shows source, not the rendered page). Returns
+`(; ok, url, preview, raw, curl, error)` — `preview` renders it via gistpreview.github.io, `raw` is
+the file's raw URL, `curl` a ready-to-share download one-liner. Best-effort and never throws: a
+missing/unauthenticated `gh` comes back as `ok=false` with a human-readable `error`.
+"""
+function export_gist(nb::LiveNotebook; kwargs...)
+    fail(e) = (; ok = false, url = "", preview = "", raw = "", curl = "", error = e)
+    gh = Sys.which("gh")
+    gh === nothing && return fail("`gh` CLI not found on PATH")
+    success(pipeline(`$gh auth status`; stdout = devnull, stderr = devnull)) ||
+        return fail("`gh` is not authenticated — run `gh auth login`")
+    html = export_html(nb; kwargs...)
+    base = _slugify(splitext(basename(nb.path))[1]); isempty(base) && (base = "notebook")
+    fname = base * ".html"
+    title = strip(report_frontmatter(nb.report).title); isempty(title) && (title = base)
+    desc = "Slate HTML export — $title (open via gistpreview.github.io, or download the raw .html)"
+    readme = """
+    # $title — Slate HTML export
+
+    A **self-contained HTML page** (`$fname`) exported from a Kaimon Slate notebook — figures embedded,
+    math via KaTeX. It's meant to be **viewed as a page**, not read as source:
+
+    - **View rendered** — open this gist through <https://gistpreview.github.io/>.
+    - **Download** — save the **Raw** `$fname` and open it in a browser (a `curl` one-liner is shared alongside).
+    """
+    dir = mktempdir()
+    try
+        write(joinpath(dir, fname), html)
+        write(joinpath(dir, "README.md"), readme)
+        out = IOBuffer(); err = IOBuffer()
+        # `gh gist create` is SECRET by default (no `--public`); it prints the gist URL to stdout.
+        ok = try
+            run(pipeline(`$gh gist create $(joinpath(dir, fname)) $(joinpath(dir, "README.md")) -d $desc`;
+                         stdout = out, stderr = err)); true
+        catch; false; end
+        url = strip(String(take!(out)))
+        if !ok || isempty(url)
+            e = strip(String(take!(err)))
+            return fail(isempty(e) ? "`gh gist create` failed" : e)
+        end
+        id = String(last(split(rstrip(url, '/'), '/')))   # …/<user>/<id> → the id renders via gistpreview
+        # Authoritative raw URL from the API → a shareable download command.
+        raw = try
+            strip(String(read(pipeline(`$gh api gists/$id --jq $(".files[\"$fname\"].raw_url")`; stderr = devnull))))
+        catch; ""; end
+        curl = isempty(raw) ? "" : "curl -L $raw -o $fname"
+        return (; ok = true, url = String(url), preview = "https://gistpreview.github.io/?" * id,
+                raw = String(raw), curl = curl, error = "")
+    finally
+        rm(dir; recursive = true, force = true)
+    end
 end
 
 # Materialise the site into `dir`: index.html (wired to the og-image sidecar) + og-image.png +

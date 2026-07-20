@@ -793,11 +793,13 @@ function _sse_site_publish(stream::HTTP.Stream, h::Hub)
     end
     nb === nothing && return _sse_stream(stream, _oe -> error("no such notebook: $id"))
     isempty(site) && return _sse_stream(stream, _oe -> error("no site given"))
+    wq = get(q, "width", "")   # content column width: px, "full" (=100%), or unset ⇒ default
     bopts = (slug = get(q, "slug", ""), site_title = get(q, "siteTitle", ""),
              theme = get(q, "theme", "dark"), charttheme = get(q, "charttheme", ""),
              override = get(q, "override", "0") == "1", outputs = get(q, "outputs", "all"),
              include_source = get(q, "source", "1") == "1", bundle = get(q, "bundle", "0") == "1",
-             history = get(q, "history", "0") == "1")
+             history = get(q, "history", "0") == "1",
+             width = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v))
     _sse_stream(stream, on_event -> publish_to_site!(nb, String(site); on_event = on_event, bopts...))
 end
 

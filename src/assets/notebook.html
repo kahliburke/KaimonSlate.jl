@@ -373,6 +373,7 @@
         <label title="Ship the project's full git history in the runnable bundle so a visitor can branch &amp; PR with matching commits (off = source-only snapshot; safer for a public site)"><input type="checkbox" id="pubopt_history"/> Git history</label>
         <label title="Which cell outputs appear on the page">Outputs <select id="pubopt_outputs"><option value="all">All</option><option value="figures">Figures only</option><option value="none">None</option></select></label>
         <label title="As-is keeps the notebook's live palette; Light/Dark force one (and re-render native Makie figures to match)">Theme <select id="pubopt_theme"><option value="asis">As-is</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+        <label title="Content column width of the published page — the far end is full width (100%)">Width <input type="range" id="pubopt_width" min="620" max="1620" step="20" value="900" oninput="_htmlWidthSync(this)" style="vertical-align:middle;width:110px"/> <span id="pubopt_widthout" class="pubdim" style="font-size:.76rem"></span></label>
       </div>
       <div class="puboptrow" id="pubopts2">
         <label title="URL path for THIS document under the site (/<path>/). Blank = auto from the title. Re-publishing the same path updates it in place.">Document path <input type="text" id="pubopt_slug" class="pubinp" placeholder="auto from title" autocomplete="off" spellcheck="false" style="font-family:monospace"/></label>
@@ -459,6 +460,11 @@
       <option value="smaller">Smaller</option>
       <option value="tiny">Tiny</option>
     </select></div>
+  <div class="setrow exrow fmt-html fmt-website"><label title="Content column width of the exported/published page — the far end is full width (100%)">Page width</label>
+    <div class="memoq">
+      <input type="range" id="htmlwidth" min="620" max="1620" step="20" value="900" oninput="_htmlWidthSync()">
+      <span id="htmlwidthout" class="memoreadout"></span>
+    </div></div>
   <div class="setrow exrow fmt-html"><label>Source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmlsource" checked> Include cell source (uncheck for outputs only)</label></div>
@@ -469,6 +475,8 @@
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmlhistory"> Ship full git history in the bundle (else source-only snapshot)</label></div>
   <div class="setrow exrow fmt-html sethint"><span></span>A self-contained page — figures embedded, math via KaTeX. No server needed.</div>
+  <div class="setrow exrow fmt-html" id="htmlgistrow"><label title="Upload this HTML export as a secret GitHub gist (needs the gh CLI, authenticated) and copy a curl download command to your clipboard">Share</label>
+    <button type="button" onclick="exportGist()">🔗 Share via Gist</button></div>
   <div class="setrow exrow fmt-standalone fmt-html" id="memorow"><label title="Embed precomputed cell results so the notebook springs to life on import — the expensive cells RESTORE instantly instead of recomputing. Larger file. Entries are chosen by compute-saved-per-byte, so a small budget still banks the most expensive solves.">Precomputed results</label>
     <div class="memoq">
       <input type="range" id="memoquality" min="0" max="100" value="100" oninput="_memoSyncReadout()">

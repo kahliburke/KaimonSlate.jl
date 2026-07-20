@@ -32,6 +32,7 @@
     const o = { bundle: ck('pubopt_runnable') ? '1' : '0', source: ck('pubopt_source') ? '1' : '0',
                 history: ck('pubopt_history') ? '1' : '0', outputs: val('pubopt_outputs') || 'all',
                 theme: t.theme, charttheme: t.charttheme || '', override: t.override ? '1' : '0',
+                width: (typeof _htmlWidthQS === 'function' ? _htmlWidthQS(el('pubopt_width')) : ''),
                 slug: (el('pubopt_slug') && el('pubopt_slug').value.trim()) || '' };
     try {
       localStorage.setItem('slate_siterunnable', o.bundle); localStorage.setItem('slate_sitesource', o.source);
@@ -47,6 +48,9 @@
     set('pubopt_runnable', g('slate_siterunnable')); set('pubopt_source', g('slate_sitesource'));
     set('pubopt_history', g('slate_sitehistory'));
     sel('pubopt_theme', g('slate_sitetheme')); sel('pubopt_outputs', g('slate_siteoutputs'));
+    // Page width — shared preference with the HTML/Website export slider (`slate_htmlwidth`).
+    const wEl = el('pubopt_width');
+    if (wEl) { const w = g('slate_htmlwidth'); if (w != null) wEl.value = w; if (typeof _htmlWidthSync === 'function') _htmlWidthSync(wEl); }
   }
 
   // ── Sites: this notebook's membership + front-page state across every site ───────────────────────
@@ -112,6 +116,7 @@
                                     history: o.history, outputs: o.outputs });
     if (o.charttheme) q.set('charttheme', o.charttheme);
     if (o.override === '1') q.set('override', '1');
+    if (o.width) q.set('width', o.width);
     if (o.slug) q.set('slug', o.slug);
     const es = new EventSource(_apipath('/api/site-publish') + '?' + q.toString());
     es.addEventListener('status', e => line(e.data, 'st'));
