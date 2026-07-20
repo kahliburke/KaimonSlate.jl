@@ -23,7 +23,6 @@ function toast(msg, ms = 4500, kind = '') {
 
 const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
 const srcEditInner = () => '<textarea></textarea><div class="mdhint">⇧⏎ commit · esc cancel</div>';
-const srcEditHTML = () => `<div class="srcedit" style="display:none">${srcEditInner()}</div>`;
 
 // Strip the interactive-only chrome from a chart spec for a clean, static, publication render.
 // ECharts has no "publication mode" flag — what reads as on-screen controls are spec components:

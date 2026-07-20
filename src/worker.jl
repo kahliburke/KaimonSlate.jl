@@ -2038,7 +2038,7 @@ function _prepare_env!()
     @info "slate prepare: precompile complete" pkgs = tr.done secs = round(Int, time() - tr.t0)
     return nothing
 end
-const _PREP_SKIP = ("KaimonGate", "Revise", "ExpressionExplorer")   # infra deps — never notebook-relevant
+const _PREP_SKIP = _INFRA_DEPS   # infra deps — never notebook-relevant (single source: _INFRA_DEPS)
 # "Available without compiling": a sysimage-baked stdlib (Libdl/LinearAlgebra/…) has NO separate cache, so
 # `Base.isprecompiled` reports false for it — treat in-sysimage packages as ready, else a warm env always
 # looks cold. `in_sysimage` is 1.9+; the guard degrades gracefully if it's ever absent.
@@ -2657,7 +2657,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     warm_deps && Threads.@spawn try
         t0 = time(); n = 0
         names = [nm for nm in sort!(collect(keys(Pkg.project().dependencies)))
-                 if !(nm in ("KaimonGate", "Revise", "ExpressionExplorer"))]
+                 if !(nm in _INFRA_DEPS)]
         total = length(names)
         for name in names
             _WARM_STATUS[] = "warming $(n)/$(total) · $(name)"   # live status → telemetry → the pool UI
