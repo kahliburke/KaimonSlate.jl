@@ -83,6 +83,10 @@ end
 # The `save_asset` blobs a notebook produced → Vector of (spec, bytes), where `spec` is the shared
 # metadata dict (`_asset_common`: path, mime, name, size, sha, cell, created, dtype/shape/order). The
 # producing cell stored them on its output. Empty unless a cell called `save_asset`.
+# A `@web(...)` widget cell — it renders a WebPage/widget, not code you'd read. Exports hide its source
+# (like a `@bind` cell) so the page shows the widget, not the `@web(...)` skin + its inline `{{ }}` data.
+_is_web_cell(c) = occursin(r"^\s*@web\b", c.source)
+
 function _page_save_assets(nb::LiveNotebook)
     out = Tuple{Dict{String,Any},Vector{UInt8}}[]
     for c in nb.report.cells
@@ -245,6 +249,10 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
 .exp-refs h2{font-size:1.1rem;}
 .exp-reflist{margin:6px 0 0;padding-left:1.6em;}.exp-reflist li{margin:3px 0;}
 .exp-reflist li:target{background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:4px;}
+/* Regular markdown links — accent-toned with a soft underline (parity with the live notebook's `.md a`),
+   not the browser default dark blue. Emitted BEFORE `a.cite`/`a.figref` so those keep their own style. */
+.exp-md a{color:var(--accent);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 38%,transparent);transition:color .12s,border-color .12s;}
+.exp-md a:hover{color:color-mix(in srgb,var(--accent) 78%,var(--text));border-bottom-color:var(--accent);}
 a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:underline;}
 :target{scroll-margin-top:12px;}
 .exp-run{text-align:center;margin:10px 0 4px;}
@@ -607,6 +615,30 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # builder; the OG/Twitter tags let a hosted link unfurl into a rich card (see `_og_tags`).
         rawdesc = _first_words(rwtext(isempty(strip(fm0.abstract)) ? fm0.byline : fm0.abstract), 40)
         io = IOBuffer()
+        # Slate shim + asset registry, emitted at the TOP of <body> so a `@web` cell's inline <script>
+        # finds `Slate.runFragment`/`asset`/`assetUrl` (+ a populated `__slateAssets`) already defined
+        # when it runs during body parse — otherwise the widget dies on "Slate is not defined".
+        _asset_head = let sa = _page_save_assets(nb), wm = _web_asset_modules(nb),
+                          has_web = any(c -> occursin("@web", c.source) || occursin("Slate.runFragment", c.source), nb.report.cells)
+            if !(has_web || !isempty(sa) || !isempty(wm))
+                ""
+            else
+                ents = String[]
+                for (spec, bytes) in sa
+                    e = copy(spec)
+                    inline_assets ? (e["data"] = Base64.base64encode(bytes)) : (e["url"] = spec["path"])
+                    push!(ents, string(JSON.json(spec["path"]), ":", JSON.json(e)))
+                end
+                for (rel, bytes) in wm
+                    e = Dict{String,Any}("path" => rel, "name" => basename(rel), "mime" => "text/javascript")
+                    inline_assets ? (e["data"] = Base64.base64encode(bytes)) : (e["url"] = rel)
+                    push!(ents, string(JSON.json(rel), ":", JSON.json(e)))
+                end
+                string("<script>", _EXPORT_ASSET_JS,
+                       isempty(ents) ? "" : string("Object.assign(window.__slateAssets,{", join(ents, ","), "});"),
+                       "</script>")
+            end
+        end
         print(io, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"/>",
               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"/><title>", title, "</title>",
               # The page's import map → so an exported page's front-end JS resolves the same bare
@@ -626,7 +658,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # so the widget bails (blank canvas). Load it here (sync, before the body widget scripts run)
               # so such widgets FUNCTION in the export instead of being frozen to a snapshot.
               "<script src=\"https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js\"></script>",
-              "<style>", _export_css(palette, code, width), "</style></head><body><article class=\"export\">")
+              "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head, "<article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
         # (name => local file, read into the page). Otherwise (published page) the map rides as a
@@ -674,9 +706,9 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
             else
                 print(io, "<section class=\"exp-code\">")
                 # Show source only when the NOTEBOOK shows it: respect the global `?source=0` toggle,
-                # the per-cell `hidecode` (🙈) flag, AND `@bind` cells (which render their widget,
-                # not the code editor, in the browser) — so the export matches what's on screen.
-                (show_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))) &&
+                # the per-cell `hidecode` (🙈) flag, AND widget cells — `@bind` and `@web` — which render
+                # their widget, not a code editor, in the browser, so the export matches what's on screen.
+                (show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))) &&
                     print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
                 if _outputs_any(outputs)
                     # `figures`: only rich display (images/html/latex) — drop scalar text / stdout / errors.
@@ -757,30 +789,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         end
         # ECharts: render each embedded spec client-side (real, interactive charts with data). The specs
         # are emitted as a JS array; a resize handler keeps them responsive.
+        # The Slate shim + `save_asset`/`@asset`-module registry are emitted at the TOP of <body>
+        # (see `_asset_head`), so a web cell finds them at parse time. Only the table + chart hydrators
+        # ride here at the end (they run against the finished DOM).
         print(io, "<script>")
         print(io, _EXPORT_TABLE_JS)   # hydrate every `.exp-table` → sortable/filterable/paged + CSV (no server)
-        # `save_asset` blobs → the client `Slate.asset` registry. Standalone inlines the bytes (base64);
-        # a published page points at the page-local sibling written by `_write_page_assets!`. Emitted even
-        # without charts (a WebPage widget may reference an asset with no echart on the page).
-        saveassets = _page_save_assets(nb)
-        webmods = _web_asset_modules(nb)   # @asset JS modules a web cell imports → shipped so the widget loads offline
-        if !isempty(saveassets) || !isempty(webmods)
-            entries = String[]
-            for (spec, bytes) in saveassets
-                entry = copy(spec)   # carries path/mime/name/bytes/sha/cell/created/dtype/shape/order
-                inline_assets ? (entry["data"] = Base64.base64encode(bytes)) :   # standalone → inline
-                                (entry["url"]  = spec["path"])                    # published → page-local sibling
-                push!(entries, string(JSON.json(spec["path"]), ":", JSON.json(entry)))
-            end
-            for (rel, bytes) in webmods
-                entry = Dict{String,Any}("path" => rel, "name" => basename(rel), "mime" => "text/javascript")
-                inline_assets ? (entry["data"] = Base64.base64encode(bytes)) :    # standalone → data: URL
-                                (entry["url"]  = rel)                             # published → page-local sibling
-                push!(entries, string(JSON.json(rel), ":", JSON.json(entry)))
-            end
-            print(io, _EXPORT_ASSET_JS,
-                  "Object.assign(window.__slateAssets,{", join(entries, ","), "});")
-        end
         if !isempty(charts)
             # Register the Slate ECharts theme from the page's CSS vars (the SAME brand palette as the
             # chrome) and render every embedded spec under it — so an exported page's charts match the
