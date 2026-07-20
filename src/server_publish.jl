@@ -199,6 +199,7 @@ function stage_site!(name::AbstractString; hub = nothing)
     (dir === nothing || !isdir(dir)) &&
         error("site '$name' has no local build yet — add a notebook to it first")
     hub === nothing || _resync_live_members!(dir, String(name), hub)
+    rewrite_site_index!(dir)   # refresh the front-page chrome even when no member was open to rebuild
     return Dict{String,Any}("ok" => true, "url" => "/sites/" * _slugify(String(name)) * "/", "buildDir" => dir)
 end
 

@@ -1353,9 +1353,8 @@ _gh_git(sub::Cmd) = `git -c credential.helper= -c $_GH_CRED $sub`
 # already in the repo are preserved (we build on top of the existing gh-pages, not a fresh history).
 const _SITE_MANIFEST = "slate-site.json"
 
-# Where the "Published by Kaimon Slate" footer credit links. One place to change if the project gets a
-# marketing homepage; the repo is a sensible default.
-const _SLATE_CREDIT_URL = "https://github.com/kahliburke/KaimonSlate.jl"
+# Where the "Published by Kaimon Slate" footer credit links (one place to change for a homepage).
+const _SLATE_CREDIT_URL = "https://kahliburke.github.io/KaimonSlate.jl/dev/"
 
 # URL-safe slug from a title: lowercased, runs of non-alphanumerics → single hyphens, trimmed.
 function _slugify(s::AbstractString)
@@ -1712,6 +1711,20 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
           _render_site_index(manifest; site_url = su))
     write(joinpath(dir, ".nojekyll"), "")                                      # serve verbatim (no Jekyll)
     return (; home = _home_notebook(nb), slug, docUrl, commit_title, docCount = length(docs))
+end
+
+# Re-render a site's index.html from its manifest — NO notebook needed. Lets a chrome change (footer,
+# back-nav) or a reorder show on the FRONT PAGE without re-exporting every doc: a home-notebook front
+# page is re-composed from its `.slate-home.html` template, otherwise the card listing is regenerated.
+# (Doc SUB-pages still bake their own chrome, so those refresh only when their notebook is re-exported.)
+function rewrite_site_index!(dir::AbstractString)
+    isdir(dir) || return nothing
+    man = _read_site_manifest(dir)
+    docs = get(man, "docs", Any[])
+    htmpl = joinpath(dir, ".slate-home.html")
+    write(joinpath(dir, "index.html"),
+          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(man))
+    return nothing
 end
 
 """
