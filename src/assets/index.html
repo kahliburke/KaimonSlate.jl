@@ -359,6 +359,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdsyncrows{overflow:auto;display:flex;flex-direction:column;gap:8px;}
 .pdsyncrow{border:1px solid #232739;border-radius:9px;padding:10px 12px;background:#10131f;}
 .pdsyncrow .r1{display:flex;align-items:center;gap:9px;}
+.pdsyncsec{font-size:.74rem;letter-spacing:.02em;color:#8a90a8;text-transform:uppercase;margin:2px 0 4px;font-weight:600;}
 .pdsyncrow .st{width:16px;text-align:center;}
 .pdsyncrow .st.ok{color:#6ecb8b;} .pdsyncrow .st.err{color:#e57575;}
 .pdsyncrow.err{border-color:#4a2a35;}
@@ -416,8 +417,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       <input type="checkbox" id="openlaunch" checked onchange="_saveLaunchPref()"/> Launch worker on open
     </label>
     <button id="openbtn">Open</button>
-    <button id="uploadbtn" title="Upload a .jl from this computer and open it">⬆ Upload</button>
-    <input type="file" id="uploadin" accept=".jl" style="display:none"/>
+    <button id="uploadbtn" title="Upload from this computer — a .jl notebook or bundle, or a runnable .html export">⬆ Upload</button>
+    <input type="file" id="uploadin" accept=".jl,.html,.htm" style="display:none"/>
   </div>
 </div>
 <div class="cols">
@@ -441,7 +442,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   <div class="pdhead"><strong id="pdsynctitle">Deploying…</strong><span class="pdsub" id="pdsyncsub"></span><button class="pdx" id="pdsyncx" onclick="pdCloseSync()" title="Close" style="visibility:hidden">✕</button></div>
   <div id="pdsyncbanner" class="pdsyncbanner"></div>
   <div id="pdsyncrows" class="pdsyncrows"></div>
-  <div class="row"><button class="primary" id="pdsyncdone" onclick="pdCloseSync()" disabled>Working…</button></div>
+  <div class="row"><button class="primary" id="pdsyncgo" onclick="pdSyncExecute()" style="display:none">▶ Sync now</button><button id="pdsyncdone" onclick="pdCloseSync()" disabled>Working…</button></div>
 </div></div>
 <!-- Remotes modal — rendered by the remotes.js Preact island (host setup + SSE preflight + known-hosts
      list + xfer settings + the region focus view). -->
@@ -506,11 +507,44 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function _defTarget(p){var dir=window.PLATFORM.dirOf(p);               // dir incl. trailing sep
     var name=baseName(p).replace(/\.jl$/i,'').replace(/\.standalone$/i,'');
     return dir+(name||'imported')+window.PLATFORM.sep;}
-  // Open a file — but if it's a self-contained bundle, launch the run/import helper instead.
+  // Route a file to the right open flow by its server-classified `kind`: a Slate `.jl` notebook opens
+  // live/inactive; a self-contained `.jl` bundle (or a RUNNABLE HTML export, whose embedded bundle we
+  // extract first) goes through the import helper; a plain Julia script is offered as a NEW notebook
+  // (original untouched); a static HTML export or foreign file gets a clear message.
+  function _dispatchOpen(p, info){
+    switch((info&&info.kind)||''){
+      case 'bundle':      openImport(p); break;
+      case 'notebook':    openPath(p); break;
+      case 'plain':       offerNewNotebook(p); break;
+      case 'html-bundle': extractAndImport(p); break;
+      case 'html-static': alertDark('“'+baseName(p)+'” is a static Slate export — it carries no embedded runnable bundle.\n\nRe-export it with the “Runnable” option checked to get a launchable notebook.'); break;
+      default: alertDark('“'+baseName(p)+'” isn’t a Slate notebook or bundle.\n\nOpen a .jl notebook, a self-contained .jl bundle, or a runnable .html export.');
+    }
+  }
+  // Open a file — classify it server-side first, then dispatch. (Falls back to a plain open if the
+  // classify request itself fails, so a transient hiccup still opens a normal notebook.)
   function openMaybeStandalone(p){
     fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();})
-      .then(function(info){info.standalone?openImport(p):openPath(p);})
+      .then(function(info){_dispatchOpen(p,info);})
       .catch(function(){openPath(p);});}
+  // Plain Julia script → offer to create a NEW notebook from it (a copy; the original is untouched).
+  function offerNewNotebook(p){
+    confirmDark('“'+baseName(p)+'” is a plain Julia file, not a Slate notebook.\n\nCreate a new notebook from it? Your original file is left untouched.','Create notebook').then(function(ok){
+      if(!ok)return;
+      showLoading('Creating a notebook from “'+baseName(p)+'”…');
+      fetch('/api/notebook-from-script',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
+        .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+        .then(function(d){hideLoading();pushRecent(d.path);openPath(d.path);})
+        .catch(function(e){hideLoading();alertDark('Could not create the notebook: '+e);});
+    });}
+  // Runnable HTML export → extract its embedded `.jl` bundle server-side, then hand it to the standalone
+  // import helper (identical to a downloaded `.jl` bundle).
+  function extractAndImport(p){
+    showLoading('Reading exported notebook…');
+    fetch('/api/extract-html-bundle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(d){hideLoading();openImport(d.path);})
+      .catch(function(e){hideLoading();alertDark('Could not extract the notebook from this HTML:\n'+e);});}
   function _imBusy(b){imRun.disabled=b;imImport.disabled=b;}
   function openImport(p){_imPath=p;_imDone=false;imSrc.textContent=p;imTarget.value=_defTarget(p);
     imLog.style.display='none';imLog.textContent='';imStatus.textContent='';imStatus.className='imstatus';
@@ -560,7 +594,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var p=inp.value.trim(); if(!p)return;
     var info=await fetch('/api/path-info?q='+encodeURIComponent(p)).then(function(r){return r.json();});
     if(info.isdir){if(!isdir(p))inp.value=p+window.PLATFORM.sep;fetchComp();return;} // never open a directory
-    if(info.isfile){info.standalone?openImport(p):openPath(p);return;}              // standalone → import helper
+    if(info.isfile){_dispatchOpen(p, info);return;}                                 // route by kind (bundle/notebook/plain/html)
     if(!await confirmDark('Create new notebook “'+p+'”?','Create'))return;          // confirm new file
     if(p.slice(-3).toLowerCase()!=='.jl'){ if(await confirmDark('“'+p+'” has no .jl extension. Add it?','Add .jl'))p=p+'.jl'; }
     openPath(p);
@@ -588,8 +622,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var pick=items[+li.dataset.i];inp.value=pick;inp.focus();
     isdir(pick)?fetchComp():openMaybeStandalone(pick);});   // click dir = descend, click file = open/import
   document.getElementById('openbtn').onclick=function(){submit();};
-  // Upload a local .jl from the browser (this machine) → the server saves it and we open it via the
-  // normal open/import flow (so a self-contained bundle still routes through the import helper).
+  // Upload a local file from the browser (this machine) — a .jl notebook/bundle or a runnable .html
+  // export → the server saves it and we classify + open it via the normal flow (a self-contained
+  // bundle routes through the import helper; a runnable HTML has its bundle extracted first).
   document.getElementById('uploadbtn').onclick=function(){document.getElementById('uploadin').click();};
   document.getElementById('uploadin').onchange=function(e){
     var f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f)return;   // reset so the same file re-fires
@@ -1077,17 +1112,47 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     es.onerror=function(){es.close();_syncES=null;done();_syncBanner('err','✗ <b>Connection lost</b> before publishing finished.');_syncRunning(false);};
   }
   window.pdPublishInto=pdPublishInto;
+  // STAGE 1 — arm/review: open the modal and show a PLAN (what will re-export vs keep, + destinations),
+  // fetched from /site-sync-plan. Nothing deploys until the user clicks ▶ Sync now (pdSyncExecute).
+  var _syncPlanName=null;
   function pdSyncSite(name,btn){
     var s=pdSiteByName(name); if(!s)return;
     if(!(s.targets||[]).length){alertDark('“'+name+'” has no destinations yet — edit it and pick some.');return;}
-    // Nothing built yet → sync would fail on "no local build". Guide instead of failing.
     if(!(s.docs||[]).length && !s.hasHome){
       alertDark('“'+name+'” has no content yet — nothing to deploy.\n\nOpen a notebook and publish it into this site first (☰ → ☁ Publish… → choose “'+name+'”). Then Sync pushes that build to every destination.');
       return;
     }
-    // Open the dedicated modal with a pending row per destination.
-    document.getElementById('pdsynctitle').textContent='Deploying “'+name+'”';
+    _syncPlanName=name;
+    document.getElementById('pdsynctitle').textContent='Review sync — “'+name+'”';
     document.getElementById('pdsyncsub').textContent='';
+    document.getElementById('pdsyncgo').style.display='none';
+    document.getElementById('pdsyncrows').innerHTML='';
+    _syncBanner('run','<span class="pdspin"></span> Planning…');
+    _syncRunning(true);
+    document.getElementById('pdsyncbg').classList.add('show');
+    fetch('/api/publish/site-sync-plan?site='+encodeURIComponent(name)).then(function(r){return r.json();})
+      .then(pdRenderPlan)
+      .catch(function(e){_syncBanner('err','✗ Could not plan the sync.<div class="pdsyncdetail">'+esc(String(e))+'</div>');_syncRunning(false);});
+  }
+  function pdRenderPlan(p){
+    if(p&&p.error){_syncBanner('err','✗ '+esc(p.error));_syncRunning(false);return;}
+    var members=(p&&p.members)||[], targets=(p&&p.targets)||[];
+    var reb=members.filter(function(m){return m.action==='rebuild';}), keep=members.filter(function(m){return m.action!=='rebuild';});
+    var row=function(m,ic){return '<div class="pdsyncrow"><div class="r1"><span class="st">'+ic+'</span><span class="pl">'+esc(m.title)+(m.home?' <span class="pdchip">front page</span>':'')+'</span> <span class="pddim" style="margin-left:6px">'+esc(m.reason)+'</span></div></div>';};
+    var html='<div class="pdsyncsec">↻ Re-export from current source ('+reb.length+')</div>'+(reb.map(function(m){return row(m,'↻');}).join('')||'<div class="pddim" style="padding:2px 10px">none open</div>');
+    html+='<div class="pdsyncsec" style="margin-top:8px">• Keep last build ('+keep.length+')</div>'+(keep.map(function(m){return row(m,'•');}).join('')||'<div class="pddim" style="padding:2px 10px">none</div>');
+    html+='<div class="pdsyncsec" style="margin-top:8px">☁ Deploy the whole build to</div><div class="pddim" style="padding:2px 10px">'+(targets.map(esc).join(', ')||'no destinations')+'</div>';
+    document.getElementById('pdsyncrows').innerHTML=html;
+    _syncBanner('','Review the plan, then ▶ Sync now.');
+    _syncRunning(false);
+    var done=document.getElementById('pdsyncdone'); done.disabled=false; done.textContent='Cancel';
+    var go=document.getElementById('pdsyncgo'); go.style.display=''; go.disabled=(targets.length===0);
+  }
+  // STAGE 2 — execute: deploy the (rebuilt) build to every destination, streaming per-target progress.
+  function pdSyncExecute(){
+    var name=_syncPlanName; if(!name)return; var s=pdSiteByName(name); if(!s)return;
+    document.getElementById('pdsyncgo').style.display='none';
+    document.getElementById('pdsynctitle').textContent='Deploying “'+name+'”';
     _syncBanner('run','<span class="pdspin"></span> Deploying to '+s.targets.length+' destination'+(s.targets.length===1?'':'s')+'…');
     document.getElementById('pdsyncrows').innerHTML=s.targets.map(function(n){var t=pdTargetByName(n)||{kind:''};
       return '<div class="pdsyncrow" id="syncrow-'+_slugId(n)+'"><div class="r1"><span class="st"><span class="pdspin"></span></span>'+
@@ -1095,19 +1160,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         '<span class="pddim" id="syncst-'+_slugId(n)+'" style="margin-left:6px">waiting…</span></div></div>';
     }).join('');
     _syncRunning(true);
-    document.getElementById('pdsyncbg').classList.add('show');
     if(_syncES){try{_syncES.close();}catch(_){}}
     var es=_syncES=new EventSource('/api/publish/site-sync?site='+encodeURIComponent(name));
-    es.addEventListener('status',function(e){   // "Deploying to X…" — mark that row in-progress
-      var m=/Deploying to (.+)…/.exec(e.data); if(m){var st=document.getElementById('syncst-'+_slugId(m[1]));if(st)st.textContent='deploying…';}
-    });
-    es.addEventListener('done',function(e){es.close();_syncES=null;var d;try{d=JSON.parse(e.data);}catch(_){d={results:[]};}
-      _syncResults(name,d); loadPubDash();});
-    es.addEventListener('failed',function(e){es.close();_syncES=null;
-      _syncBanner('err','✗ <b>Sync failed to start.</b><div class="pdsyncdetail">'+esc(e.data)+'</div>');_syncRunning(false);});
+    es.addEventListener('status',function(e){var m=/Deploying to (.+)…/.exec(e.data); if(m){var st=document.getElementById('syncst-'+_slugId(m[1]));if(st)st.textContent='deploying…';}});
+    es.addEventListener('done',function(e){es.close();_syncES=null;var d;try{d=JSON.parse(e.data);}catch(_){d={results:[]};}_syncResults(name,d); loadPubDash();});
+    es.addEventListener('failed',function(e){es.close();_syncES=null;_syncBanner('err','✗ <b>Sync failed to start.</b><div class="pdsyncdetail">'+esc(e.data)+'</div>');_syncRunning(false);});
     es.onerror=function(){es.close();_syncES=null;_syncBanner('err','✗ <b>Connection lost</b> before the sync finished.');_syncRunning(false);};
   }
   window.pdSyncSite=pdSyncSite;
+  window.pdSyncExecute=pdSyncExecute;
   function _slugId(s){return String(s).replace(/[^A-Za-z0-9_-]/g,'_');}
   // ── DETAIL — back + Content / Config / Policies tabs. ─────────────────────────────────────────
   function pdRenderDetail(){
