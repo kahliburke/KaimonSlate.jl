@@ -89,6 +89,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .siteload{color:#6a7090;font-size:.85rem;padding:10px 0;display:flex;align-items:center;gap:8px;}
 .spin-sm{display:inline-block;width:14px;height:14px;border:2px solid #2a2e40;border-top-color:#569cd6;border-radius:50%;animation:spin .8s linear infinite;}
 .loading .lmsg{color:#d4d8e8;font-size:.9rem;}
+/* Transient toast for action confirmations (Stage, etc.) — survives a dashboard re-render (it's on body). */
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(12px);opacity:0;z-index:100;
+  background:#141828;border:1px solid #2a2e40;color:#d4d8e8;padding:9px 16px;border-radius:9px;font-size:.86rem;
+  box-shadow:0 8px 28px rgba(0,0,0,.45);pointer-events:none;max-width:80vw;transition:opacity .18s,transform .18s;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.toast.ok{border-color:#2f5a3c;} .toast.err{border-color:#5a2a35;}
 .importmodal{max-width:640px;}
 .imrow{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
 /* Remotes manager modal */
@@ -483,6 +489,13 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   document.addEventListener('keydown',function(e){if(modalBg.classList.contains('show')&&e.key==='Escape')_close(false);});
   function showLoading(m){loadMsg.textContent=m||'Working…';loadEl.classList.add('show');}
   function hideLoading(){loadEl.classList.remove('show');}
+  // Transient confirmation toast (auto-dismisses). Appended to <body>, so it survives re-renders.
+  function toast(msg,kind){var t=document.getElementById('_toast');
+    if(!t){t=document.createElement('div');t.id='_toast';document.body.appendChild(t);}
+    t.className='toast'+(kind?(' '+kind):'');t.textContent=msg;
+    requestAnimationFrame(function(){t.classList.add('show');});
+    clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show');},2800);}
+  window.toast=toast;
   // ── Run-location selects (home) ─────────
   // The run-on host store + the two run-on pickers are Preact now (hoststore.js / remotes.js): the
   // <select>s are rendered into #openrunon-mount / #imrunon-mount but keep the ids openrunon / imrunon
@@ -1074,7 +1087,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var done=btn?pdBusy(btn):function(){};
     fetch('/api/publish/site-stage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:name})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(d){done();loadPubDash();})   // stage quietly — no auto-open; use "View ↗" to see it
+      .then(function(d){done();toast('✓ Staged “'+name+'” — ▶ Sync to deploy, or View ↗ to preview','ok');loadPubDash();})
       .catch(function(e){done();alertDark('Stage failed: '+e);});
   }
   window.pdStageSite=pdStageSite;
