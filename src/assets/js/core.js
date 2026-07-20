@@ -189,6 +189,14 @@ window.Slate.assetPaths = function () {
   ((window.__slateState || {}).cells || []).forEach(_registerAssets);
   return Object.keys(window.__slateAssets);
 };
+// True inside a LIVE notebook (served at /n/<id> with a Julia kernel + WebSocket), false in a static
+// export / published page. Server-backed widgets branch on this to pick a live vs offline data path.
+// Mirrored (as a constant `false`) in the static-export Slate shim, so it's always defined.
+window.Slate.isLive = function () { return /^\/n\/[^\/]+/.test(location.pathname); };
+// Resolve an `@asset` FILE (e.g. a web-cell JS module) to a loadable URL: live → the notebook's served
+// `/n/<id>/asset/<path>` route; a static export overrides this to a data:/sibling URL from the inlined
+// registry, so `import(Slate.assetUrl("webassets/foo.js"))` works both live and offline.
+window.Slate.assetUrl = function (path) { return location.pathname + "/asset/" + path; };
 // The runtime a web cell's `@web(...)` <script> calls: `Slate.runFragment(document.currentScript, fn)`.
 // It hands the fragment its own `root` (the cell's output element, captured from the running script) and
 // an `echo(...)` that prints a line into the cell (a `.weblog` block) plus the console; runs `fn(root,

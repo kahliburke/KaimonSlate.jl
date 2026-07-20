@@ -1963,6 +1963,11 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 .md a.figref { color: color-mix(in srgb, var(--accent) 58%, var(--text)); text-decoration: none;
   cursor: pointer; white-space: nowrap; }
 .md a.figref:hover { color: var(--accent); }
+/* Regular markdown links — accent-toned with a soft underline so they read as links on the dark theme,
+   not the browser's default hard blue. (Citations/figrefs above keep their own, more specific styling.) */
+.md a { color: var(--accent); text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); transition: color .12s, border-color .12s; }
+.md a:hover { color: color-mix(in srgb, var(--accent) 78%, var(--text)); border-bottom-color: var(--accent); }
 /* Reference numbers in the bibliography card, matching the in-text [N]. */
 .bibcard-num { flex: none; color: var(--dim); font-variant-numeric: tabular-nums; font-size: .82rem; min-width: 2.2em; }
 .bibcard-keys li.cited .bibcard-num { color: var(--text); }
