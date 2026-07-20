@@ -736,6 +736,9 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function _renderSites(v, hasLocal){
     var box=document.getElementById('published'); if(!box) return;
     v=v||{}; hasLocal=hasLocal||{};
+    // Preserve which cards are expanded across a re-render — else the initial load's refresh (or a
+    // visibility/pageshow refresh) collapses a card the user JUST clicked ("opens then closes").
+    var openNames={}; box.querySelectorAll('.sitecard.open[data-site]').forEach(function(c){openNames[c.getAttribute('data-site')]=1;});
     var sites=(v.sites)||[], byName={}; (v.targets||[]).forEach(function(t){byName[t.name]=t;});
     var cards=sites.map(function(s){
       var dests=(s.targets||[]).map(function(n){var t=byName[n];if(!t)return '';var u=_pubSiteUrl(t);
@@ -744,7 +747,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       }).filter(Boolean).join('');
       var preview=hasLocal[s.name]?('<a class="pubdest" href="/sites/'+encodeURIComponent(s.name)+'/" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="local build preview">👁 Preview ↗</a>'):'';
       var body=preview+dests, nd=(s.docs||[]).length, ndest=(s.targets||[]).length;
-      return '<div class="sitecard sitecard-site" onclick="this.classList.toggle(\'open\')">'+
+      return '<div class="sitecard sitecard-site'+(openNames[s.name]?' open':'')+'" data-site="'+esc(s.name)+'" onclick="this.classList.toggle(\'open\')">'+
         '<span class="si">🌐</span><span class="sn">'+esc(s.name)+'<span class="scchev">›</span></span>'+
         '<span class="su">'+nd+' doc'+(nd===1?'':'s')+' · '+ndest+' destination'+(ndest===1?'':'s')+(hasLocal[s.name]?'':' · not built')+'</span>'+
         '<div class="scdests">'+(body||'<span class="su">not built yet — publish a notebook into it</span>')+'</div></div>';
