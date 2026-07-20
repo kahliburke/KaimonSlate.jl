@@ -423,19 +423,16 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
     return nothing
 end
 
-# Reactive push triggered by a cell's async task (`slate_refresh(:data, …)`):
-# restale the cells that READ those vars (but not the producers that WRITE them,
-# so we don't re-trigger the task), recompute, and push a lightweight live update.
-function server_refresh(nb::LiveNotebook, vars)
-    syms = Set{Symbol}(vars)
+# The shared body of a reactive push (a `@bind`/data/asset change): restale every cell the
+# `seed_predicate` selects (the direct triggers), then their dependents, recompute, and broadcast a
+# lightweight `refresh:` patch of ONLY the cells that recomputed — the browser patches just those
+# (charts `setOption`, output swap) instead of pulling the whole state.
+function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
     msg = ""
     lock(nb.lock) do
         seed = String[]
         for c in nb.report.cells
-            # MARKDOWN readers seed too: a `{{ level[] }}` interpolation is a reader like any code
-            # cell (md never writes, so the don't-retrigger guard passes trivially). Skipping them
-            # left prose silently frozen at the last non-reactive render while charts moved.
-            (!isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms)) || continue
+            seed_predicate(c) || continue
             ReportEngine.restale!(c) && push!(seed, c.id)
         end
         isempty(seed) && return
@@ -446,8 +443,6 @@ function server_refresh(nb::LiveNotebook, vars)
             ReportEngine.restale!(nb.report.cells[i]) && push!(changed, id)
         end
         _eval!(nb)
-        # Push ONLY the cells that recomputed (seed + dependents), inline in the event — the browser
-        # patches just those (charts `setOption`, output swap) instead of pulling the whole state.
         bindref, hostednames = _bind_index(nb.report)
         bibctx = _bib_link_ctx(nb)
         figidx = figure_index(nb.report)
@@ -458,6 +453,14 @@ function server_refresh(nb::LiveNotebook, vars)
     return nothing
 end
 
+# Reactive push triggered by a cell's async task (`slate_refresh(:data, …)`): restale the cells that
+# READ those vars (but NOT the producers that WRITE them, so we don't re-trigger the task). MARKDOWN
+# readers seed too — a `{{ level[] }}` interpolation is a reader; md never writes, so the guard passes.
+function server_refresh(nb::LiveNotebook, vars)
+    syms = Set{Symbol}(vars)
+    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms))
+end
+
 # Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset`
 # files a cell READS changed on disk → restale those cells + their dependents, recompute, and push
 # the same lightweight `refresh:` patch as a `@bind` change. `changed` are absolute paths; a cell's
@@ -466,31 +469,7 @@ function server_asset_changed(nb::LiveNotebook, changed::Vector{String})
     base = String(get(nb.report.meta, "assetbase", ""))
     chset = Set{String}(changed)
     _resolve(rel) = isabspath(rel) ? String(rel) : (isempty(base) ? String(rel) : joinpath(base, rel))
-    _inputs_changed(c) = any(rel -> _resolve(rel) in chset, c.inputs)
-    msg = ""
-    lock(nb.lock) do
-        seed = String[]
-        for c in nb.report.cells
-            _inputs_changed(c) || continue
-            ReportEngine.restale!(c) && push!(seed, c.id)
-        end
-        isempty(seed) && return
-        changedids = Set(seed)
-        for id in dependents_of(nb.report, Set(seed))
-            i = _index_of(nb.report.cells, id)
-            i === nothing && continue
-            ReportEngine.restale!(nb.report.cells[i]) && push!(changedids, id)
-        end
-        _eval!(nb)
-        bindref, hostednames = _bind_index(nb.report)
-        bibctx = _bib_link_ctx(nb)
-        figidx = figure_index(nb.report)
-        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx, report = nb.report)
-                 for c in nb.report.cells if c.id in changedids]
-        msg = "refresh:" * JSON.json(Dict("cells" => cells))
-    end
-    isempty(msg) || _broadcast(nb, msg)
-    return nothing
+    return _reactive_refresh!(nb, c -> any(rel -> _resolve(rel) in chset, c.inputs))
 end
 
 # Live per-cell run status (registered via `register_progress!` per notebook): `eval_cell!` calls
@@ -789,30 +768,27 @@ function _mesh_consent_check!(nb::LiveNotebook)
     return nothing
 end
 
-# The region NAMES this notebook uses — a comma-separated list in the durable footer (`regions` meta).
-# Each name references a GLOBAL region definition (the registry, remote.jl); the notebook stores only
-# the reference, resolved at spawn time. Deduped, order-preserved.
-function _nb_region_names(nb::LiveNotebook)
-    raw = strip(String(get(nb.report.meta, "regions", "")))
-    isempty(raw) && return String[]
+# Split a comma-separated region-name list: strip each name, drop empties, dedup preserving order.
+function _split_region_csv(s::AbstractString)
     seen = Set{String}(); out = String[]
-    for seg in split(raw, ',')
+    for seg in split(String(s), ',')
         n = String(strip(seg)); (isempty(n) || n in seen) && continue
         push!(seen, n); push!(out, n)
     end
     return out
 end
 
+# The region NAMES this notebook uses — a comma-separated list in the durable footer (`regions` meta).
+# Each name references a GLOBAL region definition (the registry, remote.jl); the notebook stores only
+# the reference, resolved at spawn time. Deduped, order-preserved.
+_nb_region_names(nb::LiveNotebook) = _split_region_csv(String(get(nb.report.meta, "regions", "")))
+
 # Set (or clear) which named regions this notebook uses. Tears the OLD region kernels down first (they
 # detach warm), rewrites the `regions` footer, and persists. Shared core of the `region_on` tool and
 # the `/api/{id}/regions` endpoint. Returns the normalized name list.
 function set_notebook_regions!(nb::LiveNotebook, csv::AbstractString)
     _teardown_region!(nb)
-    names = String[]; seen = Set{String}()
-    for seg in split(String(csv), ',')
-        n = String(strip(seg)); (isempty(n) || n in seen) && continue
-        push!(seen, n); push!(names, n)
-    end
+    names = _split_region_csv(csv)
     joined = join(names, ",")
     lock(nb.lock) do
         isempty(joined) ? delete!(nb.report.meta, "regions") : (nb.report.meta["regions"] = joined)

@@ -340,13 +340,15 @@ end
 # stored wire is minimal (`duration_ms` + value_repr) — its VALUE blobs are what a restore injects,
 # and rich display comes from the preview; a WIRE-ONLY display cell (a self-theming plot) instead
 # reports the real-wire entry from its last interactive run, so its figure ships and restores on
+# Dual-lookup on a possibly-symbol-keyed nested Dict (raw-Dict fast-path can arrive symbol-keyed).
+_g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
+
 # import. NOTE: `cells` MUST be a keyword arg (raw-Dict fast-path
 # caveat — see __slate_macroexpand); nested dicts may arrive symbol-keyed, hence `_g` dual-lookup.
 function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
     out = Dict{String,Any}()
     _MEMO_OK || return out
     root = _memo_dir()
-    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     _strs(x) = String[String(v) for v in (x isa AbstractVector ? x : Any[])]
     for (id, spec) in cells
         spec isa AbstractDict || continue
@@ -683,11 +685,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
         # captured inside run_capture). Log it loudly and return an error wire so the cell shows the
         # failure and the worker keeps running, instead of the exception vanishing into the gate.
         @error "slate eval: capture machinery threw" cell = cid exception = (e, catch_backtrace())
-        return (stdout = "", mime = Tuple{String,Vector{UInt8}}[], echarts = Any[], tables = Any[],
-                binds = NamedTuple[], value_repr = "",
-                exception = "internal capture error: " * sprint(showerror, e),
-                backtrace = nothing, duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
-                animations = Any[])
+        return merge(_interrupted_wire(), (; exception = "internal capture error: " * sprint(showerror, e)))
     end
     if r.exception !== nothing
         @warn "slate eval: cell errored" cell = cid error = first(split(String(r.exception), '\n'))
@@ -1057,16 +1055,20 @@ _peer_pull_timeout_ms() = round(Int, 1000 * something(tryparse(Float64, get(ENV,
 # a failure drops the forward so the next attempt relaunches clean. Env-overridable.
 _peer_pull_stall_ms()   = round(Int, 1000 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_PULL_STALL_S", "")), 20.0))
 
+# The CURVE `configure!` hook for a client-side blob pull: presents this worker's client keypair when
+# `server_key` is non-empty (the hub must have authorised it on the peer), or `nothing` for plaintext.
+_curve_client_configure(server_key) = isempty(server_key) ? nothing : function (sock)
+    cpub, csec = KaimonGate._load_or_create_client_keypair()
+    KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
+end
+
 "PULL the content-addressed blob `hash` DIRECTLY from a peer worker's blob server at `ip:port` into THIS
 worker's CAS (the direct-transport data leg). CURVE is used when `server_key` is non-empty — this worker
 presents its client keypair, which the hub must have authorised on the peer (`__slate_authorize_client`).
 Streams, sha-verifies, atomic-lands; an already-present blob returns 0. Returns (; bytes) or (; error)."
 function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::String; on_progress = nothing)
     _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
-    configure! = isempty(server_key) ? nothing : function (sock)
-        cpub, csec = KaimonGate._load_or_create_client_keypair()
-        KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
-    end
+    configure! = _curve_client_configure(server_key)
     try
         moved = pull_blob_into!(KaimonGate.ZMQ, ip, port, _memo_dir(), hash; configure! = configure!,
                                 chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(),
@@ -1231,10 +1233,7 @@ function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts
     isempty(fw.err) || return (; error = fw.err)
     ok = false
     try
-        configure! = isempty(server_key) ? nothing : function (sock)
-            cpub, csec = KaimonGate._load_or_create_client_keypair()
-            KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
-        end
+        configure! = _curve_client_configure(server_key)
         moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", fw.lport, _memo_dir(), hash; configure! = configure!,
                                 chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(),
                                 stall_ms = _peer_pull_stall_ms(), on_progress = on_progress)
@@ -2126,7 +2125,6 @@ function __slate_materialize_datadir(; files = Any[])
         isempty(base) && return (; materialized = 0, error = "no project dir")
         joinpath(base, "data")
     end
-    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     n = 0
     for f in (files isa AbstractVector ? files : Any[])
         f isa AbstractDict || continue

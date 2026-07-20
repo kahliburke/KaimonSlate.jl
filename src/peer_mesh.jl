@@ -240,6 +240,20 @@ function _region_blob_port(name)
     (r.transport === :direct && r.base_port > 0) ? r.base_port + 2 : 0
 end
 
+# Every CROSS-HOST ordered pair among `names` — (a, b) distinct, both regions defined and on DIFFERENT
+# hosts — as `(a, b, ra, rb)` with the resolved Region objects. The shared filter behind mesh
+# introduction, route planning, and the consent/diagnostic views (same-host pairs loop back — no mesh).
+function _cross_host_pairs(names)
+    out = Tuple[]
+    for a in names, b in names
+        a == b && continue
+        ra = region_get(a); rb = region_get(b)
+        (ra === nothing || rb === nothing || ra.host == rb.host) && continue
+        push!(out, (a, b, ra, rb))
+    end
+    return out
+end
+
 # ── Introduce a friend group ─────────────────────────────────────────────────────────────────────────
 # Install bidirectional grants across every CROSS-HOST ordered pair in `names` (§5.1: one introduction
 # covers both directions, either region may later be source or dest). Same-host pairs are skipped (they
@@ -254,10 +268,7 @@ function introduce_group!(names::AbstractVector; on_progress = nothing)
     # front so `on_progress(i, n, source, puller)` can report "i/n" as each grant installs — the per-pair SSH
     # keygen + authorized_keys/known_hosts edits are the slow part of a build, so this is the long operation.
     todo = Tuple{Any,Any}[]
-    for a in names, b in names
-        a == b && continue
-        ra = region_get(a); rb = region_get(b)
-        (ra === nothing || rb === nothing || ra.host == rb.host) && continue
+    for (a, b, ra, rb) in _cross_host_pairs(names)
         push!(todo, (a, b))
     end
     n = length(todo)
@@ -360,10 +371,7 @@ function peer_plan_data(names::AbstractVector; refresh::Bool = false)
     filter!(!isempty, hosts)
     refresh && for h in hosts; _peer_route_forget!(h); end
     routes = Any[]
-    for a in names, b in names
-        a == b && continue
-        ra = region_get(a); rb = region_get(b)
-        (ra === nothing || rb === nothing || ra.host == rb.host) && continue
+    for (a, b, ra, rb) in _cross_host_pairs(names)
         v = _peer_route_load(ra.host, rb.host)      # b pulls from a ⇒ keyed (a.host, b.host)
         bw = _peer_bw_get(ra.host, rb.host)         # measured peer rate (bytes/s) for this direction, 0 = unmeasured
         push!(routes, Dict("src" => String(a), "dst" => String(b),
@@ -393,10 +401,7 @@ function mesh_consent_status(names::AbstractVector)
         for g in st["grants"]; push!(installed, (String(g["source"]), String(g["puller"]))); end
     end
     pairs = Any[]
-    for a in defined, b in defined
-        a == b && continue
-        ra = region_get(a); rb = region_get(b)
-        ra.host == rb.host && continue                       # same host ⇒ no mesh
+    for (a, b, ra, rb) in _cross_host_pairs(defined)
         (a, b) in installed && continue                      # grant already present ⇒ connected
         # An unreachable host reads as "no grants" — we can't PROVE the pair is armed, so we surface it as
         # needing connection (with the `unreachable` warning) rather than silently skipping it: a false
@@ -423,10 +428,7 @@ function peer_plan(names::AbstractVector; refresh::Bool = false)
         println(io, "(route cache cleared for $(join(filter(!=("?"), hosts), ", ")) — next transfer re-probes)")
     end
     println(io, "── cached route verdicts (src → dst : kind @ addr, age) ──")
-    for a in names, b in names
-        a == b && continue
-        ra = region_get(a); rb = region_get(b)
-        (ra === nothing || rb === nothing || ra.host == rb.host) && continue
+    for (a, b, ra, rb) in _cross_host_pairs(names)
         v = _peer_route_load(ra.host, rb.host)      # b pulls from a ⇒ keyed (a.host, b.host)
         println(io, v === nothing ? "  $b ← $a : (not yet resolved)" :
             "  $b ← $a : $(v[1]) @ $(v[2])  ($(round(Int, time() - v[3]))s ago)")
@@ -443,10 +445,7 @@ function peer_plan(names::AbstractVector; refresh::Bool = false)
         println(io, "▸ $h"); println(io, ok ? rstrip(out) : "  (ssh failed)")
     end
     println(io, "── peer pull commands (per cross-host pair) ──")
-    for a in names, b in names
-        a == b && continue
-        ra = region_get(a); rb = region_get(b)
-        (ra === nothing || rb === nothing || ra.host == rb.host) && continue
+    for (a, b, ra, rb) in _cross_host_pairs(names)
         port = _region_blob_port(a); port = port > 0 ? port : 1
         aip = _region_peer_addr(a, ra.host); au = _ssh_user(ra.host)
         tgt = isempty(au) ? aip : "$au@$aip"

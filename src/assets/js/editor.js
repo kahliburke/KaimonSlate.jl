@@ -132,11 +132,10 @@
   // _showHintDoc). Fetches /api/help for the option's base name; methods carry a signature in
   // their label, so strip the arg list first. Returns a DOM node or null (no popup card).
   function docPreview(name) {
-    const base = name;
-    if (!base || !/^[A-Za-z_@]/.test(base)) return null;   // skip operators/keys with no doc
+    if (!name || !/^[A-Za-z_@]/.test(name)) return null;   // skip operators/keys with no doc
     return async () => {
       try {
-        const r = await (await fetch(_apipath('/api/help') + '?name=' + encodeURIComponent(base))).json();
+        const r = await (await fetch(_apipath('/api/help') + '?name=' + encodeURIComponent(name))).json();
         if (!r || !r.docHtml) return null;
         const dom = document.createElement('div');
         dom.className = 'docmd';
@@ -414,15 +413,20 @@
   //   cellId → { versions:[{seq,ts,label,source}] (newest-first), idx, loading, applying }
   // idx 0 == the live/committed source (no badge); larger idx == older snapshots.
   const _hu = {};
-  function _huBadge(cellId, ts, label, atOldest) {
-    const cell = document.getElementById('cell-' + cellId); if (!cell) return null;
-    const head = cell.querySelector('.cellhead'); if (!head) return null;
+  // Find the cell header's history badge, creating it (just after the cell-id span) if absent.
+  function _huEnsureBadge(head) {
     let b = head.querySelector('.histago');
     if (!b) {
       b = document.createElement('span'); b.className = 'histago';
       const cid = head.querySelector('.cid');
       cid ? cid.insertAdjacentElement('afterend', b) : head.appendChild(b);
     }
+    return b;
+  }
+  function _huBadge(cellId, ts, label, atOldest) {
+    const cell = document.getElementById('cell-' + cellId); if (!cell) return null;
+    const head = cell.querySelector('.cellhead'); if (!head) return null;
+    const b = _huEnsureBadge(head);
     const st = _hu[cellId]; if (st && st._nowTimer) { clearTimeout(st._nowTimer); st._nowTimer = null; }
     b.className = 'histago' + (atOldest ? ' oldest' : '');
     b.textContent = '↶ ' + (window._reltime ? window._reltime(ts) : '') + (atOldest ? ' · oldest' : '');
@@ -435,12 +439,7 @@
     const st = _hu[cellId]; if (st && st._nowTimer) { clearTimeout(st._nowTimer); st._nowTimer = null; }
     const cell = document.getElementById('cell-' + cellId); if (!cell) return;
     const head = cell.querySelector('.cellhead'); if (!head) return;
-    let b = head.querySelector('.histago');
-    if (!b) {
-      b = document.createElement('span'); b.className = 'histago';
-      const cid = head.querySelector('.cid');
-      cid ? cid.insertAdjacentElement('afterend', b) : head.appendChild(b);
-    }
+    const b = _huEnsureBadge(head);
     b.className = 'histago now pulse';
     b.textContent = '⭢ now · current';
     b.title = 'back to the current version';
