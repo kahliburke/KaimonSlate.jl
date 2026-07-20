@@ -1727,6 +1727,48 @@ function rewrite_site_index!(dir::AbstractString)
     return nothing
 end
 
+# CSS for chrome INJECTED into already-built pages (references the page's own theme vars; fixed width).
+# Kept close to the baked rules in `_export_css`.
+const _CHROME_INJECT_CSS =
+    "<style>.exp-topnav{margin:-8px 0 10px;font-size:.85rem;text-align:left}" *
+    ".exp-topnav a,.exp-ft a{color:var(--dim);text-decoration:none;border-bottom:1px solid transparent}" *
+    ".exp-topnav a:hover,.exp-ft a:hover{color:var(--accent);border-bottom-color:var(--accent)}" *
+    ".exp-ft{max-width:900px;margin:44px auto 0;padding:18px 24px 44px;border-top:1px solid var(--border);" *
+    "display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:.8rem;color:var(--dim)}" *
+    ".exp-ft-credit{margin-left:auto}</style>"
+
+# Inject the "← <site>" back-nav + "Published by Kaimon Slate" footer into an EXISTING doc sub-page's
+# HTML WITHOUT re-running its notebook — so a chrome change reaches closed-notebook pages too. Idempotent
+# (a page already carrying the chrome — e.g. freshly re-exported — is returned unchanged).
+function _inject_doc_chrome(html::AbstractString, site_title::AbstractString)
+    (occursin("exp-topnav", html) || occursin("class=\"exp-ft\"", html)) && return html
+    occursin("<article class=\"export\">", html) || return html   # only Slate export pages
+    label = _esc(isempty(strip(site_title)) ? "Home" : site_title)
+    nav = "<nav class=\"exp-topnav\"><a href=\"../\">← $label</a></nav>"
+    ft = "<footer class=\"exp-ft\"><a class=\"exp-ft-home\" href=\"../\">← $label</a>" *
+         "<span class=\"exp-ft-credit\">Published by <a href=\"$_SLATE_CREDIT_URL\" target=\"_blank\" rel=\"noopener\">Kaimon Slate</a></span></footer>"
+    h = replace(html, "<article class=\"export\">" => "<article class=\"export\">" * nav; count = 1)
+    h = replace(h, "</article>" => "</article>" * ft; count = 1)
+    h = replace(h, "</head>" => _CHROME_INJECT_CSS * "</head>"; count = 1)
+    return h
+end
+
+# Refresh a site's chrome in place: re-render the index, and inject the back-nav + footer into every doc
+# SUB-page (`<slug>/index.html`) that lacks it — delivering a chrome change to the whole site without
+# re-exporting notebooks. Freshly re-exported pages already carry the chrome, so they're skipped.
+function refresh_site_chrome!(dir::AbstractString)
+    isdir(dir) || return nothing
+    rewrite_site_index!(dir)
+    title = String(get(_read_site_manifest(dir), "title", ""))
+    for sub in readdir(dir; join = true)
+        isdir(sub) || continue
+        p = joinpath(sub, "index.html"); isfile(p) || continue
+        html = read(p, String); new = _inject_doc_chrome(html, title)
+        new === html || write(p, new)
+    end
+    return nothing
+end
+
 """
     build_site!(dir, nb; site_url="", slug="", bundle=false, kwargs...) -> NamedTuple
 
