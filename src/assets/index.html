@@ -878,7 +878,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       return '<div class="pdtile" onclick="pdEditSite(\''+esc(s.name)+'\')">'+
         '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+dirty+
           '<span style="margin-left:auto;display:flex;gap:6px" onclick="event.stopPropagation()">'+
-          (s.hasLocal?'<button class="pdbtn pdmini" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy &amp; open it — no deploy">⤒ Stage</button>':'')+
+          (s.hasLocal?'<button class="pdbtn pdmini" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy — no deploy, no tab">⤒ Stage</button>':'')+
           '<button class="pdbtn pdmini primary" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button></span></div>'+
         '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
         '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+'</div></div>';
@@ -1037,7 +1037,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       (s
         ? ('<div class="pdrow" style="margin-top:14px;gap:8px;align-items:center;flex-wrap:wrap">'+
              '<button class="pdbtn primary" onclick="pdSaveSite(this,\''+esc(s.name)+'\')" title="Store this site’s settings — no deploy">Save settings</button>'+
-             (s.hasLocal?'<button class="pdbtn" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy &amp; open it — no deploy">⤒ Stage</button>':'')+
+             (s.hasLocal?'<button class="pdbtn" onclick="pdStageSite(\''+esc(s.name)+'\',this)" title="Rebuild the local deploy copy — no deploy, no tab">⤒ Stage</button>':'')+
+             (s.hasLocal&&s.previewUrl?'<button class="pdbtn" onclick="window.open(\''+esc(s.previewUrl)+'\',\'_blank\',\'noopener\')" title="open the staged local copy in a new tab">View ↗</button>':'')+
              '<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Copy the staged build to all destinations">▶ Sync</button>'+
            '</div>'+
            '<div class="pddim" style="font-size:.72rem;margin-top:5px;line-height:1.5"><b style="color:#9aa3c0">Save</b> stores settings · <b style="color:#9aa3c0">Stage</b> builds the local deploy copy (no deploy) · <b style="color:#9aa3c0">Sync</b> copies that to the destinations.</div>'+
@@ -1073,7 +1074,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var done=btn?pdBusy(btn):function(){};
     fetch('/api/publish/site-stage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:name})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(d){done();loadPubDash();if(d.url)window.open(d.url,'_blank','noopener');})
+      .then(function(d){done();loadPubDash();})   // stage quietly — no auto-open; use "View ↗" to see it
       .catch(function(e){done();alertDark('Stage failed: '+e);});
   }
   window.pdStageSite=pdStageSite;
@@ -1588,7 +1589,16 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // Opened from a notebook's "🗂 Publishing manager…" (new tab → /#publishing): auto-open the manager.
   if(location.hash==='#publishing'){ try{history.replaceState(null,'',location.pathname);}catch(e){} openPubDash(); }
   pubdashBg.addEventListener('mousedown',function(e){if(e.target===pubdashBg)closePubDash();});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&pubdashBg.classList.contains('show'))closePubDash();});
+  document.addEventListener('keydown',function(e){if(e.key!=='Escape')return;
+    // The deploy/results modal takes Escape first (but not mid-run — its ✕ is hidden while deploying),
+    // so Escape closes the results without also closing the Publishing dashboard stacked behind it.
+    var sync=document.getElementById('pdsyncbg');
+    if(sync&&sync.classList.contains('show')){
+      if(document.getElementById('pdsyncx').style.visibility!=='hidden')pdCloseSync();
+      return;
+    }
+    if(pubdashBg.classList.contains('show'))closePubDash();
+  });
 
   // Paint the server-inlined ledger (sites+targets+local-build list, from the local cache — no network)
   // in the first frame, so the async /api/publish/ledger fetch refreshes in place with identical output
