@@ -434,7 +434,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 </div></div>
 <div class="modal-bg" id="pdarrangebg"><div class="modal pubdash" style="max-width:660px;max-height:86vh">
   <div class="pdhead"><strong>Arrange documents</strong><span class="pdsub" id="pdarrsub"></span><button class="pdx" onclick="closeArrange()" title="Close">✕</button></div>
-  <div class="pddim" style="font-size:.76rem;margin-bottom:6px">Drag to reorder within a section, or between sections. Add sections and rename them. Apply re-pushes just the index — the pages themselves aren't rebuilt.</div>
+  <div class="pddim" id="pdarrdesc" style="font-size:.76rem;margin-bottom:6px">Drag to reorder within a section, or between sections. Add sections and rename them.</div>
   <div class="pdbody" style="flex-direction:column;overflow:auto"><div id="pdarrbody" style="width:100%"></div></div>
   <div class="row"><button onclick="pdAddSection()">+ Section</button><button onclick="closeArrange()">Cancel</button><button class="primary" id="pdarrapply" onclick="applyArrange()">Apply &amp; re-push</button></div>
 </div></div>
@@ -863,9 +863,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var ts=_pdView.targets||[], sites=_pdView.sites||[];
     // Sites: the logical unit you sync. Each has a name, destination targets, and member docs.
     var siteTiles=sites.map(function(s){var nd=(s.docs||[]).length;
+      var dirty=s.dirty?'<span class="pdchip warn" style="margin-left:8px" title="the local build changed since the last deploy">● unsynced</span>':'';
       return '<div class="pdtile" onclick="pdEditSite(\''+esc(s.name)+'\')">'+
-        '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+
-          '<button class="pdbtn pdmini primary" style="margin-left:auto" onclick="event.stopPropagation();pdSyncSite(\''+esc(s.name)+'\',this)" title="Deploy to all destinations">▶ Sync</button></div>'+
+        '<div class="pdrow"><span class="pl">🌐 '+esc(s.name)+'</span>'+dirty+
+          '<span style="margin-left:auto;display:flex;gap:6px" onclick="event.stopPropagation()">'+
+          (s.hasLocal?'<button class="pdbtn pdmini" onclick="pdPreviewSite(\''+esc(s.name)+'\',this)" title="Build the local mirror &amp; open it — no deploy">👁 Preview</button>':'')+
+          '<button class="pdbtn pdmini primary" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Deploy the build to all destinations">▶ Sync</button></span></div>'+
         '<div class="pdrow" style="margin-top:6px;flex-wrap:wrap;gap:4px">'+pdSiteChips(s)+'</div>'+
         '<div class="pddim" style="margin-top:6px">'+nd+' doc'+(nd===1?'':'s')+'</div></div>';
     }).join('');
@@ -968,7 +971,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<input id="pdsitetitle" class="pdinp" placeholder="'+(s?esc(s.name):'e.g. “Stat Mech Notebooks”')+'" value="'+esc((s&&s.title)||'')+'"/>'+
       '<div class="pdsec">Deploys to</div>'+picks+
       docMgmt+
-      '<div class="pdrow" style="margin-top:14px;gap:8px"><button class="pdbtn primary" onclick="pdSaveSite(this,'+(s?('\''+esc(s.name)+'\''):'\'\'')+')">'+(s?'Save':'Create')+'</button></div>'+
+      (s
+        ? ('<div class="pdrow" style="margin-top:14px;gap:8px;align-items:center;flex-wrap:wrap">'+
+             '<button class="pdbtn primary" onclick="pdSaveSite(this,\''+esc(s.name)+'\')" title="Store this site’s settings — no deploy">Save settings</button>'+
+             (s.hasLocal?'<button class="pdbtn" onclick="pdPreviewSite(\''+esc(s.name)+'\',this)" title="Build the local mirror &amp; open it — no deploy">👁 Preview</button>':'')+
+             '<button class="pdbtn" onclick="pdSyncSite(\''+esc(s.name)+'\',this)" title="Deploy the build to all destinations">▶ Sync</button>'+
+           '</div>'+
+           '<div class="pddim" style="font-size:.72rem;margin-top:5px;line-height:1.5"><b style="color:#9aa3c0">Save</b> stores settings · <b style="color:#9aa3c0">Preview</b> builds the local mirror (no deploy) · <b style="color:#9aa3c0">Sync</b> deploys to destinations.</div>'+
+           (s.dirty?'<div class="pdchip warn" style="display:inline-block;margin-top:8px">● Local changes aren’t deployed yet — Sync to push them.</div>':''))
+        : '<div class="pdrow" style="margin-top:14px;gap:8px"><button class="pdbtn primary" onclick="pdSaveSite(this,\'\')">Create</button></div>')+
       '<div id="pdsitelog" class="pdsync-log" style="display:none"></div>'+
       (s?'<div class="pdrow" style="margin-top:22px;padding-top:10px;border-top:1px solid #232739">'+
          '<button class="pdbtn pdmini danger" style="margin-left:0" onclick="pdDelSite(this,\''+esc(s.name)+'\')">Delete site…</button></div>':'')+
@@ -993,6 +1004,16 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       .then(function(v){_pdView=v;pdBack();}).catch(function(e){alertDark('Save site failed: '+e);}).finally(done);
   }
   window.pdSaveSite=pdSaveSite;
+  // Preview: build the LOCAL mirror only (re-export open members) and open it — no deploy. The site
+  // stays "unsynced" until an actual Sync, since Preview never touches a destination.
+  function pdPreviewSite(name,btn){
+    var done=btn?pdBusy(btn):function(){};
+    fetch('/api/publish/site-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:name})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(d){done();loadPubDash();if(d.url)window.open(d.url,'_blank','noopener');})
+      .catch(function(e){done();alertDark('Preview failed: '+e);});
+  }
+  window.pdPreviewSite=pdPreviewSite;
   // Remove a document from a site's local build (Sync afterward to update the destinations).
   function pdRemoveSiteDoc(btn,site,slug){
     confirmDark('Remove this document from “'+site+'”?\nIt\'s deleted from the local build — hit ▶ Sync to update the destinations.','Remove','danger').then(function(ok){if(!ok)return;
@@ -1418,6 +1439,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function openArrange(repo,tname){ _arrMode='repo'; _arrTarget=repo; _openArrange('/api/publish/site-docs?repo='+encodeURIComponent(repo), '— '+tname+' · '+repo); }
   function _openArrange(url,sub){
     document.getElementById('pdarrsub').textContent=sub;
+    // Save (site) vs deploy (repo): arranging a SITE only rewrites its local build — Sync deploys it
+    // later; arranging a published REPO re-pushes the index directly. Label + copy make that explicit.
+    var site=(_arrMode==='site');
+    var ab=document.getElementById('pdarrapply'); if(ab)ab.textContent=site?'Save order':'Apply & re-push';
+    var dsc=document.getElementById('pdarrdesc');
+    if(dsc)dsc.textContent=site
+      ? 'Drag to reorder within a section, or between sections. Add and rename sections. Save order stores the arrangement in the local build — Sync afterward to deploy it.'
+      : 'Drag to reorder within a section, or between sections. Add and rename sections. Apply re-pushes just the index to the published repo (the pages themselves aren’t rebuilt).';
     document.getElementById('pdarrbody').innerHTML='<div class="pddim">Loading…</div>';
     document.getElementById('pdarrangebg').classList.add('show');
     fetch(url,{cache:'no-store'})
@@ -1470,7 +1499,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     if(!ordering.length){alertDark('Nothing to arrange.');return;}
     var btn=document.getElementById('pdarrapply');if(btn)btn.disabled=true;
     var site=(_arrMode==='site');
-    showLoading(site?'Updating the site index…':'Re-pushing the site index…');
+    showLoading(site?'Saving the order…':'Re-pushing the site index…');
     var url=site?'/api/publish/site-arrange':'/api/publish/site-reorder';
     var payload=site?{site:_arrTarget,ordering:ordering}:{repo:_arrTarget,ordering:ordering};
     fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})

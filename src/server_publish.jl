@@ -123,14 +123,64 @@ function _doc_view(d)
 end
 
 _target_view(t) = Dict{String,Any}("name" => t.name, "kind" => t.kind, "config" => t.config)
+# ── Local mirror ⇄ deployed state ────────────────────────────────────────────────────────────────
+# A tiny stamp records the last successful Sync, so the manager can distinguish the three phases:
+#   Save     — persist settings/membership/arrangement (rewrites the local build; no deploy)
+#   Preview  — build the local mirror only (re-export open members; still no deploy)
+#   Sync     — deploy the build to destinations (writes the stamp)
+# A site is "dirty" (unsynced) when its build changed since that stamp — the cue to re-Sync.
+_sync_stamp_file(dir) = joinpath(dir, ".slate-synced.json")
+function _write_sync_stamp!(dir, targets, results)
+    any(r -> r.ok, results) || return
+    ok = [String(n) for (n, r) in zip(targets, results) if r.ok]
+    try; write(_sync_stamp_file(dir), JSON.json(Dict("at" => round(Int, time()), "targets" => ok))); catch; end
+end
+# (haslocal, synced-epoch, modified-epoch) — `modified` is the manifest / front-page index, which every
+# add/remove/arrange rewrites; `synced` is the stamp's mtime. modified > synced ⇒ undeployed changes.
+function _site_build_times(dir)
+    (dir === nothing || !isdir(dir)) && return (haslocal = false, synced = 0, modt = 0)
+    stampf = _sync_stamp_file(dir)
+    synced = isfile(stampf) ? round(Int, mtime(stampf)) : 0
+    modt = 0
+    for f in (_SITE_MANIFEST, "index.html")
+        p = joinpath(dir, f); isfile(p) && (modt = max(modt, round(Int, mtime(p))))
+    end
+    return (haslocal = true, synced = synced, modt = modt)
+end
+
 function _site_view(s)
     fp = site_frontpage(s.name)
+    dir = _site_dir(s.name)
+    bt = _site_build_times(dir)
+    hasTargets = !isempty(s.targets)
     return Dict{String,Any}("name" => s.name, "title" => s.title, "targets" => copy(s.targets),
         "paths" => copy(s.paths),               # target → subpath within it ("" = root)
         "docs" => site_docs(s.name),            # docs/order/sections from the local build
         # Front page (a `home`-tagged notebook): presence + WHICH notebook it is — title and
         # source path recorded at build time, so the manager can name it and link back to it.
-        "hasHome" => fp.home, "homeTitle" => fp.homeTitle, "homePath" => fp.homePath)
+        "hasHome" => fp.home, "homeTitle" => fp.homeTitle, "homePath" => fp.homePath,
+        # Local-mirror ⇄ deploy state for the Save/Preview/Sync UI. `dirty` flags DRIFT after a known
+        # deploy only (needs a stamp baseline, `synced > 0`), so legacy/never-synced sites don't all
+        # light up as "unsynced" — the cue appears once you've Synced and then changed the build.
+        "hasLocal" => bt.haslocal,
+        "previewUrl" => bt.haslocal ? ("/sites/" * _slugify(s.name) * "/") : "",
+        "lastSynced" => bt.synced,
+        "dirty" => hasTargets && bt.haslocal && bt.synced > 0 && bt.modt > bt.synced)
+end
+
+"""
+    preview_site!(name; hub=nothing) -> {ok,url,buildDir}
+
+Build the site's LOCAL mirror only: re-export any open members into the canonical build (the same
+refresh Sync does first), but deploy NOWHERE — so the result can be reviewed at `/sites/<slug>/`
+before it's pushed. Leaves the site "dirty" (the stamp is untouched), since nothing was deployed.
+"""
+function preview_site!(name::AbstractString; hub = nothing)
+    dir = _site_dir(String(name))
+    (dir === nothing || !isdir(dir)) &&
+        error("site '$name' has no local build yet — publish a notebook to it first")
+    hub === nothing || _resync_live_members!(dir, String(name), hub)
+    return Dict{String,Any}("ok" => true, "url" => "/sites/" * _slugify(String(name)) * "/", "buildDir" => dir)
 end
 
 # The authenticated GitHub login (for owner auto-fill so a new github-pages target only needs a repo
@@ -546,6 +596,7 @@ function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
             on_event === nothing || on_event(i, :done, r)
         end
     end
+    _write_sync_stamp!(dir, tnames, results)   # record the deploy so the manager can flag later drift
     return _publish_summary(tnames, results)
 end
 
@@ -835,6 +886,13 @@ function _register_publish_routes!(router, h::Hub)
         site = get(HTTP.queryparams(HTTP.URI(req.target)), "site", "")
         isempty(site) && return HTTP.Response(400, "no site")
         _json(sync_site_plan(String(site), h))
+    end)
+    # Preview: build the site's LOCAL mirror only (re-export open members), deploy nowhere. Returns the
+    # local `/sites/<slug>/` URL to open. Distinct from Sync — this never touches a destination.
+    HTTP.register!(router, "POST", "/api/publish/site-preview", req -> begin
+        name = strip(String(get(_body(req), "site", "")))
+        isempty(name) && return HTTP.Response(400, "missing site")
+        try; _json(preview_site!(String(name); hub = h)); catch e; HTTP.Response(422, sprint(showerror, e)); end
     end)
     # This notebook's document info (scoped).
     HTTP.register!(router, "GET", "/api/{id}/publish/doc",
