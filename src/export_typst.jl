@@ -1150,8 +1150,9 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                 end
             else
                 # Match the browser: `show_source` is the global toggle; also hide source for the
-                # per-cell 🙈 `hidecode` flag and for `@bind` cells (which show their widget, not code).
-                if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))
+                # per-cell 🙈 `hidecode` flag and for widget cells — `@bind` and `@web` — which show
+                # their widget, not code.
+                if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))
                     write(joinpath(dir, base * ".jl"), c.source)
                     print(io, "#codeblock(read(\"", base, ".jl\"))\n")
                 end
@@ -1182,7 +1183,7 @@ function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, chartt
         write(joinpath(dir, base * ".md"), md)
         print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
     else
-        if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !isempty(strip(c.source))
+        if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))
             write(joinpath(dir, base * ".jl"), c.source)
             print(io, "#codeblock(read(\"", base, ".jl\"))\n")
         end
