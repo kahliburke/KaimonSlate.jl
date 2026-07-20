@@ -1037,18 +1037,41 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       var row=sp.closest('.pdsyncrow'); if(row){var lbl=row.querySelector('[id^=syncst-]'); if(lbl&&/waiting|deploying/.test(lbl.textContent))lbl.textContent='not started';}
     });}
   // Render the authoritative per-target result cards from the `done` summary.
+  // Turn a recognizable deploy failure into a one-line, actionable hint shown ABOVE the raw log —
+  // so a cryptic CLI error (e.g. a bare "Forbidden") comes with a "here's what to do" instead.
+  function _syncHint(r){
+    var s=String((r.status||'')+' '+(r.log||''));
+    var msg='';
+    if(/\b403\b|Forbidden/i.test(s))
+      msg='The host returned 403 Forbidden. If publishing worked before, the token and quota are usually fine — this is often a transient host-side error, so try Sync again. If it keeps failing, check that the token still has deploy access to this site/project.';
+    else if(/\b401\b|Unauthorized|invalid[^a-z]{0,4}token|Bad credentials/i.test(s))
+      msg='Authentication was rejected — the access token is likely expired, revoked, or wrong. Regenerate it and update this target’s secret (Publishing → the target → secret).';
+    else if(/\b402\b|Payment Required|quota|bandwidth|exceeded|over.?limit/i.test(s))
+      msg='Looks like a plan/usage limit on the host — check your account’s bandwidth/build usage.';
+    else if(/ENOTFOUND|ETIMEDOUT|ECONNREFUSED|ENETUNREACH|getaddrinfo|network/i.test(s))
+      msg='A network problem reaching the host — check your connection and retry.';
+    else if(/not found|no such|404/i.test(s))
+      msg='The destination wasn’t found — the site/project id or repo in this target’s config may be stale.';
+    return msg?('<div class="pdsyncdetail" style="color:#e0b48a;border-left-color:#5a4630">'+esc(msg)+'</div>'):'';
+  }
   function _syncResults(site,d){
     var res=d.results||[]; var bad=res.filter(function(r){return !r.ok;}).length;
     var rows=res.map(function(r){
       var t=pdTargetByName(r.target)||{kind:''};
-      var live=(r.url&&pdIsLoopback(r.url))?('<a class="pdlink" href="'+esc(r.url)+'" target="_blank" rel="noopener" title="tunnel-only — needs the SSH tunnel up">localhost ↗ (tunnel)</a>')
-             :(r.url?('<a class="pdlink" href="'+esc(r.url)+'" target="_blank" rel="noopener">open ↗</a>'):'');
+      // On SUCCESS the URL is this deploy → "open ↗". On FAILURE the URL is the PREVIOUS (stale)
+      // deploy, not this result — label it clearly so it never reads as "it worked, click here".
+      var live=!r.url ? ''
+             : r.ok ? (pdIsLoopback(r.url)
+                 ? ('<a class="pdlink" href="'+esc(r.url)+'" target="_blank" rel="noopener" title="tunnel-only — needs the SSH tunnel up">localhost ↗ (tunnel)</a>')
+                 : ('<a class="pdlink" href="'+esc(r.url)+'" target="_blank" rel="noopener">open ↗</a>'))
+             : ('<a class="pdlink" style="color:#6a7090" href="'+esc(r.url)+'" target="_blank" rel="noopener" title="the previously-published site — NOT this failed deploy">last live ↗</a>');
+      var hint=(!r.ok)?_syncHint(r):'';
       var detail=(!r.ok&&r.log)?('<div class="pdsyncdetail">'+esc(r.log)+'</div>'):'';
       return '<div class="pdsyncrow'+(r.ok?'':' err')+'"><div class="r1">'+
         '<span class="st '+(r.ok?'ok':'err')+'">'+(r.ok?'✓':'✗')+'</span>'+
         '<span class="pl">'+esc(r.target)+'</span>'+(t.kind?'<span class="pdchip">'+esc(t.kind)+'</span>':'')+
         '<span class="pddim" style="margin-left:6px">'+esc(r.ok?(r.status||'deployed'):('failed — '+(r.status||'error')))+'</span>'+
-        '<span style="margin-left:auto">'+live+'</span></div>'+detail+'</div>';
+        '<span style="margin-left:auto">'+live+'</span></div>'+hint+detail+'</div>';
     }).join('');
     document.getElementById('pdsyncrows').innerHTML=rows;
     if(bad===0)_syncBanner('ok','✓ <b>Deployed “'+esc(site)+'” to '+res.length+' destination'+(res.length===1?'':'s')+'.</b> Every target is checked in and live.');
@@ -1134,16 +1157,47 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       .then(pdRenderPlan)
       .catch(function(e){_syncBanner('err','✗ Could not plan the sync.<div class="pdsyncdetail">'+esc(String(e))+'</div>');_syncRunning(false);});
   }
+  // Per-doc provenance line: where the source .jl lives (or that it isn't recorded) and where/when the
+  // built HTML was produced — so "rebuild vs keep" is legible and you can see what actually ships.
+  function _planProv(m){
+    var mono='font-family:ui-monospace,Menlo,monospace;font-size:.72rem;color:#b8c0d8';
+    var src = m.source
+      ? ('source <span style="'+mono+'">'+esc(m.source)+'</span>'+(m.sourceExists?'':' <span style="color:#e0a33a">(file missing)</span>'))
+      : '<span style="color:#e0a33a">source not recorded</span> — Slate can’t re-export this one; open its notebook &amp; Publish into this site once to link it';
+    var bt = m.built
+      ? ('built '+(m.builtAt?relTime(m.builtAt):'')+' · <span style="'+mono+'">'+esc(m.buildPath)+'</span>')
+      : '<span style="color:#e0a33a">not built yet</span>';
+    return '<div class="pdsyncdetail" style="color:#8a90a8;border-left-color:#2a2e40;margin-top:4px">'+src+'<br>'+bt+'</div>';
+  }
   function pdRenderPlan(p){
     if(p&&p.error){_syncBanner('err','✗ '+esc(p.error));_syncRunning(false);return;}
     var members=(p&&p.members)||[], targets=(p&&p.targets)||[];
-    var reb=members.filter(function(m){return m.action==='rebuild';}), keep=members.filter(function(m){return m.action!=='rebuild';});
-    var row=function(m,ic){return '<div class="pdsyncrow"><div class="r1"><span class="st">'+ic+'</span><span class="pl">'+esc(m.title)+(m.home?' <span class="pdchip">front page</span>':'')+'</span> <span class="pddim" style="margin-left:6px">'+esc(m.reason)+'</span></div></div>';};
-    var html='<div class="pdsyncsec">↻ Re-export from current source ('+reb.length+')</div>'+(reb.map(function(m){return row(m,'↻');}).join('')||'<div class="pddim" style="padding:2px 10px">none open</div>');
-    html+='<div class="pdsyncsec" style="margin-top:8px">• Keep last build ('+keep.length+')</div>'+(keep.map(function(m){return row(m,'•');}).join('')||'<div class="pddim" style="padding:2px 10px">none</div>');
-    html+='<div class="pdsyncsec" style="margin-top:8px">☁ Deploy the whole build to</div><div class="pddim" style="padding:2px 10px">'+(targets.map(esc).join(', ')||'no destinations')+'</div>';
+    var reb=members.filter(function(m){return m.action==='rebuild';});
+    var keep=members.filter(function(m){return m.action==='keep';});
+    var unb=members.filter(function(m){return m.action==='unbuilt';});
+    var row=function(m,ic){return '<div class="pdsyncrow"><div class="r1"><span class="st">'+ic+'</span>'+
+      '<span class="pl">'+esc(m.title)+(m.home?' <span class="pdchip">front page</span>':'')+'</span>'+
+      '<span class="pddim" style="margin-left:6px">'+esc(m.reason)+'</span></div>'+_planProv(m)+'</div>';};
+    // A one-line mental model up top — the question the plan kept failing to answer.
+    var html='<div class="pddim" style="padding:0 10px 9px;line-height:1.55">Sync re-exports any notebook that’s '+
+      '<b style="color:#cdd3e6">open right now</b> (fresh from its live state), <b style="color:#cdd3e6">keeps the last build</b> '+
+      'for the rest, then deploys the whole site folder to its destinations. Re-open a notebook first only if you want its '+
+      'latest source changes in this deploy.</div>';
+    html+='<div class="pdsyncsec">↻ Re-export from open notebooks ('+reb.length+')</div>'+
+      (reb.map(function(m){return row(m,'↻');}).join('')||'<div class="pddim" style="padding:2px 10px">none open — nothing gets rebuilt this run</div>');
+    html+='<div class="pdsyncsec" style="margin-top:8px">• Keep the last build ('+keep.length+')</div>'+
+      (keep.map(function(m){return row(m,'•');}).join('')||'<div class="pddim" style="padding:2px 10px">none</div>');
+    if(unb.length) html+='<div class="pdsyncsec" style="margin-top:8px;color:#e0a33a">⚠ Not built yet — will be skipped ('+unb.length+')</div>'+
+      unb.map(function(m){return row(m,'⚠');}).join('');
+    // Destinations, with kind + live URL, and where the build folder lives on disk.
+    var dests=targets.map(function(n){var t=pdTargetByName(n)||{kind:'',config:{}};var u=(typeof _pubSiteUrl==='function')?_pubSiteUrl(t):'';
+      return '<div class="pdrow pdsub2" style="padding:2px 10px"><span class="pl">'+esc(n)+'</span>'+(t.kind?'<span class="pdchip">'+esc(t.kind)+'</span>':'')+
+        (u?'<a class="pdlink" style="margin-left:auto" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+' ↗</a>':'<span class="pddim" style="margin-left:auto">no public URL</span>')+'</div>';
+    }).join('')||'<div class="pddim" style="padding:2px 10px">no destinations — add one to deploy</div>';
+    html+='<div class="pdsyncsec" style="margin-top:8px">☁ Deploy the whole site to</div>'+dests;
+    if(p&&p.buildDir) html+='<div class="pddim" style="padding:6px 10px 0;font-size:.72rem">Build folder: <span style="font-family:ui-monospace,Menlo,monospace;color:#8a90a8">'+esc(p.buildDir)+'</span></div>';
     document.getElementById('pdsyncrows').innerHTML=html;
-    _syncBanner('','Review the plan, then ▶ Sync now.');
+    _syncBanner('','Review the plan, then ▶ Sync now — nothing deploys until you do.');
     _syncRunning(false);
     var done=document.getElementById('pdsyncdone'); done.disabled=false; done.textContent='Cancel';
     var go=document.getElementById('pdsyncgo'); go.style.display=''; go.disabled=(targets.length===0);

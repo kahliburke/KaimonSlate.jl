@@ -484,13 +484,28 @@ function sync_site_plan(name::AbstractString, hub)
         title = String(get(e.entry, "title", isempty(e.slug) ? "front page" : e.slug))
         matched = any(nb -> _doc_entry_is(nb, e.entry), nbs)
         hasid = !isempty(strip(String(get(e.entry, "id", ""))))
-        push!(members, Dict{String,Any}("title" => title, "slug" => e.slug, "home" => e.home,
-            "action" => matched ? "rebuild" : "keep",
-            "reason" => matched ? "open — re-export from current source" :
-                        hasid  ? "notebook not open — keep last build" :
-                                 "not linked yet — publish it once to enable rebuild"))
+        # Provenance the UI surfaces: where the source .jl is (older builds never recorded it), and
+        # where/when this doc's HTML was built. `source` is the abspath stamped at build time; empty
+        # for pre-source-tracking builds — which is exactly why they can't be re-exported.
+        src = String(get(e.entry, "source", get(e.entry, "path", "")))
+        srcok = !isempty(src) && isfile(src)
+        bfile = e.home ? joinpath(dir, "index.html") : joinpath(dir, e.slug, "index.html")
+        built = isfile(bfile)
+        builtat = built ? round(Int, mtime(bfile)) : 0
+        bdir = e.home ? dir : joinpath(dir, e.slug)
+        action = matched ? "rebuild" : (built ? "keep" : "unbuilt")
+        reason = matched ? "Notebook is open — re-export from its current live state." :
+                 !built  ? "No build on disk yet — it will be skipped. Publish it into this site first." :
+                 hasid   ? "Not open — deploy the last build. Open the notebook before syncing to refresh it from source." :
+                           "Not open, and no source is recorded — deploy the existing build as-is. Open its notebook and Publish into this site once to link the source (then Sync can re-export it)."
+        push!(members, Dict{String,Any}(
+            "title" => title, "slug" => e.slug, "home" => e.home,
+            "action" => action, "reason" => reason,
+            "open" => matched, "linked" => hasid,
+            "source" => src, "sourceExists" => srcok,
+            "built" => built, "builtAt" => builtat, "buildPath" => bdir))
     end
-    return Dict{String,Any}("site" => name, "members" => members, "targets" => targets)
+    return Dict{String,Any}("site" => name, "members" => members, "targets" => targets, "buildDir" => dir)
 end
 
 """
