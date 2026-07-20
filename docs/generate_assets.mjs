@@ -181,9 +181,31 @@ const PUB_LEDGER = {
     { name: 'zenodo', kind: 'zenodo', config: { secretRef: 'zenodo-token' } },
   ],
 }
+// This notebook's per-site membership (/api/publish/doc + /api/publish/sites) for the Publish panel
+// (#pubbg) — a dedicated panel now, not the Export dialog. Left column = sites this notebook can join;
+// right column = where it's already published.
+const PUB_SITES = {
+  slug: 'gram-schmidt',
+  sites: [
+    { name: 'portfolio', title: "Ada's Notebooks", targets: ['pages', 'cloudflare'], member: true,
+      isHome: false, hasHome: true, homeTitle: "Ada's Notebooks", url: 'https://ada.github.io/notebooks/' },
+    { name: 'teaching', title: 'Numerical Methods', targets: ['pages'], member: false,
+      isHome: false, hasHome: false, homeTitle: '' },
+  ],
+}
+const PUB_DOC = {
+  title: 'Gram–Schmidt, visualized', slug: 'gram-schmidt',
+  events: [
+    { target: 'pages', status: 'ok', ts: '2026-07-02T10:15:00', url: 'https://ada.github.io/notebooks/gram-schmidt/' },
+    { target: 'cloudflare', status: 'ok', ts: '2026-06-20T09:40:00', url: 'https://ada-notebooks.pages.dev/gram-schmidt/' },
+  ],
+}
 async function mockPublish(page) {
-  await page.route('**/api/publish/ledger*', (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify(PUB_LEDGER) }))
-  await page.route('**/api/sites', (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ sites: ['portfolio'] }) }))
+  const J = (o) => ({ contentType: 'application/json', body: JSON.stringify(o) })
+  await page.route('**/publish/ledger*', (r) => r.fulfill(J(PUB_LEDGER)))   // manager dashboard + panel targets
+  await page.route('**/publish/sites*', (r) => r.fulfill(J(PUB_SITES)))     // Publish panel: site membership
+  await page.route('**/publish/doc*', (r) => r.fulfill(J(PUB_DOC)))         // Publish panel: this doc's history
+  await page.route('**/api/sites', (r) => r.fulfill(J({ sites: ['portfolio'] })))   // front-page Sites strip
 }
 
 // ── regions / remotes (synthetic — no real hosts spawn) ───────────────────────────────────────
@@ -576,6 +598,20 @@ async function main() {
     if (process.env.SLATE_REGION_ONLY === '1') { await regionShots(browser); log('done (region-only) — assets in', OUT); return }
     // SLATE_HERO_ONLY=1 captures just the README hero.
     if (process.env.SLATE_HERO_ONLY === '1') { await heroShot(browser); log('done (hero-only) — assets in', OUT); return }
+    // SLATE_PUBLISH_ONLY=1 captures just the Publish panel (fast iteration on that capture).
+    if (process.env.SLATE_PUBLISH_ONLY === '1') {
+      const p = await (await newContext(browser)).newPage()
+      await mockPublish(p)
+      await p.goto(`${BASE}/n/demo`, { waitUntil: 'domcontentloaded' })
+      await p.waitForSelector('.cell', { timeout: 30_000 })
+      await p.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
+      await sleep(700)
+      await p.evaluate(() => (window.openPublishing || window.openPublish)())
+      await p.waitForSelector('#pubbg.show', { timeout: 6000 }).catch(() => {})
+      await sleep(800)
+      await elShot(p, '#pubbg .pubmodal', 'publish-panel.png')
+      log('done (publish-only) — assets in', OUT); return
+    }
 
     // ── per-notebook static cell screenshots ────────────────────────────────────────────────
     for (const [id, shots] of Object.entries(CELL_SHOTS)) {
@@ -755,19 +791,17 @@ async function main() {
     // the Publish panel, the front-page manager dashboard, and the Sites strip all render clean
     // demo content — reproducible in CI without configuring any real publish target.
     try {
-      // Publish panel — notebook ☰ → ☁ Publish… (Export dialog in Website mode)
+      // Publish panel — notebook ☰ → ☁ Publish… (the dedicated #pubbg panel: site membership + history)
       const p1 = await (await newContext(browser)).newPage()
       await mockPublish(p1)
       await p1.goto(`${BASE}/n/demo`, { waitUntil: 'domcontentloaded' })
       await p1.waitForSelector('.cell', { timeout: 30_000 })
       await p1.addStyleTag({ content: '.warn{display:none!important} #doclauncher{display:none!important}' })
       await sleep(700)
-      await p1.evaluate(() => window.openPublish && window.openPublish())
-      await sleep(600)
-      // pick the existing "portfolio" site so the destinations show
-      await p1.evaluate(() => { const s = document.getElementById('sitepick'); if (s) { for (const o of s.options) { if (o.value === 'portfolio' || o.textContent.includes('portfolio')) { s.value = o.value; s.dispatchEvent(new Event('change', { bubbles: true })); break } } } })
-      await sleep(500)
-      await elShot(p1, '#exportbg .modal', 'publish-panel.png')
+      await p1.evaluate(() => (window.openPublishing || window.openPublish)())
+      await p1.waitForSelector('#pubbg.show', { timeout: 6000 })
+      await sleep(800)                                        // let loadSites / loadDoc render both columns
+      await elShot(p1, '#pubbg .pubmodal', 'publish-panel.png')
       await p1.context().close()
 
       // Manager dashboard + Sites strip — the hub front page

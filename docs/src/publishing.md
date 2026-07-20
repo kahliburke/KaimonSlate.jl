@@ -46,7 +46,7 @@ Click **☁ Publish into site**. KaimonSlate renders this notebook into the site
 `/sites/<name>/`, then **syncs** the whole build to every destination. When it finishes, a live
 URL appears; **Already published** shows where this document currently lives.
 
-![The Publish panel: outputs, theme, source/runnable/git-history options, the site to publish into with its destinations, a Zenodo archive action, and site title / document path](./assets/publish-panel.png)
+![The Publish panel: the sites this notebook belongs to (each with a front-page star and a ☁ Publish action), the publish options (run-live bundle, source, git history, outputs, theme, width, document path), and an "Already published" column showing where it's live](./assets/publish-panel.png)
 
 !!! tip "A site with no destinations is a local staging area"
     If a site has no destinations yet, publishing just builds it locally — preview it at
