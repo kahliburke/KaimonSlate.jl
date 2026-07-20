@@ -158,6 +158,7 @@ function _enrich_site_doc(dir, d)
     src = String(get(d, "source", get(d, "path", "")))
     e["source"] = src
     e["sourceExists"] = !isempty(src) && isfile(src)
+    e["sourceMtime"] = (!isempty(src) && isfile(src)) ? round(Int, mtime(src)) : 0   # source .jl mtime → staleness
     bfile = isempty(slug) ? joinpath(dir, "index.html") : joinpath(dir, slug, "index.html")
     e["built"] = isfile(bfile)
     e["builtAt"] = isfile(bfile) ? round(Int, mtime(bfile)) : 0
@@ -170,12 +171,22 @@ function _site_view(s)
     dir = _site_dir(s.name)
     bt = _site_build_times(dir)
     hasTargets = !isempty(s.targets)
+    # Home-page staleness: the home notebook's source `.jl` mtime vs its rendered front-page template —
+    # so the UI can tell whether re-staging the home would change anything.
+    homeMtime = (fp.home && !isempty(fp.homePath) && isfile(fp.homePath)) ? round(Int, mtime(fp.homePath)) : 0
+    homeBuilt = 0
+    if dir !== nothing && isdir(dir)
+        for f in (".slate-home.html", "index.html")
+            p = joinpath(dir, f); isfile(p) && (homeBuilt = round(Int, mtime(p)); break)
+        end
+    end
     return Dict{String,Any}("name" => s.name, "title" => s.title, "targets" => copy(s.targets),
         "paths" => copy(s.paths),               # target → subpath within it ("" = root)
         "docs" => [_enrich_site_doc(dir, d) for d in site_docs(s.name)],   # + per-doc source/build provenance
         # Front page (a `home`-tagged notebook): presence + WHICH notebook it is — title and
         # source path recorded at build time, so the manager can name it and link back to it.
         "hasHome" => fp.home, "homeTitle" => fp.homeTitle, "homePath" => fp.homePath,
+        "homeMtime" => homeMtime, "homeBuilt" => homeBuilt,
         # Local-mirror ⇄ deploy state for the Save/Preview/Sync UI. `dirty` flags DRIFT after a known
         # deploy only (needs a stamp baseline, `synced > 0`), so legacy/never-synced sites don't all
         # light up as "unsynced" — the cue appears once you've Synced and then changed the build.
