@@ -758,7 +758,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         return '<a class="pubdest" href="'+esc(u||'#')+'"'+(u?' target="_blank" rel="noopener"':' onclick="return false"')+
           ' onclick="event.stopPropagation()" title="'+esc(n)+(u?(' — '+esc(u)):' (no live URL)')+'">'+_pubIcon(t.kind)+' '+esc(_destLabel(t.kind))+(u?' ↗':'')+'</a>';
       }).filter(Boolean).join('');
-      var preview=hasLocal[s.name]?('<a class="pubdest" href="/sites/'+encodeURIComponent(s.name)+'/" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="local build preview">👁 Preview ↗</a>'):'';
+      var preview=hasLocal[s.name]?('<a class="pubdest" href="/sites/'+encodeURIComponent(s.name)+'/" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="the staged local build (what Sync deploys)">👁 Staged site ↗</a>'):'';
       var body=preview+dests, nd=(s.docs||[]).length, ndest=(s.targets||[]).length;
       return '<div class="sitecard sitecard-site'+(openNames[s.name]?' open':'')+'" data-site="'+esc(s.name)+'" onclick="this.classList.toggle(\'open\')">'+
         '<span class="si">🌐</span><span class="sn">'+esc(s.name)+'<span class="scchev">›</span></span>'+
@@ -780,15 +780,16 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   var pubdashBg=document.getElementById('pubdashbg');
   var _pdView={documents:[],targets:[],secretRefs:[],availableKinds:[],ghUser:''};
   var _pdOpenNbs=[];   // open notebooks (path+title) — lets the UI tell when Stage would re-export something
-  // True if Stage would re-export anything: a site member (or its home page) matches an OPEN notebook by
-  // source path or title. If nothing's open, Stage is a no-op (the build is already current), so disable it.
+  // True if Stage would actually change the build: an OPEN member (or the home page) whose SOURCE .jl is
+  // newer than its staged build — i.e. real unstaged edits. Re-staging identical content only bumps mtimes
+  // (→ a pointless "unsynced"), so when nothing is newer we disable Stage as "already current".
   function _pdStageable(s){
     var nbs=_pdOpenNbs||[]; if(!nbs.length||!s||!s.hasLocal) return false;
     var paths={}, titles={};
     nbs.forEach(function(n){ if(n.path)paths[String(n.path).toLowerCase()]=1; if(n.title)titles[String(n.title).toLowerCase()]=1; });
-    var hit=function(src,title){ return !!((src&&paths[String(src).toLowerCase()]) || (title&&titles[String(title).toLowerCase()])); };
-    if(s.hasHome && hit(s.homePath, s.homeTitle)) return true;
-    return (s.docs||[]).some(function(d){ return hit(d.source, d.title); });
+    var open=function(src,title){ return !!((src&&paths[String(src).toLowerCase()]) || (title&&titles[String(title).toLowerCase()])); };
+    if(s.hasHome && open(s.homePath, s.homeTitle) && (s.homeMtime||0) > (s.homeBuilt||0)) return true;
+    return (s.docs||[]).some(function(d){ return open(d.source, d.title) && (d.sourceMtime||0) > (d.builtAt||0); });
   }
   var _pdSel=null;          // open target detail (name), or null
   var _pdSite=null;         // open site editor: null = none, '' = the New-site form, else the site name
