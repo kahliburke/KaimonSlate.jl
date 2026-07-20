@@ -249,6 +249,13 @@ function _export_css(theme::AbstractString = "dark", code::AbstractString = "nor
 .exp-refs h2{font-size:1.1rem;}
 .exp-reflist{margin:6px 0 0;padding-left:1.6em;}.exp-reflist li{margin:3px 0;}
 .exp-reflist li:target{background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:4px;}
+/* Sub-page back-nav (inside the article column) + page footer credit (full-width, aligned to content). */
+.exp-topnav{margin:-8px 0 10px;font-size:.85rem;text-align:left;}
+.exp-topnav a,.exp-ft a{color:var(--dim);text-decoration:none;border-bottom:1px solid transparent;transition:color .12s,border-color .12s;}
+.exp-topnav a:hover,.exp-ft a:hover{color:var(--accent);border-bottom-color:color-mix(in srgb,var(--accent) 45%,transparent);}
+.exp-ft{max-width:$(mw);margin:44px auto 0;padding:18px 24px 44px;border-top:1px solid var(--border);
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;font-size:.8rem;color:var(--dim);}
+.exp-ft-credit{margin-left:auto;}
 /* Regular markdown links — accent-toned with a soft underline (parity with the live notebook's `.md a`),
    not the browser default dark blue. Emitted BEFORE `a.cite`/`a.figref` so those keep their own style. */
 .exp-md a{color:var(--accent);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 38%,transparent);transition:color .12s,border-color .12s;}
@@ -590,7 +597,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      og_url::AbstractString = "", og_type::AbstractString = "article",
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
                      memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL,
-                     inline_assets::Bool = true, width::Integer = 900)
+                     inline_assets::Bool = true, width::Integer = 900,
+                     credit::Bool = true, site_home::AbstractString = "", site_home_label::AbstractString = "")
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     # One Slate palette drives the page chrome, code AND the client-rendered ECharts (they read its CSS
     # vars) — As-is uses the notebook's live palette (charttheme), Light/Dark force one. A themed OVERRIDE
@@ -668,6 +676,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # Role-tagged metadata → a title block at the top; the hoisted cells are dropped from the
         # body (mirrors the PDF/Typst export).
         fm = fm0   # citation/figure context + the `rw` body rewriter were set up above (used for the OG desc too)
+        # Sub-page back-nav: on a doc page inside a site, a "← <site>" link home (site_home is the
+        # relative URL to the site root, e.g. "../"). Empty for standalone/home pages — no bar then.
+        isempty(strip(site_home)) || print(io,
+            "<nav class=\"exp-topnav\"><a href=\"", _esc(site_home), "\">← ",
+            _esc(isempty(strip(site_home_label)) ? "Home" : site_home_label), "</a></nav>")
         print(io, "<header class=\"exp-titleblock\"><h1 class=\"exp-title\">",
               _esc(fm.title), "</h1>")
         isempty(strip(fm.subtitle)) || print(io, "<div class=\"exp-subtitle\">", _esc(fm.subtitle), "</div>")
@@ -755,6 +768,16 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         refs = _html_references(citectx)
         isempty(refs) || print(io, "<section class=\"exp-md exp-refs\">", refs, "</section>")
         print(io, "</article>")
+        # Page footer: an optional "← <site>" home link (sub-pages) + the "Published by Kaimon Slate"
+        # credit. Full-width, outside the article column, on every exported page unless `credit=false`.
+        if credit || !isempty(strip(site_home))
+            print(io, "<footer class=\"exp-ft\">")
+            isempty(strip(site_home)) || print(io, "<a class=\"exp-ft-home\" href=\"", _esc(site_home), "\">← ",
+                _esc(isempty(strip(site_home_label)) ? "Home" : site_home_label), "</a>")
+            credit && print(io, "<span class=\"exp-ft-credit\">Published by <a href=\"", _SLATE_CREDIT_URL,
+                "\" target=\"_blank\" rel=\"noopener\">Kaimon Slate</a></span>")
+            print(io, "</footer>")
+        end
         # "Run this live" overlay. Two modes: SITE (sidecar run.jl + bundle next to index.html → a
         # copy-paste one-liner) and EMBED (single-file HTML → the bundle + run.jl ride inside the page and
         # are handed out as client-side Blob downloads, so nothing external is needed).
@@ -1330,6 +1353,10 @@ _gh_git(sub::Cmd) = `git -c credential.helper= -c $_GH_CRED $sub`
 # already in the repo are preserved (we build on top of the existing gh-pages, not a fresh history).
 const _SITE_MANIFEST = "slate-site.json"
 
+# Where the "Published by Kaimon Slate" footer credit links. One place to change if the project gets a
+# marketing homepage; the repo is a sensible default.
+const _SLATE_CREDIT_URL = "https://github.com/kahliburke/KaimonSlate.jl"
+
 # URL-safe slug from a title: lowercased, runs of non-alphanumerics → single hyphens, trimmed.
 function _slugify(s::AbstractString)
     slug = replace(lowercase(strip(String(s))), r"[^a-z0-9]+" => "-")
@@ -1354,7 +1381,8 @@ end
 # fetch is absolute. `date` seeds the entry (a re-publish keeps the original via `_upsert_doc!`).
 function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractString,
                      base_url::AbstractString = "", bundle::Bool = false, agent::Bool = true,
-                     history::Bool = false, kwargs...)
+                     history::Bool = false, site_home::AbstractString = "", site_home_label::AbstractString = "",
+                     kwargs...)
     mkpath(docdir)
     img = og_image(nb)
     ogpath = ""
@@ -1379,7 +1407,7 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
     _write_page_assets!(docdir, nb)
     write(joinpath(docdir, "index.html"),
           export_html(nb; og_image = ogpath, og_url = String(base_url), runnable = bundle, history = history,
-                      inline_assets = false, kwargs...))
+                      inline_assets = false, site_home = site_home, site_home_label = site_home_label, kwargs...))
     m = _doc_meta(nb)
     cs = nb.report.cells
     md = count(c -> c.kind == MARKDOWN, cs)
@@ -1612,7 +1640,8 @@ function _render_site_index(manifest; site_url::AbstractString = "")
           ".site-ft{max-width:960px;margin:0 auto;padding:24px;color:#8b949e;font-size:.8rem;border-top:1px solid #30363d}",
           "</style></head><body><header class=\"site-hd\"><h1>", _esc(site_title), "</h1></header>",
           "<main class=\"site-wrap\">", _manifest_cards_block(docs), "</main>",
-          "<footer class=\"site-ft\">Published with Kaimon Slate</footer></body></html>")
+          "<footer class=\"site-ft\">Published by <a href=\"", _SLATE_CREDIT_URL,
+          "\" target=\"_blank\" rel=\"noopener\" style=\"color:#8b949e;text-decoration:underline\">Kaimon Slate</a></footer></body></html>")
     return String(take!(io))
 end
 
@@ -1670,7 +1699,9 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
         base = isempty(su) ? "" : su * slug * "/"
         docdir = joinpath(dir, slug)
         rm(docdir; recursive = true, force = true)                             # clean replace of this doc
-        entry = _build_doc!(docdir, nb; slug = slug, base_url = base, bundle = bundle, kwargs...)
+        # A doc lives at <site>/<slug>/ — "../" is the site front page. Label it with the site title.
+        entry = _build_doc!(docdir, nb; slug = slug, base_url = base, bundle = bundle,
+                            site_home = "../", site_home_label = String(get(manifest, "title", "")), kwargs...)
         _upsert_doc!(manifest, entry)
         commit_title = entry["title"]; docUrl = base
     end
