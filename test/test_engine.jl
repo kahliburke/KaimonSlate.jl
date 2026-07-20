@@ -70,6 +70,54 @@ mean(data)
         @test r.cells[4].source == "z = 3"
     end
 
+    @testset "hybrid: attached comment hugs code (adopted .jl doesn't fragment)" begin
+        # A one-line comment DIRECTLY above code is an inline code comment, NOT its own markdown
+        # cell — it opens a code cell that the following code joins. This is what keeps an ordinary
+        # Julia file (each function prefaced by a terse `# …`) from shattering into md/code/md/code.
+        src = """
+        # incorporate one observation
+        function push!(rs, x)
+            rs.n += 1
+        end
+
+        # sample variance
+        variance(rs) = rs.m2 / (rs.n - 1)
+        """
+        r = parse_report(src)
+        @test length(r.cells) == 2
+        @test all(c -> c.kind == CODE, r.cells)
+        @test r.cells[1].source == "# incorporate one observation\nfunction push!(rs, x)\n    rs.n += 1\nend"
+        @test r.cells[2].source == "# sample variance\nvariance(rs) = rs.m2 / (rs.n - 1)"
+    end
+
+    @testset "hybrid: prose signals still promote a comment to markdown" begin
+        # heading marker → markdown even when code hugs it with no blank line
+        r1 = parse_report("# ## Section\nx = 1")
+        @test length(r1.cells) == 2
+        @test r1.cells[1].kind == MARKDOWN && r1.cells[1].source == "## Section"
+        @test r1.cells[2].kind == CODE && r1.cells[2].source == "x = 1"
+
+        # blank line between the comment and the code → a standalone note (markdown)
+        r2 = parse_report("# just a note\n\nx = 1")
+        @test r2.cells[1].kind == MARKDOWN && r2.cells[1].source == "just a note"
+        @test r2.cells[2].kind == CODE && r2.cells[2].source == "x = 1"
+
+        # a trailing comment with no code after it → markdown
+        r3 = parse_report("x = 1\n# trailing note")
+        @test r3.cells[1].kind == CODE && r3.cells[1].source == "x = 1"
+        @test r3.cells[2].kind == MARKDOWN && r3.cells[2].source == "trailing note"
+
+        # a multi-line comment block set off by a blank → markdown paragraph
+        r4 = parse_report("# line one\n# line two\n\ncode()")
+        @test r4.cells[1].kind == MARKDOWN && r4.cells[1].source == "line one\nline two"
+        @test r4.cells[2].kind == CODE && r4.cells[2].source == "code()"
+
+        # bullet list markers → markdown
+        r5 = parse_report("# - item one\n# - item two\ncode()")
+        @test r5.cells[1].kind == MARKDOWN && r5.cells[1].source == "- item one\n- item two"
+        @test r5.cells[2].kind == CODE && r5.cells[2].source == "code()"
+    end
+
     @testset "hybrid: bare leading text is code, # lines are markdown" begin
         r = parse_report("# a note\n\nbare_code()\n\n#%% code id=a\ny = 2")
         @test length(r.cells) == 3

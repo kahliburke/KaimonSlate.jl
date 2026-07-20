@@ -2509,6 +2509,21 @@ Base.flush(t::_LogTee) = flush(t.inner)
 Base.isopen(t::_LogTee) = isopen(t.inner)
 Base.get(t::_LogTee, k, d) = get(t.inner, k, d)   # IOContext property probing (e.g. :color) delegates through
 
+# A logger wrapper that drops ONE benign message: `Base.Docs`' "Replacing docs for `X`" warning.
+# Reactive re-evaluation redefines a cell's documented structs/functions on every run, so Base.Docs
+# would warn each time — noise the user can't act on (the docstring is still registered, which is
+# exactly what feeds the docs index). Everything else passes through untouched.
+struct _DocsQuietLogger{L<:Logging.AbstractLogger} <: Logging.AbstractLogger
+    inner::L
+end
+Logging.min_enabled_level(l::_DocsQuietLogger) = Logging.min_enabled_level(l.inner)
+Logging.catch_exceptions(l::_DocsQuietLogger) = Logging.catch_exceptions(l.inner)
+Logging.shouldlog(l::_DocsQuietLogger, args...) = Logging.shouldlog(l.inner, args...)
+function Logging.handle_message(l::_DocsQuietLogger, level, message, args...; kwargs...)
+    (level == Logging.Warn && occursin("Replacing docs for", string(message))) && return nothing
+    return Logging.handle_message(l.inner, level, message, args...; kwargs...)
+end
+
 """
     start(; host="127.0.0.1", port, stream_port)
 
@@ -2534,11 +2549,11 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
         # Tee the log stream so every formatted record ALSO PUBs on `slate_log` (→ hub → the worker popup,
         # live) while still writing to the worker-<port>.log file. Mirrors the pipe that `worker_log_tail`
         # reads, so the pushed lines and the polled snapshot are the same text.
-        Base.global_logger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
+        Base.global_logger(_DocsQuietLogger(Logging.ConsoleLogger(_LogTee(stderr), Logging.Info;
             meta_formatter = (lvl, m, g, id, f, l) -> begin
                 c, pre, suf = Logging.default_metafmt(lvl, m, g, id, f, l)
                 (c, string(Dates.format(Dates.now(), "HH:MM:SS "), pre), suf)
-            end))
+            end)))
     catch e; @warn "slate: timestamp logger install failed" exception = e; end
     # `curve`/`allowed_clients` are set for a REMOTE worker (host="0.0.0.0", :direct transport): the
     # hub pins THIS gate's CURVE server key (fetched over SSH) and the gate allow-lists the hub's client
