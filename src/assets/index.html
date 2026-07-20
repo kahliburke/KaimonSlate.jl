@@ -765,10 +765,11 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   var _pdView={documents:[],targets:[],secretRefs:[],availableKinds:[],ghUser:''};
   var _pdSel=null;          // open target detail (name), or null
   var _pdSite=null;         // open site editor: null = none, '' = the New-site form, else the site name
+  var _pdDocs=null;         // open a site's Documents drill-down (site name), or null
   var _pdPane=null;         // 'add' (new target) | 'secrets' | null — other focused sub-pages
   var _abs=function(p){return /^([A-Za-z]:[\\/]|\/)/.test(p||'');};
   function openPubDash(){
-    _pdSel=null;_pdSite=null;_pdPane=null;   // always reopen on the OVERVIEW — no stale sub-page
+    _pdSel=null;_pdSite=null;_pdPane=null;_pdDocs=null;   // always reopen on the OVERVIEW — no stale sub-page
     showLoading('Loading publishing…');
     loadPubDash(function(){ hideLoading(); pubdashBg.classList.add('show'); },
                function(){ hideLoading(); alertDark('Could not load the publishing ledger.'); });
@@ -788,9 +789,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function pdRender(){
     // The wide modal fits the overview's tile grid; every focused sub-page (target, site,
     // add-target, secrets) is a single narrow column — shrink the modal, no dead space.
-    var focused=_pdSel||_pdSite!==null||_pdPane;
+    var focused=_pdSel||_pdSite!==null||_pdPane||_pdDocs;
     var m=document.querySelector('#pubdashbg .pubdash'); if(m)m.classList.toggle('pdslim',!!focused);
-    if(_pdSel)pdRenderDetail();
+    if(_pdDocs)pdRenderSiteDocs();
+    else if(_pdSel)pdRenderDetail();
     else if(_pdSite!==null)pdRenderSiteDetail();
     else if(_pdPane==='add')pdRenderAdd();
     else if(_pdPane==='secrets')pdRenderSecrets();
@@ -896,9 +898,13 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<div class="pdrow" style="margin-top:16px;gap:8px"><button class="pdbtn primary" onclick="pdShowAdd()">+ Add target</button><button class="pdbtn" onclick="pdShowSecrets()">⚙ Secrets</button></div>'+
       '<div id="pdextra" style="margin-top:8px"></div>';
   }
-  function pdOpen(n){_pdSel=n;_pdSite=null;_pdPane=null;pdRender();} window.pdOpen=pdOpen;
-  function pdBack(){_pdSel=null;_pdSite=null;_pdPane=null;pdRender();} window.pdBack=pdBack;
-  function pdShowAdd(){_pdPane='add';_pdSel=null;_pdSite=null;pdRender();} window.pdShowAdd=pdShowAdd;
+  function pdOpen(n){_pdSel=n;_pdSite=null;_pdPane=null;_pdDocs=null;pdRender();} window.pdOpen=pdOpen;
+  function pdBack(){_pdSel=null;_pdSite=null;_pdPane=null;_pdDocs=null;pdRender();} window.pdBack=pdBack;
+  function pdShowAdd(){_pdPane='add';_pdSel=null;_pdSite=null;_pdDocs=null;pdRender();} window.pdShowAdd=pdShowAdd;
+  // Drill into a site's Documents management page (list + reorder/sections + add/delete). Keeps _pdSite
+  // set so the breadcrumb can step back to the site editor.
+  function pdSiteDocs(name){_pdDocs=name;_pdSite=name;_pdSel=null;_pdPane=null;pdRender();} window.pdSiteDocs=pdSiteDocs;
+  function pdDocsBackToSite(){_pdDocs=null;pdRender();} window.pdDocsBackToSite=pdDocsBackToSite;
   function pdRenderAdd(){
     document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › add target';
     var owner=(_pdView.ghUser||''), kinds=_pdView.availableKinds||['github-pages','cloudflare-pages','netlify','s3','r2','rsync','rsync-serve','zenodo'];
@@ -911,7 +917,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<button class="pdbtn primary" onclick="pdAddTarget(this)">+ Add target</button></div></div>';
     pdKindFields();
   }
-  function pdShowSecrets(){_pdPane='secrets';_pdSel=null;_pdSite=null;pdRender();} window.pdShowSecrets=pdShowSecrets;
+  function pdShowSecrets(){_pdPane='secrets';_pdSel=null;_pdSite=null;_pdDocs=null;pdRender();} window.pdShowSecrets=pdShowSecrets;
   function pdRenderSecrets(){
     document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › secrets';
     var refs=_pdView.secretRefs||[];
@@ -925,35 +931,62 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       '<div class="pddim" style="font-size:.72rem">Visible as you type; stored only in your config home (chmod 600) — never in the ledger/gist.</div></div>';
   }
   // ── SITES — a focused editor page (like a target's detail): breadcrumb + only this site. ──
-  function pdEditSite(name){_pdSite=name;_pdSel=null;pdRender();} window.pdEditSite=pdEditSite;
-  function pdShowSite(name){_pdSite=(name==null?'':String(name));_pdSel=null;pdRender();} window.pdShowSite=pdShowSite;
-  // A document inside a site: a collapsible row. Header = title + section/state chips + built-age;
-  // expands to full provenance (source .jl, build folder + time, cell stats) and actions (open, remove).
-  function _siteDocRow(site,d){
-    var sl=d.slug||d.title, id='doc-'+_slugId(site+'--'+sl);
-    var mono='font-family:ui-monospace,Menlo,monospace;font-size:.72rem;color:#b8c0d8';
-    var stats=[]; if(d.cells)stats.push(d.cells+' cells'); if(d.code)stats.push(d.code+' code'); if(d.md)stats.push(d.md+' md'); if(d.binds)stats.push(d.binds+' ⊞');
-    var srcLine=d.source
-      ? ('source <span style="'+mono+'">'+esc(d.source)+'</span>'+(d.sourceExists?(' <a class="pdlink" onclick="pdOpenPath(\''+esc(d.source)+'\')" title="open the notebook">open ↗</a>'):' <span style="color:#e0a33a">(file missing)</span>'))
-      : '<span style="color:#e0a33a">source not recorded</span> — open the notebook &amp; Publish into this site once to link it';
-    var builtLine=d.built?('built '+(d.builtAt?relTime(d.builtAt):'')+' · <span style="'+mono+'">'+esc(d.buildPath||'')+'</span>'):'<span style="color:#e0a33a">not built yet</span>';
-    var detail='<div class="pddocdetail" id="'+id+'" style="display:none">'+
-      '<div class="pddim" style="line-height:1.65">'+srcLine+'<br>'+builtLine+(stats.length?('<br>'+stats.join(' · ')+(d.runnable?' · runnable':'')):'')+'</div>'+
-      '<div class="pdrow" style="margin-top:7px;gap:6px">'+
-        (d.source&&d.sourceExists?'<button class="pdbtn pdmini" onclick="pdOpenPath(\''+esc(d.source)+'\')">Open notebook</button>':'')+
-        '<button class="pdbtn pdmini danger" onclick="pdRemoveSiteDoc(this,\''+esc(site)+'\',\''+esc(sl)+'\')" title="remove from this site\'s build">Remove</button>'+
-      '</div></div>';
-    var chips=(d.section?'<span class="pdchip" style="margin-left:6px">'+esc(d.section)+'</span>':'')+
-      (d.home?' <span class="pdchip">front page</span>':'')+
-      (d.built?'':' <span class="pdchip warn" style="margin-left:6px">not built</span>')+
-      (d.source?'':' <span class="pdchip warn" style="margin-left:6px" title="no source notebook recorded">unlinked</span>');
-    return '<div class="pddocitem"><div class="pdrow pdsub2" style="cursor:pointer" onclick="pdToggleDoc(this,\''+id+'\')">'+
-      '<span class="pddocchev">›</span><span class="pl" style="color:#e6ebf7">'+esc(d.title||d.slug)+'</span>'+chips+
-      '<span class="pddim" style="margin-left:auto">'+(d.builtAt?relTime(d.builtAt):'')+'</span></div>'+detail+'</div>';
+  function pdEditSite(name){_pdSite=name;_pdSel=null;_pdDocs=null;pdRender();} window.pdEditSite=pdEditSite;
+  function pdShowSite(name){_pdSite=(name==null?'':String(name));_pdSel=null;_pdDocs=null;pdRender();} window.pdShowSite=pdShowSite;
+  // ── A site's Documents page (drill-down from the site editor): list w/ attributes, drag-reorder,
+  // sections, add & remove. Subsumes the old inline list + Arrange modal + Add button. "Save order" is
+  // a SAVE (rewrites the local build only) — Sync afterward to deploy. ────────────────────────────────
+  // One draggable doc row, carrying its attributes + a remove action inline.
+  function _docsArrRow(d){
+    var mono='font-family:ui-monospace,Menlo,monospace;font-size:.7rem';
+    var chips=(d.home?'<span class="pdchip">front page</span> ':'')+
+      (d.built?'':'<span class="pdchip warn">not built</span> ')+
+      (d.source?'':'<span class="pdchip warn" title="no source notebook recorded">unlinked</span> ');
+    var src=(d.source&&d.sourceExists)?('<a class="pdlink" style="'+mono+'" onclick="pdOpenPath(\''+esc(d.source)+'\')" title="'+esc(d.source)+'">open source ↗</a>')
+           :(d.source?'<span style="color:#e0a33a;'+mono+'">source file missing</span>':'<span style="color:#e0a33a;'+mono+'">no source recorded</span>');
+    var meta=[]; if(d.builtAt)meta.push('built '+relTime(d.builtAt)); if(d.cells)meta.push(d.cells+' cells');
+    return '<div class="pdarr-row" draggable="true" data-slug="'+esc(d.slug||d.title)+'">'+
+      '<span class="pdarr-grip">⠿</span>'+
+      '<span style="flex:1;min-width:0"><span style="color:#e6ebf7">'+esc(d.title||d.slug)+'</span> '+chips+
+        '<span class="pddim" style="'+mono+';color:#8a90b0">'+meta.join(' · ')+(meta.length?' · ':'')+src+'</span></span>'+
+      '<button class="pdbtn pdmini danger" onmousedown="event.stopPropagation()" onclick="pdRemoveSiteDoc(this,\''+esc(_pdDocs)+'\',\''+esc(d.slug||d.title)+'\')" title="remove from this site\'s build">remove</button></div>';
   }
-  function pdToggleDoc(hdr,id){var e=document.getElementById(id);if(!e)return;var open=e.style.display==='none';
-    e.style.display=open?'block':'none';var ch=hdr.querySelector('.pddocchev');if(ch)ch.style.transform=open?'rotate(90deg)':'';}
-  window.pdToggleDoc=pdToggleDoc;
+  function pdRenderSiteDocs(){
+    var s=pdSiteByName(_pdDocs);
+    if(!s){pdBack();return;}
+    document.getElementById('pdtitle').innerHTML='<span class="pdcrumb" onclick="pdBack()" title="back to Publishing">Publishing</span> › <span class="pdcrumb" onclick="pdDocsBackToSite()" title="back to the site">'+esc(s.name)+'</span> › Documents';
+    var docs=(s.docs||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
+    var fp=s.hasHome
+      ? ('<div class="pddim" style="margin:2px 0 12px">Front page: <b style="color:#cdd3e6">'+esc(s.homeTitle||'home')+'</b> <span class="pdchip">home</span>'+
+          (s.homePath?(' — <a class="pdlink" onclick="pdOpenPath(\''+esc(s.homePath)+'\')" title="'+esc(s.homePath)+'">'+esc((s.homePath.split(/[\\/]/).pop())||'notebook')+' ↗</a>')
+                     :' <span style="opacity:.65">(source not recorded — republish it once to link it)</span>')+'</div>')
+      : '<div class="pddim" style="margin:2px 0 12px">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
+    document.getElementById('pdbody').innerHTML='<div class="pdnarrow">'+
+      '<div class="pdsec" style="margin-top:0">Front page</div>'+fp+
+      '<div class="pdsec">Documents ('+docs.length+')'+(docs.length?' <span class="pddim" style="text-transform:none;font-weight:400;letter-spacing:0">— drag to reorder, or between sections; rename a section by editing its heading</span>':'')+'</div>'+
+      (docs.length?'<div id="pddocsbody"></div>'+
+        '<div class="pdrow" style="margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap">'+
+          '<button class="pdbtn" onclick="pdAddSection(\'pddocsbody\')">+ Section</button>'+
+          '<button class="pdbtn primary" onclick="pdSaveSiteDocs(this)" title="Store the order &amp; sections in the local build — no deploy">Save order</button>'+
+          '<span class="pddim" style="font-size:.72rem">Saves to the local build · Sync afterward to deploy.</span></div>'
+        :'<div class="pddim">No documents yet — add one below.</div>')+
+      '<div class="pdsec" style="margin-top:22px">Add a document</div>'+
+      '<div class="pdrow"><button class="pdbtn" onclick="pdPickNotebook(this,\''+esc(s.name)+'\')">＋ Add a notebook to this site</button></div>'+
+      '<div id="pdaddnb"></div></div>';
+    if(docs.length)renderArrangeInto(document.getElementById('pddocsbody'),docs,_docsArrRow);
+  }
+  window.pdRenderSiteDocs=pdRenderSiteDocs;
+  function pdSaveSiteDocs(btn){
+    var body=document.getElementById('pddocsbody'); if(!body)return;
+    var ordering=_collectOrdering(body);
+    if(!ordering.length){alertDark('Nothing to arrange.');return;}
+    var done=pdBusy(btn);
+    fetch('/api/publish/site-arrange',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:_pdDocs,ordering:ordering})})
+      .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
+      .then(function(){loadPubDash(function(){pdRender();});})   // stay on the docs page, refreshed
+      .catch(function(e){alertDark('Save order failed: '+e);}).finally(done);
+  }
+  window.pdSaveSiteDocs=pdSaveSiteDocs;
   function pdRenderSiteDetail(){
     var s=_pdSite?pdSiteByName(_pdSite):null;
     if(_pdSite&&!s){pdBack();return;}   // deleted/renamed under us → overview
@@ -977,20 +1010,16 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     // Documents in the site's canonical build: list with section badge + remove; drag-order via Arrange.
     // (The front page is set by tagging a cell `home` in that notebook — it renders to the site root and
     // isn't a card here, so there's no separate "home" picker.)
+    // Documents are managed on their OWN drill-down page (list + reorder/sections + add/remove). Here
+    // in the editor they're a single summary row that opens it — keeping the editor about settings.
     var docMgmt='';
     if(s){
-      var rows=docs.length?docs.map(function(d){return _siteDocRow(s.name,d);}).join('')
-        :'<div class="pddim">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
-      var fp=s.hasHome?('<div class="pddim" style="margin:2px 0">Front page: <b>'+esc(s.homeTitle||'home')+'</b> <span class="pdchip">home</span>'+
-          (s.homePath?' — from <a class="pdlink" onclick="pdOpenPath(\''+esc(s.homePath)+'\')" title="'+esc(s.homePath)+'">'+esc(s.homePath.split(/[\\/]/).pop()||'notebook')+' ↗</a>'
-                     :' <span style="opacity:.65">(source notebook not recorded — republish it once to link it here)</span>')+'</div>')
-        :'<div class="pddim" style="margin:2px 0">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
-      docMgmt='<div class="pdsec">Front page</div>'+fp+
-        '<div class="pdsec">Documents ('+docs.length+')'+(docs.length?' <span class="pddim" style="text-transform:none;font-weight:400;letter-spacing:0">— click a row for source &amp; build details</span>':'')+'</div>'+rows+
-        (docs.length?'<div class="pdrow" style="margin-top:8px"><button class="pdbtn" onclick="openSiteArrange(\''+esc(s.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag to order + group into sections</span></div>':'')+
-        // Add content WITHOUT opening a notebook first — pick from open/recent and publish it in.
-        '<div class="pdrow" style="margin-top:10px"><button class="pdbtn" onclick="pdPickNotebook(this,\''+esc(s.name)+'\')">＋ Add a notebook to this site</button></div>'+
-        '<div id="pdaddnb"></div>';
+      var nd=docs.length, fpGlance=s.hasHome?('Front page: '+esc(s.homeTitle||'home')):'No front page yet';
+      docMgmt='<div class="pdsec">Documents</div>'+
+        '<div class="pdtile" style="cursor:pointer" onclick="pdSiteDocs(\''+esc(s.name)+'\')" title="Open the document manager">'+
+          '<div class="pdrow"><span class="pl">📄 '+nd+' document'+(nd===1?'':'s')+'</span>'+
+            '<span style="margin-left:auto;color:#6a7090">manage ›</span></div>'+
+          '<div class="pddim" style="margin-top:4px">'+fpGlance+' · list, reorder, sections, add &amp; remove</div></div>';
     }
     // name = the site's IDENTIFIER (part of the URL, fixed once created); title = what readers SEE.
     // Escapes both parts (raw text in) — same contract as pdFldLbl, so entities never double-escape.
@@ -1051,7 +1080,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       var done=pdBusy(btn);
       fetch('/api/publish/site-remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:site,slug:slug})})
         .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-        .then(function(){loadPubDash(function(){pdShowSite(site);});})   // refresh docs, reopen the editor
+        .then(function(){loadPubDash(function(){pdRender();});})   // refresh + stay on the current view (docs page)
         .catch(function(e){alertDark('Remove failed: '+e);}).finally(done);});
   }
   window.pdRemoveSiteDoc=pdRemoveSiteDoc;
@@ -1489,17 +1518,27 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   window.closeArrange=closeArrange;
   function _arrRow(d){return '<div class="pdarr-row" draggable="true" data-slug="'+esc(d.slug)+'"><span class="pdarr-grip">⠿</span><span>'+esc(d.title||d.slug)+'</span> <span class="pddim">'+esc(d.date||'')+'</span></div>';}
   function _arrSec(name,rows,ungrouped){var hd=ungrouped?'<span class="pddim">Ungrouped</span>':'<input class="pdarr-name" value="'+esc(name)+'"/>';return '<div class="pdarr-sec"><div class="pdarr-hd">'+hd+'</div><div class="pdarr-list">'+(rows||'<div class="pdarr-empty">drop here</div>')+'</div></div>';}
-  function renderArrange(docs){
+  // Render sectioned, drag-orderable rows into `bodyEl` using `rowFn` for each doc. Shared by the
+  // modal (repo mode) and the site Documents page (inline, richer rows).
+  function renderArrangeInto(bodyEl,docs,rowFn){
     var secs=[],by={};
     docs.forEach(function(d){var s=(d.section||'');if(!(s in by)){by[s]=[];secs.push(s);}by[s].push(d);});
     if(secs.indexOf('')<0)secs.unshift('');
     secs.sort(function(a,b){return a===''?-1:b===''?1:0;});
-    document.getElementById('pdarrbody').innerHTML=secs.map(function(s){return _arrSec(s,(by[s]||[]).map(_arrRow).join(''),s==='');}).join('');
-    wireArrangeDnD();
+    bodyEl.innerHTML=secs.map(function(s){return _arrSec(s,(by[s]||[]).map(rowFn).join(''),s==='');}).join('');
+    wireArrangeDnD(bodyEl);
   }
+  function renderArrange(docs){ renderArrangeInto(document.getElementById('pdarrbody'),docs,_arrRow); }
+  // Collect the current ordering (slug + section + order) from a DnD container — the payload for save.
+  function _collectOrdering(body){var ordering=[],idx=0;
+    body.querySelectorAll('.pdarr-sec').forEach(function(sec){
+      var nameEl=sec.querySelector('.pdarr-name');var section=nameEl?(nameEl.value||'').trim():'';
+      sec.querySelectorAll('.pdarr-row').forEach(function(row){ordering.push({slug:row.getAttribute('data-slug'),section:section,order:(idx++)*10});});
+    });
+    return ordering;}
   function arrAfter(list,y){var rows=[].slice.call(list.querySelectorAll('.pdarr-row:not(.dragging)'));var best={o:-Infinity,el:null};rows.forEach(function(c){var b=c.getBoundingClientRect();var o=y-b.top-b.height/2;if(o<0&&o>best.o)best={o:o,el:c};});return best.el;}
-  function wireArrangeDnD(){
-    var body=document.getElementById('pdarrbody');
+  function wireArrangeDnD(body){
+    body=body||document.getElementById('pdarrbody');
     body.querySelectorAll('.pdarr-row').forEach(function(row){
       if(row._wired)return;row._wired=true;
       row.addEventListener('dragstart',function(){row.classList.add('dragging');});
@@ -1515,18 +1554,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       });
     });
   }
-  function pdAddSection(){
-    var body=document.getElementById('pdarrbody');var div=document.createElement('div');div.className='pdarr-sec';
+  function pdAddSection(bodyId){
+    var body=document.getElementById(bodyId||'pdarrbody');var div=document.createElement('div');div.className='pdarr-sec';
     div.innerHTML='<div class="pdarr-hd"><input class="pdarr-name" value="New section"/></div><div class="pdarr-list"><div class="pdarr-empty">drop here</div></div>';
-    body.appendChild(div);wireArrangeDnD();
+    body.appendChild(div);wireArrangeDnD(body);
   }
   window.pdAddSection=pdAddSection;
   function applyArrange(){
-    var body=document.getElementById('pdarrbody');var ordering=[];var idx=0;
-    body.querySelectorAll('.pdarr-sec').forEach(function(sec){
-      var nameEl=sec.querySelector('.pdarr-name');var section=nameEl?(nameEl.value||'').trim():'';
-      sec.querySelectorAll('.pdarr-row').forEach(function(row){ordering.push({slug:row.getAttribute('data-slug'),section:section,order:(idx++)*10});});
-    });
+    var ordering=_collectOrdering(document.getElementById('pdarrbody'));
     if(!ordering.length){alertDark('Nothing to arrange.');return;}
     var btn=document.getElementById('pdarrapply');if(btn)btn.disabled=true;
     var site=(_arrMode==='site');
