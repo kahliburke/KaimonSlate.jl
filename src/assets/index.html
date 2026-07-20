@@ -375,6 +375,12 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdtiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;}
 .pdtile{border:1px solid #2a2e40;border-radius:9px;padding:11px 13px;background:#10131f;cursor:pointer;transition:border-color .12s,transform .12s;}
 .pdtile:hover{border-color:#569cd6;transform:translateY(-1px);}
+/* Per-site Documents: a collapsible row (header + provenance/actions detail). */
+.pddocitem{border:1px solid #21253a;border-radius:7px;margin:5px 0;background:#10131f;}
+.pddocitem>.pdrow{padding:8px 10px;margin:0;}
+.pddocitem>.pdrow:hover{background:rgba(86,156,214,.05);border-radius:7px;}
+.pddocchev{display:inline-block;transition:transform .12s;color:#6a7090;margin-right:4px;}
+.pddocdetail{padding:2px 12px 10px 26px;border-top:1px solid #21253a;margin-top:2px;}
 .pdtabs{display:flex;gap:2px;border-bottom:1px solid #2a2e40;}
 .pdtab{background:none;border:none;color:#8a90b0;padding:7px 15px;cursor:pointer;font-size:.85rem;border-bottom:2px solid transparent;margin-bottom:-1px;}
 .pdtab:hover{color:#d4d8e8;} .pdtab.on{color:#e6ebf7;border-bottom-color:#569cd6;}
@@ -921,6 +927,33 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   // ── SITES — a focused editor page (like a target's detail): breadcrumb + only this site. ──
   function pdEditSite(name){_pdSite=name;_pdSel=null;pdRender();} window.pdEditSite=pdEditSite;
   function pdShowSite(name){_pdSite=(name==null?'':String(name));_pdSel=null;pdRender();} window.pdShowSite=pdShowSite;
+  // A document inside a site: a collapsible row. Header = title + section/state chips + built-age;
+  // expands to full provenance (source .jl, build folder + time, cell stats) and actions (open, remove).
+  function _siteDocRow(site,d){
+    var sl=d.slug||d.title, id='doc-'+_slugId(site+'--'+sl);
+    var mono='font-family:ui-monospace,Menlo,monospace;font-size:.72rem;color:#b8c0d8';
+    var stats=[]; if(d.cells)stats.push(d.cells+' cells'); if(d.code)stats.push(d.code+' code'); if(d.md)stats.push(d.md+' md'); if(d.binds)stats.push(d.binds+' ⊞');
+    var srcLine=d.source
+      ? ('source <span style="'+mono+'">'+esc(d.source)+'</span>'+(d.sourceExists?(' <a class="pdlink" onclick="pdOpenPath(\''+esc(d.source)+'\')" title="open the notebook">open ↗</a>'):' <span style="color:#e0a33a">(file missing)</span>'))
+      : '<span style="color:#e0a33a">source not recorded</span> — open the notebook &amp; Publish into this site once to link it';
+    var builtLine=d.built?('built '+(d.builtAt?relTime(d.builtAt):'')+' · <span style="'+mono+'">'+esc(d.buildPath||'')+'</span>'):'<span style="color:#e0a33a">not built yet</span>';
+    var detail='<div class="pddocdetail" id="'+id+'" style="display:none">'+
+      '<div class="pddim" style="line-height:1.65">'+srcLine+'<br>'+builtLine+(stats.length?('<br>'+stats.join(' · ')+(d.runnable?' · runnable':'')):'')+'</div>'+
+      '<div class="pdrow" style="margin-top:7px;gap:6px">'+
+        (d.source&&d.sourceExists?'<button class="pdbtn pdmini" onclick="pdOpenPath(\''+esc(d.source)+'\')">Open notebook</button>':'')+
+        '<button class="pdbtn pdmini danger" onclick="pdRemoveSiteDoc(this,\''+esc(site)+'\',\''+esc(sl)+'\')" title="remove from this site\'s build">Remove</button>'+
+      '</div></div>';
+    var chips=(d.section?'<span class="pdchip" style="margin-left:6px">'+esc(d.section)+'</span>':'')+
+      (d.home?' <span class="pdchip">front page</span>':'')+
+      (d.built?'':' <span class="pdchip warn" style="margin-left:6px">not built</span>')+
+      (d.source?'':' <span class="pdchip warn" style="margin-left:6px" title="no source notebook recorded">unlinked</span>');
+    return '<div class="pddocitem"><div class="pdrow pdsub2" style="cursor:pointer" onclick="pdToggleDoc(this,\''+id+'\')">'+
+      '<span class="pddocchev">›</span><span class="pl" style="color:#e6ebf7">'+esc(d.title||d.slug)+'</span>'+chips+
+      '<span class="pddim" style="margin-left:auto">'+(d.builtAt?relTime(d.builtAt):'')+'</span></div>'+detail+'</div>';
+  }
+  function pdToggleDoc(hdr,id){var e=document.getElementById(id);if(!e)return;var open=e.style.display==='none';
+    e.style.display=open?'block':'none';var ch=hdr.querySelector('.pddocchev');if(ch)ch.style.transform=open?'rotate(90deg)':'';}
+  window.pdToggleDoc=pdToggleDoc;
   function pdRenderSiteDetail(){
     var s=_pdSite?pdSiteByName(_pdSite):null;
     if(_pdSite&&!s){pdBack();return;}   // deleted/renamed under us → overview
@@ -946,16 +979,14 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     // isn't a card here, so there's no separate "home" picker.)
     var docMgmt='';
     if(s){
-      var rows=docs.length?docs.map(function(d){var sl=d.slug||d.title;
-        return '<div class="pdrow pdsub2"><span>'+esc(d.title||d.slug)+'</span>'+
-          (d.section?'<span class="pdchip" style="margin-left:6px">'+esc(d.section)+'</span>':'')+
-          '<button class="pdbtn pdmini danger" onclick="pdRemoveSiteDoc(this,\''+esc(s.name)+'\',\''+esc(sl)+'\')" title="remove from this site\'s build">remove</button></div>';
-      }).join(''):'<div class="pddim">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
+      var rows=docs.length?docs.map(function(d){return _siteDocRow(s.name,d);}).join('')
+        :'<div class="pddim">No documents yet — publish a notebook into this site (☰ → ☁ Publish…).</div>';
       var fp=s.hasHome?('<div class="pddim" style="margin:2px 0">Front page: <b>'+esc(s.homeTitle||'home')+'</b> <span class="pdchip">home</span>'+
           (s.homePath?' — from <a class="pdlink" onclick="pdOpenPath(\''+esc(s.homePath)+'\')" title="'+esc(s.homePath)+'">'+esc(s.homePath.split(/[\\/]/).pop()||'notebook')+' ↗</a>'
                      :' <span style="opacity:.65">(source notebook not recorded — republish it once to link it here)</span>')+'</div>')
         :'<div class="pddim" style="margin:2px 0">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
-      docMgmt='<div class="pdsec">Front page</div>'+fp+'<div class="pdsec">Documents</div>'+rows+
+      docMgmt='<div class="pdsec">Front page</div>'+fp+
+        '<div class="pdsec">Documents ('+docs.length+')'+(docs.length?' <span class="pddim" style="text-transform:none;font-weight:400;letter-spacing:0">— click a row for source &amp; build details</span>':'')+'</div>'+rows+
         (docs.length?'<div class="pdrow" style="margin-top:8px"><button class="pdbtn" onclick="openSiteArrange(\''+esc(s.name)+'\')">⇅ Arrange &amp; sections</button> <span class="pddim">drag to order + group into sections</span></div>':'')+
         // Add content WITHOUT opening a notebook first — pick from open/recent and publish it in.
         '<div class="pdrow" style="margin-top:10px"><button class="pdbtn" onclick="pdPickNotebook(this,\''+esc(s.name)+'\')">＋ Add a notebook to this site</button></div>'+

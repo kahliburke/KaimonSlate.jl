@@ -148,6 +148,23 @@ function _site_build_times(dir)
     return (haslocal = true, synced = synced, modt = modt)
 end
 
+# Enrich a site's manifest doc entry with computed provenance for the manager's per-doc detail view:
+# where its source `.jl` is (recorded at build time; empty for older builds), and whether/when/where its
+# HTML was built. Non-destructive — returns a copy with the extra fields layered on.
+function _enrich_site_doc(dir, d)
+    d isa AbstractDict || return d
+    e = Dict{String,Any}(d)
+    slug = String(get(d, "slug", ""))
+    src = String(get(d, "source", get(d, "path", "")))
+    e["source"] = src
+    e["sourceExists"] = !isempty(src) && isfile(src)
+    bfile = isempty(slug) ? joinpath(dir, "index.html") : joinpath(dir, slug, "index.html")
+    e["built"] = isfile(bfile)
+    e["builtAt"] = isfile(bfile) ? round(Int, mtime(bfile)) : 0
+    e["buildPath"] = isempty(slug) ? String(dir) : joinpath(dir, slug)
+    return e
+end
+
 function _site_view(s)
     fp = site_frontpage(s.name)
     dir = _site_dir(s.name)
@@ -155,7 +172,7 @@ function _site_view(s)
     hasTargets = !isempty(s.targets)
     return Dict{String,Any}("name" => s.name, "title" => s.title, "targets" => copy(s.targets),
         "paths" => copy(s.paths),               # target → subpath within it ("" = root)
-        "docs" => site_docs(s.name),            # docs/order/sections from the local build
+        "docs" => [_enrich_site_doc(dir, d) for d in site_docs(s.name)],   # + per-doc source/build provenance
         # Front page (a `home`-tagged notebook): presence + WHICH notebook it is — title and
         # source path recorded at build time, so the manager can name it and link back to it.
         "hasHome" => fp.home, "homeTitle" => fp.homeTitle, "homePath" => fp.homePath,
