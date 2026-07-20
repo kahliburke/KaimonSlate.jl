@@ -308,19 +308,21 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .actrun{color:#7cc0ff;font-size:.74rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .actrun.idle{color:#5a6070;}
 .actempty{color:#6a7090;font-size:.76rem;padding:3px 1px;}
-.sitecards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;}
-.sitecard{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;column-gap:11px;align-items:center;
+.sitecards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;align-items:start;}
+.sitecard{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto auto;column-gap:11px;align-items:center;
   background:#141828;border:1px solid #2a2e40;border-radius:11px;padding:12px 15px;text-decoration:none;
   transition:border-color .14s,transform .14s,box-shadow .14s;}
+.sitecard.expanded{border-color:#569cd6;}   /* subtle highlight when expanded (NOT `.open` — that's the notebook-opener box) */
 .sitecard:hover{border-color:#569cd6;transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.3);}
 .sitecard .si{grid-row:1/3;font-size:1.3rem;opacity:.9;}
 .sitecard .sn{color:#e6ebf7;font-weight:600;font-size:.96rem;min-width:0;overflow-wrap:anywhere;}
 .sitecard .su{color:#6a7090;font-size:.73rem;font-family:Menlo,monospace;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .sitecard-site{cursor:pointer;}
-.sitecard .scchev{color:#6a7090;margin-left:7px;display:inline-block;transition:transform .14s;}
-.sitecard.open .scchev{transform:rotate(90deg);}
-.sitecard .scdests{grid-column:1/3;display:none;flex-wrap:wrap;gap:8px;margin-top:11px;padding-top:11px;border-top:1px solid #2a2e40;}
-.sitecard.open .scdests{display:flex;}
+.sitecard .scchev{color:#6a7090;margin-left:6px;display:inline-block;font-size:.85em;line-height:1;vertical-align:middle;transition:transform .14s;}
+.sitecard.expanded .scchev{transform:rotate(90deg);}
+.sitecard .scdests{position:absolute;top:calc(100% + 5px);left:-1px;right:-1px;z-index:20;display:none;flex-wrap:wrap;gap:8px;box-sizing:border-box;
+  padding:11px 14px;background:#161b2b;border:1px solid #569cd6;border-radius:9px;box-shadow:0 12px 30px rgba(0,0,0,.5);}
+.sitecard.expanded .scdests{display:flex;}
 .pubdest{display:inline-flex;align-items:center;gap:5px;background:#10131f;border:1px solid #2a2e40;border-radius:7px;padding:5px 10px;color:#9aa3c0;font-size:.78rem;text-decoration:none;}
 .pubdest:hover{border-color:#569cd6;color:#569cd6;transform:none;}
 /* Publishing dashboard — full-screen global ledger surface (documents, targets, secrets, sites) */
@@ -753,7 +755,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     v=v||{}; hasLocal=hasLocal||{};
     // Preserve which cards are expanded across a re-render — else the initial load's refresh (or a
     // visibility/pageshow refresh) collapses a card the user JUST clicked ("opens then closes").
-    var openNames={}; box.querySelectorAll('.sitecard.open[data-site]').forEach(function(c){openNames[c.getAttribute('data-site')]=1;});
+    var openNames={}; box.querySelectorAll('.sitecard.expanded[data-site]').forEach(function(c){openNames[c.getAttribute('data-site')]=1;});
     var sites=(v.sites)||[], byName={}; (v.targets||[]).forEach(function(t){byName[t.name]=t;});
     var cards=sites.map(function(s){
       var dests=(s.targets||[]).map(function(n){var t=byName[n];if(!t)return '';var u=_pubSiteUrl(t);
@@ -766,7 +768,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       var purl = s.previewUrl || ('/sites/'+encodeURIComponent(_slug(s.name))+'/');
       var preview=isLocal?('<a class="pubdest" href="'+esc(purl)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="the staged local build (what Sync deploys)">👁 Staged site ↗</a>'):'';
       var body=preview+dests, nd=(s.docs||[]).length, ndest=(s.targets||[]).length;
-      return '<div class="sitecard sitecard-site'+(openNames[s.name]?' open':'')+'" data-site="'+esc(s.name)+'" onclick="this.classList.toggle(\'open\')">'+
+      return '<div class="sitecard sitecard-site'+(openNames[s.name]?' expanded':'')+'" data-site="'+esc(s.name)+'" onclick="this.classList.toggle(\'expanded\')">'+
         '<span class="si">🌐</span><span class="sn">'+esc(s.name)+'<span class="scchev">›</span></span>'+
         '<span class="su">'+nd+' doc'+(nd===1?'':'s')+' · '+ndest+' destination'+(ndest===1?'':'s')+(isLocal?'':' · not built')+'</span>'+
         '<div class="scdests">'+(body||'<span class="su">not built yet — publish a notebook into it</span>')+'</div></div>';
