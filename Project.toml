@@ -25,6 +25,7 @@ Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
 REPL = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
@@ -53,6 +54,7 @@ REPL = "1.11.0"
 ReTest = "0.3"
 SHA = "0.7"
 Serialization = "1.11.0"
+SlateExtensionsBase = "0.1"
 Sockets = "1.11.0"
 TOML = "1.0.3"
 Tachikoma = "2.3.6"
@@ -61,6 +63,12 @@ Typst_jll = "0.14"
 julia = "1.10"
 
 [apps.slate]
+
+# The extension SDK lives in the monorepo lib/ and versions in lockstep with the server (so the
+# injected notebook namespace and an external extension agree on Widget/Choice/WebPage/…). A
+# registered install resolves the registered package instead.
+[sources]
+SlateExtensionsBase = {path = "lib/SlateExtensionsBase"}
 
 [extras]
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"

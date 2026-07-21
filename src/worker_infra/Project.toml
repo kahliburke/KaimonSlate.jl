@@ -1,0 +1,22 @@
+# Slate-owned WORKER INFRA env — the single env stacked on a local worker's LOAD_PATH (after the
+# notebook project, so the notebook's own copies always win). It carries the packages the worker
+# needs that the notebook's own project shouldn't be forced to declare:
+#   • Revise             — hot-reload the parent project's /src (worker.jl `using Revise`)
+#   • ExpressionExplorer — macro-aware dependency recovery, pinned to the engine's version (worker.jl `_EE_OK`)
+#   • SlateExtensionsBase — the extension SDK (Widget/Choice/WebPage/slate_context), path-dev'd from
+#                           the monorepo lib; zero-external-dependency, so this env instantiates offline
+# Consolidates the former worker_revise + worker_ee + (proposed) worker_seb single-package dirs into
+# one env — one LOAD_PATH insert, one resolved Manifest, no cross-env skew. A remote worker gets the
+# same packages added INTO its notebook env instead (remote.jl `_env_instantiate_script`), since this
+# local path doesn't exist there.
+[deps]
+ExpressionExplorer = "21656369-7473-754a-2065-74616d696c43"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
+
+[compat]
+ExpressionExplorer = "1.1.4"   # keep in lockstep with the engine's pin (macroexpand.jl)
+SlateExtensionsBase = "0.1"
+
+[sources]
+SlateExtensionsBase = {path = "../../lib/SlateExtensionsBase"}

@@ -52,8 +52,8 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test RE.coerce_bind(w, "x^2 + 1") == "x^2 + 1"
         @test RE.coerce_bind(w, 42) === 42
         # reconcile keeps the user's value across a re-run (same custom kind), resets on a kind change
-        @test RE._reconcile_bind(w, "kept", RE.custom_widget("mathfield")) == "kept"
-        @test RE._reconcile_bind(w, "kept", RE.Slider(0:10)) == 0                        # kind changed → default
+        @test RE.reconcile_bind(w, "kept", RE.custom_widget("mathfield")) == "kept"
+        @test RE.reconcile_bind(w, "kept", RE.Slider(0:10)) == 0                        # kind changed → default
     end
 
     @testset "TableSelect binds the clicked row as a NamedTuple" begin
@@ -62,34 +62,36 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         @test [c["name"] for c in ts.params["columns"]] == ["sym", "px"]   # object-form columns
         @test ts.default == 0                                   # nothing selected initially
         # No selection → nothing; a valid 1-based index → the row as a NamedTuple (field per column)
-        @test RE._wrap_choice(ts, 0) === nothing
-        row = RE._wrap_choice(ts, 1)
+        @test RE.wrap_value(ts, 0) === nothing
+        row = RE.wrap_value(ts, 1)
         @test row === (sym = "AAPL", px = 42.0)
         @test row.px == 42.0 && row.sym == "AAPL"               # struct-like field access
         # coerce clamps the browser's row index to the known rows (out of range → 0 = none)
         @test RE.coerce_bind(ts, 2.0) === 2
         @test RE.coerce_bind(ts, 99) === 0 && RE.coerce_bind(ts, 0) === 0
         # reconcile keeps the selected index across a re-run while it stays in range
-        @test RE._reconcile_bind(ts, 2, ts) == 2
+        @test RE.reconcile_bind(ts, 2, ts) == 2
         ts1 = RE.TableSelect([(sym = "AAPL", px = 42.0)])       # a re-run that now has only 1 row
-        @test RE._reconcile_bind(ts, 2, ts1) == 0               # index 2 no longer valid → default
+        @test RE.reconcile_bind(ts, 2, ts1) == 0               # index 2 no longer valid → default
     end
 
     @testset "reconcile: keep value unless type-changed or out of domain" begin
-        @test RE._reconcile_bind(RE.Slider(0:10), 5, RE.Slider(0:10)) == 5        # in range → keep
-        @test RE._reconcile_bind(RE.Slider(0:10), 8, RE.Slider(0:5)) == 0         # out of range → default
-        @test RE._reconcile_bind(RE.Slider(0:10), 5, RE.Toggle(false)) === false  # type change → default
-        @test RE._reconcile_bind(RE.Select(["a", "b"]), "b", RE.Select(["a", "b", "c"])) == "b"
-        @test RE._reconcile_bind(RE.Select(["a", "b"]), "b", RE.Select(["a", "c"])) == "a"  # gone → default
+        @test RE.reconcile_bind(RE.Slider(0:10), 5, RE.Slider(0:10)) == 5        # in range → keep
+        @test RE.reconcile_bind(RE.Slider(0:10), 8, RE.Slider(0:5)) == 0         # out of range → default
+        @test RE.reconcile_bind(RE.Slider(0:10), 5, RE.Toggle(false)) === false  # type change → default
+        @test RE.reconcile_bind(RE.Select(["a", "b"]), "b", RE.Select(["a", "b", "c"])) == "b"
+        @test RE.reconcile_bind(RE.Select(["a", "b"]), "b", RE.Select(["a", "c"])) == "a"  # gone → default
         # multiselect drops now-invalid options
-        @test RE._reconcile_bind(RE.MultiSelect(["x", "y", "z"]), ["x", "z"],
+        @test RE.reconcile_bind(RE.MultiSelect(["x", "y", "z"]), ["x", "z"],
                                  RE.MultiSelect(["x", "y"])) == ["x"]
-        # `_do_set_bind`'s "?" placeholder (browser set a value before this bind cell's first run
-        # this session) isn't a real type change — the pending value survives, coerced against the
-        # real widget, instead of being discarded to the default.
-        placeholder = RE.Widget("?", Dict{String,Any}(), 7)
-        @test RE._reconcile_bind(placeholder, 7, RE.Slider(0:10)) == 7
-        @test RE._reconcile_bind(placeholder, 7.0, RE.Slider(0:10)) == 7   # coerced like a normal Int slider set
+        # `_do_bind` handles the "?" placeholder (browser set a value before this bind cell's first
+        # run this session): it isn't a real type change, so the pending value survives, coerced
+        # against the real widget, instead of being discarded to the default.
+        lk = ReentrantLock()
+        regp = Dict{Symbol,Tuple{RE.Widget,Any}}(:k => (RE.Widget("?", Dict{String,Any}(), 7), 7))
+        @test RE._do_bind(regp, lk, :k, RE.Slider(0:10)) == 7
+        regp2 = Dict{Symbol,Tuple{RE.Widget,Any}}(:k => (RE.Widget("?", Dict{String,Any}(), 7.0), 7.0))
+        @test RE._do_bind(regp2, lk, :k, RE.Slider(0:10)) == 7   # coerced like a normal Int slider set
     end
 
     @testset "bind cell: control reported by eval; dependents react" begin

@@ -60,7 +60,7 @@ end
 
 # Infra packages the remote provisioner adds INTO the worker's env (the single-env fix) — filtered out
 # of the notebook's package view + footer so they don't masquerade as the user's own deps.
-const _WORKER_INFRA_PKGS = Set(["KaimonGate", "Revise", "ExpressionExplorer"])
+const _WORKER_INFRA_PKGS = Set(["KaimonGate", "Revise", "ExpressionExplorer", "SlateExtensionsBase"])
 
 # The notebook's OWN packages (the delta beyond the parent project) as sorted
 # `{name, version, uuid}` — the set difference active − parent − parent-package. Shared by

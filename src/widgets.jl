@@ -11,9 +11,15 @@
 # value against a per-notebook registry (preserve across re-runs unless the widget
 # or its domain changed) and records the spec so the host can render the control.
 #
-# Dependency-light (Base + stdlib only) so it loads cleanly into the standalone worker.
-import Base64   # stdlib — for WebPage(obscure=true) base64 packaging
+# The @bind CONTRACT (Widget/Choice/Selection/WebPage + the per-kind value-lifecycle registry) lives
+# in the lean SlateExtensionsBase SDK, so an external package can build controls against it without
+# depending on KaimonSlate. This file supplies the built-in widget CONSTRUCTORS + `@bind` macro and
+# registers the built-in kinds through the SAME `register_kind!` seam a third party uses. SEB reaches
+# both namespaces: the engine via KaimonSlate's Project.toml dep, the standalone worker via the
+# slate-owned worker_infra env on LOAD_PATH.
 import Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `_populate_notebook_ns!`)
+using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indices, WebPage,
+                           to_widget, register_kind!, coerce_bind, reconcile_bind, wrap_value
 
 # slate_fingerprint + memo-store introspection — shared notebook helpers injected below
 # (one include here serves both namespaces, mirroring how this file itself is shared).
@@ -227,65 +233,10 @@ function _web_skin(; html::AbstractString = "", css::AbstractString = "", js::Ab
     return string("@web(", join(secs, ",\n"), ")")
 end
 
-# A widget spec: its kind (UI tag), display params, and default value. Built by the
-# constructors below at runtime — no syntactic parsing, no `Slider`-name matching.
-struct Widget
-    kind::String
-    params::Dict{String,Any}
-    default::Any
-end
-
-# What an option widget (Radio/Select/MultiSelect built from `value => label` pairs) binds to:
-# it carries BOTH the selected value and its display label. It behaves like the value for
-# comparison, display, hashing and string interpolation — so `pick == "a"`, `Dict(opts)[pick]`,
-# `"$(pick)"` and `{{ pick }}` all use the value — while `pick.label` gives the rendered text.
-# Fields: `.value` / `.label` (short aliases `.v` / `.l`).
-struct Choice{V}
-    value::V
-    label::String
-    index::Int            # 1-based position in the widget's option list (0 = unknown)
-end
-Choice(value, label) = Choice(value, label, 0)
-Base.getproperty(c::Choice, s::Symbol) = s === :v ? getfield(c, :value) : s === :l ? getfield(c, :label) :
-                                         s === :i ? getfield(c, :index) : getfield(c, s)
-Base.propertynames(::Choice) = (:value, :label, :index, :v, :l, :i)
-Base.show(io::IO, c::Choice) = show(io, getfield(c, :value))
-Base.print(io::IO, c::Choice) = print(io, getfield(c, :value))
-Base.string(c::Choice) = string(getfield(c, :value))
-Base.:(==)(a::Choice, b::Choice) = getfield(a, :value) == getfield(b, :value)
-Base.:(==)(a::Choice, b) = getfield(a, :value) == b
-Base.:(==)(a, b::Choice) = a == getfield(b, :value)
-Base.hash(c::Choice, h::UInt) = hash(getfield(c, :value), h)
-Base.isequal(a::Choice, b::Choice) = isequal(getfield(a, :value), getfield(b, :value))
-# Transparent in CONVERT/INDEX contexts too — typed struct fields, typed local assignment (`x::Int = c`),
-# typed collections (`Int[c]`, `push!(::Vector{Int}, c)`), indexing (`arr[c]`), and explicit numeric
-# construction (`Int(c)`) — so a labeled option's `Choice` works wherever its bare value would flow
-# through a `convert`. `convert` is restricted to SCALAR targets so it can't shadow the Choice→Choice
-# conversion that `Choice[…]` collections (e.g. `Selection`) depend on. NOTE: a typed *keyword/positional
-# argument* (`f(; n::Int)`, `f(n::Int)`) ASSERTS/DISPATCHES rather than converting — Julia rejects even a
-# `Float64` there — so it still needs `Int(c)`/`c.value`; no `Choice` method can change that.
-Base.convert(::Type{T}, c::Choice) where {T<:Union{Number,AbstractString,AbstractChar,Symbol}} =
-    convert(T, getfield(c, :value))
-(::Type{T})(c::Choice) where {T<:Number} = T(getfield(c, :value))
-Base.to_index(c::Choice) = Base.to_index(getfield(c, :value))
-
-# A multi-selection — an ordered, read-only `value => label` dict (emulates OrderedDict on Base
-# alone). `keys(picks)` → values, `values(picks)` → labels, `picks[v]` → label, `haskey`,
-# `for (v,l) in picks`, `length`; plus `indices(picks)` → each pick's position in the original
-# option list. (`v in picks` checks pairs like any dict — use `v in keys(picks)` / `haskey`.)
-struct Selection <: AbstractDict{Any,String}
-    items::Vector{Choice}
-end
-Base.length(s::Selection) = length(s.items)
-Base.iterate(s::Selection, i = 1) = i > length(s.items) ? nothing : (s.items[i].value => s.items[i].label, i + 1)
-function Base.getindex(s::Selection, k)
-    for c in s.items
-        isequal(c.value, k) && return c.label
-    end
-    throw(KeyError(k))
-end
-Base.haskey(s::Selection, k) = any(c -> isequal(c.value, k), s.items)
-indices(s::Selection) = Int[c.index for c in s.items]
+# `Widget` (kind/params/default), `Choice`, `Selection` and `WebPage` are defined in
+# SlateExtensionsBase (imported above) — the shared contract. The built-in constructors below build
+# `Widget`s at runtime (no syntactic parsing, no `Slider`-name matching); the value lifecycle for
+# each built-in kind is registered via `register_kind!` further down.
 
 _wparams(label) = label === nothing ? Dict{String,Any}() : Dict{String,Any}("label" => String(label))
 
@@ -419,61 +370,12 @@ const _WIDGET_CTORS = (:Slider, :NumberField, :Checkbox, :Toggle, :TextField, :T
                        :Select, :Radio, :MultiSelect, :MultiCheckBox, :ColorPicker, :DateField,
                        :TimeField, :Button, :playhead, :TableSelect, :custom_widget)
 
-# ── Value reconcile (the persistence policy) ──────────────────────────────────
-# Re-running a bind cell updates the SPEC (range/params) but KEEPS the user's value
-# unless it no longer fits: widget type changed, or value out of the new domain.
-function _reconcile_bind(oldw::Widget, oldv, neww::Widget)
-    # `oldw.kind == "?"` is the placeholder `_do_set_bind` fabricates when the browser sets a
-    # value for a name the registry doesn't know yet (e.g. a control-change race before this
-    # cell's first run this session). It's not a real "type changed" — coerce the pending value
-    # against the REAL widget instead of discarding it to the default.
-    oldw.kind == "?" && return coerce_bind(neww, oldv)
-    oldw.kind == neww.kind || return neww.default          # type changed → reset
-    if neww.kind == "slider" || neww.kind == "number"
-        lo = get(neww.params, "min", -Inf); hi = get(neww.params, "max", Inf)
-        return (oldv isa Number && lo <= oldv <= hi) ? oldv : neww.default
-    elseif neww.kind == "tableselect"                      # keep the selected row index if still valid
-        n = length(get(neww.params, "rows", ()))
-        return (oldv isa Integer && 1 <= oldv <= n) ? oldv : neww.default
-    elseif haskey(neww.params, "options")
-        vals = _opt_values(neww.params["options"])
-        if _is_multi(neww.kind)
-            return oldv isa AbstractVector ? [v for v in oldv if v in vals] : neww.default
-        end
-        return oldv in vals ? oldv : neww.default
-    end
-    return oldv
-end
-
-# Coerce a value from the browser (JSON number/string/bool/array) to the widget's type.
-function coerce_bind(w::Widget, v)
-    if (w.kind == "slider" || w.kind == "number") && v isa Number
-        # Key the int-vs-float coercion on the widget's DEFAULT type, not `step`: a Float64 slider
-        # (`Slider(0.0, 10.0)`) defaults step to 1 (Integer), which previously truncated its values to Int.
-        return (w.default isa Integer && isinteger(v)) ? Int(round(v)) : float(v)
-    elseif w.kind == "checkbox" || w.kind == "toggle"
-        return v === true || v == 1
-    elseif w.kind == "button" || w.kind == "playhead"
-        return v isa Number ? Int(round(v)) : v
-    elseif w.kind == "tableselect"
-        # The browser sends the clicked row's 1-based index; clamp to the known rows (0 = none).
-        n = length(get(w.params, "rows", ()))
-        i = v isa Number ? Int(round(v)) : 0
-        return (1 <= i <= n) ? i : 0
-    elseif w.kind == "select" || w.kind == "radio"
-        # The browser sends the option's stringified value attribute; map it back to the real value.
-        for v0 in _opt_values(get(w.params, "options", ()))
-            string(v0) == string(v) && return v0
-        end
-        return v
-    elseif _is_multi(w.kind)
-        vals = _opt_values(get(w.params, "options", ()))
-        sel = v isa AbstractVector ? v : (v === nothing ? Any[] : Any[v])
-        ss = Set(string(s) for s in sel)
-        return Any[v0 for v0 in vals if string(v0) in ss]
-    end
-    return v
-end
+# ── Value lifecycle ───────────────────────────────────────────────────────────
+# `coerce_bind` (browser value → Julia value), `reconcile_bind` (persistence across a bind-cell
+# re-run) and `wrap_value` (registry value → user-facing value) are SlateExtensionsBase's per-kind
+# registry (imported above). The built-in kinds register their hooks in `_register_builtin_kinds!()`
+# below (after the option/label helpers), through the SAME `register_kind!` seam a third party uses —
+# so a built-in widget is not privileged over an extension one.
 
 # ── Per-notebook bind runtime ─────────────────────────────────────────────────
 # `reg` is the notebook's registry (name => (widget, value)); `sink` collects the
@@ -492,33 +394,103 @@ function _lookup_option(w::Widget, v)
     return (string(v), 0)
 end
 _choice(w::Widget, v) = (li = _lookup_option(w, v); Choice(v, li[1], li[2]))
-# Wrap a LABELED option widget's value for the user namespace: a single Choice (Radio/Select) or a
-# `Selection` (multi). The registry, wire and frontend keep the bare value(s); non-labeled
-# widgets pass through unchanged.
-function _wrap_choice(w::Widget, val)
-    w.kind == "tableselect" && return _row_namedtuple(w, val isa Integer ? val : 0)   # index → row NamedTuple
-    get(w.params, "labeled", false) === true || return val
-    _is_multi(w.kind) && return Selection(Choice[_choice(w, v) for v in val])
-    (w.kind == "select" || w.kind == "radio") && return _choice(w, val)
-    return val
+
+# Register the value lifecycle for each built-in kind through SlateExtensionsBase's `register_kind!`
+# — the SAME seam a third-party widget uses. Hooks: coerce(w, v) (browser value → Julia value),
+# reconcile(ow, ov, nw) (bind-cell re-run, SAME kind — the kind-changed reset is generic, in
+# `reconcile_bind`), wrap(w, v) (registry value → user-facing value). Runs once at module load.
+function _register_builtin_kinds!()
+    # Slider / Number — numeric. Key the int-vs-float coercion on the widget's DEFAULT type, not
+    # `step`: a Float64 slider (`Slider(0.0, 10.0)`) defaults step to 1 (Integer), which would else
+    # truncate its values to Int. Reconcile keeps the value while still within [min,max].
+    numcoerce(w, v) = v isa Number ? ((w.default isa Integer && isinteger(v)) ? Int(round(v)) : float(v)) : v
+    function numrecon(ow, ov, nw)
+        lo = get(nw.params, "min", -Inf); hi = get(nw.params, "max", Inf)
+        (ov isa Number && lo <= ov <= hi) ? ov : nw.default
+    end
+    for k in ("slider", "number")
+        register_kind!(k; coerce = numcoerce, reconcile = numrecon)
+    end
+    # Checkbox / Toggle — boolean (reconcile keeps the value: the default).
+    for k in ("checkbox", "toggle")
+        register_kind!(k; coerce = (w, v) -> v === true || v == 1)
+    end
+    # Button / playhead — an integer counter / frame index.
+    for k in ("button", "playhead")
+        register_kind!(k; coerce = (w, v) -> v isa Number ? Int(round(v)) : v)
+    end
+    # TableSelect — the browser sends the clicked row's 1-based index; clamp to the known rows
+    # (0 = none). The user-facing value is that row as a NamedTuple.
+    register_kind!("tableselect";
+        coerce = function (w, v)
+            n = length(get(w.params, "rows", ()))
+            i = v isa Number ? Int(round(v)) : 0
+            (1 <= i <= n) ? i : 0
+        end,
+        reconcile = function (ow, ov, nw)
+            n = length(get(nw.params, "rows", ()))
+            (ov isa Integer && 1 <= ov <= n) ? ov : nw.default
+        end,
+        wrap = (w, v) -> _row_namedtuple(w, v isa Integer ? v : 0))
+    # Select / Radio — the browser sends the option's stringified value; map it back to the real
+    # value. A labeled option binds a `Choice` (value + label); a bare option stays its value.
+    for k in ("select", "radio")
+        register_kind!(k;
+            coerce = function (w, v)
+                for v0 in _opt_values(get(w.params, "options", ()))
+                    string(v0) == string(v) && return v0
+                end
+                return v
+            end,
+            reconcile = (ow, ov, nw) -> (ov in _opt_values(get(nw.params, "options", ()))) ? ov : nw.default,
+            wrap = (w, v) -> get(w.params, "labeled", false) === true ? _choice(w, v) : v)
+    end
+    # MultiSelect / MultiCheckBox — a set of stringified values; keep those still in the option set.
+    # Labeled → a `Selection` (value+label dict); bare → the value vector.
+    for k in ("multiselect", "multicheck")
+        register_kind!(k;
+            coerce = function (w, v)
+                vals = _opt_values(get(w.params, "options", ()))
+                sel = v isa AbstractVector ? v : (v === nothing ? Any[] : Any[v])
+                ss = Set(string(s) for s in sel)
+                Any[v0 for v0 in vals if string(v0) in ss]
+            end,
+            reconcile = function (ow, ov, nw)
+                vals = _opt_values(get(nw.params, "options", ()))
+                ov isa AbstractVector ? [v for v in ov if v in vals] : nw.default
+            end,
+            wrap = (w, v) -> get(w.params, "labeled", false) === true ? Selection(Choice[_choice(w, x) for x in v]) : v)
+    end
+    return nothing
 end
+_register_builtin_kinds!()
 
 # The per-eval `@bind` sink is TASK-LOCAL, so cells evaluated CONCURRENTLY (the parallel batch) each
 # collect their own controls instead of racing on one shared vector. `run_capture` seeds/reads it.
 const _BIND_SINK_KEY = :__slate_binds
 
-function _do_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name::Symbol, w::Widget)
+function _do_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name::Symbol, w0)
+    w = to_widget(w0)   # accept a Widget OR any value with a `to_widget` method (the extension seam)
     # The registry PERSISTS across evals and is shared, so a concurrent bind batch would resize the
     # Dict from two tasks at once — guard it. (The sink below is task-local, so it needs no lock.)
     val = lock(reglock) do
         prev = get(reg, name, nothing)
-        v = prev === nothing ? w.default : _reconcile_bind(prev[1], prev[2], w)
+        v = if prev === nothing
+            w.default
+        elseif prev[1].kind == "?"
+            # `"?"` is the placeholder `_do_set_bind` fabricates when the browser sets a value for a
+            # name the registry doesn't know yet (a control-change race before this cell's first run).
+            # Not a real "type changed" — coerce the pending value against the REAL widget.
+            coerce_bind(w, prev[2])
+        else
+            reconcile_bind(prev[1], prev[2], w)   # keeps the value unless the new spec rejects it
+        end
         reg[name] = (w, v)
         v
     end
     s = get(task_local_storage(), _BIND_SINK_KEY, nothing)
     s === nothing || push!(s, (name = name, kind = w.kind, params = w.params, value = val))
-    return _wrap_choice(w, val)        # user gets a Choice for labeled option widgets; bare value otherwise
+    return wrap_value(w, val)        # user gets a Choice for labeled option widgets; bare value otherwise
 end
 
 # Host sets a control's value (browser change). Updates the registry so a later
@@ -544,42 +516,10 @@ function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLoc
     end
 end
 
-# ── WebPage: compose a self-contained HTML page from CSS/HTML/JS ──────────────
-# A first-class replacement for the ad-hoc `HTMLDoc` + base64 `<img onload>` boot pattern (see the
-# Portfolio front page). Pass the pieces as strings — typically via `@asset` so the source files are
-# TRACKED (edit → the cell re-runs; the memo won't serve stale): `WebPage(css=@asset("app.css"),
-# js=@asset("app.js"), html=@asset("app.html"))`. Renders to ONE `text/html` output — `<style>` +
-# body + `<script>` — that works both in the live notebook (its `<script>` is revived by the
-# frontend's `runScripts`) and in a static export/publish (self-contained, no external requests, no
-# `<img onload>` smuggling needed since a static page runs `<script>` natively).
-#
-# `obscure=true` base64-encodes the JS behind a tiny decode-and-run bootstrap ("curtains" — trivial
-# to peel, but it doesn't spill the source to a casual View-Source), for when a published page should
-# keep the magic behind the curtain. The source files on disk stay plain and debuggable regardless.
-struct WebPage
-    html::String
-    css::String
-    js::String
-    obscure::Bool
-end
-WebPage(; html::AbstractString = "", css::AbstractString = "", js::AbstractString = "", obscure::Bool = false) =
-    WebPage(String(html), String(css), String(js), obscure)
-function Base.show(io::IO, ::MIME"text/html", w::WebPage)
-    isempty(w.css) || print(io, "<style>", replace(w.css, "</style>" => "<\\/style>"), "</style>")
-    print(io, w.html)
-    if !isempty(w.js)
-        if w.obscure
-            # Decode the base64'd UTF-8 (atob → latin-1 bytes; TextDecoder reassembles multi-byte
-            # chars) and run it. A plain `<script>` (no image hack) — revived live by runScripts,
-            # native in a static export.
-            print(io, "<script>Function(new TextDecoder().decode(Uint8Array.from(atob('",
-                  Base64.base64encode(w.js), "'),c=>c.charCodeAt(0))))()</script>")
-        else
-            print(io, "<script>", replace(w.js, "</script>" => "<\\/script>"), "</script>")
-        end
-    end
-    return nothing
-end
+# `WebPage` (compose a self-contained HTML page from CSS/HTML/JS, rendering to ONE `text/html`
+# output that works live and in a static export) is defined in SlateExtensionsBase and imported
+# above — so an extension package can build one from its own module. It's injected into the notebook
+# namespace by `_populate_notebook_ns!` below.
 
 # Normalize call args to NAMED-TUPLE shape so a handler reads `args.n` (not `args["n"]`): a JSON object
 # → NamedTuple (Symbol keys), arrays stay Vectors (recursing into elements so nested objects convert
@@ -676,7 +616,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     Core.eval(m, :(const __slate_set_bind = $((name, value) -> begin
         cv = _do_set_bind(reg, reglock, name, value)
         w = lock(reglock) do; reg[name][1]; end
-        wv = _wrap_choice(w, cv)
+        wv = wrap_value(w, cv)
         Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
         h = get(handlers, name, nothing)
         h === nothing || __on_fire!(tokens, name, h, wv)      # dispatch @onclick/@onchange with the new value

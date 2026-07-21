@@ -56,14 +56,12 @@ function _worker_tag(label::AbstractString, region::AbstractString, port::Intege
 end
 
 const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
-# Slate-owned env carrying ONLY Revise (+ its deps), so the worker can hot-reload the
-# notebook's parent-project /src without adding Revise to the user's project. Stacked AFTER
-# the notebook project on LOAD_PATH so the notebook's own deps always win.
-const _REVISE_ENV = joinpath(@__DIR__, "worker_revise")
-# Slate-owned env carrying ONLY ExpressionExplorer (same pinned version as the engine's), so the
-# worker can analyze macro EXPANSIONS where the macros live (see macroexpand.jl) without adding
-# EE to the user's project. Placed after the notebook project like the Revise env.
-const _EE_ENV = joinpath(@__DIR__, "worker_ee")
+# Slate-owned WORKER INFRA env — Revise (hot-reload the parent project's /src), ExpressionExplorer
+# (macro-aware dep recovery, pinned to the engine's version — see macroexpand.jl), and
+# SlateExtensionsBase (the extension SDK: Widget/Choice/WebPage/slate_context). Carried in ONE env
+# (was three single-package dirs) so the worker gets them without the user's project declaring them.
+# Stacked AFTER the notebook project on LOAD_PATH so the notebook's own copies always win.
+const _INFRA_ENV = joinpath(@__DIR__, "worker_infra")
 
 # ── Worker KaimonGate env ──────────────────────────────────────────────────────
 # The worker imports KaimonGate (the ZMQ bridge) from LOAD_PATH[1]. Pointing that at
@@ -451,8 +449,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # worker can attribute package provenance (which deps are notebook adds vs parent).
     return """
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
-    insert!(LOAD_PATH, 3, $(repr(_REVISE_ENV)))   # slate-owned Revise — after the notebook project (@), before globals
-    insert!(LOAD_PATH, 4, $(repr(_EE_ENV)))       # slate-owned ExpressionExplorer — macro-aware deps (worker.jl _EE_OK)
+    insert!(LOAD_PATH, 3, $(repr(_INFRA_ENV)))   # slate-owned infra (Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
     import KaimonGate
     # Load Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
     # KaimonGate.serve auto-starts a watcher that PUBs `files_changed` on Revise.revision_event.
