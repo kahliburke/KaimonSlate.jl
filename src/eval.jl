@@ -12,7 +12,7 @@ export register_refresh!, unregister_refresh!, register_srcchange!, unregister_s
 export register_progress!, unregister_progress!, register_runbatch!, unregister_runbatch!
 export register_userprog!, unregister_userprog!
 export register_prepare!, unregister_prepare!
-export register_emit!, unregister_emit!
+export register_emit!, unregister_emit!, register_bin_emit!, unregister_bin_emit!
 export register_celldone!, unregister_celldone!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
@@ -98,6 +98,19 @@ function _do_emit(report_id::AbstractString, channel, payload)
     cb = get(_EMIT_REGISTRY, String(report_id), nothing)
     cb === nothing && return nothing
     try; cb(String(channel), payload); catch e; @debug "eval: emit callback failed" report_id exception = e; end   # payload is a Julia VALUE (gate: deserialized; in-process: passed straight through) — the emit callback JSON-encodes it
+    return nothing
+end
+
+# Binary twin of the emit path: a `slate_emit_bin` frame is a ready-made self-describing binary buffer
+# (SlateExtensionsBase.encode_binary_frame — channel+meta+dtype+shape+raw bytes) that the server callback
+# forwards to the page as a binary WS frame AS-IS (no deserialize, no JSON). Same out-of-band registry.
+const _BIN_EMIT_REGISTRY = Dict{String,Any}()
+register_bin_emit!(report_id::AbstractString, cb) = (_BIN_EMIT_REGISTRY[String(report_id)] = cb; nothing)
+unregister_bin_emit!(report_id::AbstractString) = (delete!(_BIN_EMIT_REGISTRY, String(report_id)); nothing)
+function _do_emit_bin(report_id::AbstractString, frame::Vector{UInt8})
+    cb = get(_BIN_EMIT_REGISTRY, String(report_id), nothing)
+    cb === nothing && return nothing
+    try; cb(frame); catch e; @debug "eval: bin emit callback failed" report_id exception = e; end
     return nothing
 end
 
