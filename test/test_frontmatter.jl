@@ -292,6 +292,8 @@ x = 1
         @test !occursin("fetch_bundle()println", rj)                 # statements not glued onto one line (juxtaposition bug)
         @test occursin("nb = fetch_bundle()\n", rj)
         @test occursin("KAIMONSLATE_NO_AUTOREGISTER", rj)            # don't touch the user's Kaimon config
+        @test occursin("KAIMONSLATE_HOME", rj)                       # isolate state (prefs/secrets/ledger/cache) off the machine-global homes
+        @test occursin(".kaimonslate", rj) && occursin("mktempdir", rj)   # install → under the notebook folder; throwaway → temp
         @test occursin("free_port()", rj)                            # pick a free port (8765 may be taken)
         @test occursin("using KaimonSlate\n", rj)                    # load at top level (world-age safe)
         # No-URL run.jl (extracted site / embed): reads the sibling bundle; the per-notebook name is threaded in

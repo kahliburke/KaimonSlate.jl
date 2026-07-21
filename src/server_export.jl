@@ -1281,6 +1281,16 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     const NB = setup()
     let dir = choose_install_dir()
         isempty(dir) || (ENV["SLATE_INSTALL_DIR"] = dir; println("→ Setting up in ", dir))
+        # Keep THIS run's Slate state — prefs/secrets, the publish ledger, local site builds — OFF the
+        # machine-global homes (~/.config, ~/.local/share, ~/.cache under kaimonslate), so a standalone
+        # never reads or clobbers a Kaimon extension's (or another standalone's) secrets/ledger/cache.
+        # A real install keeps it under the notebook's OWN folder (self-contained + portable; delete the
+        # folder → gone); a throwaway ('-') run uses a temp home so it leaves no trace. Because every run
+        # gets its own home, multiple standalone hubs can run at once. An explicit KAIMONSLATE_HOME wins.
+        if get(ENV, "KAIMONSLATE_HOME", "") == "" && get(ENV, "KAIMONSLATE_CONFIG_HOME", "") == ""
+            ENV["KAIMONSLATE_HOME"] = isempty(dir) ? mktempdir(; prefix = "kaimonslate-run-") :
+                                                     joinpath(dir, ".kaimonslate")
+        end
     end
     port = free_port()
     println("Starting the notebook server (first run compiles the environment)…")
