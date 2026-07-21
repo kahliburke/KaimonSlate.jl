@@ -1812,8 +1812,13 @@ function _try_slate_call(nb::LiveNotebook, k, channel::AbstractString, args, cal
         f === nothing && return (false, Dict{String,Any}("ok" => false, "error" => "no slate_on handler registered for channel '$channel'"))
         progress = isempty(call_id) ? (p -> nothing) :
             (p -> ReportEngine._do_emit(nb.report.id, "__slate_call_progress", (id = String(call_id), data = p)))
+        # Establish the execution context so a handler that STREAMS (`slate_emit` via SlateExtensionsBase's
+        # ctx accessors) works — the in-process twin of the worker fix.
+        ctx = ReportEngine._build_slate_ctx(m, nb.report.id, "", String[])
         return (true, Dict{String,Any}("ok" => true,
-            "value" => ReportEngine._invoke_slate_handler(f, ReportEngine._slate_args(args), progress)))
+            "value" => task_local_storage(:slate_ctx, ctx) do
+                ReportEngine._invoke_slate_handler(f, ReportEngine._slate_args(args), progress)
+            end))
     catch e
         return (false, Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300)))
     end

@@ -917,7 +917,14 @@ function __slate_call(channel::String, args; call_id::String = "")
                 Base64.base64encode(Serialization.serialize, (id = call_id, data = p)))
         catch; end; nothing))
     try
-        return (; ok = true, value = _invoke_slate_handler(f, _slate_args(args), progress))   # Dict → NamedTuple so the handler reads `args.field`
+        # Establish the per-cell execution context for the handler task, so a package that STREAMS from its
+        # `slate_on` action — `slate_emit`/`slate_effect` via SlateExtensionsBase's ctx accessors — works the
+        # same inside a handler as inside a cell eval. Without this, `slate_emit` in a handler is a silent
+        # no-op (its `_ctx_field(:emit)` is unset). A browser call is main-side, so no region/notebook needed.
+        ctx = _build_slate_ctx(m, "", "", String[])
+        return task_local_storage(:slate_ctx, ctx) do
+            (; ok = true, value = _invoke_slate_handler(f, _slate_args(args), progress))   # Dict → NamedTuple so the handler reads `args.field`
+        end
     catch e
         return (; ok = false, error = first(sprint(showerror, e), 400))
     end
