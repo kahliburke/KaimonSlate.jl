@@ -50,6 +50,7 @@ include(joinpath(@__DIR__, "slate_matrix.jl")) # slate_matrix — auto-render fo
 include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value tracing (engine + worker)
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
+include(joinpath(@__DIR__, "envprep.jl"))   # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
 include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (parallel evaluator I/O isolation)
 include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_scheduled — parallel batch scheduler
@@ -1611,26 +1612,14 @@ function __slate_env_info()
     return Dict{String,Any}("notebook" => nb, "parent" => parent, "payload_sha" => PAYLOAD_SHA[])
 end
 
-# Seed a forked notebook env from `parent`: copy the parent's deps + compat (NOT its package
-# identity) and its Manifest as the resolution baseline, activate the env, then `dev` the
-# parent package in so `using ParentModule` works — all preserving the parent's pinned
-# versions, so anything already loaded in this worker stays valid. One consistent env.
+# Seed a forked notebook env from `parent`: write the env's Project/Manifest from the parent (the
+# shared `seed_env_project!` policy — deps/compat/sources with dev paths made absolute — from
+# envprep.jl), stamp the parent fingerprint (so a later parent change is detected stale), then
+# activate + `dev` the parent package in so `using ParentModule` works, preserving the parent's
+# pinned versions. One consistent env.
 function _seed_notebook_env!(envdir::AbstractString, parent::AbstractString)
-    mkpath(envdir)
-    pname = ""
-    ppf = joinpath(parent, "Project.toml")
-    if isfile(ppf)
-        pt = Pkg.TOML.parsefile(ppf)
-        seed = Dict{String,Any}()
-        haskey(pt, "deps") && (seed["deps"] = pt["deps"])
-        haskey(pt, "compat") && (seed["compat"] = pt["compat"])
-        open(joinpath(envdir, "Project.toml"), "w") do io; Pkg.TOML.print(io, seed); end
-        pmf = joinpath(parent, "Manifest.toml")
-        isfile(pmf) && cp(pmf, joinpath(envdir, "Manifest.toml"); force = true)
-        (haskey(pt, "name") && haskey(pt, "uuid")) && (pname = String(pt["name"]))
-    else
-        write(joinpath(envdir, "Project.toml"), "")
-    end
+    pname = seed_env_project!(envdir, parent)   # shared policy (envprep.jl)
+    stamp_env!(envdir, parent)
     Pkg.activate(envdir)
     if !isempty(pname)
         try
