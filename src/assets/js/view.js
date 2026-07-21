@@ -46,6 +46,11 @@ window.slateRegisterWidget = function (kind, impl) {
       if (im.sync) { const bs = _bindSpec(el.dataset.bind, el.dataset.name); if (bs) im.sync(el, bs.value, bs.params || {}); }
     } catch (e) { console.error(e); }
   });
+  // Same for return-value component OUTPUTS (`slate_render`): a `.slatecomponent` placeholder rendered
+  // before this kind registered now gets wired (wireOutputComponent re-reads its descriptor + matches kind).
+  document.querySelectorAll('.slatecomponent').forEach(el => {
+    try { if (!el._customWired) wireOutputComponent(el); } catch (e) { console.error(e); }
+  });
 };
 // Tear down any custom widgets under `root` before their DOM is discarded (a bind/control-strip
 // rebuild). Mirrors the inline-echart dispose before an innerHTML swap — a plugin holding resources
@@ -483,12 +488,39 @@ function _bindSpec(bindId, name) {
   const c = _cellById(bindId); if (!c) return null;
   return (c.binds || []).find(b => b.name === name) || null;
 }
+// Mount return-value component OUTPUTS: a `slate_render` descriptor {v, component, props} is emitted as a
+// `.slatecomponent` placeholder plus a sibling JSON `<script class="slatecomponent-desc">`. Look the
+// component up in the widget registry and wire it with the props + a DISPLAY ctx (call/stream, no bind
+// value). Distinct from a @bind control — an output component has no `data-bind`. Idempotent per element;
+// an as-yet-unregistered component just waits for `slateRegisterWidget` to re-scan (see above).
+function wireOutputComponent(el) {
+  if (el._customWired) return;
+  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
+  if (!scr) return;
+  let desc; try { desc = JSON.parse(scr.textContent); } catch (e) { return; }
+  const kind = desc && desc.component;
+  const reg = kind && window.slateWidgets && window.slateWidgets[kind];
+  el.dataset.component = kind || '';
+  if (!reg || !reg.wire) return;                       // await registration
+  el._customWired = true;
+  reg.wire(el, {
+    params: (desc && desc.props) || {},
+    value: undefined,                                  // a returned value has no bound state
+    display: true,
+    call: (ch, payload, onProgress) => window.slateCall(String(ch), payload, onProgress),
+  });
+}
+function mountOutputComponents(root) {
+  (root || document).querySelectorAll('.slatecomponent').forEach(wireOutputComponent);
+}
+
 // Wire every bound widget in a cell — its own @bind widget and/or control strip.
 function mountControls(c) {
   const cell = document.getElementById('cell-' + c.id);
   if (!cell) return;
   cell.querySelectorAll('[data-bind]').forEach(wireControl);
   cell.querySelectorAll('.radiogroup, .checkgroup, .mslist').forEach(typeset);   // render rich ($math$) option labels
+  mountOutputComponents(cell);                                                   // return-value component outputs
 }
 
 // Source editing for non-code cells (markdown + @bind widgets): reveal a raw
@@ -915,6 +947,7 @@ function _swapOutput(out, html) {
   out.style.minHeight = out.offsetHeight + 'px';
   out.innerHTML = html;
   runScripts(out);   // <script> set via innerHTML is inert — re-create so figures boot
+  mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
   const imgs = out.querySelectorAll('img');
   const release = () => { out.style.minHeight = ''; };
   if (!imgs.length) { requestAnimationFrame(release); return; }

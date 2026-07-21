@@ -12,6 +12,7 @@
 #   notebook  :: String                  — the notebook id
 #   emit      :: (channel, value) -> …   — this side's slate_emit (worker → gate stream / in-proc → SSE)
 #   effect    :: (kind; names, data...) -> … — the code→Slate declaration channel
+#   on        :: (channel, f) -> …       — register a JS→Julia handler (into the notebook's __slate_handlers)
 
 const _CTX_KEY = :slate_ctx
 
@@ -91,3 +92,19 @@ Sugar for `slate_effect(:everywhere; names = names)` — mark process-global sta
 global config) registered by the current statement so Slate re-establishes it on every worker.
 """
 slate_everywhere(names::Symbol...) = slate_effect(:everywhere; names = collect(names))
+
+"""
+    slate_on(channel, f) -> nothing
+
+Register a JS→Julia RPC handler for `channel` from PACKAGE code — the browser's `window.slateCall(channel,
+payload)` invokes `f`. Routed through the current cell's context (the notebook's `__slate_handlers`), so a
+package can wire an interactive widget's actions itself instead of the notebook hand-calling the injected
+`slate_on`. The symmetric counterpart to [`slate_emit`](@ref) (push) — `slate_emit` is Julia→JS, this is
+JS→Julia. A no-op outside a Slate cell.
+"""
+function slate_on(channel, f)
+    on = _ctx_field(:on)
+    on === nothing && return nothing
+    on(channel, f)
+    return nothing
+end
