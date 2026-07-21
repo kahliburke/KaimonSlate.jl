@@ -295,12 +295,17 @@ end
 
 LocalStore() = LocalStore(joinpath(SlateHome.ledger_dir(), "kaimonslate-ledger.json"))
 
-function load(s::LocalStore)::Ledger
+# `strict=true` (the save path) rethrows on a PRESENT-but-unparseable store instead of degrading to
+# empty: `save` reconciles against `load`, so an empty result there would rescue zero events and the
+# next write would CLOBBER the whole history. Read-only callers keep the graceful default.
+function load(s::LocalStore; strict::Bool = false)::Ledger
     isfile(s.path) || return Ledger()
     try
         return _write_cache(from_json(read(s.path, String)))
     catch e
-        @warn "PublishLedger: could not parse ledger; starting empty" path = s.path exception = e
+        e isa InterruptException && rethrow()
+        strict && rethrow()
+        @warn "PublishLedger: could not parse ledger; treating as empty for this read" path = s.path exception = (e, catch_backtrace())
         return Ledger()
     end
 end
@@ -308,8 +313,20 @@ end
 function save(s::LocalStore, ledger::Ledger)
     mkpath(dirname(s.path))
     # load→reconcile→save: our ledger is authoritative for structure (edits/deletes stick) while any
-    # events already on disk are rescued into surviving docs (see `_reconcile_for_save`).
-    merged = isfile(s.path) ? _reconcile_for_save(load(s), ledger) : ledger
+    # events already on disk are rescued into surviving docs (see `_reconcile_for_save`). A present-but-
+    # unreadable store ABORTS the save (fail closed) rather than clobbering the history.
+    merged = if isfile(s.path)
+        remote = try
+            load(s; strict = true)
+        catch e
+            e isa InterruptException && rethrow()
+            @error "PublishLedger: existing ledger is unreadable — aborting save so it isn't clobbered" path = s.path exception = (e, catch_backtrace())
+            rethrow()
+        end
+        _reconcile_for_save(remote, ledger)
+    else
+        ledger
+    end
     _atomic_write(s.path, to_json(merged))
     return _write_cache(merged)
 end
@@ -483,7 +500,9 @@ function locate(s::GistStore)
     return nothing
 end
 
-function load(s::GistStore)::Ledger
+# See `load(::LocalStore)`: `strict=true` (the save path) rethrows on present-but-unparseable content —
+# degrading to empty there would let the next write clobber the whole history (esp. a truncated read).
+function load(s::GistStore; strict::Bool = false)::Ledger
     id = locate(s)
     id === nothing && return Ledger()
     content = gist_read(s.client, id, s.filename)
@@ -491,7 +510,9 @@ function load(s::GistStore)::Ledger
     try
         return _write_cache(from_json(content))
     catch e
-        @warn "PublishLedger: could not parse gist ledger; starting empty" gist = id exception = e
+        e isa InterruptException && rethrow()
+        strict && rethrow()
+        @warn "PublishLedger: could not parse gist ledger; treating as empty for this read" gist = id exception = (e, catch_backtrace())
         return Ledger()
     end
 end
@@ -506,7 +527,14 @@ function save(s::GistStore, ledger::Ledger)
         return _write_cache(ledger)
     end
     # fetch-before-write: reconcile against the current remote (our structure wins; rescue remote events).
-    merged = _reconcile_for_save(load(s), ledger)
+    # An unreadable remote ABORTS the save (fail closed) rather than clobbering the history.
+    merged = try
+        _reconcile_for_save(load(s; strict = true), ledger)
+    catch e
+        e isa InterruptException && rethrow()
+        @error "PublishLedger: existing gist ledger is unreadable — aborting save so it isn't clobbered" gist = id exception = (e, catch_backtrace())
+        rethrow()
+    end
     gist_update(s.client, id, s.filename, to_json(merged))
     _write_cache(merged)
     return merged
