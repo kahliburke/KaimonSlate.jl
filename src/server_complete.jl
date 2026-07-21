@@ -425,7 +425,34 @@ end
 # writes to disk; the worker's Revise hot-reload watcher picks it up exactly like an external edit.
 const _TREE_SKIP_DIRS = Set{String}([".git", ".julia", "node_modules", "compiled", "build",
                                      ".cache", "__pycache__", ".vscode", ".claude", ".ipynb_checkpoints"])
-const _TREE_EXTS = Set{String}([".jl", ".toml", ".md", ".txt", ".r", ".py", ".qmd", ".csv"])   # editable text
+# Extensions that open in the built-in CM6 text editor. Source, config, and the web assets a
+# notebook pulls in (`.js`/`.css`/`.html`/`.json`/…) — the whole point of the browser is to edit
+# the files a notebook references, not just its Julia source.
+const _TREE_TEXT_EXTS = Set{String}([
+    ".jl", ".toml", ".md", ".markdown", ".txt", ".text", ".r", ".py", ".qmd", ".csv", ".tsv",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css", ".scss", ".less", ".html", ".htm",
+    ".json", ".jsonl", ".ndjson", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties",
+    ".sh", ".bash", ".zsh", ".fish", ".glsl", ".wgsl", ".frag", ".vert", ".comp",
+    ".c", ".h", ".hpp", ".cc", ".cpp", ".rs", ".go", ".lua", ".sql", ".tex", ".typ", ".log",
+])
+# Media that render inline via the notebook's `/n/{id}/asset/**` byte route (no base64-through-JSON).
+const _TREE_IMG_EXTS   = Set{String}([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif"])
+const _TREE_AUDIO_EXTS = Set{String}([".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus"])
+const _TREE_VIDEO_EXTS = Set{String}([".mp4", ".webm", ".mov", ".m4v", ".ogv"])
+# Largest file we'll inline into the JSON editor payload; media/binary stream via the asset route instead.
+const _TREE_TEXT_MAX = 4_000_000
+
+# Classify a file by extension for the Files tab: "image"/"audio"/"video" preview inline, "text"
+# opens in the editor, "binary" gets a guarded info card. `.svg` counts as an image (preview by
+# default) but is still text — the client's "open as text" reads it through `?as=text`.
+function _file_kind(name::AbstractString)
+    e = lowercase(splitext(name)[2])
+    e in _TREE_IMG_EXTS   && return "image"
+    e in _TREE_AUDIO_EXTS && return "audio"
+    e in _TREE_VIDEO_EXTS && return "video"
+    e in _TREE_TEXT_EXTS  && return "text"
+    return "binary"
+end
 
 # The notebook's project root (its parent project dir — the `@asset` base). "" ⇒ in-process / no project.
 _proj_root(nb::LiveNotebook) = String(get(nb.report.meta, "assetbase", ""))
@@ -441,8 +468,10 @@ function _safe_proj_path(root::AbstractString, rel::AbstractString)
     return ap
 end
 
-# Editable source tree under `root`: dirs (that contain something) before text files, alphabetical,
-# skipping VCS/build/hidden noise. Each node: {name, path (root-relative), dir}, dirs carry `children`.
+# Project tree under `root`: dirs (that contain something) before files, alphabetical, skipping
+# VCS/build/hidden noise. Every non-hidden file shows — each node carries a `kind` (text/image/
+# audio/video/binary) so the client can route the click (edit vs preview vs download). Each node:
+# {name, path (root-relative), dir}; files add {kind, bytes}, dirs carry `children`.
 function _proj_tree(root::AbstractString, dir::AbstractString; depth::Int = 0)
     nodes = Any[]
     depth > 10 && return nodes
@@ -451,14 +480,14 @@ function _proj_tree(root::AbstractString, dir::AbstractString; depth::Int = 0)
         (isempty(name) || startswith(name, ".") || name in _TREE_SKIP_DIRS) && continue
         p = joinpath(dir, name); isdir(p) || continue
         kids = _proj_tree(root, p; depth = depth + 1)
-        isempty(kids) && continue                          # prune dirs with no editable content
+        isempty(kids) && continue                          # prune dirs with nothing visible inside
         push!(nodes, Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => true, "children" => kids))
     end
-    for name in entries                                    # then text files
+    for name in entries                                    # then files (all non-hidden, tagged by kind)
         startswith(name, ".") && continue
-        p = joinpath(dir, name)
-        (isfile(p) && lowercase(splitext(name)[2]) in _TREE_EXTS) || continue
+        p = joinpath(dir, name); isfile(p) || continue
         push!(nodes, Dict{String,Any}("name" => name, "path" => relpath(p, root), "dir" => false,
+                                      "kind" => _file_kind(name),
                                       "bytes" => (try; filesize(p); catch; 0; end)))
     end
     return nodes
@@ -624,7 +653,10 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/n/{id}/asset/**", req -> begin
         id = HTTP.getparam(req, "id")
         m = match(r"^/n/[^/]+/asset/(.*)$", HTTP.URI(req.target).path)
-        sub = m === nothing ? "" : String(m.captures[1])
+        # Percent-DECODE before the traversal guard — a filename may legitimately contain spaces or
+        # unicode (the Files-tab preview/download URL-encodes each segment), and decoding first also
+        # stops an encoded `..` (`%2E%2E`) from slipping past the guard below.
+        sub = m === nothing ? "" : HTTP.URIs.unescapeuri(String(m.captures[1]))
         nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
         nb === nothing && return HTTP.Response(404, "no such notebook")
         base = String(get(nb.report.meta, "assetbase", ""))
@@ -1384,19 +1416,36 @@ function _make_router(h::Hub)
                    "detached" => false, "tree" => _proj_tree(root, root)))
     end))
     HTTP.register!(router, "GET", "/api/{id}/file", req -> _withnb(h, req, nb -> begin
-        rel = String(get(HTTP.queryparams(HTTP.URI(req.target)), "path", ""))
+        qp = HTTP.queryparams(HTTP.URI(req.target))
+        rel = String(get(qp, "path", ""))
         ap = _safe_proj_path(_proj_root(nb), rel)
         isempty(ap) && return HTTP.Response(400, "bad or out-of-project path")
         isfile(ap) || return HTTP.Response(404, "no such file")
-        filesize(ap) > 4_000_000 && return HTTP.Response(413, "file too large to edit here")
-        _json(Dict("path" => rel, "content" => read(ap, String), "bytes" => filesize(ap)))
+        sz = filesize(ap)
+        # Media/binary don't ride in the JSON payload — the client previews or downloads them through
+        # the raw `/n/{id}/asset/**` byte route. `?as=text` forces a binary open in the editor (used by
+        # the "open as text anyway" affordance), guarded on size + a UTF-8 validity check.
+        kind = get(qp, "as", "") == "text" ? "text" : _file_kind(basename(ap))
+        kind == "text" || return _json(Dict("path" => rel, "kind" => kind, "bytes" => sz))
+        sz > _TREE_TEXT_MAX && return HTTP.Response(413, "file too large to edit here ($(sz) bytes)")
+        bytes = read(ap)
+        isvalid(String, bytes) || return HTTP.Response(415, "not a text file (invalid UTF-8)")
+        _json(Dict("path" => rel, "kind" => "text", "content" => String(bytes), "bytes" => sz))
     end))
     HTTP.register!(router, "POST", "/api/{id}/file", req -> _withnb(h, req, nb -> begin
         body = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
         rel = String(get(body, "path", "")); content = String(get(body, "content", ""))
+        create = get(body, "create", false) === true
         ap = _safe_proj_path(_proj_root(nb), rel)
         isempty(ap) && return HTTP.Response(400, "bad or out-of-project path")
-        isfile(ap) || return HTTP.Response(404, "won't create new files here (v1 edits existing source only)")
+        if !isfile(ap)
+            # A save only touches existing files; creating one is an explicit `create:true` request
+            # (the "New file" affordance), which may need to `mkpath` an intermediate dir.
+            create || return HTTP.Response(404, "no such file (pass create:true to make a new one)")
+            ispath(ap) && return HTTP.Response(409, "path already exists")
+            try; mkpath(dirname(ap)); catch e
+                return HTTP.Response(500, "could not create parent dir: " * first(sprint(showerror, e), 200)); end
+        end
         try
             write(ap, content)
         catch e
@@ -1406,6 +1455,47 @@ function _make_router(h::Hub)
         # affected cells) AND kicks a background `Pkg.precompile()` in the warm worker to refresh the
         # now-stale on-disk cache — see `_kick_bg_precompile!` in worker.jl (logs to the worker log).
         _json(Dict("ok" => true, "path" => rel, "bytes" => sizeof(content)))
+    end))
+    # Attach a dropped/pasted media file into the notebook's project so a cell can reference it by
+    # URL. Bytes land in `<project>/assets/` (content-deduped: an identical file is reused, a name
+    # clash with different bytes is uniquified), and we return the root-relative path + the served
+    # `/n/{id}/asset/**` URL. The front end inserts a Markdown/HTML reference to that URL. A detached
+    # (in-process) notebook has no project root — the client inlines a data URL instead. Body:
+    # {name, contentB64, subdir?} (subdir defaults to "assets").
+    HTTP.register!(router, "POST", "/api/{id}/attach", req -> _withnb(h, req, nb -> begin
+        root = _proj_root(nb)
+        isempty(root) && return HTTP.Response(409, "notebook has no project root to attach into")
+        body = try; JSON.parse(String(req.body)); catch; Dict{String,Any}(); end
+        raw = basename(String(get(body, "name", "")))
+        name = replace(raw, r"[^\w.\-]" => "_"); isempty(name) && (name = "file")
+        startswith(name, ".") && (name = "_" * name)            # never an accidental dotfile
+        subdir = replace(String(get(body, "subdir", "assets")), r"[^\w/\-]" => "_")
+        isempty(strip(subdir, ['/', ' '])) && (subdir = "assets")
+        bytes = try
+            Vector{UInt8}(Base64.base64decode(String(get(body, "contentB64", ""))))
+        catch
+            return HTTP.Response(400, "bad base64 payload")
+        end
+        isempty(bytes) && return HTTP.Response(400, "empty file")
+        length(bytes) > 64_000_000 && return HTTP.Response(413, "file too large to attach ($(length(bytes)) bytes)")
+        reldir = _safe_proj_path(root, subdir)
+        isempty(reldir) && return HTTP.Response(400, "bad subdir")
+        try; mkpath(reldir); catch e
+            return HTTP.Response(500, "could not create assets dir: " * first(sprint(showerror, e), 200)); end
+        stem, ext = splitext(name)
+        # Content dedup: reuse an existing identical file; otherwise uniquify the stem past any clash.
+        cand = joinpath(reldir, name); i = 1
+        while isfile(cand)
+            (filesize(cand) == length(bytes) && read(cand) == bytes) && break   # identical → reuse
+            i += 1; cand = joinpath(reldir, "$(stem)-$(i)$(ext)")
+        end
+        if !isfile(cand)
+            try; write(cand, bytes); catch e
+                return HTTP.Response(500, "write failed: " * first(sprint(showerror, e), 200)); end
+        end
+        rel = relpath(cand, root)
+        url = "/n/$(nb.id)/asset/" * join(HTTP.URIs.escapeuri.(split(rel, ('/', '\\'))), "/")
+        _json(Dict("ok" => true, "path" => rel, "url" => url, "name" => basename(cand), "bytes" => length(bytes)))
     end))
     # ── Notebook packages ─────────────────────────────────────────────────────
     # Show the environment with provenance: `notebook` deps (the notebook's own forked env,
