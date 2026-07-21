@@ -88,10 +88,12 @@ end
 # callback fed the subprocess's stdout/stderr line-by-line as it precompiles — mirrors the
 # remote-provision path's `_run_streamed`, so a slow first-run instantiate narrates itself into
 # the boot banner instead of being silent for however long `Pkg.instantiate()` takes.
-function _instantiate_env!(envdir::AbstractString; online = nothing)
+function _instantiate_env!(envdir::AbstractString; online = nothing,
+                           code::AbstractString = "using Pkg; Pkg.instantiate()", quiet::Bool = true)
     jl = Base.julia_cmd()[1]
+    ok = true
     try
-        cmd = `$jl --project=$envdir --startup-file=no -e 'using Pkg; Pkg.instantiate()'`
+        cmd = `$jl --project=$envdir --startup-file=no -e $code`
         if online === nothing
             run(pipeline(cmd; stdout = devnull, stderr = devnull))
         else
@@ -103,8 +105,34 @@ function _instantiate_env!(envdir::AbstractString; online = nothing)
                 isempty(s) || (try; online(String(s)); catch; end)
             end
             wait(proc)
+            ok = success(proc)
         end
     catch
+        ok = false
+        quiet || rethrow()
+    end
+    return ok
+end
+
+# Rebuild a STALE or broken forked notebook env from its parent: re-seed via the shared policy
+# (`seed_env_project!` — dev paths made absolute), then a subprocess `develop(parent)` + instantiate,
+# with ONE reset-and-retry from the authoritative parent. The local mirror of the remote provisioner's
+# self-healing `build_env!`, and the counterpart to the worker's in-process `_seed_notebook_env!` for
+# when the worker can't run yet (a stale env would crash it at boot). Streams into the boot banner.
+function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; online = nothing)
+    build = function ()
+        pname = ReportEngine.seed_env_project!(envdir, parent)
+        dev = isempty(pname) ? "" :
+              "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"); preserve=Pkg.PRESERVE_ALL); "
+        ok = _instantiate_env!(envdir; online = online, code = "using Pkg; $(dev)Pkg.instantiate()")
+        ok && ReportEngine.stamp_env!(envdir, parent)
+        return ok
+    end
+    if !build()
+        # Reset the env + rebuild ONCE from the authoritative parent (a half-written / stale env dir
+        # self-heals instead of wedging every future open — same policy as the remote provisioner).
+        for f in ("Project.toml", "Manifest.toml"); try; rm(joinpath(envdir, f); force = true); catch; end; end
+        build()
     end
     return envdir
 end
@@ -193,7 +221,14 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             ReportEngine.ensure_notebook_env!(envdir)
             return GateKernel(envdir; parent = "", envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
         elseif env_exists
-            # Already has its own packages → run in the forked env (extends the parent).
+            # Already has its own packages → run in the forked env (extends the parent). But first, if
+            # the PARENT changed since this fork was seeded (a dep added, a re-resolve — e.g. an
+            # extension package that gained a dependency), REBUILD it: a stale fork would crash the
+            # worker at boot on `using` a dep the fork never received. Self-healing, before spawn.
+            if ReportEngine.env_stale(envdir, parent)
+                ReportEngine._rlog("_select_kernel: notebook env stale vs parent → rebuilding $(basename(envdir))")
+                _rebuild_notebook_env!(envdir, parent; online = online)
+            end
             return GateKernel(envdir; parent = parent, envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.

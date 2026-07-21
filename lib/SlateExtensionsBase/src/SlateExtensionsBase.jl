@@ -34,12 +34,15 @@ import Base64   # stdlib — WebPage(obscure=true) base64 packaging
 include("controls.jl")
 include("output.jl")
 include("context.jl")
+include("frontend.jl")
 
 # Controls
 export Widget, Choice, Selection, indices, to_widget
 export register_kind!, widget_kinds, coerce_bind, reconcile_bind, wrap_value
 # Output
 export WebPage, register_widget_js
+# Auto-registered front-end (no boot cell)
+export register_widget!, provide_frontend!, frontend_scripts
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere
