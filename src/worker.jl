@@ -1492,7 +1492,7 @@ function __slate_module_help(name::String)
     return module_help(m, name)
 end
 
-# ExpressionExplorer for macro-aware analysis, delivered by the slate-owned `worker_ee` env on
+# ExpressionExplorer for macro-aware analysis, delivered by the slate-owned `worker_infra` env on
 # LOAD_PATH (after the notebook project — a notebook's own EE wins). Guarded like Serialization:
 # absent (env build failure, offline first-instantiate) → no macro recovery, the server keeps its
 # conservative analysis; never a boot failure.

@@ -535,9 +535,10 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     #    their Manifest paths to the remote copies, then instantiate. Covers registry, GitHub, and dev'd
     #    packages + the project's own /src. (Data files are out of scope for now.)
     # In every case the worker's env (t.project) ends up with KaimonGate + ExpressionExplorer (macro-aware
-    # dependency recovery; locally it rides src/worker_ee on LOAD_PATH, which doesn't exist over there) —
+    # dependency recovery; locally these ride src/worker_infra on LOAD_PATH, which doesn't exist over there) —
     # plus Revise IF the user uses it locally — resolved TOGETHER with whatever else is there (one env,
-    # no stacked-env skew).
+    # no stacked-env skew). SlateExtensionsBase (the extension SDK) rides worker_infra locally too; on a
+    # remote host it needs to reach the worker's env as well (registry add or shipped source — see below).
     rel = startswith(t.project, "~/") ? t.project[3:end] : t.project
     infra = _local_has_revise() ?
         "[Pkg.PackageSpec(name=\"KaimonGate\"), Pkg.PackageSpec(name=\"ExpressionExplorer\"), Pkg.PackageSpec(name=\"OpenSSL_jll\"), Pkg.PackageSpec(name=\"Revise\")]" :
@@ -994,7 +995,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     println(io, "Pkg.activate(proj)")
     # Add the worker infra INTO this same env so it resolves against the notebook's exact dependency
     # versions (no stacked-env skew). KaimonGate is always needed (the gate); ExpressionExplorer too
-    # (worker-side macro-aware dep recovery — local workers get it via src/worker_ee on LOAD_PATH, but
+    # (worker-side macro-aware dep recovery — local workers get it via src/worker_infra on LOAD_PATH, but
     # that path doesn't exist on a remote host); Revise only if the user uses it locally (see
     # `_local_has_revise` at the call site) — mirror their setup, don't force it.
     # preserve=PRESERVE_ALL keeps the notebook's EXACT pins so the infra can't bump a shared dep and

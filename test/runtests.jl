@@ -35,10 +35,11 @@ module Frontmatter; include("test_frontmatter.jl"); end
 module Export;    include("test_export.jl");    end
 module Publishing; include("test_publishing.jl"); end
 module App;       include("test_app.jl");       end
+module Extensions; include("test_extensions.jl"); end
 
 const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
                    Web, Bind, Render, Tables, Trace, Complete, History, Agentops, Repro, Slides,
-                   Frontmatter, Export, Publishing, App)
+                   Frontmatter, Export, Publishing, App, Extensions)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
 # ReTest matches a plain String LITERALLY (regex metacharacters escaped), so "deps|eval" would match
