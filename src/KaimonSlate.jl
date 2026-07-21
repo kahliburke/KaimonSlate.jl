@@ -117,6 +117,10 @@ end
 # loading; opt out with `ENV["KAIMONSLATE_NO_AUTOREGISTER"] = "1"`.
 function __init__()
     ReportEngine._snapshot_inprocess_base_deps!()   # this process's own deps, before any notebook `pkg_op`
+    # Read the hub port at RUNTIME (skipped during precompilation), so a launcher/config UI can pin
+    # KAIMONSLATE_PORT reliably — a top-level `const` would bake in whatever env produced the `.ji`.
+    # Before the early returns below so it always runs, even for a non-extension load (`slate --own`).
+    _PORT[] = something(tryparse(Int, get(ENV, "KAIMONSLATE_PORT", "8765")), 8765)
     get(ENV, "KAIMONSLATE_NO_AUTOREGISTER", "0") in ("1", "true") && return nothing
     haskey(ENV, "KAIMON_EXTENSION") || return nothing
     try
@@ -144,17 +148,18 @@ end
 # The hub runs in the extension subprocess alongside the Gate loop.
 
 # Port is configurable via the KAIMONSLATE_PORT env var (default 8765) so a
-# config UI / launcher can pin it; the hub auto-starts at extension init.
-const _PORT = something(tryparse(Int, get(ENV, "KAIMONSLATE_PORT", "8765")), 8765)
+# config UI / launcher can pin it; the hub auto-starts at extension init. Held in a `Ref` and set
+# from the env in `__init__` (RUNTIME) — a top-level `const` reading ENV would be frozen at precompile.
+const _PORT = Ref(8765)
 const _HUB = Ref{Union{Hub,Nothing}}(nothing)
 const _LOCK = ReentrantLock()
 
-_base() = "http://127.0.0.1:$_PORT"
+_base() = "http://127.0.0.1:$(_PORT[])"
 
 # The running hub (started lazily on first open).
 function _hub()
     lock(_LOCK) do
-        _HUB[] === nothing && (_HUB[] = start_hub(; port = _PORT))
+        _HUB[] === nothing && (_HUB[] = start_hub(; port = _PORT[]))
         # (Re)register the remote bring-up → browser-banner sink HERE too, not only in `start_hub`: this
         # runs on every hub access, so a Revise reload of the server picks it up WITHOUT a full restart
         # (start_hub only runs once, at boot). The closure reads `_HUB[]` at call time → always the live hub.
