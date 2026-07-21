@@ -28,3 +28,7 @@ build/cm6/package-lock.json
 *.standalone.jl
 *.standalone.expanded/
 /test_thought/
+
+# Isolated per-worktree hub state (dev/hub.jl) and standalone-run state under a notebook folder
+.kaimonslate-dev/
+.kaimonslate/
