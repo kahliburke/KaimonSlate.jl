@@ -708,7 +708,7 @@ function _app_main(args::Vector{String})::Int
         try
             _own_hub!()
         catch e
-            println(stderr, "slate: could not start the hub on port $_PORT: ", sprint(showerror, e))
+            println(stderr, "slate: could not start the hub on port $(_PORT[]): ", sprint(showerror, e))
             println(stderr, "Is another service using the port? Set KAIMONSLATE_PORT to move it.")
             return 1
         end

@@ -201,3 +201,16 @@ end
     KS.Tachikoma.update!(m, KS.Tachikoma.KeyEvent(:char, 'q'))
     @test KS.Tachikoma.should_quit(m)
 end
+
+@testset "hub port is a runtime Ref, read live (issue #6)" begin
+    # The port must be a mutable Ref set from ENV in `__init__` (runtime) — NOT a precompile-baked
+    # `const`, which would freeze whatever env produced the `.ji` and ignore a launcher's KAIMONSLATE_PORT.
+    @test KS._PORT isa Base.RefValue{Int}
+    old = KS._PORT[]
+    try
+        KS._PORT[] = 9911
+        @test occursin("9911", KS._base())        # _base reads _PORT[] live (a baked const couldn't change)
+    finally
+        KS._PORT[] = old
+    end
+end
