@@ -1130,50 +1130,82 @@ mutable struct _SshFwd
 end
 const _SSH_FWDS = Dict{Tuple{String,Int},_SshFwd}()
 const _SSH_FWD_LOCK = ReentrantLock()
+# Keys with a launch in flight. The ≤5s forward come-up poll runs OFF `_SSH_FWD_LOCK` (so a pull to
+# another target, the idle-reaper, and shutdown teardown never stall behind it); a second caller for
+# the SAME key waits on the condition rather than launching a duplicate forward.
+const _SSH_FWD_COND = Threads.Condition(_SSH_FWD_LOCK)
+const _SSH_FWD_LAUNCHING = Set{Tuple{String,Int}}()
 _ssh_fwd_idle_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SSH_FWD_IDLE_S", "")), 90.0)
 
 # Get (or launch) the standing forward for (ssh_target → 127.0.0.1:blob_port) and MARK it busy. Returns
 # (; lport, err): lport>0 and empty err on success. The caller MUST `_ssh_fwd_release!` when done.
 function _ensure_ssh_fwd(ssh_target::String, key_path::String, known_hosts::String, blob_port::Int)
     key = (ssh_target, blob_port)
-    lock(_SSH_FWD_LOCK) do
-        f = get(_SSH_FWDS, key, nothing)
-        if f !== nothing
-            if !process_exited(f.proc) && _port_open(f.lport)
-                f.busy = true; f.last = time()             # reuse — the whole point
-                return (; lport = f.lport, err = "")
+    # Phase 1 (locked): reuse a live forward, or CLAIM the launch for this key. A concurrent caller for
+    # the same key blocks on the condition until the claimant publishes, then re-checks (no duplicate launch).
+    claimed = lock(_SSH_FWD_COND) do
+        while true
+            f = get(_SSH_FWDS, key, nothing)
+            if f !== nothing
+                if !process_exited(f.proc) && _port_open(f.lport)
+                    f.busy = true; f.last = time()         # reuse — the whole point
+                    return (; lport = f.lport, err = "")
+                end
+                try; kill(f.proc); catch; end              # dead/stale forward — drop and relaunch
+                delete!(_SSH_FWDS, key)
             end
-            try; kill(f.proc); catch; end                  # dead/stale forward — drop and relaunch
-            delete!(_SSH_FWDS, key)
+            key in _SSH_FWD_LAUNCHING || break             # nobody launching this key → we claim it
+            wait(_SSH_FWD_COND)                            # someone is; wait (releases the lock), then re-check
         end
-        lport = _free_local_port()
-        kp = expanduser(key_path); kh = expanduser(known_hosts)
-        # -L lport → (from A) 127.0.0.1:blob_port (A binds 0.0.0.0, so its loopback works). ExitOnForwardFailure
-        # so a blocked permitopen/auth fails fast instead of hanging; least-privilege key is `permitopen`-scoped.
-        cmd = `ssh -i $kp -o IdentitiesOnly=yes -o UserKnownHostsFile=$kh -o StrictHostKeyChecking=yes
-                  -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ConnectTimeout=10 -o BatchMode=yes
-                  -N -L $(lport):127.0.0.1:$(blob_port) $ssh_target`
-        proc = try
-            run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
-        catch e
-            return (; lport = 0, err = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
-        end
-        up = false
-        for _ in 1:100                                     # wait ≤5s for the forward to accept
-            process_exited(proc) && break
-            if _port_open(lport); up = true; break; end
-            sleep(0.05)
-        end
-        if !up
-            exited = process_exited(proc)
-            try; kill(proc); catch; end
-            return (; lport = 0, err = exited ?
-                "ssh forward exited before coming up (auth / host key / permitopen?)" :
-                "ssh forward did not come up on 127.0.0.1:$lport within 5s")
-        end
-        _SSH_FWDS[key] = _SshFwd(proc, lport, time(), true)
-        return (; lport = lport, err = "")
+        push!(_SSH_FWD_LAUNCHING, key)
+        return nothing                                     # sentinel: WE own the launch, do it off-lock
     end
+    claimed === nothing || return claimed                  # reused an existing forward
+    # Phase 2 (OFF the lock): launch + ≤5s come-up poll — the blocking part that must not hold the pool lock.
+    # Any throw is turned into an error result so Phase 3 always releases the claim + wakes waiters (else the
+    # key would be stuck "launching" forever and same-key callers would wait indefinitely).
+    r = try
+        _launch_ssh_fwd(ssh_target, key_path, known_hosts, blob_port)
+    catch e
+        (; proc = nothing, lport = 0, err = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
+    end
+    # Phase 3 (locked): publish the result, release the claim, wake same-key waiters.
+    return lock(_SSH_FWD_COND) do
+        delete!(_SSH_FWD_LAUNCHING, key)
+        notify(_SSH_FWD_COND; all = true)                  # waiters re-check: reuse the new forward, or relaunch if it failed
+        if r.err != ""
+            r.proc === nothing || (try; kill(r.proc); catch; end)
+            return (; lport = 0, err = r.err)
+        end
+        _SSH_FWDS[key] = _SshFwd(r.proc, r.lport, time(), true)
+        return (; lport = r.lport, err = "")
+    end
+end
+
+# The blocking half of `_ensure_ssh_fwd`, run OFF `_SSH_FWD_LOCK`: launch the `ssh -N -L` forward and
+# wait ≤5s for it to accept. Returns (; proc, lport, err) — err set (and proc killed by the caller) on failure.
+function _launch_ssh_fwd(ssh_target::String, key_path::String, known_hosts::String, blob_port::Int)
+    lport = _free_local_port()
+    kp = expanduser(key_path); kh = expanduser(known_hosts)
+    # -L lport → (from A) 127.0.0.1:blob_port (A binds 0.0.0.0, so its loopback works). ExitOnForwardFailure
+    # so a blocked permitopen/auth fails fast instead of hanging; least-privilege key is `permitopen`-scoped.
+    cmd = `ssh -i $kp -o IdentitiesOnly=yes -o UserKnownHostsFile=$kh -o StrictHostKeyChecking=yes
+              -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ConnectTimeout=10 -o BatchMode=yes
+              -N -L $(lport):127.0.0.1:$(blob_port) $ssh_target`
+    proc = try
+        run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
+    catch e
+        return (; proc = nothing, lport = 0, err = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
+    end
+    for _ in 1:100                                         # wait ≤5s for the forward to accept
+        process_exited(proc) && break
+        _port_open(lport) && return (; proc = proc, lport = lport, err = "")
+        sleep(0.05)
+    end
+    exited = process_exited(proc)
+    return (; proc = proc, lport = lport, err = exited ?
+        "ssh forward exited before coming up (auth / host key / permitopen?)" :
+        "ssh forward did not come up on 127.0.0.1:$lport within 5s")
 end
 
 # Release a forward after a pull. `drop=true` (the pull errored) tears it down unconditionally: a failed
