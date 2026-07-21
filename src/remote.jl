@@ -153,6 +153,11 @@ const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
 #   blob_xfer_timeout       KAIMONSLATE_BLOB_XFER_TIMEOUT       600   whole-binding / direct-blob move gate timeout
 #   sysimage_lock_stale     KAIMONSLATE_SYSIMAGE_LOCK_STALE     1800  concurrent sysimage-build lock staleness window
 #   peer_bw_mbps            KAIMONSLATE_PEER_BW_MBPS            30    assumed rate (MB/s) for an unmeasured peer link
+#   rsync_path              KAIMONSLATE_RSYNC_PATH              ""    remote `rsync` binary (rsync --rsync-path); set on a
+#                                                                     firmware-locked NAS whose stock rsync rejects home dests.
+#                                                                     Per-host: remote.hosts.<host>.rsync_path (see _rcfg_hostval).
+# Any key above may be given PER HOST under `remote.hosts.<host>` (overrides the global `remote.<key>`); handy when one
+# machine needs a quirk (a NAS's rsync_path, a slow box's longer dial deadline) without changing the others.
 _ssh_connect_timeout()    = round(Int, _rcfg("ssh_connect_timeout",    "KAIMONSLATE_SSH_CONNECT_TIMEOUT",    15))
 _ssh_control_persist()    = round(Int, _rcfg("ssh_control_persist",    "KAIMONSLATE_SSH_CONTROL_PERSIST",    600))
 _tunnel_alive_interval()  = round(Int, _rcfg("tunnel_alive_interval",  "KAIMONSLATE_TUNNEL_ALIVE_INTERVAL",  5))
@@ -168,6 +173,14 @@ _blob_chunk_timeout_ms()  = round(Int, _rcfg("blob_chunk_timeout", "KAIMONSLATE_
 _blob_xfer_timeout()      = _rcfg("blob_xfer_timeout",      "KAIMONSLATE_BLOB_XFER_TIMEOUT",      600.0)
 _sysimage_lock_stale()    = round(Int, _rcfg("sysimage_lock_stale", "KAIMONSLATE_SYSIMAGE_LOCK_STALE", 1800))
 _peer_bw_default()        = _rcfg("peer_bw_mbps",          "KAIMONSLATE_PEER_BW_MBPS",           30.0) * 1.0e6
+# Absolute path to the `rsync` binary to invoke ON THE REMOTE (rsync's `--rsync-path`). Empty ⇒ let the
+# remote resolve `rsync` on PATH (the normal case). Needed on some appliance NAS/firmware that
+# ship a firmware-patched `rsync` which gates the server side to a whitelist of "shared folders" and so
+# rejects a home-dir dest with `invalid path` — point this at a stock rsync you dropped in, e.g.
+# `/home/<user>/bin/rsync`. Since the binary is a property of the MACHINE (many regions may share a host,
+# and the per-host preflight/provision runs before any region exists), configure it PER HOST:
+# slate.json `remote.hosts.<host>.rsync_path` (falls back to a global `remote.rsync_path` / KAIMONSLATE_RSYNC_PATH / "").
+_rsync_path(host::AbstractString = "") = _rcfg_str("rsync_path", "KAIMONSLATE_RSYNC_PATH", ""; host = host)
 
 # ── Supervised SSH tunnel (lifted from TachiRei/tunnel.jl; migrate to KaimonGate later) ──
 "An OS-assigned free local TCP port (bind :0, read it, release — small race window)."
@@ -365,7 +378,7 @@ function _ssh_julia!(host, code::AbstractString, what::AbstractString; stream::B
     write(tmp, code)
     remote = "$_REMOTE_ROOT/$(basename(tmp)).jl"
     scp_ok = try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
+        run(pipeline(`scp -O -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
     catch; false; end
     rm(tmp; force = true)
     scp_ok || (_rlog("FAILED: scp provisioning script → $host ($what)"); return (false, ""))
@@ -445,6 +458,7 @@ function _rsync!(host, localdir::AbstractString, remotedir::AbstractString; dele
     _ssh_ok(host, `mkdir -p $remotedir`)   # openrsync (macOS) has no --mkpath; ensure the dest exists
     args = String["-az"]
     append!(args, _rsync_ssh_opt())
+    rp = _rsync_path(host); isempty(rp) || push!(args, "--rsync-path=$rp")   # per-host stock rsync on a locked-down NAS
     delete && push!(args, "--delete")
     for e in excludes; push!(args, "--exclude", e); end
     push!(args, string(rstrip(localdir, '/'), "/"), string(host, ":", remotedir))
@@ -743,7 +757,7 @@ function _kickoff_sysimage_build!(t::RemoteTarget, projrel::AbstractString; forc
     tmp = tempname()
     write(tmp, _sysimage_build_script(projrel, sysreldir, _sysimage_minfree_gb()))
     ok = try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
+        run(pipeline(`scp -O -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote))`; stdout = devnull, stderr = devnull)); true
     catch; false; end
     rm(tmp; force = true)
     ok || (_rlog("sysimg: scp build script → $host failed (skip)"); return nothing)
@@ -1169,7 +1183,7 @@ function _launch_worker!(t::RemoteTarget, port::Int, stream_port::Int;
     tmp = tempname()
     write(tmp, script)
     try
-        run(pipeline(`scp -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
+        run(pipeline(`scp -O -q $(_ssh_mux_opts()) $tmp $(string(host, ":", remote_script))`; stdout = devnull, stderr = devnull))
     finally
         rm(tmp; force = true)
     end

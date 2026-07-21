@@ -742,6 +742,33 @@ function _make_router(h::Hub)
         end
         _xfer_json()
     end)
+    # Per-HOST remote settings — currently rsync_path, the `rsync` binary to invoke ON that host (rsync's
+    # --rsync-path). Needed for a firmware-locked NAS/appliance whose stock rsync rejects a
+    # home-dir dest with `invalid path`: point this at a stock rsync you dropped in (e.g. ~/bin/rsync).
+    # GET {host} → current value. POST {host, rsync_path} persists remote.hosts.<host>.rsync_path in
+    # slate.json + refreshes the live config so the NEXT provision/preflight uses it; empty clears it.
+    _host_rsync_path(host) = begin
+        cfg = ReportEngine._REMOTE_CFG[]; hs = get(cfg, "hosts", nothing)
+        hc = hs isa AbstractDict ? get(hs, host, nothing) : nothing
+        hc isa AbstractDict ? String(get(hc, "rsync_path", "")) : ""
+    end
+    HTTP.register!(router, "GET", "/api/host-settings", req -> begin
+        host = strip(String(get(HTTP.queryparams(HTTP.URI(req.target)), "host", "")))
+        _json(Dict("host" => host, "rsync_path" => isempty(host) ? "" : _host_rsync_path(host)))
+    end)
+    HTTP.register!(router, "POST", "/api/host-settings", req -> begin
+        b = _body(req)
+        host = strip(String(get(b, "host", "")))
+        isempty(host) && return _json(Dict("ok" => false, "error" => "no host"))
+        rp = strip(String(get(b, "rsync_path", "")))
+        p = _HOST_CFG_PERSIST[]
+        p === nothing && return _json(Dict("ok" => false, "error" => "no config store (standalone hub)"))
+        try; p(host, rp)
+        catch e; @warn "slate: could not persist host settings" host = host exception = e
+            return _json(Dict("ok" => false, "error" => "persist failed"))
+        end
+        _json(Dict("ok" => true, "host" => host, "rsync_path" => _host_rsync_path(host)))
+    end)
     # Test + prime a host: the full reported dry-run (ssh, julia, provision, KaimonGate, CURVE, spawn+
     # connect+eval+teardown). Body {host, transport:"tunnel"|"direct"}. Slow on a cold host (provision).
     HTTP.register!(router, "POST", "/api/preflight", req -> begin

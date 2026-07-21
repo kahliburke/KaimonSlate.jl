@@ -729,12 +729,37 @@ _eval_timeout() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_EVAL_TIMEOUT
 # default is tabulated over the helpers in remote.jl (the `_ssh_*`/`_dial_*`/… cluster); the two below
 # live here because their call sites do.
 const _REMOTE_CFG = Ref{Dict{String,Any}}(Dict{String,Any}())
-function _rcfg(key::AbstractString, env::AbstractString, default::Real)
-    v = get(_REMOTE_CFG[], key, nothing)
-    if v !== nothing
-        fv = tryparse(Float64, string(v)); fv !== nothing && return fv
+# Per-host override lookup: slate.json `remote.hosts.<host>.<key>`. Returns the raw value or nothing.
+# `host` may arrive as "user@host" (ssh target) — match the exact key first, then the bare hostname —
+# so a config keyed by plain hostname still applies to a user-qualified ssh target. Empty host ⇒ nothing
+# (no per-host layer), which collapses every accessor to its old global→env→default behaviour.
+function _rcfg_hostval(key::AbstractString, host::AbstractString)
+    isempty(host) && return nothing
+    hs = get(_REMOTE_CFG[], "hosts", nothing); hs isa AbstractDict || return nothing
+    bare = (i = findlast('@', host)) === nothing ? host : host[nextind(host, i):end]
+    for cand in (host, bare)
+        hc = get(hs, cand, nothing); hc isa AbstractDict || continue
+        v = get(hc, key, nothing); v !== nothing && return v
+    end
+    return nothing
+end
+# Precedence for every remote knob: per-host slate.json (`remote.hosts.<host>.<key>`, when `host` given)
+# → global slate.json (`remote.<key>`) → KAIMONSLATE_<ENV> → hardcoded default.
+function _rcfg(key::AbstractString, env::AbstractString, default::Real; host::AbstractString = "")
+    for v in (_rcfg_hostval(key, host), get(_REMOTE_CFG[], key, nothing))
+        if v !== nothing
+            fv = tryparse(Float64, string(v)); fv !== nothing && return fv
+        end
     end
     something(tryparse(Float64, get(ENV, env, "")), Float64(default))
+end
+# String-valued sibling of `_rcfg` (same per-host → global → env → default precedence) for non-numeric
+# knobs like a remote binary path. Empty string means "unset" at every layer.
+function _rcfg_str(key::AbstractString, env::AbstractString, default::AbstractString; host::AbstractString = "")
+    for v in (_rcfg_hostval(key, host), get(_REMOTE_CFG[], key, nothing))
+        v !== nothing && !isempty(string(v)) && return string(v)
+    end
+    e = get(ENV, env, ""); isempty(e) ? String(default) : e
 end
 # Local (127.0.0.1) worker connect deadline — worker Julia startup + KaimonGate load is slow.
 _connect_deadline_local() = _rcfg("connect_deadline_local", "KAIMONSLATE_CONNECT_DEADLINE_LOCAL", 90.0)
