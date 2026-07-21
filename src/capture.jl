@@ -32,6 +32,8 @@ const _MAX_HTML_BYTES = 4_000_000   # per text/html | text/latex output chunk (R
 # even the saved file is clipped — guards against a pathological multi-GB repr eating the disk.
 const _MAX_KEEP_BYTES = Ref(50_000_000)
 
+# Hard character ceiling for a single text blob (used by tests; the live value-capping path uses
+# `_cap_keep!`). Truncates with a "… ⚠ truncated — N more characters." marker.
 _cap_text(s::AbstractString, limit::Int = _MAX_OUT_CHARS) =
     (str = String(s); length(str) <= limit ? str :
      string(first(str, limit), "\n\n… ⚠ truncated — ", length(str) - limit, " more characters."))
@@ -605,7 +607,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     if err === nothing && value !== nothing && !quiet && isempty(chunks) && isempty(echarts) && isempty(tables) && isempty(animations)
         try
             # `:displaysize` bounds how much `show` even generates for big containers (≈40 rows),
-            # then `_cap_text` is the hard ceiling for anything still huge (e.g. a giant String value).
+            # then `_cap_keep!` is the hard ceiling for anything still huge (e.g. a giant String value).
             value_repr = Base.invokelatest(sprint, show, MIME("text/plain"), value;
                                            context = (:limit => true, :displaysize => (40, 160)))
             value_repr = _cap_keep!(overflow, "value", value_repr, "txt")

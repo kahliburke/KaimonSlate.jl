@@ -7,6 +7,8 @@ const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
 // Order-independent key for a control's value — used by the stale-echo guard so an in-flight
 // server echo (which may reorder a multi-select) can't reset a control the user just changed.
 const _valKey = v => Array.isArray(v) ? JSON.stringify([...v].map(String).sort()) : String(v);
+// Normalize a widget option: a bare value becomes {value, label:String(value)}; an object passes through.
+const _normOpt = o => (o && typeof o === 'object') ? o : { value: o, label: String(o) };
 // The text shown in a widget's value mirror (`.wval`). A toggle with on/off labels shows the
 // active state's word; a button shows its click count; everything else shows the raw value. Reads
 // the on/off text from the input's data- attributes so the local + server-sync paths agree.
@@ -65,7 +67,7 @@ function controlMarkup(bindId, b) {
   const a = `data-bind="${bindId}" data-name="${b.name}" data-widget="${w}"`;
   // Options are {value,label} (a bare value normalizes to value===label). The browser carries the
   // stringified VALUE in each option's `value` attr; the LABEL is what's shown (rich for radio).
-  const opts = (p.options || []).map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+  const opts = (p.options || []).map(o => _normOpt(o));
   const _selV = String(b.value);
   let ctrl = '', wval = `<span class="wval">${_esc(_showVal(b.value))}</span>`;
   if (w === 'slider')
@@ -781,12 +783,6 @@ function renderPalette() {
       `<span class="pval" data-pname="${c.name}">${c.value}</span></span></div>`;
   }).join('');
 }
-function updatePaletteValues(state) {
-  state.cells.forEach(c => (c.binds || []).forEach(b => {
-    const v = document.querySelector('#palette-list .pval[data-pname="' + b.name + '"]');
-    if (v) v.textContent = b.value;
-  }));
-}
 
 // Keep every widget bound to a variable in lockstep (a control may be surfaced in
 // multiple cells). Skips the element being actively dragged so we never fight it.
@@ -824,11 +820,11 @@ function syncControlValues(state) {
     } else if (w === 'select' && Array.isArray(p.options)) {
       // Dynamic options: rebuild the <option> list only if it changed (the value-set
       // below re-applies the selection). Avoids tearing the menu down every sync.
-      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const o2 = p.options.map(o => _normOpt(o));
       const cur = [...el.options].map(o => o.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) el.innerHTML = o2.map(o => `<option value="${_esc(o.value)}">${_esc(o.label)}</option>`).join('');
     } else if (w === 'multiselect' && Array.isArray(p.options)) {
-      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const o2 = p.options.map(o => _normOpt(o));
       const cur = [...el.querySelectorAll('.msopt')].map(o => o.dataset.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) {
         el.innerHTML = o2.map(o => `<div class="msopt" data-value="${_esc(o.value)}" role="option"><span class="optlbl">${_esc(o.label)}</span></div>`).join('');
@@ -836,7 +832,7 @@ function syncControlValues(state) {
       }
     } else if ((w === 'radio' || w === 'multicheck') && Array.isArray(p.options)) {
       // Radio + checkbox-list MultiCheckBox share a label-per-input layout; rebuild only on change.
-      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const o2 = p.options.map(o => _normOpt(o));
       const type = w === 'radio' ? 'radio' : 'checkbox';
       const cur = [...el.querySelectorAll('input')].map(i => i.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) {
@@ -926,5 +922,5 @@ async function runScripts(root) {
 // properties. So ONLY the consts go here (the functions are already on window). `editors`/
 // `charts`/`srcMap` are shared by reference, so the module's mutations stay in sync. (All of
 // these are defined in core.js or earlier in view.js, so they exist when this runs.)
-Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditHTML, srcEditInner, bindsInner, hasBinds });
+Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditInner, bindsInner, hasBinds });
 
