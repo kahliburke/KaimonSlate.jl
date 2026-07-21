@@ -48,9 +48,10 @@ findcell(r, id) = r.cells[findfirst(c -> c.id == id, r.cells)]
         w = RE.custom_widget("mathfield"; label = "answer")
         @test w.kind == "mathfield" && w.default == "" && w.params["label"] == "answer"
         @test RE.custom_widget("mathfield", "\\frac{1}{2}").default == "\\frac{1}{2}"   # positional default carries
-        # coerce is identity for an unknown kind — the browser value crosses unchanged (no server coercion)
+        # coerce is TYPE-DRIVEN from the default even for an unregistered kind: a String-valued field
+        # coerces a stray browser value to String (see SlateExtensionsBase `coerce_value`).
         @test RE.coerce_bind(w, "x^2 + 1") == "x^2 + 1"
-        @test RE.coerce_bind(w, 42) === 42
+        @test RE.coerce_bind(w, 42) === "42"                                            # coerced to the default's String type
         # reconcile keeps the user's value across a re-run (same custom kind), resets on a kind change
         @test RE.reconcile_bind(w, "kept", RE.custom_widget("mathfield")) == "kept"
         @test RE.reconcile_bind(w, "kept", RE.Slider(0:10)) == 0                        # kind changed → default

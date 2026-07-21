@@ -1031,6 +1031,20 @@ function env_info(k::GateKernel, report::Report)
     return (notebook = nb === nothing ? (path = "", name = "", deps = Dict{String,Any}[]) : nb, parent = par)
 end
 
+# The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
+# page to mirror (`frontend` scripts now; more fields as SEB grows). Pulled once per run drain (see
+# `_refresh_extensions!`); returns `nothing` when there's no live worker, so the caller keeps its
+# current registry. No `prepare!`: we only ask a worker that just ran, never spawn one to query.
+function extension_manifest(k::GateKernel)
+    k.conn === nothing && return nothing
+    return try
+        _tool(k, "__slate_extension_manifest", Dict{String,Any}(); timeout = 15.0)
+    catch e
+        @debug "slate: extension manifest gate call failed" exception = e
+        nothing
+    end
+end
+
 # Filesystem coordinates for a self-contained export (active project dir + path-dep sources).
 function bundle_info(k::GateKernel, report::Report)
     prepare!(k, report)

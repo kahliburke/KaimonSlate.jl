@@ -1065,6 +1065,10 @@ function state_json(nb::LiveNotebook)
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
     let bk = _bib_keys_meta(bibctx); bk === nothing || (meta["bibKeys"] = bk); end
     haskey(nb.report.meta, "hydrate_error") && (meta["hydrateError"] = nb.report.meta["hydrate_error"])
+    # Package-declared front-end scripts (SlateExtensionsBase manifest → `_refresh_extensions!`). The
+    # browser injects each `<script>` once (deduped by id) so a package's widget renderer / editor
+    # extension registers with no boot cell (see `_frontend_scripts`, view.js `injectFrontendScripts`).
+    let fe = _frontend_scripts_json(nb); isempty(fe) || (meta["frontendScripts"] = fe); end
     return meta
 end
 
