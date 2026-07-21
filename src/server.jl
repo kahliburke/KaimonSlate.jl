@@ -1946,10 +1946,10 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         _prepare_region_for_cell!(nb, cell, kernel, side) || return nothing
         _region_active(nb) && !isempty(side) && _stats_ran_on!(nb, cell.id, _side_label(nb, side))
         try; _region_presync!(nb, cell, kernel; dst_side = side); catch e; @warn "slate region: md presync failed" cell = cell.id exception = e; end
-        lock(nb.lock) do
-            ReportEngine.eval_cell!(nb.report, cell, kernel)
-            isempty(side) || _broadcast_progress(nb, cell)   # region md set RUNNING above → push the final state
-        end
+        # `eval_cell!` runs the md `$(…)` interpolation on the worker — a kernel round-trip — so it runs
+        # OFF nb.lock (protocol; mirrors the code-cell branch below). Re-take the lock only to push state.
+        ReportEngine.eval_cell!(nb.report, cell, kernel)
+        isempty(side) || lock(nb.lock) do; _broadcast_progress(nb, cell); end   # region md set RUNNING above → push the final state
         return nothing
     end
     # The cell's cross-boundary inputs ship over after the kernel is primed. A presync failure is the
@@ -2402,16 +2402,17 @@ function _run_loop!(nb::LiveNotebook)
         # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the
         # "barrier" marking. Kept off the hot per-cell path — it fires once per drain and no-ops unless
         # a NEW module got resolved.
-        refined = lock(nb.lock) do
-            a = ReportEngine.refine_usings!(nb.report, nb.kernel)
-            # Notebook-defined macros now exist; a PARALLEL drain may have raced a reader past its
-            # just-recovered producer, so restale those — the `again` re-arm below re-drains them.
-            b = ReportEngine.refine_macros!(nb.report, nb.kernel;
-                                            restale_racers = _parallel_enabled(nb))
-            a || b
-        end
-        if refined
-            lock(nb.lock) do; nb.version += 1; end
+        # PROTOCOL: the export/macro RESOLVE against the kernel is a round-trip, so it runs OFF nb.lock
+        # (`rebuild=false`); we then re-take the lock ONLY for the graph rebuild (a report mutation).
+        # Holding nb.lock across these resolves was the teardown-deadlock hazard. (`again` re-arm below
+        # re-drains any cell left stale — covering the racer-restale that `refine_macros!` skips here.)
+        resolved_u = ReportEngine.refine_usings!(nb.report, nb.kernel; rebuild = false)
+        resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false)
+        if resolved_u || resolved_m
+            with_report(nb) do report
+                ReportEngine.rebuild_precise!(report)
+                nb.version += 1
+            end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
         end
         lock(_RUNNER_LOCK) do; delete!(_RUNNER_FAILS, nb.id); end   # clean drain (cells may have ERRORED, but no throw) → clear the streak
