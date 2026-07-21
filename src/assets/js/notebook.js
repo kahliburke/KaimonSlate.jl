@@ -100,7 +100,7 @@ function Editor({ cell }) {
       const p = host.querySelector('.cm-placeholder'); if (p) p.remove();
       let primed = false;
       view = window.mkEditor(host, {
-        doc: cell.source, cellId: cell.id,
+        doc: cell.source, cellId: cell.id, markdown: cell.kind === 'md',
         // Compare against the LIVE server source (srcMap), NOT the mount-time `cell.source` closure —
         // else applying an agent/external edit via edSetText (which fires this) would look like a USER
         // edit, falsely marking the cell `edited` + backing it up, which later pops phantom reconcile
