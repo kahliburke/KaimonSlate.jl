@@ -75,6 +75,7 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_userprog!(nb.report.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
     register_prepare!(nb.report.id, json -> (try; _broadcast(nb, "prepare:" * json); catch; end))   # env precompile progress → "Preparing packages" banner
     register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
+    register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     return nb
 end
@@ -82,7 +83,7 @@ function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
-    unregister_prepare!(nb.report.id)
+    unregister_prepare!(nb.report.id); unregister_bin_emit!(nb.report.id)
     return nb
 end
 

@@ -79,8 +79,15 @@ function _new_ns()
         # base64's alphabet); the hub deserializes it back to a Julia value and JSON-encodes it for the
         # `cellstream:` frame. (In-process notebooks skip this and pass the value straight through.) Bulk
         # data belongs on the blob channel, not here — base64+serialize suits small streaming payloads.
-        slate_emit = (channel, value) -> KaimonGate._publish_stream("slate_emit",
-            string(channel) * "\x1f" * Base64.base64encode(Serialization.serialize, value)),
+        # A SlateBinary rides a raw binary frame on the `slate_emit_bin` channel (encode_binary_frame packs
+        # channel+meta+dtype+shape+raw bytes) — published via `_publish_stream_raw` (multipart, NO
+        # Serialization envelope: the frame moves by reference, copied only once at the wire) → forwarded as
+        # a binary WS frame → a TypedArray in the browser. Any other value takes the string path
+        # (Serialization+base64; the hub deserializes + JSON-encodes it).
+        slate_emit = (channel, value) -> value isa SlateExtensionsBase.SlateBinary ?
+            KaimonGate._publish_stream_raw("slate_emit_bin", SlateExtensionsBase.encode_binary_frame(string(channel), value)) :
+            KaimonGate._publish_stream("slate_emit",
+                string(channel) * "\x1f" * Base64.base64encode(Serialization.serialize, value)),
         # `@asset`/`readfile` resolve relative paths against the notebook's project dir (what
         # `pkgdir(...)` gives, and where a package notebook's assets live). Read at call time so a
         # provenance change is picked up; falls back to the active project when PARENT_PROJECT is unset.

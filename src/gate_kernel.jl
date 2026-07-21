@@ -358,6 +358,7 @@ function _ensure_poller!()
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
                 emits = Tuple{String,String,Any}[]   # ordered slate_emit pushes (rid, channel, deserialized VALUE) — NOT coalesced; each event matters
+                binemits = Tuple{String,Vector{UInt8}}[]   # ordered slate_emit_bin frames (rid, raw binary frame) — forwarded to the page WS as-is
                 prepares = Dict{String,String}()     # notebook → LATEST env-prep status JSON (coalesced per wake; a burst collapses harmlessly)
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
@@ -396,6 +397,8 @@ function _ensure_poller!()
                             val = try; Serialization.deserialize(IOBuffer(Base64.base64decode(String(parts[2])))); catch; nothing; end
                             push!(emits, (rid, String(parts[1]), val))
                         end
+                    elseif m.channel == "slate_emit_bin"      # a raw binary numeric frame (bytes carry channel+meta+dtype+shape+payload)
+                        m.data isa Vector{UInt8} && push!(binemits, (rid, m.data))
                     elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring + WS push
                         _record_telemetry!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_log"           # worker log record → live tail push (no store)
@@ -421,6 +424,9 @@ function _ensure_poller!()
                 end
                 for (rid, ch, d) in emits
                     _do_emit(rid, ch, d)
+                end
+                for (rid, frame) in binemits
+                    _do_emit_bin(rid, frame)
                 end
             catch e
                 # Surface a persistent failure (this class of bug — a missing/renamed Kaimon

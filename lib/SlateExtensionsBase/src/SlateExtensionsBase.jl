@@ -36,6 +36,7 @@ include("output.jl")
 include("context.jl")
 include("frontend.jl")
 include("render.jl")
+include("binary.jl")
 
 # Controls
 export Widget, Choice, Selection, indices, to_widget, auto_widget, kind_for
@@ -51,5 +52,7 @@ export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere, slate_on
 # Rich output (Slate display MIMEs)
 export slate_render, component, html_fragment, SlateComponentMIME, SlateHtmlMIME
+# Binary numeric streaming
+export SlateBinary, encode_binary_frame
 
 end # module
