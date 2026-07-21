@@ -16,7 +16,12 @@
 import REPL       # for `REPL.softscope` — REPL-style cell eval (stdlib; always available)
 import Logging    # to capture a cell's `@warn`/`@info` onto the redirected stderr (stdlib)
 
-const _RICH_MIMES = ("image/svg+xml", "image/png", "text/html", "text/latex")
+# The Slate display MIMEs (SlateExtensionsBase) lead the priority list, so a value with a `slate_render`
+# method is captured as a component descriptor / HTML fragment IN PREFERENCE to text/html or text/plain —
+# the richest representation wins, exactly like VS Code's `DISPLAYABLE_MIMES` scan. A plain value isn't
+# `showable` for them (its `slate_render` returns nothing), so it falls through to the standard MIMEs.
+const _RICH_MIMES = ("application/vnd.kaimonslate.component+json", "application/vnd.kaimonslate.html+html",
+                     "image/svg+xml", "image/png", "text/html", "text/latex")
 
 # ── Output size caps ─────────────────────────────────────────────────────────
 # A cell that accidentally produces a giant result (a printed 10⁷-element loop, the text repr of a
@@ -485,12 +490,16 @@ end
 function _build_slate_ctx(mod::Module, notebook::AbstractString, region::AbstractString,
                           regions::AbstractVector)
     emit = isdefined(mod, :slate_emit) ? getfield(mod, :slate_emit) : (channel, value) -> nothing
+    # The notebook's injected `slate_on` (registers a JS→Julia handler into `__slate_handlers`), so package
+    # code can wire an interactive widget's handlers via SEB's `slate_on` accessor — mirrors `emit`.
+    on   = isdefined(mod, :slate_on) ? getfield(mod, :slate_on) : (channel, f) -> nothing
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
               side     = String(region),
               emit     = emit,
               regions  = Symbol[Symbol(r) for r in regions],
-              effect   = _slate_effect)          # code→Slate declaration channel (zero-dep for packages)
+              effect   = _slate_effect,          # code→Slate declaration channel (zero-dep for packages)
+              on       = on)
 end
 
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";

@@ -271,6 +271,17 @@ function _render_chunks(chunks)
             b64 = Base64.base64encode(ch.data)
             print(io, "<div class=\"disp img\"><img alt=\"output\" src=\"data:",
                   ch.mime, ";base64,", b64, "\"/></div>")
+        elseif ch.mime == "application/vnd.kaimonslate.component+json"
+            # A Slate component descriptor {v, component, props} (SlateExtensionsBase `slate_render`):
+            # emit a mount placeholder carrying the raw descriptor in a sibling JSON script; the SPA looks
+            # up the registered component and mounts it (props + a display ctx exposing call/stream, no
+            # bind value). `<\/` keeps the JSON from closing the <script> early.
+            desc = replace(String(copy(ch.data)), "</" => "<\\/")
+            print(io, "<div class=\"disp slatecomp\"><span class=\"slatecomponent\"></span>",
+                  "<script type=\"application/json\" class=\"slatecomponent-desc\">", desc, "</script></div>")
+        elseif ch.mime == "application/vnd.kaimonslate.html+html"
+            # A self-contained HTML fragment (the `slate_render` escape hatch) — trusted, injected as-is.
+            print(io, "<div class=\"disp html\">", String(copy(ch.data)), "</div>")
         end
     end
     return String(take!(io))

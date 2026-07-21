@@ -29,6 +29,12 @@ module FakeExtPkg
     end
 end
 
+# Rich output: a value that renders as a COMPONENT descriptor, and one via the HTML escape hatch.
+struct Meter; value::Int; max::Int; end
+SlateExtensionsBase.slate_render(m::Meter) = component("Demo.Meter"; value = m.value, max = m.max)
+struct Banner; text::String; end
+SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</b>")
+
 @testset "SlateExtensionsBase" begin
 
     @testset "Widget construction" begin
@@ -311,6 +317,46 @@ end
 
         empty!(SlateExtensionsBase._FRONTEND)
         empty!(SlateExtensionsBase._MODULE_FRONTEND_DONE)
+    end
+
+    # Rich output: `slate_render` → a component descriptor (component+json) or an HTML fragment
+    # (html+html), picked by `showable`; the descriptor is written by SEB's own minimal JSON writer.
+    @testset "slate_render + display MIMEs" begin
+        m = Meter(3, 5)
+        @test showable(SlateComponentMIME(), m)
+        @test !showable(SlateHtmlMIME(), m)
+        d = slate_render(m)
+        @test d["v"] == 1 && d["component"] == "Demo.Meter" && d["props"]["max"] == 5
+        js = sprint(show, SlateComponentMIME(), m)
+        @test occursin("\"component\":\"Demo.Meter\"", js) && occursin("\"v\":1", js)
+
+        b = Banner("hi")
+        @test showable(SlateHtmlMIME(), b) && !showable(SlateComponentMIME(), b)
+        @test sprint(show, SlateHtmlMIME(), b) == "<b>hi</b>"
+
+        @test slate_render(42) === nothing            # a plain value → not Slate-renderable
+        @test !showable(SlateComponentMIME(), 42)
+
+        # `component` accepts a Type (kind derived) and a props Dict/NamedTuple.
+        @test component(Meter, (; a = 1))["component"] == "Main.Meter"
+
+        # The minimal JSON writer: nesting, string escaping, non-finite floats → null.
+        io = IOBuffer()
+        SlateExtensionsBase._write_json(io, Dict("a" => Any[1, 2.5, true, nothing], "b" => "x\"y", "c" => Inf))
+        s = String(take!(io))
+        @test occursin("\"a\":[1,2.5,true,null]", s)
+        @test occursin("\"b\":\"x\\\"y\"", s)
+        @test occursin("\"c\":null", s)               # non-finite float → null (valid JSON)
+    end
+
+    # The `slate_on` context accessor — package code registers a JS→Julia handler through `:slate_ctx`.
+    @testset "slate_on context accessor" begin
+        @test slate_on("ch", identity) === nothing    # outside a cell → no-op
+        handlers = Dict{String,Any}()
+        task_local_storage(:slate_ctx, (; on = (c, f) -> (handlers[string(c)] = f; nothing))) do
+            slate_on("compute", a -> a + 1)
+        end
+        @test haskey(handlers, "compute") && handlers["compute"](1) == 2
     end
 
 end
