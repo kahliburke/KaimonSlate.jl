@@ -158,6 +158,9 @@ function _typst_preamble(title::AbstractString; style::AbstractString = "article
     $(donumber ? "#set heading(numbering: (..n) => { let m = n.pos(); if m.len() <= 1 { none } else { numbering(\"1.1\", ..m.slice(1)) } })" : "")
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
+    // Author-embedded markdown images stage into the doc root; resolve them relative to THIS file
+    // (not cmarker's package dir, where its built-in image() looks) — passed to cmarker as scope.image.
+    #let mdimage(src, alt: none) = image(src, alt: alt)
     $(_CITE_SHOW)
     #let titleblock(t) = { align(center, text(size: $(st.titlesize), weight: "bold", fill: $(p.title), t)); v(2pt); line(length: 100%, stroke: 0.5pt + $(p.rule)); v(10pt) }
     #let metablock(title, subtitle, byline, abstract) = {
@@ -216,6 +219,9 @@ function _typst_preamble_slides(title::AbstractString; theme::AbstractString = "
     #set heading(numbering: none)
     #let PRE = "$pre "
     #let mathfn = (s, block: false) => if block { mitex(PRE + s) } else { mi(PRE + s) }
+    // Author-embedded markdown images stage into the doc root; resolve them relative to THIS file
+    // (not cmarker's package dir, where its built-in image() looks) — passed to cmarker as scope.image.
+    #let mdimage(src, alt: none) = image(src, alt: alt)
     $(_CITE_SHOW)
     #let metablock(title, subtitle, byline, abstract) = align(center + horizon)[
       #text(size: 2.4em, weight: "bold", fill: $(p.title))[#title]
@@ -606,12 +612,21 @@ end
 function _typst_compile(typ::String, pdf::String)
     root = dirname(typ)
     sys = Sys.which("typst")
-    if sys !== nothing
-        run(`$sys compile --root $root $typ $pdf`)
-        return
-    end
-    Typst_jll.typst() do exe
-        run(`$exe compile --root $root $typ $pdf`)
+    err = IOBuffer()
+    try
+        if sys !== nothing
+            run(pipeline(`$sys compile --root $root $typ $pdf`; stderr = err))
+        else
+            Typst_jll.typst() do exe
+                run(pipeline(`$exe compile --root $root $typ $pdf`; stderr = err))
+            end
+        end
+    catch e
+        # `run` throws only `ProcessExited(1)` — useless on its own. Surface Typst's actual diagnostic
+        # (the source line + reason) so an export failure is debuggable instead of opaque.
+        msg = strip(String(take!(err)))
+        isempty(msg) && rethrow()
+        error("typst compile failed:\n" * first(msg, 4000))
     end
     return
 end
@@ -1115,7 +1130,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             if !isempty(strip(fm.abstract))
                 write(joinpath(dir, "abstract.md"),
                       _stage_typst_md_media(_rewrite_citations(fm.abstract, citekeys), dir, "abstract", _proj_root(nb)))
-                absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn)"
+                absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn, scope: (image: mdimage))"
             end
             print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")
         end
@@ -1142,9 +1157,9 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
                     write(joinpath(dir, base * ".md"), md)
                     if haskey(figidx.numbers, c.id)  # a caption cell → numbered "Figure N." block
                         print(io, "#figcaption(\"Figure ", figidx.numbers[c.id],
-                              "\", cmarker.render(read(\"", base, ".md\"), math: mathfn))\n\n")
+                              "\", cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage)))\n\n")
                     else
-                        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
+                        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage))\n\n")
                     end
                 end
             else
@@ -1181,7 +1196,7 @@ function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, chartt
         md = _stage_typst_md_media(md, dir, base, _proj_root(nb))   # author-embedded images → staged files
         isempty(strip(md)) && return
         write(joinpath(dir, base * ".md"), md)
-        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
+        print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn, scope: (image: mdimage))\n\n")
     else
         if show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))
             write(joinpath(dir, base * ".jl"), c.source)
@@ -1262,7 +1277,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
                 isempty(strip(ntext)) && continue
                 write(joinpath(dir, "notes$(si).md"), ntext)
                 print(io, "#slide[\n#text(fill: luma(130))[Notes · slide $(si)]\n#v(6pt)\n",
-                      "#cmarker.render(read(\"notes$(si).md\"), math: mathfn)\n]\n\n")
+                      "#cmarker.render(read(\"notes$(si).md\"), math: mathfn, scope: (image: mdimage))\n]\n\n")
             end
         end
         write(joinpath(dir, "doc.typ"), String(take!(io)))
