@@ -196,6 +196,7 @@ mutable struct SlateModel <: Model
     rows::Vector{Any}            # the raw notebook dicts, aligned with the table rows
     _table_hash::UInt            # rebuild the table only when its data changes
     detail::Bool                 # the [d] notebook-detail modal is open
+    port_edit::Union{Nothing,String}  # the [p] port-input prompt buffer (nothing = closed)
     close_arm_id::String         # [c] pressed once for this notebook — second press confirms
     close_arm_until::Float64
     refresher::Union{Task,Nothing}
@@ -204,7 +205,7 @@ SlateModel(mode::Symbol; pending = nothing) =
     SlateModel(mode, _base(), false, 0, "", 0.0,
                ReentrantLock(), Any[], false, false, pending,
                ResizableLayout(Vertical, [Fixed(5), Fill(1), Fixed(1)]),
-               nothing, Any[], UInt(0), false, "", 0.0, nothing)
+               nothing, Any[], UInt(0), false, nothing, "", 0.0, nothing)
 
 # Open the notebook that was queued while we waited for a hub (then browser it).
 function _open_pending!(m::SlateModel)
@@ -222,6 +223,21 @@ function _open_pending!(m::SlateModel)
 end
 
 _flash!(m::SlateModel, s::AbstractString) = (m.msg = String(s); m.msg_until = time() + 4.0; nothing)
+
+# Commit the [p] port prompt: validate, persist durably (`set_configured_port!`), point the model at
+# the new base, and tell the user how to apply it. A running hub keeps its current port until it's
+# restarted — [r] rebinds an owner hub on the new port; an extension hub restarts from Kaimon.
+function _commit_port!(m::SlateModel)
+    buf = something(m.port_edit, ""); m.port_edit = nothing
+    p = tryparse(Int, strip(buf))
+    (p === nothing || !(1 <= p <= 65535)) && return _flash!(m, "invalid port — keeping $(_PORT[])")
+    set_configured_port!(p)
+    _PORT[] = p
+    m.base = _base()
+    _flash!(m, m.mode == :owner ? "port saved: $p — press [r] to restart the hub and apply" :
+                                  "port saved: $p — restart Slate to apply")
+    return nothing
+end
 
 # Snapshot the shared status under the lock (the refresher task writes it).
 _status(m::SlateModel) = lock(m.lock) do
@@ -365,6 +381,17 @@ function Tachikoma.cleanup!(m::SlateModel)
 end
 
 function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
+    if m.port_edit !== nothing         # the [p] port-input prompt owns the keys
+        @match (evt.key, evt.char) begin
+            (:escape, _) => (m.port_edit = nothing)
+            (:enter, _)  => _commit_port!(m)
+            (:backspace, _) => (m.port_edit = String(chop(m.port_edit)))
+            (:char, c)   => (isdigit(c) && length(m.port_edit) < 5 && (m.port_edit *= c))
+            (:ctrl_c, _) => (m.quit = true)
+            _ => nothing
+        end
+        return nothing
+    end
     if m.detail                       # the [d] detail modal owns the keys
         @match (evt.key, evt.char) begin
             (:escape, _) || (:char, 'd') || (:char, 'q') || (:enter, _) => (m.detail = false)
@@ -386,6 +413,7 @@ function Tachikoma.update!(m::SlateModel, evt::KeyEvent)
         end
         (:char, 'c') => _close_selected!(m)
         (:char, 's') => _own_now!(m)
+        (:char, 'p') => (m.port_edit = string(_PORT[]))   # open the port-input prompt, pre-filled
         (:char, 'r') => _flash!(m, _restart_hub!(m))
         (:char, 'o') => begin
             NotebookServer._open_in_browser(m.base)
@@ -604,10 +632,15 @@ function _sync_table!(m::SlateModel, nbs::Vector{Any})
 end
 
 function _view_statusbar(m::SlateModel, area::Rect, buf::Buffer, ok::Bool)
-    left = if time() < m.msg_until && !isempty(m.msg)
+    left = if m.port_edit !== nothing
+        [Span(" set hub port: ", tstyle(:accent, bold = true)),
+         Span(isempty(m.port_edit) ? "▏" : "$(m.port_edit)▏", tstyle(:text, bold = true)),
+         Span("  [enter] save · [esc] cancel ", tstyle(:text_dim))]
+    elseif time() < m.msg_until && !isempty(m.msg)
         [Span(" $(m.msg) ", tstyle(:warning, bold = true))]
     elseif m.mode == :waiting
         [Span(" [q]uit ", tstyle(:text_dim)),
+         Span(" [p]ort ", tstyle(:text_dim)),
          Span(" [s]tart local hub ", tstyle(:warning))]
     else
         [Span(" [q]uit ", tstyle(:text_dim)),
@@ -615,6 +648,7 @@ function _view_statusbar(m::SlateModel, area::Rect, buf::Buffer, ok::Bool)
          Span(" [d]etails ", tstyle(:text_dim)),
          Span(" [c]lose notebook ", tstyle(:text_dim)),
          Span(" [o]pen index ", tstyle(:text_dim)),
+         Span(" [p]ort ", tstyle(:text_dim)),
          Span(" [r]estart hub ", tstyle(:text_dim))]
     end
     mode_span = m.mode == :waiting ?
@@ -636,12 +670,14 @@ Usage:
   slate <file.jl>       also open that notebook in the browser (created if missing)
   slate --own           own the hub in-process even if the Kaimon extension is
                         registered (default is to WAIT for the extension's hub)
+  slate --port <n>      run the hub on port <n> for this launch (one-off; to set
+                        it durably press [p] in the TUI or set KAIMONSLATE_PORT)
   slate --status        print the hub status and open notebooks, then exit
                         (exit code 0 = hub up, 1 = no hub)
   slate -h | --help     show this help
 
 Environment:
-  KAIMONSLATE_PORT      hub port (default 8765)
+  KAIMONSLATE_PORT      hub port — overrides the persisted [p] setting; else 8765
   KAIMONSLATE_NO_OPEN   =1 → never open a browser
 """
 
@@ -676,14 +712,22 @@ end
 function _app_main(args::Vector{String})::Int
     file = nothing
     own = false
+    port_arg = nothing
+    want_port = false
     for a in args
-        if a in ("-h", "--help")
+        if want_port
+            want_port = false; port_arg = a
+        elseif a in ("-h", "--help")
             print(_APP_HELP)
             return 0
         elseif a == "--status"
             return _print_status()
         elseif a == "--own"
             own = true
+        elseif a == "--port"
+            want_port = true                       # value is the next argument
+        elseif startswith(a, "--port=")
+            port_arg = a[length("--port=")+1:end]
         elseif startswith(a, "-")
             println(stderr, "slate: unknown option '$a'\n")
             print(stderr, _APP_HELP)
@@ -694,6 +738,18 @@ function _app_main(args::Vector{String})::Int
             println(stderr, "slate: too many arguments (one notebook file)")
             return 2
         end
+    end
+    if want_port
+        println(stderr, "slate: --port needs a value (e.g. --port 8080)")
+        return 2
+    end
+    if port_arg !== nothing
+        p = tryparse(Int, strip(port_arg))
+        if p === nothing || !(1 <= p <= 65535)
+            println(stderr, "slate: invalid --port '$port_arg' (want 1–65535)")
+            return 2
+        end
+        _PORT[] = p                                # this run only — highest precedence; not persisted
     end
     if _maybe_onboard!()
         # Kaimon scans for extensions dynamically, so the entry we just wrote is picked up
