@@ -1060,7 +1060,7 @@ drain, and narrowing a cell's dependents can only shrink the blast radius (see
 [`build_dependencies!`]). Idempotent: each module path is attempted at most once per session.
 Returns `true` iff a module was newly resolved (and deps were rebuilt).
 """
-function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
+function refine_usings!(report::Report, kernel::Kernel = InProcessKernel(); rebuild::Bool = true)
     pending = String[]
     for c in report.cells
         # Only cells that ran cleanly — an errored `using` (package didn't load) can't be resolved,
@@ -1091,7 +1091,9 @@ function refine_usings!(report::Report, kernel::Kernel = InProcessKernel())
             !isempty(v) && src == "registry" && _using_disk_store!("$p@$v", syms)
         end
     end
-    newly && rebuild_precise!(report)
+    # `rebuild=false` lets a caller that holds a notebook lock do the (report-mutating) graph rebuild
+    # itself, AFTER this off-lock kernel query — see the nb.lock protocol in server.jl.
+    newly && rebuild && rebuild_precise!(report)
     return newly
 end
 
@@ -1295,10 +1297,15 @@ writer is restaled once ("staleness never under-invalidates") and the caller's r
 A serial drain executes in document order — a valid topological order even without the edge —
 so the default skips the restale. Returns `true` iff something newly resolved (deps rebuilt).
 """
-function refine_macros!(report::Report, kernel::Kernel = InProcessKernel(); restale_racers::Bool = false)
+function refine_macros!(report::Report, kernel::Kernel = InProcessKernel(); restale_racers::Bool = false,
+                        rebuild::Bool = true)
     cells = pending_macro_cells(report)
     isempty(cells) && return false
     resolve_macros!(report, kernel, cells; mark_tried = true) || return false
+    # `rebuild=false`: this ran the kernel resolve OFF a notebook lock (the protocol); the caller re-takes
+    # the lock to `rebuild_precise!`. The racer-restale needs the rebuilt graph, so it's the caller's job
+    # too — its post-refine drain re-arm catches any stale cell either way.
+    rebuild || return true
     rebuild_precise!(report)
     restale_racers || return true
     recovered = Set{String}()   # attempted cells whose recovery included a WRITE (new downstream edges)

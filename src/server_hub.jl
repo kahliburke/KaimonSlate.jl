@@ -26,10 +26,15 @@ function _unique_id(h::Hub, path::AbstractString)
     return id
 end
 
-_notebooks_json(h::Hub) = lock(h.lock) do
-    nbs = [begin
-        cs = nb.report.cells
-        Dict("id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
+# Snapshot the registry under h.lock, then read each notebook's cells under ITS OWN nb.lock — the
+# runner mutates `report.cells` (a Vector) under nb.lock on another thread, so counting over it while
+# only holding h.lock would race that mutation (a torn read, or an error mid-iteration). Never takes
+# nb.lock WHILE h.lock is held (h.lock is released first), preserving the h.lock→(no nb.lock) ordering.
+function _notebooks_json(h::Hub)
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    rows = [with_report(nb) do report
+        cs = report.cells
+        Dict("id" => nb.id, "title" => report.title, "path" => abspath(nb.path),
              "cells" => length(cs),
              "code" => count(c -> c.kind == CODE, cs),
              "md" => count(c -> c.kind == MARKDOWN, cs),
@@ -41,9 +46,10 @@ _notebooks_json(h::Hub) = lock(h.lock) do
              "mtime" => _file_mtime(nb.path),
              "worker" => _worker_label(nb), "port" => _worker_port(nb),
              "runLocation" => _worker_location(nb))
-     end for nb in values(h.notebooks)]
+    end for nb in nbs]
     # Most-recently-edited first (the dict's iteration order is otherwise arbitrary).
-    sort!(nbs; by = d -> d["mtime"], rev = true)
+    sort!(rows; by = d -> d["mtime"], rev = true)
+    return rows
 end
 
 # A short "worker :port" tag for the index, when a notebook runs on a gate worker.
