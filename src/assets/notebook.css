@@ -526,6 +526,13 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
   100% { background:rgba(255,110,70,0); }
 }
 .cm-editor .cm-line.cm-errorline-flash { animation:cm-errorflash 1.2s ease-out; }
+/* Collapsed inline data-URI (an inlined base64 image) — a compact atomic chip in the editor so the
+   huge blob doesn't make the cell uneditable. See `dataUriChit` in editor.js. */
+.data-uri-chit { display:inline-flex; align-items:center; gap:.35em; margin:0 .1em; padding:0 .5em;
+  border:1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius:10px;
+  background:color-mix(in srgb, var(--accent) 12%, var(--bg3)); color:var(--dim);
+  font-family:system-ui,sans-serif; font-size:.82em; line-height:1.6; white-space:nowrap;
+  cursor:default; user-select:none; vertical-align:baseline; }
 .dispwrap { padding:10px 12px; border-top:1px solid var(--border); }
 .echarts:not(:empty) { padding:8px 6px; border-top:1px solid var(--border); }
 .echart { height:340px; width:100%; }

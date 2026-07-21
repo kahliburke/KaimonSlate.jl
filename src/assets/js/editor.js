@@ -6,6 +6,7 @@
   const CM = window.CM6;
   if (!CM) { console.error('CM6 bundle missing'); return; }
   const { EditorView, EditorState, EditorSelection, Compartment, StateField, StateEffect, Decoration, Transaction,
+          ViewPlugin, WidgetType,
           keymap, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentWithTab, toggleComment,
           indentUnit, bracketMatching, indentOnInput, syntaxTree, drawSelection,
           syntaxHighlighting, julia, juliaHighlightStyle, juliaThemes, slateThemes, slateThemeMeta,
@@ -288,6 +289,51 @@
   const errField = mkField(setErr, 'cm-errorline');
   const flashField = mkField(setFlash, 'cm-errorline-flash');
   const originField = mkField(setOrigin, 'cm-errorline-origin');
+
+  // ── Inline data-URI "chit" ────────────────────────────────────────────────────────────────────
+  // A pasted/dropped image with no project to attach into lands in the cell source as a HUGE
+  // `data:…;base64,<blob>` — thousands of chars that make the cell impossible to edit. Collapse each
+  // such blob in the EDITOR into one compact, atomic chip (mime + size). The document text is
+  // untouched, so it still renders + exports; the chip selects/deletes as a single unit, and the
+  // rest of the cell stays editable. Only genuinely long blobs collapse (a hand-written `data:` stays).
+  const _DATA_URI_RE = /data:([\w.+-]+\/[\w.+-]+)?;base64,[A-Za-z0-9+/=]{48,}/g;
+  const _fmtChitBytes = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+  class DataUriChit extends WidgetType {
+    constructor(label) { super(); this.label = label; }
+    eq(o) { return o.label === this.label; }
+    toDOM() {
+      const s = document.createElement('span');
+      s.className = 'data-uri-chit';
+      s.textContent = '🖼 ' + this.label;
+      s.title = 'Inline data URI, collapsed in the editor (it still renders). Select or delete this chip to remove the image.';
+      return s;
+    }
+    ignoreEvent() { return true; }
+  }
+  const _dataUriDecos = (view) => {
+    const ranges = [];
+    for (const { from, to } of view.visibleRanges) {
+      const text = view.state.doc.sliceString(from, to);
+      _DATA_URI_RE.lastIndex = 0;
+      let m;
+      while ((m = _DATA_URI_RE.exec(text))) {
+        const s = from + m.index, e = s + m[0].length;
+        const b64 = m[0].slice(m[0].indexOf('base64,') + 7).replace(/=+$/, '');
+        const bytes = Math.floor(b64.length * 3 / 4);
+        ranges.push(Decoration.replace({ widget: new DataUriChit((m[1] || 'data') + ' · ' + _fmtChitBytes(bytes)) }).range(s, e));
+      }
+    }
+    return Decoration.set(ranges, true);
+  };
+  const dataUriChit = ViewPlugin.fromClass(class {
+    constructor(view) { this.decorations = _dataUriDecos(view); }
+    update(u) { if (u.docChanged || u.viewportChanged) this.decorations = _dataUriDecos(u.view); }
+  }, {
+    decorations: v => v.decorations,
+    // Treat each collapsed blob as ATOMIC — the caret can't wander into the base64, and one Backspace
+    // removes the whole image rather than nibbling a character at a time.
+    provide: p => EditorView.atomicRanges.of(view => view.plugin(p)?.decorations || Decoration.none),
+  });
 
   const _validLine = (view, n) => n >= 1 && n <= view.state.doc.lines;
   window.markErrorLine = (id, line1) => { const v = editors[id]; if (v) v.dispatch({ effects: setErr.of(_validLine(v, line1) ? line1 : null) }); };
@@ -576,6 +622,7 @@
         // `for x of …` is caught at author time instead of a cryptic runtime console error. No lint
         // GUTTER — it would reserve a left column the other (gutterless) Slate editors don't have.
         ...(webLang ? [syntaxErrorLinter] : []),
+        dataUriChit,   // collapse inline base64 data-URIs into a compact atomic chip (keeps the cell editable)
         // Markdown editors complete citations + fenced code only (never prose); code cells get Julia.
         // Don't pop the completion list WHILE typing — only after a brief pause — so it stops
         // flickering on/off mid-word (and Tab-to-indent can't accidentally land on a just-opened

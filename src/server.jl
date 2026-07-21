@@ -177,6 +177,16 @@ end
 # Self-contained `.jl`s are intercepted earlier in `load_notebook` (background hydrate against
 # the depot cache), so this only handles ordinary notebooks: base / forked / detached.
 function _select_kernel(path::AbstractString, report; threads::AbstractString = "", online = nothing)
+    # `assetbase` — the `@asset` base, the datadir root, AND the target that dropped/pasted media attach
+    # to — is derived for EVERY open, not just the gate path. Without it (e.g. an in-process hub with no
+    # Kaimon gate), a notebook inside a project isn't recognised as one and media has nowhere to attach,
+    # so it inlines as a huge base64 blob. Project ⇒ the project dir; detached ⇒ the per-notebook fork-env
+    # dir (a stable location that resolves identically on the hub and every region worker). The gate
+    # branches below re-affirm this with their own values; this makes the in-process path get it too.
+    let proj = Base.current_project(dirname(abspath(path)))
+        parent = proj === nothing ? "" : dirname(proj)
+        report.meta["assetbase"] = isempty(parent) ? ReportEngine.notebook_env_dir(path) : parent
+    end
     if ReportEngine.gate_available()
         ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) runon=[$(get(report.meta, "runon", ""))] remoteworker=[$(get(report.meta, "remoteworker", ""))]")
         # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
