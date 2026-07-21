@@ -196,17 +196,25 @@
   <div class="phead"><strong>📁 Files</strong><span id="filesroot" class="hint"></span>
     <button class="pclose" onclick="toggleFiles()" title="close">✕</button></div>
   <div class="filesbody">
-    <div id="filestree" class="filestree"></div>
+    <div class="filestree-wrap">
+      <div class="filestreebar">
+        <button id="filesnew" class="ftbtn" onclick="_filesNewFile()" title="Create a new file">＋ New</button>
+        <button id="filesrefresh" class="ftbtn" onclick="_filesLoadTree()" title="Refresh the tree">⟳</button>
+      </div>
+      <div id="filestree" class="filestree"></div>
+    </div>
     <div class="filesedit-wrap">
       <div class="filebar">
         <span id="filedirty" class="filedirty" title="unsaved changes">●</span>
         <span id="filepath" class="filepath hint">select a file</span>
+        <a id="filedownload" class="ftbtn" style="display:none" download>⭳ Download</a>
         <button id="filesave" class="filesave" onclick="_filesSave()" disabled>Saved</button>
       </div>
       <div id="fileedit" class="fileedit"></div>
+      <div id="filepreview" class="filepreview" style="display:none"></div>
     </div>
   </div>
-  <div class="pfoot hint">Editing the notebook's own package. Save (⌘S) writes to disk — Revise reloads it and restales the cells that use it.</div>
+  <div class="pfoot hint">Browse &amp; edit the notebook's project files — source, config, and the .js/.css/media it uses. Save (⌘S) writes to disk; Revise reloads code and restales the cells that use it.</div>
 </aside>
 <aside id="agentpanel" class="agentpanel">
   <div class="aphead"><strong>🤖 Agent</strong><span id="apstatus" class="hint"></span>

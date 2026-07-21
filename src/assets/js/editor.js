@@ -355,12 +355,37 @@
   // which keys off the code + cursor, not a cell id), snippets, comment-toggle (⌘/), bracket
   // match/close, indent-on-input, Tab-completion, ⌘-Space. No `cellId` ⇒ it isn't registered as a
   // cell editor. `opts`: {filename, onSave, onChange}; ⌘S saves (the caller owns persistence).
-  window.mkFileEditor = (parent, text, opts = {}) => mkEditor(parent, {
-    doc: text,
-    markdown: /\.(md|markdown|qmd)$/i.test(opts.filename || ''),
-    keys: opts.onSave ? [{ key: 'Mod-s', run: () => { opts.onSave(); return true; } }] : [],
-    onDoc: () => { if (opts.onChange) opts.onChange(); },
-  });
+  // Pick a CM6 section grammar from the file extension. The bundle vendors html/css/js (for web
+  // cells); everything else (Julia, .py, .toml, .sh, …) falls through to the default Julia tree —
+  // acceptable highlighting, and no regression from the old Julia-for-everything behaviour.
+  const _fileLang = fn => {
+    const e = (fn || '').toLowerCase();
+    if (/\.(css|scss|less)$/.test(e)) return 'css';
+    if (/\.(html?|xml|svg|vue)$/.test(e)) return 'html';
+    if (/\.(m?js|cjs|jsx|tsx?|json|jsonl|ndjson)$/.test(e)) return 'js';
+    return undefined;                          // Julia default
+  };
+  // What kind of reference a dropped/pasted file should become, by editor context — or null when the
+  // editor isn't an embeddable notebook cell (a Files-tab file editor has `filename`; we don't embed
+  // there). Markdown cell → markdown image; a web-cell pane → its language (<img>/url()/string);
+  // a plain code cell → Julia `@asset`. Drives `window.slateEmbedFiles` (files.js).
+  const _embedSyntax = opts => {
+    if (opts.filename) return null;                              // Files-tab file editor, not a cell
+    if (opts.markdown) return 'markdown';
+    if (opts.lang === 'html' || opts.lang === 'css' || opts.lang === 'js') return opts.lang;
+    if (opts.cellId) return 'julia';                            // a plain code cell
+    return null;
+  };
+  window.mkFileEditor = (parent, text, opts = {}) => {
+    const md = /\.(md|markdown|qmd)$/i.test(opts.filename || '');
+    return mkEditor(parent, {
+      doc: text,
+      markdown: md,
+      lang: md ? undefined : _fileLang(opts.filename),
+      keys: opts.onSave ? [{ key: 'Mod-s', run: () => { opts.onSave(); return true; } }] : [],
+      onDoc: () => { if (opts.onChange) opts.onChange(); },
+    });
+  };
   window.edFocus = id => { const v = window.ensureEditor(id); if (v) v.focus(); };
   window.edInsert = (id, text) => { const v = editors[id]; if (!v) return; v.dispatch(v.state.replaceSelection(text)); v.focus(); };
 
@@ -599,6 +624,32 @@
             if (!/^[A-Za-z_]/.test(name)) return false;
             if (window.gotoDef && window.gotoDef(name, opts.cellId)) { event.preventDefault(); return true; }
             return false;
+          },
+          // Drop a media file onto a cell editor → attach-or-inline it and insert a context-appropriate
+          // reference at the drop point (`window.slateEmbedFiles`, files.js): a markdown image, a web
+          // pane's <img>/url()/string, or a Julia `@asset`. Shift forces attach, Alt forces inline
+          // (default = a size threshold; a Julia cell always attaches). A Files-tab file drop falls through.
+          drop(event, view) {
+            const files = event.dataTransfer && event.dataTransfer.files;
+            const syntax = _embedSyntax(opts);
+            if (!syntax || !window.slateEmbedFiles || !files || !files.length) return false;
+            event.preventDefault(); event.stopPropagation();
+            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+            window.slateEmbedFiles(files, { view, cellId: opts.cellId, pos, syntax,
+              force: event.shiftKey ? 'attach' : event.altKey ? 'inline' : '' });
+            return true;
+          },
+          // Paste an image/file from the clipboard (e.g. a screenshot) → same embed path. A normal text
+          // paste (clipboard also carries text) falls through to CM6's default handling.
+          paste(event, view) {
+            const cd = event.clipboardData, files = cd && cd.files;
+            const syntax = _embedSyntax(opts);
+            if (!syntax || !window.slateEmbedFiles || !files || !files.length) return false;
+            if (cd.getData && cd.getData('text/plain')) return false;
+            event.preventDefault();
+            window.slateEmbedFiles(files, { view, cellId: opts.cellId,
+              pos: view.state.selection.main.head, syntax, force: '' });
+            return true;
           },
         }),
         EditorView.updateListener.of(u => {
