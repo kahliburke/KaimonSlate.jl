@@ -43,6 +43,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .ritem .rx{background:none;border:none;color:#6a7090;cursor:pointer;font-size:.95rem;padding:2px 6px;border-radius:5px;line-height:1;}
 .ritem .rx:hover{color:#e57575;background:rgba(229,117,117,.1);}
 .ritem.isopen{border-left:2px solid #56d364;} .rdot{color:#56d364;font-size:.6rem;vertical-align:middle;margin-left:5px;}
+.rsearch{width:100%;box-sizing:border-box;margin:0 0 8px;padding:6px 11px;background:#10131f;border:1px solid #21253a;border-radius:7px;color:#cdd3e6;font-size:.8rem;}
+.rsearch:focus{outline:none;border-color:#569cd6;}
+.rsearch::placeholder{color:#5a6080;}
+.rmore{color:#6a7090;font-size:.72rem;padding:6px 12px 2px;}
 .nb .kill{background:#141828;color:#e57575;border:1px solid #3a2030;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.78rem;white-space:nowrap;}
 .nb .kill:hover{border-color:#e57575;background:rgba(229,117,117,.1);}
 /* Three tracks: notebooks | sessions | activity monitor. The monitor has its OWN column so its
@@ -671,22 +675,44 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     fetch('/api/'+encodeURIComponent(id)+'/shutdown',{method:'POST'}).then(function(){hideLoading();loadSessions();});});
   // Recently opened notebooks (per-browser, localStorage). Click to open (or jump to it if it's
   // already running — marked with a green ● dot). ✕ forgets an entry.
-  var RECENT_KEY='slateRecents';
+  var RECENT_KEY='slateRecents', RECENT_CAP=200, RECENT_SHOW=12;   // keep many; show a truncated list, search finds the rest
   function getRecents(){try{return JSON.parse(localStorage.getItem(RECENT_KEY)||'[]');}catch(e){return [];}}
-  function saveRecents(a){try{localStorage.setItem(RECENT_KEY,JSON.stringify(a.slice(0,12)));}catch(e){}}
+  function saveRecents(a){try{localStorage.setItem(RECENT_KEY,JSON.stringify(a.slice(0,RECENT_CAP)));}catch(e){}}
   function pushRecent(p){if(!p)return;var a=getRecents().filter(function(x){return x!==p;});a.unshift(p);saveRecents(a);}
   function forgetRecent(p){saveRecents(getRecents().filter(function(x){return x!==p;}));renderRecents();}
   function openPaths(){var s={};document.querySelectorAll('.nb .p').forEach(function(e){s[e.textContent]=1;});return s;}
   function baseName(p){return window.PLATFORM.baseOf(p.replace(/[\/\\]+$/,''));}
+  var _recentQuery='';
   function renderRecents(){
-    var box=document.getElementById('recent'),open=openPaths();
-    var list=getRecents();   // show ALL recents — currently-open ones get an "open" dot, not hidden
-    box.innerHTML=list.length? '<h2 class="sect">Recent</h2>'+list.map(function(p){
+    var box=document.getElementById('recent');
+    if(!getRecents().length){box.innerHTML='';return;}
+    // Build the shell (heading + search box + list container) ONCE, so the search input keeps its
+    // focus and value across the 4s `loadSessions` polls that also call this. Later calls only
+    // refresh the list rows.
+    if(!document.getElementById('recentsearch')){
+      box.innerHTML='<h2 class="sect">Recent</h2>'+
+        '<input id="recentsearch" class="rsearch" type="search" placeholder="Search recent…" autocomplete="off" spellcheck="false">'+
+        '<div id="recentlist"></div>';
+      document.getElementById('recentsearch').addEventListener('input',function(){_recentQuery=this.value;renderRecentList();});
+    }
+    renderRecentList();
+  }
+  // Render the recent ROWS: filter by the search query (matches basename + full path); with no query
+  // show the newest RECENT_SHOW and a "N more — search" hint, so the long history stays reachable.
+  function renderRecentList(){
+    var listEl=document.getElementById('recentlist'); if(!listEl)return;
+    var open=openPaths(), all=getRecents(), q=_recentQuery.trim().toLowerCase();
+    var matched=q? all.filter(function(p){return p.toLowerCase().indexOf(q)>=0;}) : all;
+    var shown=q? matched : matched.slice(0,RECENT_SHOW);
+    var html=shown.map(function(p){
       var isOpen=!!open[p];
       return '<div class="ritem'+(isOpen?' isopen':'')+'" data-p="'+esc(p)+'"><div class="rt"><span class="rb">'+
         esc(baseName(p))+(isOpen?' <span class="rdot" title="currently open">●</span>':'')+
         '</span><span class="rp">'+esc(p)+'</span></div><button class="rx" data-p="'+esc(p)+'" title="remove from recents">✕</button></div>';
-    }).join('') : '';
+    }).join('');
+    if(q && !shown.length) html='<div class="rmore">No recent notebook matches “'+esc(_recentQuery.trim())+'”</div>';
+    else if(!q && matched.length>RECENT_SHOW) html+='<div class="rmore">'+(matched.length-RECENT_SHOW)+' more — search to find them</div>';
+    listEl.innerHTML=html;
   }
   document.getElementById('recent').addEventListener('click',function(e){
     var x=e.target.closest('.rx'); if(x){e.stopPropagation();forgetRecent(x.dataset.p);return;}
