@@ -43,7 +43,8 @@ export register_kind!, widget_kinds, coerce_bind, reconcile_bind, wrap_value, co
 export WebPage, register_widget_js
 # Auto-registered front-end (no boot cell)
 export register_widget!, register_component!, provide_frontend!, @pkg_asset,
-       required_assets, ensure_widget_assets!, frontend_scripts, extension_manifest
+       required_assets, ensure_widget_assets!, ensure_module_frontend!, ensure_module_frontends!,
+       frontend_scripts, extension_manifest
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere

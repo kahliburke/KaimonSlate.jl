@@ -107,6 +107,71 @@ function ensure_widget_assets!(::Type{T}) where {T}
     return nothing
 end
 
+# ── Package-global front-end (no bind to trigger it) ──────────────────────────
+# Some front-end an extension ships isn't tied to any single widget bind — an EDITOR extension
+# (`slateRegisterEditorExtension`, e.g. inline-math rendering in cells) and JS→Julia RPC HANDLERS
+# (`slate_on(channel) do … end`) fire on "this package is in use in the notebook", not on a `@bind`.
+# A package declares them from a named convention hook, `MyPkg.__slate_frontend(slate_on)`, instead of
+# an `__init__` + a boot cell:
+#
+#   function GiacSlate.__slate_frontend(slate_on)
+#       provide_frontend!(@pkg_asset("assets/inline_math_editor.js"); id = "GiacSlate.inline_math")
+#       slate_on("giac_tex", a -> Dict("latex" => giac_src_to_tex(String(a.src))))
+#       slate_on("giac_src", a -> Dict("src"   => mathjson_to_giac_src(String(a.mj))))
+#   end
+#
+# Slate invokes it once per drain per loaded module (see `ensure_module_frontends!`), handing it the
+# notebook's injected `slate_on` — so the FRONT-END side lands in the process-global `_FRONTEND` registry
+# (pulled by the manifest) and the HANDLER side lands in THAT notebook's `__slate_handlers`. The hook must
+# be cheap + idempotent: `provide_frontend!` dedups by id and `slate_on` replaces by channel, so re-running
+# it each drain is a no-op that also self-heals a namespace rebuild (the handlers get re-installed).
+
+# `(objectid(slate_on), module)` pairs whose hook has already run — so a package's `__slate_frontend`
+# fires ONCE per notebook-namespace generation, even though Slate rescans loaded modules every drain (to
+# catch a package a later cell `using`s). The scan is cheap; this guards the actual WORK (a file read +
+# registration). Keyed on the namespace's injected `slate_on`, which is stable within a generation and
+# FRESH after a rebuild — so a namespace reset (new `slate_on`) re-fires the hook, re-installing its
+# handlers into the new `__slate_handlers`. (Contrast `_ASSET_CHECKED`: a widget's JS is process-global,
+# so it's once-EVER; a module hook's handlers are per-namespace, so it's once-per-GENERATION.)
+const _MODULE_FRONTEND_DONE = Set{Tuple{UInt,Module}}()
+
+"""
+    ensure_module_frontend!(m::Module, slate_on) -> Bool
+
+Invoke module `m`'s package-global front-end hook, `m.__slate_frontend(slate_on)`, if it defines one and
+it hasn't already run for this notebook-namespace generation (see [`ensure_module_frontends!`](@ref));
+return whether the module *has* such a hook. A module without the method contributes nothing (returns
+`false`), so — like [`required_assets`](@ref) — the method's presence doubles as extension-detection. A
+throwing hook is isolated (caught) so one bad package can't break the manifest pull for the rest.
+"""
+function ensure_module_frontend!(m::Module, slate_on)
+    isdefined(m, :__slate_frontend) || return false
+    key = (objectid(slate_on), m)
+    key in _MODULE_FRONTEND_DONE && return true          # already wired for this namespace generation
+    push!(_MODULE_FRONTEND_DONE, key)
+    try
+        Base.invokelatest(getglobal(m, :__slate_frontend), slate_on)
+    catch
+        # A misbehaving package hook must not poison the whole manifest pull.
+    end
+    return true
+end
+
+"""
+    ensure_module_frontends!(slate_on)
+
+Invoke every loaded module's package-global front-end hook (see [`ensure_module_frontend!`](@ref)) — Slate
+calls this once per run drain, handing it the notebook namespace's injected `slate_on` so a hook can
+register both front-end scripts (via [`provide_frontend!`](@ref)) and JS→Julia handlers (via `slate_on`).
+Hooks must be idempotent (they run every drain).
+"""
+function ensure_module_frontends!(slate_on)
+    for m in Base.loaded_modules_array()
+        ensure_module_frontend!(m, slate_on)
+    end
+    return nothing
+end
+
 """
     @pkg_asset(path) -> String
 

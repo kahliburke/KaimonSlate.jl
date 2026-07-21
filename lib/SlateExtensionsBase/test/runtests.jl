@@ -18,6 +18,17 @@ struct Dial; lo::Int; hi::Int; default::Int; note::Union{Nothing,String}; end
 struct Gauge; default::Int; end
 SlateExtensionsBase.required_assets(::Type{Gauge}) = "export default () => {}"
 
+# A package with a PACKAGE-GLOBAL front-end hook (editor ext + a JS→Julia handler, no bind to trigger
+# it): Slate calls `__slate_frontend(slate_on)`, handing it the notebook's `slate_on`. The hook registers
+# both a front-end script and a handler — the inline-math/giac shape, in miniature.
+module FakeExtPkg
+    using SlateExtensionsBase
+    function __slate_frontend(slate_on)
+        provide_frontend!("EDITOR_EXT"; id = "FakeExtPkg.editor")
+        slate_on("fake_channel", a -> a)
+    end
+end
+
 @testset "SlateExtensionsBase" begin
 
     @testset "Widget construction" begin
@@ -267,6 +278,39 @@ SlateExtensionsBase.required_assets(::Type{Gauge}) = "export default () => {}"
         @test !haskey(frontend_scripts(), "widget:Main.Knob")
 
         empty!(SlateExtensionsBase._FRONTEND)
+    end
+
+    # Package-global front-end: `__slate_frontend(slate_on)` + `ensure_module_frontend!` — a hook with no
+    # bind to trigger it registers its editor-ext script AND its JS→Julia handlers, driven by Slate's
+    # once-per-drain manifest pull (not an __init__/boot cell).
+    @testset "ensure_module_frontend! (package-global hook)" begin
+        empty!(SlateExtensionsBase._FRONTEND)
+        empty!(SlateExtensionsBase._MODULE_FRONTEND_DONE)
+        handlers = Dict{String,Any}()                            # stand-in for a notebook's __slate_handlers
+        slate_on = (ch, f) -> (handlers[string(ch)] = f; nothing)
+
+        @test ensure_module_frontend!(FakeExtPkg, slate_on)      # hook present → ran
+        @test frontend_scripts()["FakeExtPkg.editor"] == "EDITOR_EXT"   # front-end registered
+        @test haskey(handlers, "fake_channel")                   # handler installed via slate_on
+
+        # Fires ONCE per (module, namespace generation): re-running with the SAME slate_on (as the
+        # every-drain scan does) is a no-op — no re-read, no re-install.
+        empty!(handlers)
+        ensure_module_frontend!(FakeExtPkg, slate_on)
+        @test isempty(handlers)                                  # skipped — not re-invoked
+        @test length(extension_manifest().frontend) == 1
+
+        # A NEW slate_on = a rebuilt namespace generation → re-fires, re-installing the handlers.
+        handlers2 = Dict{String,Any}()
+        slate_on2 = (ch, f) -> (handlers2[string(ch)] = f; nothing)
+        ensure_module_frontend!(FakeExtPkg, slate_on2)
+        @test haskey(handlers2, "fake_channel")                  # handlers back in the fresh table
+
+        # A module with no hook contributes nothing.
+        @test !ensure_module_frontend!(Base, slate_on)
+
+        empty!(SlateExtensionsBase._FRONTEND)
+        empty!(SlateExtensionsBase._MODULE_FRONTEND_DONE)
     end
 
 end
