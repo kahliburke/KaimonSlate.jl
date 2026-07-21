@@ -60,6 +60,40 @@ window.teardownCustomWidgets = function (root) {
   });
 };
 
+// Package-declared front-end scripts (`nbState.frontendScripts` = [{id, js, esm, kind}], from the worker's
+// SlateExtensionsBase manifest — `register_component!`/`register_widget!` in a module `__init__`). Inject each
+// ONCE (deduped by id across the session), with no boot cell. Three shapes:
+//   • kind set  → a COMPONENT module: import its `export default` from a blob URL and register it under the
+//                 (namespaced) kind via the widget SDK. The author's JS never names the kind.
+//   • esm only  → a self-registering ES module (e.g. an editor extension that imports + calls a global).
+//   • classic   → a self-registering `<script>` (calls `window.slateRegisterWidget(...)`).
+// A re-declaration keeps the same id → not re-run here (the registry replaces on the Julia side; a reload
+// re-runs from a clean page). Already-mounted controls are re-wired by slateRegisterWidget itself.
+window._slateFEInjected = window._slateFEInjected || new Set();
+function injectFrontendScripts(state) {
+  const list = (state && state.frontendScripts) || [];
+  for (const fe of list) {
+    if (!fe || !fe.id || !fe.js || window._slateFEInjected.has(fe.id)) continue;
+    window._slateFEInjected.add(fe.id);
+    try {
+      const s = document.createElement('script');
+      s.dataset.slateFe = fe.id;
+      if (fe.kind) {
+        const url = URL.createObjectURL(new Blob([fe.js], { type: 'text/javascript' }));  // module import honors the importmap
+        s.type = 'module';
+        s.textContent =
+          'import C from ' + JSON.stringify(url) + ';\n' +
+          'import { registerComponent } from "@slate/widget";\n' +
+          'registerComponent(' + JSON.stringify(fe.kind) + ', C);';
+      } else {
+        if (fe.esm) s.type = 'module';
+        s.textContent = fe.js;
+      }
+      document.head.appendChild(s);
+    } catch (e) { console.error('frontend script inject failed (' + fe.id + ')', e); }
+  }
+}
+
 function controlMarkup(bindId, b) {
   const p = b.params || {}, w = b.widget;
   const a = `data-bind="${bindId}" data-name="${b.name}" data-widget="${w}"`;
@@ -661,6 +695,7 @@ function _publishState(state) {
                                                 // module) can seed from it even if it loads AFTER
                                                 // this first ran (the boot reload() is async).
   if (selectedId && !(state.cells || []).some(c => c.id === selectedId)) selectedId = null;   // dropped/renamed
+  injectFrontendScripts(state);                 // package-declared widget/editor scripts (before the re-render)
   window.slateStore && window.slateStore.applyState(state);   // → Preact re-renders #nb reactively
   window.onNbState && window.onNbState(state);                // graph-shaped consumers (DAG panel)
   updateChrome(state);

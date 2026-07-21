@@ -20,6 +20,62 @@ end
 Widget(kind::AbstractString, default = ""; params...) =
     Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in params), default)
 
+# NamedTuple params — the ergonomic authoring form (`Widget(kind, (; max = 5), 0)`); stored as the wire
+# `Dict{String,Any}` bag. The 3-arg shape is unambiguous vs the 2-arg `Widget(kind, default)`.
+Widget(kind::AbstractString, params::NamedTuple, default) =
+    Widget(String(kind), Dict{String,Any}(String(k) => v for (k, v) in pairs(params)), default)
+
+"""
+    kind_for(T::Type) -> String
+
+The wire `kind` derived for a widget TYPE — its module-qualified name (e.g. `"StarRating.Stars"`).
+Because it's namespaced by the defining package, two packages can each ship a `Stars` widget without
+their kinds colliding. Used by `Widget(T, …)` and [`register_component!`](@ref) so a type-based widget
+never hand-types (and so never clashes on) a bare kind string.
+"""
+kind_for(::Type{T}) where {T} = string(parentmodule(T), '.', nameof(T))
+
+"""
+    Widget(T::Type, default=""; params...)
+
+Build a `Widget` whose `kind` is derived from the widget TYPE `T` (see [`kind_for`](@ref)) — the
+namespaced form. Use it in `to_widget` so the kind matches the one [`register_component!`](@ref)
+registers, with no shared string to keep in sync:
+
+```julia
+SlateExtensionsBase.to_widget(s::Stars) = Widget(Stars, s.default; max = s.max)
+```
+"""
+Widget(T::Type, default = ""; params...) = Widget(kind_for(T), default; params...)
+
+"""
+    auto_widget(x; value = :default, exclude = ()) -> Widget
+
+Build a [`Widget`](@ref) by REFLECTING a struct's fields into `params` — the ergonomic `to_widget`
+body when a widget's fields *are* its UI params. The `value` field (default `:default`) becomes the
+`Widget`'s bound value (not a param); `nothing`-valued fields are skipped (so an unset `Union{Nothing,…}`
+option is omitted); `exclude` drops named fields. The kind is `kind_for(typeof(x))`.
+
+```julia
+struct Stars; max::Int; label::Union{Nothing,String}; default::Int; end
+SlateExtensionsBase.to_widget(s::Stars) = auto_widget(s)     # params = {max[, label]}, value = default
+```
+
+Opt-in on purpose — Slate never reflects a struct unless you ask, so an arbitrary value isn't silently
+turned into a control, and you keep full control (write `Widget(kind_for(T), (;…), val)` by hand, or use
+`exclude`, when not every field is a param).
+"""
+function auto_widget(x; value::Symbol = :default, exclude = ())
+    T = typeof(x)
+    value in fieldnames(T) || throw(ArgumentError(
+        "auto_widget($T): no `$value` field to use as the bound value — name the value field `$value`, " *
+        "pass `value = :yourfield`, or build the Widget explicitly (`Widget(kind_for($T), (; …), val)`)."))
+    ex = (value, exclude...)
+    params = Dict{String,Any}(String(f) => getfield(x, f)
+                              for f in fieldnames(T) if f ∉ ex && getfield(x, f) !== nothing)
+    return Widget(kind_for(T), params, getfield(x, value))
+end
+
 """
     to_widget(x) -> Widget
 
@@ -125,28 +181,75 @@ end
 
 const _KINDS = Dict{String,KindSpec}()
 
-# Defaults: an unknown kind passes its browser value through untouched (so a string-valued custom
-# widget needs no coercion), keeps the user's value across a re-run (the kind-changed reset is
-# handled generically in `reconcile_bind`, so a per-kind reconciler only ever sees same-kind), and
-# hands the raw value to the user.
-_default_coerce(::Widget, v) = v
+"""
+    coerce_value(::Type{T}, v) -> T
+
+Coerce a raw browser value `v` (arriving as a JSON number / string / bool) to a control's VALUE TYPE
+`T` — the type of its [`Widget`](@ref)'s `default`. Slate applies this automatically, with error-
+fallback to the default, for any control that registers no custom `coerce` — so a typed widget (a
+`Stars` whose `default::Int`) gets `Int`-safe values for free, no lifecycle code. Add a method for
+your own value type to teach Slate how to coerce it:
+
+```julia
+SlateExtensionsBase.coerce_value(::Type{RGB}, v) = parse(RGB, string(v))
+```
+
+The fallback passes an unrecognised type through untouched (so a Dict/NamedTuple-valued widget is
+unaffected). Built-in scalar coercions: Integer (rounds/parses), AbstractFloat, Bool, String, Symbol.
+"""
+coerce_value(::Type, v) = v                                        # unknown value type → pass through
+coerce_value(::Type{T}, v) where {T<:Integer} =
+    v isa Integer ? T(v) : v isa Number ? round(T, v) : parse(T, strip(string(v)))
+coerce_value(::Type{T}, v) where {T<:AbstractFloat} =
+    v isa Number ? T(v) : parse(T, strip(string(v)))
+coerce_value(::Type{Bool}, v) = v === true || v == 1 || v == "true"
+coerce_value(::Type{T}, v) where {T<:AbstractString} = T(string(v))
+coerce_value(::Type{Symbol}, v) = Symbol(string(v))
+
+# Defaults. `coerce` is TYPE-DRIVEN: coerce the browser value to the type of `w.default` via
+# `coerce_value`, falling back to the default if that throws (a bad/unparseable value never errors the
+# cell) — so a typed widget needs no `register_kind!` at all. `reconcile` keeps the user's value across
+# a re-run (the kind-changed reset is generic, in `reconcile_bind`, so a per-kind reconciler only ever
+# sees same-kind); `wrap` hands the raw value to the user.
+_default_coerce(w::Widget, v) = try coerce_value(typeof(w.default), v) catch; w.default end
 _default_reconcile(oldw::Widget, oldv, neww::Widget) = oldv
 _default_wrap(::Widget, v) = v
 
-"""
-    register_kind!(kind; coerce, reconcile, wrap)
+# Derive coerce + reconcile from a declared DOMAIN (`domain(w)` → a numeric range or a collection of
+# allowed values). Coerce = value-type-coerce, then restrict INTO the domain (clamp a range, else
+# fall back to the default for a non-member); reconcile keeps the value only while it's still in the
+# (possibly changed) domain. Lets a bounded widget declare WHAT its values are, not the clamp/round.
+_restrict(d::AbstractRange, v, default) = clamp(v, first(d), last(d))
+_restrict(d, v, default) = v in d ? v : default
+_domain_coerce(domain) = (w::Widget, v) -> begin
+    d = domain(w)
+    cv = try coerce_value(eltype(d), v) catch; return w.default end
+    _restrict(d, cv, w.default)
+end
+_domain_reconcile(domain) = (ow::Widget, ov, nw::Widget) -> (ov in domain(nw) ? ov : nw.default)
 
-Register the value-lifecycle hooks for a control `kind`. Each is optional and falls back to a
-default (pass-through coerce, keep-across-rerun reconcile, identity wrap). Pair with a front-end
-`window.slateRegisterWidget("<kind>", …)` (see [`register_widget_js`](@ref)).
+"""
+    register_kind!(kind; coerce, reconcile, wrap, domain)
+
+Register the value-lifecycle hooks for a control `kind`. **Everything is optional** — with none, Slate
+uses a type-driven default: it coerces the browser value to the type of the widget's `default` (see
+[`coerce_value`](@ref), with error-fallback) and keeps the value across a re-run. So a typed widget
+often needs no call at all. Pass:
+
+- `domain = w -> 0:w_max` — a numeric range or allowed-value collection; Slate derives `coerce`
+  (coerce to the domain's type, then clamp/restrict into it) and `reconcile` (reset when out of domain).
+- `coerce` / `reconcile` / `wrap` — raw closures, for a fully custom value lifecycle (e.g. a labeled
+  option's index → `Choice`). An explicit hook wins over `domain`.
 
 ```julia
-register_kind!("mathfield"; coerce = (w, v) -> String(v))
+register_kind!("stars"; domain = w -> 0:Int(get(w.params, "max", 5)))   # bounds; or omit entirely
 ```
 """
 function register_kind!(kind::AbstractString;
-                        coerce = _default_coerce, reconcile = _default_reconcile, wrap = _default_wrap)
-    _KINDS[String(kind)] = KindSpec(coerce, reconcile, wrap)
+                        coerce = nothing, reconcile = nothing, wrap = _default_wrap, domain = nothing)
+    co = coerce    !== nothing ? coerce    : domain !== nothing ? _domain_coerce(domain)    : _default_coerce
+    re = reconcile !== nothing ? reconcile : domain !== nothing ? _domain_reconcile(domain) : _default_reconcile
+    _KINDS[String(kind)] = KindSpec(co, re, wrap)
     return nothing
 end
 

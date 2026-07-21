@@ -21,6 +21,12 @@ import Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `
 using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indices, WebPage,
                            to_widget, register_kind!, coerce_bind, reconcile_bind, wrap_value
 
+# The SlateExtensionsBase extension manifest for THIS process — the front-end scripts (and, in time,
+# other package registrations) that the loaded packages declared, for the hub to mirror into the page.
+# Defined here because widgets.jl is included into both ReportEngine (the in-process kernel reads it
+# directly) and the standalone SlateWorker (the `__slate_extension_manifest` gate tool returns it).
+inprocess_extension_manifest() = SlateExtensionsBase.extension_manifest()
+
 # slate_fingerprint + memo-store introspection — shared notebook helpers injected below
 # (one include here serves both namespaces, mirroring how this file itself is shared).
 include(joinpath(@__DIR__, "fingerprint.jl"))
@@ -470,6 +476,9 @@ _register_builtin_kinds!()
 const _BIND_SINK_KEY = :__slate_binds
 
 function _do_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock, name::Symbol, w0)
+    # Lazily load this widget type's front-end the first time it's bound (dispatch on the type — a
+    # package needs no `__init__`; a no-op for built-ins and any type with no `required_assets` method).
+    SlateExtensionsBase.ensure_widget_assets!(typeof(w0))
     w = to_widget(w0)   # accept a Widget OR any value with a `to_widget` method (the extension seam)
     # The registry PERSISTS across evals and is shared, so a concurrent bind batch would resize the
     # Dict from two tasks at once — guard it. (The sink below is task-local, so it needs no lock.)

@@ -51,10 +51,16 @@ mutable struct LiveNotebook
     agent_busy::Bool                     # true while ANY bound agent has a turn in flight (history attribution)
     agents::Dict{String,String}          # crew label → Kaimon agent id (multi-agent crew; "" = default)
     scratch::Vector{Cell}                # in-memory scratchpad cells (slate.eval) — never persisted/exported/graphed
-    # Inner constructor takes the original 13 fields and starts an empty scratchpad, so every existing
-    # positional call site (server + tests) is unchanged; scratch is populated at runtime by slate.eval.
+    frontend::Vector{@NamedTuple{id::String, js::String, esm::Bool, kind::String}}  # package-declared front-end
+                                         # scripts, refreshed once per drain from the worker's SlateExtensionsBase
+                                         # manifest (`_refresh_extensions!`); sticky within a session, id-deduped,
+                                         # declaration order. `esm` ⇒ ES module; non-empty `kind` ⇒ a component whose
+                                         # default export Slate wraps + registers. See `_frontend_scripts`.
+    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend registry, so every
+    # existing positional call site (server + tests) is unchanged; both are populated at runtime.
     LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
-        new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents, Cell[])
+        new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents,
+            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[])
 end
 
 # Wire/unwire the engine's out-of-band callback registry (eval.jl) for one notebook — the seam
@@ -964,6 +970,67 @@ function _reestablish_effects!(report)
     end
     return nothing
 end
+
+# Read a field tolerant of a NamedTuple (local) or a Dict/JSON3 shape (off the gate) — for extension
+# manifest entries (`(; id, js)`), which arrive as JSON3 objects across the gate.
+_manifest_field(e, f::Symbol) = e isa AbstractDict ? get(e, f, get(e, String(f), nothing)) :
+                                (hasproperty(e, f) ? getproperty(e, f) : nothing)
+
+# Add/replace one front-end script in a notebook's sticky registry, deduped by `id` (a re-declaration
+# replaces in place; declaration order is otherwise preserved). An empty/missing `id` keys on the
+# script's content hash — matching SlateExtensionsBase `provide_frontend!`. `esm` marks an ES module;
+# a non-empty `kind` marks a component (Slate wraps its default export under `kind`). Returns true if
+# the registry CHANGED (new id, or an existing id's fields differ), so the caller can bump the version.
+function _register_frontend!(nb::LiveNotebook, idv, js::AbstractString, esm::Bool = false,
+                            kind::AbstractString = "")
+    id = (idv === nothing || isempty(String(idv))) ? "fe:" * string(hash(js); base = 16) : String(idv)
+    entry = (id = id, js = String(js), esm = esm, kind = String(kind))
+    i = findfirst(e -> e.id == id, nb.frontend)
+    if i === nothing
+        push!(nb.frontend, entry); return true
+    elseif nb.frontend[i] != entry
+        nb.frontend[i] = entry; return true
+    end
+    return false
+end
+
+# Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
+# (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
+# which may run during namespace priming (no harvestable eval), so the process-global registry is the
+# authoritative source. Pulled ONCE per drain (see `_run_loop!`) — the gate worker is queried, the
+# in-process kernel read directly. Merges each script (sticky, id-deduped); returns true if anything
+# changed, so the caller pushes a fresh state for the browser to inject. Best-effort: a query failure
+# leaves the registry as-is. Runs under `nb.lock`.
+function _refresh_extensions!(nb::LiveNotebook)
+    manifest = try
+        nb.kernel isa ReportEngine.GateKernel ?
+            ReportEngine.extension_manifest(nb.kernel) :
+            ReportEngine.inprocess_extension_manifest()
+    catch e
+        ReportEngine._rlog("slate: extension manifest refresh failed: $(first(sprint(showerror, e), 120))")
+        return false
+    end
+    manifest === nothing && return false
+    fe = _manifest_field(manifest, :frontend)
+    fe === nothing && return false
+    changed = false
+    for e in fe
+        js = _manifest_field(e, :js); js === nothing && continue
+        esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
+        kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
+        _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind) && (changed = true)
+    end
+    return changed
+end
+
+# The notebook's package-declared front-end scripts, as `(; id, js, esm)` entries in declaration order.
+# Slate injects each ONCE — live (`state_json` → the browser appends every unseen `<script>`, as a module
+# when `esm`) and in a static export — so a package's widget renderer / editor extension registers with
+# no boot cell. Populated by `_refresh_extensions!` from the worker's SlateExtensionsBase manifest.
+_frontend_scripts(nb::LiveNotebook) = nb.frontend
+
+_frontend_scripts_json(nb::LiveNotebook) =
+    [Dict{String,Any}("id" => e.id, "js" => e.js, "esm" => e.esm, "kind" => e.kind) for e in nb.frontend]
 
 # Read a table spec's declared id, tolerating both JSON3.Object (Symbol keys, as
 # deserialized off the gate) and a plain Dict{String,Any} (server-built specs).
@@ -2378,7 +2445,12 @@ function _run_loop!(nb::LiveNotebook)
             # just-recovered producer, so restale those — the `again` re-arm below re-drains them.
             b = ReportEngine.refine_macros!(nb.report, nb.kernel;
                                             restale_racers = _parallel_enabled(nb))
-            a || b
+            # Any package loaded this drain may have declared front-end scripts (widget renderers,
+            # editor extensions) from `__init__` — pull the worker's extension manifest into the
+            # notebook's registry so the browser injects them. Same once-per-drain lifecycle; no-ops
+            # unless a NEW package registered something.
+            c = _refresh_extensions!(nb)
+            a || b || c
         end
         if refined
             lock(nb.lock) do; nb.version += 1; end

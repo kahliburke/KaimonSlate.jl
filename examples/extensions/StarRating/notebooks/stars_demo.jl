@@ -5,19 +5,21 @@ try; import KaimonSlate; catch; error("This is a Kaimon Slate notebook — runni
 # StarRating — a third-party Slate widget
 
 This notebook uses the **StarRating** extension package, which depends only on
-`SlateExtensionsBase` (not KaimonSlate). It adds a typed `@bind` star-rating control end to end.
+`SlateExtensionsBase` (not KaimonSlate). It adds a typed `@bind` star-rating control end to end:
+```
+@bind rating Stars(; max = 5, label = "How good is Slate's extension SDK?")
+```
 """
 
 #%% code id=pkg
 using StarRating
-stars_boot()
 
 #%% code id=bind
-@bind rating Stars(; max = 5, label = "How good is Slate's extension SDK?")
+@bind rating Stars(; max = 5, label = "How good is Slate's extension SDK?", default=0)
 
 #%% md id=readout
 @md"""
-You rated it {{ join(repeat(['⭐'],rating)) }} — click the stars above and this line updates reactively.
+{{rating > 0 ? "You rated it " : "Oh come on, tell us how you really feel!"}} {{rating > 0 ? join(repeat(['⭐'],rating)) : "" }} — click the stars above and this line updates reactively.
 """
 
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)

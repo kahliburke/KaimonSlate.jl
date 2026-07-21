@@ -1707,6 +1707,23 @@ function __slate_bundle_info()
     return out
 end
 
+"The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
+page to mirror: `{frontend:[{id, js, esm, kind}]}` (widget renderers + editor extensions declared from
+`__init__`; `esm` ⇒ ES module; a non-empty `kind` ⇒ a component whose default export Slate wraps). The
+server pulls this once per run drain and injects the scripts into the page. Empty when no such package
+is loaded."
+function __slate_extension_manifest()
+    out = Dict{String,Any}("frontend" => Dict{String,Any}[])
+    try
+        m = inprocess_extension_manifest()
+        out["frontend"] = Dict{String,Any}[Dict{String,Any}(
+            "id" => String(e.id), "js" => String(e.js), "esm" => e.esm, "kind" => String(e.kind))
+            for e in m.frontend]
+    catch
+    end
+    return out
+end
+
 "Add or remove package(s) in the worker's OWN active project (the notebook's deps).
 `op` is \"add\" or \"rm\". `name` is one spec, or several separated by whitespace/commas — all applied
 in a single resolve (one precompile). Each add-spec may be a registry name (`Foo` or `Foo@1.2`), a git
@@ -2202,6 +2219,7 @@ function tools()
         KaimonGate.GateTool("__slate_sync_parent", __slate_sync_parent),
         KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
         KaimonGate.GateTool("__slate_bundle_info", __slate_bundle_info),
+        KaimonGate.GateTool("__slate_extension_manifest", __slate_extension_manifest),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
         KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
         KaimonGate.GateTool("__slate_revise", __slate_revise),

@@ -37,12 +37,13 @@ include("context.jl")
 include("frontend.jl")
 
 # Controls
-export Widget, Choice, Selection, indices, to_widget
-export register_kind!, widget_kinds, coerce_bind, reconcile_bind, wrap_value
+export Widget, Choice, Selection, indices, to_widget, auto_widget, kind_for
+export register_kind!, widget_kinds, coerce_bind, reconcile_bind, wrap_value, coerce_value
 # Output
 export WebPage, register_widget_js
 # Auto-registered front-end (no boot cell)
-export register_widget!, provide_frontend!, frontend_scripts
+export register_widget!, register_component!, provide_frontend!, @pkg_asset,
+       required_assets, ensure_widget_assets!, frontend_scripts, extension_manifest
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere
