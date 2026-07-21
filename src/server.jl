@@ -1005,7 +1005,7 @@ function _refresh_extensions!(nb::LiveNotebook)
     manifest = try
         nb.kernel isa ReportEngine.GateKernel ?
             ReportEngine.extension_manifest(nb.kernel) :
-            ReportEngine.inprocess_extension_manifest()
+            ReportEngine.inprocess_extension_manifest(ReportEngine.report_module(nb.report))
     catch e
         ReportEngine._rlog("slate: extension manifest refresh failed: $(first(sprint(showerror, e), 120))")
         return false

@@ -25,7 +25,21 @@ using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indic
 # other package registrations) that the loaded packages declared, for the hub to mirror into the page.
 # Defined here because widgets.jl is included into both ReportEngine (the in-process kernel reads it
 # directly) and the standalone SlateWorker (the `__slate_extension_manifest` gate tool returns it).
-inprocess_extension_manifest() = SlateExtensionsBase.extension_manifest()
+#
+# `ns` is the notebook namespace (`_NS[]` in a worker, `report_module(nb.report)` in-process): reading the
+# manifest is also when Slate fires each loaded package's PACKAGE-GLOBAL front-end hook
+# (`M.__slate_frontend(slate_on)` — editor extensions + JS→Julia handlers with no bind to trigger them),
+# handing it that namespace's injected `slate_on`. So a package's editor-ext + handlers register lazily
+# from the once-per-drain manifest pull, no `__init__` and no boot cell. Idempotent (see the hook).
+function inprocess_extension_manifest(ns::Union{Module,Nothing} = nothing)
+    if ns !== nothing && isdefined(ns, :slate_on)
+        try
+            SlateExtensionsBase.ensure_module_frontends!(getglobal(ns, :slate_on))
+        catch
+        end
+    end
+    return SlateExtensionsBase.extension_manifest()
+end
 
 # slate_fingerprint + memo-store introspection — shared notebook helpers injected below
 # (one include here serves both namespaces, mirroring how this file itself is shared).

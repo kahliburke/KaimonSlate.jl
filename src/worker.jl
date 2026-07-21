@@ -1715,7 +1715,7 @@ is loaded."
 function __slate_extension_manifest()
     out = Dict{String,Any}("frontend" => Dict{String,Any}[])
     try
-        m = inprocess_extension_manifest()
+        m = inprocess_extension_manifest(_NS[])
         out["frontend"] = Dict{String,Any}[Dict{String,Any}(
             "id" => String(e.id), "js" => String(e.js), "esm" => e.esm, "kind" => String(e.kind))
             for e in m.frontend]
