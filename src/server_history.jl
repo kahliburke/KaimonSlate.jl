@@ -69,7 +69,9 @@ function _notebook_adds(nb::LiveNotebook)
     info = try
         ReportEngine.env_info(nb.kernel, nb.report)
     catch
-        return (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true)
+        # `ok = false` distinguishes a FAILED env probe from a genuinely detached notebook (both
+        # `detached = true`) — so a transient failure can't be read as "no packages" and wipe the footer.
+        return (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true, ok = false)
     end
     pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
     pnames = Set(string(get(d, "name", "")) for d in pdeps)
@@ -81,7 +83,7 @@ function _notebook_adds(nb::LiveNotebook)
                 by = d -> string(get(d, "name", "")))
     return (adds = adds, parent = pdeps,
             parentpath = info.parent === nothing ? "" : info.parent.path,
-            detached = info.parent === nothing)
+            detached = info.parent === nothing, ok = true)
 end
 
 # Sync the `.jl` reproducibility footer (`report.meta["env"]`) to the notebook's current
@@ -89,10 +91,12 @@ end
 function _refresh_env_meta!(nb::LiveNotebook)
     # `_notebook_adds` queries the worker env (`env_info` — a round-trip), so compute the footer OFF
     # nb.lock (protocol), then apply the change + persist under the lock. Sole caller: `notebook_pkg_op!`.
+    info = _notebook_adds(nb)
+    info.ok || return nb   # env probe failed transiently — leave the footer as-is rather than wiping it
     env = Dict{String,Any}[Dict{String,Any}("name" => string(get(d, "name", "")),
                                              "version" => string(get(d, "version", "")),
                                              "uuid" => string(get(d, "uuid", "")))
-                           for d in _notebook_adds(nb).adds]
+                           for d in info.adds]
     @report_op nb report begin
         cur = get(report.meta, "env", Dict{String,Any}[])
         changed = if isempty(env)

@@ -61,7 +61,9 @@ function __on_fire!(tokens, name::Symbol, f, value)
         try
             f(value)
         catch e
-            e isa _Cancelled || rethrow()           # cancellation is expected; surface anything else
+            # Runs in an unawaited `@async`, so a rethrow would just vanish — LOG the handler error
+            # (an @onclick/@onchange body that threw) instead. Cancellation is expected and ignored.
+            e isa _Cancelled || @error "Slate: reactive handler '$name' errored" exception = (e, catch_backtrace())
         end
     end
     return nothing

@@ -1117,9 +1117,11 @@ function _reconstruct_env!(k::GateKernel)
               Dict{String,Any}("envdir" => k.envdir, "parent" => k.parent, "pkgs" => k.pending);
               timeout = _pkg_op_timeout())
         _write_parent_marker!(k)
-    catch
+        empty!(k.pending)   # clear ONLY on success — a failed rebuild keeps `pending` so the next use retries
+    catch e
+        e isa InterruptException && rethrow()
+        @warn "KaimonSlate: notebook env reconstruction failed — keeping pending packages to retry" exception = (e, catch_backtrace())
     end
-    empty!(k.pending)
     return
 end
 
