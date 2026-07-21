@@ -137,7 +137,10 @@
   }
 
   // Is THIS notebook the site's home/front page? (tagged `home` — the same rule publish_site uses.)
+  // Delegates to the shared dialogs.js helper (loaded first) so the home-tag rule lives in one place;
+  // falls back to the inline check if that script isn't present (e.g. reused outside the notebook page).
   function isHome() {
+    if (typeof _isHomeNotebook === 'function') return _isHomeNotebook();
     return Array.isArray(nbState && nbState.cells) &&
       nbState.cells.some(c => c && Array.isArray(c.tags) && c.tags.includes('home'));
   }

@@ -534,6 +534,46 @@ function _sync_datadir_to!(nb::LiveNotebook, dst_k; cell_id::AbstractString = ""
     return nothing
 end
 
+# Sanitized download filename for an export: notebook base name with unsafe chars folded to `_`,
+# plus the given extension (which INCLUDES the leading dot, e.g. ".html", ".typ.tar.gz").
+_download_name(nb, ext) = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ext
+
+# Read an MB-valued query param (`key`) and convert to a byte budget: absent or unparseable ⇒ `default`.
+_mb_budget(qp, key, default) = begin
+    s = get(qp, key, "")
+    isempty(s) ? default : (v = tryparse(Float64, s); v === nothing ? default : round(Int, v * 1024^2))
+end
+
+# Content column width in px from the `width` query param: "full" ⇒ 0 (100%), unset/bad ⇒ 900.
+_width_px(qp) = begin
+    wq = get(qp, "width", "")
+    wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
+end
+
+# Region display names the DAG actually shows (declared footer ∪ cell-tagged), deduped and non-empty.
+_nb_display_regions(nb) = begin
+    names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
+    filter!(!isempty, names)
+    names
+end
+
+# Shared PDF/Typst export options extracted from the query params (both call sites are identical).
+_pdf_export_opts(qp, nb) = begin
+    _lay = get(qp, "layout", "article")
+    (; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
+       style = get(qp, "style", "article"),
+       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
+       theme = get(qp, "theme", "light"),
+       charttheme = get(qp, "charttheme", ""),
+       override = get(qp, "override", "0") == "1",
+       code = get(qp, "code", "normal"),
+       body = get(qp, "body", ""),
+       include_params = get(qp, "params", "0") == "1",
+       layout = _lay, notes = get(qp, "notes", "0") == "1",
+       level = get(nb.report.meta, "slidelevel", 2),
+       outputs = get(qp, "outputs", "all"))
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html()))   # front page + inlined last-known ledger (see _index_html)
@@ -1067,8 +1107,7 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/peer-plan", req -> _withnb(h, req, nb -> begin
         # The region set the DAG actually shows = declared footer ∪ cell-tagged (a cell can be tagged into a
         # region the footer never listed). Mirror `_regions_json` so the plan matches the zones on screen.
-        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
-        filter!(!isempty, names)
+        names = _nb_display_regions(nb)
         ref = get(HTTP.queryparams(HTTP.URI(req.target)), "refresh", "0") == "1"
         isempty(names) && return _json(Dict("regions" => String[], "routes" => [], "hosts" => [], "refreshed" => ref))
         data = try; ReportEngine.peer_plan_data(names; refresh = ref)
@@ -1090,8 +1129,7 @@ function _make_router(h::Hub)
     # measured NOW instead of waiting for a cell to drive one. Reuses the region kernels + the peer transport;
     # results also land in the peer-rate memory and the live `transfers` view. Returns per-pair kind/bytes/mbps.
     HTTP.register!(router, "POST", "/api/{id}/probe", req -> _withnb(h, req, nb -> begin
-        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
-        filter!(!isempty, names)
+        names = _nb_display_regions(nb)
         # Every ordered cross-region pair, counted up front so we can PUSH "i/n" progress over the notebook's
         # SSE channel (same `_broadcast` bus as `mesh-consent:`) as each probe runs — a probe is a real test
         # transfer that takes seconds, so a single blocking POST would otherwise show no step-by-step feedback.
@@ -1119,8 +1157,7 @@ function _make_router(h::Hub)
     # per-poll (t, cumulative-bytes) series → the frontend derives instantaneous throughput, timelines, the
     # peer-to-peer grid, and the distribution. Filtered to the notebook's regions; `now` anchors relative time.
     HTTP.register!(router, "GET", "/api/{id}/transfer-stats", req -> _withnb(h, req, nb -> begin
-        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
-        filter!(!isempty, names); rset = Set(names)
+        names = _nb_display_regions(nb); rset = Set(names)
         traces = [Dict("src" => t.src, "dst" => t.dst, "name" => t.name, "via" => t.via,
                        "started" => t.started, "finished" => t.finished, "total" => t.total, "err" => t.err,
                        "ts" => t.ts, "bs" => t.bs)
@@ -1133,14 +1170,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.html", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         _run = get(qp, "bundle", "0") == "1"   # embed the reproducible bundle + a "Run live" launcher
-        mb = get(qp, "memo", "")               # precomputed-results budget (MB) for the embedded bundle
-        budget = isempty(mb) ? typemax(Int) :
-                 (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
-        pv = get(qp, "preview", "")            # interim-render budget (MB) for the embedded bundle's preview
-        pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
-                  (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
-        wq = get(qp, "width", "")                   # content column width: px, "full" (=100%), or unset ⇒ default
-        pw = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
+        budget = _mb_budget(qp, "memo", typemax(Int))       # precomputed-results budget (MB) for the embedded bundle
+        pbudget = _mb_budget(qp, "preview", _PREVIEW_MAX_TOTAL)  # interim-render budget (MB) for the embedded bundle's preview
+        pw = _width_px(qp)                          # content column width: px, "full" (=100%), or unset ⇒ default
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
                            theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
                            override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
@@ -1149,7 +1181,7 @@ function _make_router(h::Hub)
                            memo_budget = budget, preview_budget = pbudget, width = pw)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
-            fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
+            fn = _download_name(nb, ".html")
             push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
         end
         HTTP.Response(200, headers, html)
@@ -1158,8 +1190,7 @@ function _make_router(h::Hub)
     # (theme/charttheme/override/code/outputs/width/source); returns {ok,url,preview,error} as JSON.
     HTTP.register!(router, "POST", "/api/{id}/export.gist", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
-        wq = get(qp, "width", "")
-        pw = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
+        pw = _width_px(qp)
         r = export_gist(nb; include_source = get(qp, "source", "1") != "0",
                         theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
                         override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
@@ -1175,7 +1206,7 @@ function _make_router(h::Hub)
                              outputs = get(qp, "outputs", "all"))
         headers = Pair{String,String}["Content-Type" => "text/markdown; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
-            fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".md"
+            fn = _download_name(nb, ".md")
             push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
         end
         HTTP.Response(200, headers, md)
@@ -1207,23 +1238,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         pdf = try
-            _lay = get(qp, "layout", "article")
-            export_pdf(nb; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
-                       style = get(qp, "style", "article"),
-                       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
-                       theme = get(qp, "theme", "light"),
-                       charttheme = get(qp, "charttheme", ""),
-                       override = get(qp, "override", "0") == "1",
-                       code = get(qp, "code", "normal"),
-                       body = get(qp, "body", ""),
-                       include_params = get(qp, "params", "0") == "1",
-                       layout = _lay, notes = get(qp, "notes", "0") == "1",
-                       level = get(nb.report.meta, "slidelevel", 2),
-                       outputs = get(qp, "outputs", "all"))
+            export_pdf(nb; _pdf_export_opts(qp, nb)...)
         catch e
             return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf"
+        fn = _download_name(nb, ".pdf")
         HTTP.Response(200, ["Content-Type" => "application/pdf",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], pdf)
     end))
@@ -1232,23 +1251,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.typ", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         data = try
-            _lay = get(qp, "layout", "article")
-            export_typst_bundle(nb; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
-                       style = get(qp, "style", "article"),
-                       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
-                       theme = get(qp, "theme", "light"),
-                       charttheme = get(qp, "charttheme", ""),
-                       override = get(qp, "override", "0") == "1",
-                       code = get(qp, "code", "normal"),
-                       body = get(qp, "body", ""),
-                       include_params = get(qp, "params", "0") == "1",
-                       layout = _lay, notes = get(qp, "notes", "0") == "1",
-                       level = get(nb.report.meta, "slidelevel", 2),
-                       outputs = get(qp, "outputs", "all"))
+            export_typst_bundle(nb; _pdf_export_opts(qp, nb)...)
         catch e
             return HTTP.Response(500, "Typst export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".typ.tar.gz"
+        fn = _download_name(nb, ".typ.tar.gz")
         HTTP.Response(200, ["Content-Type" => "application/gzip",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], data)
     end))
@@ -1264,7 +1271,7 @@ function _make_router(h::Hub)
         catch e
             return HTTP.Response(500, "Site export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".site.tar.gz"
+        fn = _download_name(nb, ".site.tar.gz")
         HTTP.Response(200, ["Content-Type" => "application/gzip",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], data)
     end))
@@ -1340,21 +1347,17 @@ function _make_router(h::Hub)
         qp = HTTP.queryparams(HTTP.URI(req.target))
         # `memo` = byte budget for embedded precomputed results (MB in the query, → bytes):
         # ""/absent = all memoizable results; "0" = none. Entries chosen by compute-saved-per-byte.
-        mb = get(qp, "memo", "")
-        budget = isempty(mb) ? typemax(Int) :
-                 (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
+        budget = _mb_budget(qp, "memo", typemax(Int))
         # `preview` = byte budget for the embedded interim render (MB → bytes): ""/absent = the
         # default cap; "0" = omit the frozen preview entirely (smaller file, cells show un-run on open).
-        pv = get(qp, "preview", "")
-        pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
-                  (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
+        pbudget = _mb_budget(qp, "preview", _PREVIEW_MAX_TOTAL)
         jl = try
             export_standalone(nb; history = get(qp, "history", "1") != "0",   # full git history by default (deliberate share)
                               memo_budget = budget, preview_budget = pbudget)
         catch e
             return HTTP.Response(500, "Standalone export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".standalone.jl"
+        fn = _download_name(nb, ".standalone.jl")
         HTTP.Response(200, ["Content-Type" => "text/x-julia; charset=utf-8",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], jl)
     end))

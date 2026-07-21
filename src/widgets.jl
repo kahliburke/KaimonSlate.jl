@@ -925,13 +925,18 @@ end
 # no evaluation — used by the engine's dependency analysis: the bound name is a
 # write, the widget call's free variables are reads (so dynamic ranges like
 # `Slider(1:step:hi)` make the bind cell depend on `step`/`hi`).
-function _bind_macrocall(ex)
-    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@bind")) || return nothing
+# (first::Symbol, second_expr) if `ex` is `@<name> first second` — LineNumberNodes stripped, ≥2 real
+# args, first a Symbol — else nothing. The shared AST shape of the two-arg reactive macros below; each
+# thin wrapper's own comment explains how its two args feed the dependency analysis.
+function _two_arg_macrocall(ex, name::Symbol)
+    (ex isa Expr && ex.head === :macrocall && ex.args[1] === name) || return nothing
     real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
     length(real) >= 2 || return nothing
     real[1] isa Symbol || return nothing
     return (real[1], real[2])
 end
+
+_bind_macrocall(ex) = _two_arg_macrocall(ex, Symbol("@bind"))
 
 # (name::Symbol, init_expr) if `ex` is `@reactive name = init`, else nothing. Lets the dependency
 # analysis see through the sugar: `name` is a WRITE (this cell DEFINES the reactive producer — readers
@@ -947,21 +952,9 @@ end
 # this lets the dependency analysis see through the macro: the button is a READ (so a click
 # recomputes the handler cell) and the body is analysed normally (so `level[] = v` registers as a
 # write of `level`, excluding the handler from its own refresh).
-function _onclick_macrocall(ex)
-    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@onclick")) || return nothing
-    real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
-    length(real) >= 2 || return nothing
-    real[1] isa Symbol || return nothing
-    return (real[1], real[2])
-end
+_onclick_macrocall(ex) = _two_arg_macrocall(ex, Symbol("@onclick"))
 
 # (control::Symbol, body_expr) if `ex` is `@onchange ctrl body`, else nothing. The control is the
 # handler PARAMETER (the new value), not a read of the global — so the cell doesn't recompute on
 # change; only `body`'s OTHER free vars are reads, and `ctrl[]=`-style mutations are writes.
-function _onchange_macrocall(ex)
-    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@onchange")) || return nothing
-    real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
-    length(real) >= 2 || return nothing
-    real[1] isa Symbol || return nothing
-    return (real[1], real[2])
-end
+_onchange_macrocall(ex) = _two_arg_macrocall(ex, Symbol("@onchange"))

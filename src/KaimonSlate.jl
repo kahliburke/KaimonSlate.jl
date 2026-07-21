@@ -227,6 +227,28 @@ _slate_config_path() = SlateHome.config_file()   # our OWN XDG config home (off 
 _slate_config() = (f = _slate_config_path(); isfile(f) ?
     (try; JSON.parsefile(f); catch; Dict{String,Any}(); end) : Dict{String,Any}())
 
+# Persist the in-memory slate config `cfg` to disk (best-effort). Shared by every setter below — they
+# all write the one config file, so a failure is the same regardless of which knob changed.
+function _persist_slate_config!(cfg)
+    try
+        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+    catch e
+        @warn "slate: could not persist config" exception = e
+    end
+    return cfg
+end
+
+# Respawn every running notebook's worker so a just-changed spawn setting (threads/flags/memo cap)
+# takes effect immediately. No-op when the hub isn't up.
+function _respawn_running_workers!()
+    _HUB[] === nothing && return
+    nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
+    for nb in nbs
+        try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
+    end
+    return nothing
+end
+
 "Current worker Julia-thread spec (\"<compute>,<interactive>\"); \"\" means the adaptive default (min(cores,8),2)."
 worker_threads()::String = String(get(_slate_config(), "worker_threads", ""))
 
@@ -241,17 +263,8 @@ function set_worker_threads!(spec::AbstractString; respawn::Bool = true)
     s = strip(String(spec))
     ReportEngine.WORKER_THREADS[] = s
     cfg = _slate_config(); cfg["worker_threads"] = s
-    try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
-    catch e
-        @warn "slate: could not persist worker-threads setting" exception = e
-    end
-    if respawn && _HUB[] !== nothing
-        nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
-        for nb in nbs
-            try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
-        end
-    end
+    _persist_slate_config!(cfg)
+    respawn && _respawn_running_workers!()
     @info "slate: worker threads set" spec = s respawned = respawn
     return s
 end
@@ -271,17 +284,8 @@ function set_worker_extra_flags!(spec::AbstractString; respawn::Bool = true)
     s = strip(String(spec))
     ReportEngine.WORKER_EXTRA_FLAGS[] = s
     cfg = _slate_config(); cfg["worker_extra_flags"] = s
-    try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
-    catch e
-        @warn "slate: could not persist worker-extra-flags setting" exception = e
-    end
-    if respawn && _HUB[] !== nothing
-        nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
-        for nb in nbs
-            try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
-        end
-    end
+    _persist_slate_config!(cfg)
+    respawn && _respawn_running_workers!()
     @info "slate: worker extra flags set" spec = s respawned = respawn
     return s
 end
@@ -300,17 +304,8 @@ function set_memo_cap_gb!(gb::Real; respawn::Bool = true)
     v = max(0.0, Float64(gb))
     ReportEngine.MEMO_CAP_GB[] = v
     cfg = _slate_config(); v > 0 ? (cfg["memo_cap_gb"] = v) : delete!(cfg, "memo_cap_gb")
-    try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
-    catch e
-        @warn "slate: could not persist memo-cap setting" exception = e
-    end
-    if respawn && _HUB[] !== nothing
-        nbs = lock(_HUB[].lock) do; collect(values(_HUB[].notebooks)); end
-        for nb in nbs
-            try; NotebookServer.restart_kernel!(nb); catch e; @warn "slate: worker respawn failed" notebook = nb.id exception = e; end
-        end
-    end
+    _persist_slate_config!(cfg)
+    respawn && _respawn_running_workers!()
     @info "slate: memo cap set" gb = v respawned = respawn
     return v
 end
@@ -329,7 +324,7 @@ function set_blob_chunk_mb!(mb::Real)
     v = max(0.0, Float64(mb))
     ReportEngine.BLOB_CHUNK_MB[] = v
     cfg = _slate_config(); v > 0 ? (cfg["blob_chunk_mb"] = v) : delete!(cfg, "blob_chunk_mb")
-    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist chunk-size setting" exception = e; end
+    _persist_slate_config!(cfg)
     return v
 end
 
@@ -355,7 +350,7 @@ function set_xfer_confirm_s!(s::Real)
     v = Float64(s) < 0 ? -1.0 : Float64(s)
     ReportEngine.XFER_CONFIRM_S[] = v
     cfg = _slate_config(); v >= 0 ? (cfg["xfer_confirm_s"] = v) : delete!(cfg, "xfer_confirm_s")
-    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist preview-threshold setting" exception = e; end
+    _persist_slate_config!(cfg)
     return v
 end
 
@@ -370,7 +365,7 @@ function set_carry_max_s!(s::Real)
     v = max(0.0, Float64(s))
     ReportEngine.CARRY_MAX_S[] = v
     cfg = _slate_config(); v > 0 ? (cfg["carry_max_s"] = v) : delete!(cfg, "carry_max_s")
-    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist carry-ceiling setting" exception = e; end
+    _persist_slate_config!(cfg)
     return v
 end
 
@@ -380,11 +375,7 @@ ext_prompt_choice()::String = String(get(_slate_config(), "ext_prompt", ""))
 "Persist the onboarding answer (see `ext_prompt_choice`). Returns the stored choice."
 function set_ext_prompt_choice!(choice::AbstractString)
     cfg = _slate_config(); cfg["ext_prompt"] = String(choice)
-    try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
-    catch e
-        @warn "slate: could not persist onboarding choice" exception = e
-    end
+    _persist_slate_config!(cfg)
     return String(choice)
 end
 
@@ -400,7 +391,7 @@ per-notebook Settings toggle still overrides for a specific notebook.
 function set_parallel_default!(on::Bool)
     NotebookServer.PARALLEL_DEFAULT[] = on
     cfg = _slate_config(); cfg["parallel"] = on
-    try; mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2)); catch e; @warn "slate: could not persist parallel default" exception = e; end
+    _persist_slate_config!(cfg)
     return on
 end
 
@@ -437,7 +428,7 @@ function _load_slate_config!()
     # Install the persist hook so set_runon_default! (from the browser route / gate tool) writes slate.json.
     NotebookServer._RUNON_PERSIST[] = function (spec)
         cfg = _slate_config(); cfg["run_location"] = String(spec)
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
+        _persist_slate_config!(cfg)
         return nothing
     end
     return nothing
@@ -1230,19 +1221,6 @@ function create_tools(GateTool::Type)
     end
 
     """
-        eval_js(notebook, code) -> String
-
-    Run `code` as JavaScript IN THE OPEN BROWSER TAB and return its result — the general way to
-    drive or inspect the live notebook UI without a headless browser. Runs in the page's global
-    scope, so page globals are reachable: invoke actions (`renderCharts(c)`, open a dialog, click a
-    handler), read live state (`nbState`, a chart's resolved option `charts[id][0].getOption()`,
-    DOM/computed styles), or trigger a reactive flow. The last expression is the return value; a
-    returned Promise is awaited (so `await`-style snippets work). The value comes back JSON-encoded
-    (functions / DOM nodes / cycles are collapsed, size-capped). Needs an OPEN tab — returns a notice
-    if none answers in time. NOTE: this CANNOT capture a browser download (e.g. the PDF blob from
-    `exportPdf()`); to inspect generated artifacts use the server-side tool (`slate.export_pdf`).
-    """
-    """
         eval(notebook, source; ephemeral="0", memo_key="", memo_threshold="0") -> String
 
     Run `source` as Julia in the notebook's LIVE kernel and return its captured output — a
@@ -1282,6 +1260,19 @@ function create_tools(GateTool::Type)
         return scratch_check(job)
     end
 
+    """
+        eval_js(notebook, code) -> String
+
+    Run `code` as JavaScript IN THE OPEN BROWSER TAB and return its result — the general way to
+    drive or inspect the live notebook UI without a headless browser. Runs in the page's global
+    scope, so page globals are reachable: invoke actions (`renderCharts(c)`, open a dialog, click a
+    handler), read live state (`nbState`, a chart's resolved option `charts[id][0].getOption()`,
+    DOM/computed styles), or trigger a reactive flow. The last expression is the return value; a
+    returned Promise is awaited (so `await`-style snippets work). The value comes back JSON-encoded
+    (functions / DOM nodes / cycles are collapsed, size-capped). Needs an OPEN tab — returns a notice
+    if none answers in time. NOTE: this CANNOT capture a browser download (e.g. the PDF blob from
+    `exportPdf()`); to inspect generated artifacts use the server-side tool (`slate.export_pdf`).
+    """
     function eval_js(notebook::String, code::String)::String
         nb, err = _nb(notebook); nb === nothing && return err
         res = request_live_eval(nb, code)

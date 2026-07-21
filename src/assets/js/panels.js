@@ -244,7 +244,6 @@ async function histSelect(hash) {
 async function histRestore(hash) {
   const st = await api('POST', '/api/history/restore', { hash });
   if (st && st.cells) { renderAll(st); lastVersion = st.version; }
-  _histSrcCache[hash] = _histSrcCache[hash];          // keep cache
   await loadHistory(); histSelect(histCurrent);
 }
 async function histReplay() {
@@ -466,7 +465,6 @@ function connectLive() {
 // scratch is for throwaway diagnostics, kept out of the document. `state.scratch` seeds it on load.
 let _scratchCells = [], _scUnread = 0;
 function _scPanelOpen() { const p = document.getElementById('scratchpanel'); return !!(p && p.classList.contains('open')); }
-function _scEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function _scBadge(st) {
   return st === 'running' ? '<span class="scspin"></span>'
        : st === 'errored' ? '<span class="scx">⚠</span>' : '<span class="scok">✓</span>';
@@ -476,9 +474,9 @@ function _scCellHtml(c) {
   const dur = c.duration != null ? (c.duration + ' ms') : '';
   const rich = ((c.echarts && c.echarts.length) || (c.tables && c.tables.length))
     ? '<div class="scnote">interactive output — run it in a real cell to see the chart/table</div>' : '';
-  return '<div class="sccell sc-' + _scEsc(st) + '">' +
-    '<div class="schdr">' + _scBadge(st) + '<span class="scdur">' + _scEsc(dur) + '</span></div>' +
-    '<pre class="scsrc">' + _scEsc(c.source) + '</pre>' +
+  return '<div class="sccell sc-' + _esc(st) + '">' +
+    '<div class="schdr">' + _scBadge(st) + '<span class="scdur">' + _esc(dur) + '</span></div>' +
+    '<pre class="scsrc">' + _esc(c.source) + '</pre>' +
     '<div class="scout">' + (c.output || '') + '</div>' + rich + '</div>';
 }
 function _scRender() {

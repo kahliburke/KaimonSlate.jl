@@ -312,3 +312,38 @@ end
         rm(dir; recursive = true, force = true)
     end
 end
+
+@testset "Typst slide frag preserves the override Bool (regression)" begin
+    # A slide code-cell frag is `(cell, nothing)`. `_emit_slide_frag!` must forward the themed-render
+    # `override::Bool` to `_emit_output!`, NOT shadow it with the frag's source-override — before the fix,
+    # a code cell on a slide passed `override=nothing` into a `::Bool` kwarg and threw at the call.
+    rep = _RE.parse_report("#%% code id=c\n1 + 1\n")
+    nb = NS.LiveNotebook("slidenb", "/tmp/slidenb.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    c = rep.cells[end]
+    @test c.kind != NS.MARKDOWN                       # the else-branch that forwards `override` is a code cell
+    io = IOBuffer(); dir = mktempdir()
+    try
+        # override=true is the themed-render flag; it must reach _emit_output! as a Bool (no throw).
+        @test (NS._emit_slide_frag!(io, dir, "s1f1", nb, (c, nothing); theme = "dark", override = true,
+                                    show_source = false, include_params = false); true)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+@testset "_apply_ordering! sets section/order in place, leaves unmatched" begin
+    docs = Any[Dict{String,Any}("slug" => "a"), Dict{String,Any}("slug" => "b"),
+               Dict{String,Any}("slug" => "keep")]
+    NS._apply_ordering!(docs, [Dict("slug" => "a", "section" => "Intro", "order" => 2),
+                               Dict("slug" => "b", "section" => "", "order" => 1)])
+    @test docs[1]["section"] == "Intro" && docs[1]["order"] == 2.0    # order coerced to Float64
+    @test docs[2]["section"] == "" && docs[2]["order"] == 1.0
+    @test !haskey(docs[3], "section") && !haskey(docs[3], "order")     # unmatched doc untouched
+end
+
+@testset "_split_region_csv strips, drops empties, dedups in order" begin
+    @test NS._split_region_csv("east, west , , east ,north") == ["east", "west", "north"]
+    @test NS._split_region_csv("") == String[]
+    @test NS._split_region_csv("  ,  ") == String[]
+end

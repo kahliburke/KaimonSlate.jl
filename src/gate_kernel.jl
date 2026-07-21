@@ -492,9 +492,7 @@ function _spawn_worker!(k::GateKernel)
     # Julia just timeslices.) Order: explicit config (panel) wins, then env, then this adaptive default.
     # Precedence: this notebook's own override (k.threads, set at open) → global panel/config setting
     # (WORKER_THREADS[]) → env → the adaptive default.
-    jthreads = !isempty(k.threads)         ? k.threads :
-               !isempty(WORKER_THREADS[])  ? WORKER_THREADS[] :
-               get(ENV, "KAIMONSLATE_JULIA_THREADS", default_worker_threads())
+    jthreads = effective_worker_threads(k.threads)
     # Extra Julia flags (e.g. "--gcthreads=4,1 --heap-size-hint=4G") — same tiering as threads above,
     # via `effective_worker_extra_flags`. Shell-split so multiple flags/values become separate argv
     # entries (a raw string interpolated into a backtick would land as ONE mangled argument). Must
