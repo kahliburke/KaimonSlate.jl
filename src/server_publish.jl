@@ -5,15 +5,21 @@
 # Everything here composes the already-tested core (PublishLedger + the PublishTarget adapters).
 
 # ── secret store (config home; gitignored, chmod 600 — referenced by `secretRef`, never in the ledger) ─
+# A MISSING store is an empty store; an UNREADABLE/UNPARSEABLE one returns `nothing`, so a
+# load→mutate→save path can refuse to overwrite (and thereby WIPE) every stored token after a transient
+# read/parse error. Read-only callers go through `_secrets_or_empty` (the error is already logged here).
 function _secrets_load()
     f = SlateHome.secrets_file()
     isfile(f) || return Dict{String,Any}()
     return try
         JSON.parse(read(f, String))
-    catch
-        Dict{String,Any}()
+    catch e
+        @warn "slate: could not read secrets file — treating as unreadable" file = f exception = (e, catch_backtrace())
+        nothing
     end
 end
+
+_secrets_or_empty() = something(_secrets_load(), Dict{String,Any}())
 
 function _secrets_save!(d::AbstractDict)
     mkpath(SlateHome.config_home())
@@ -30,13 +36,15 @@ function publish_secret_set!(ref::AbstractString, value::AbstractString)
     r = String(ref)
     isempty(strip(r)) && return secret_refs()
     d = _secrets_load()
+    d === nothing && error("secrets file is unreadable — refusing to overwrite the stored tokens " *
+                           "(fix or remove $(SlateHome.secrets_file()) first)")
     isempty(strip(String(value))) ? delete!(d, r) : (d[r] = String(value))
     _secrets_save!(d)
     return secret_refs()
 end
 
 "The configured secret ref NAMES (values never leave the process)."
-secret_refs() = sort!(collect(keys(_secrets_load())))
+secret_refs() = sort!(collect(keys(_secrets_or_empty())))
 
 # ── notebook identity ────────────────────────────────────────────────────────────────────────────
 # Parse "owner/name" out of an origin remote URL (https or scp-form), stripping a trailing ".git".
@@ -291,7 +299,7 @@ function publish_target_delete!(name::AbstractString; purge::Bool = false)
             t = get(led.targets, String(name), nothing)
             if t !== nothing
                 r = try
-                    purge_deployed!(target_from_ledger(t; secrets = _secrets_load()))
+                    purge_deployed!(target_from_ledger(t; secrets = _secrets_or_empty()))
                 catch e
                     (; ok = false, log = sprint(showerror, e))
                 end
@@ -476,7 +484,7 @@ function publish_site_delete!(name::AbstractString; purge::Bool = false)
         site = get(led.sites, String(name), nothing)
         ls = String[]
         if purge && site !== nothing
-            secrets = _secrets_load()
+            secrets = _secrets_or_empty()
             for tn in site.targets
                 t = get(led.targets, tn, nothing)
                 t === nothing && continue
@@ -625,7 +633,7 @@ function sync_site!(name::AbstractString; on_event = nothing, hub = nothing)
     # can review, with no surprise re-render at deploy time. (`hub`/`on_event` kept for the API shape.)
     tnames = _live_target_names(led, site)
     isempty(tnames) && error("site '$name' has no configured destinations — add some in the manager")
-    secrets = _secrets_load()
+    secrets = _secrets_or_empty()
     results = Vector{PublishResult}(undef, length(tnames))
     @sync for (i, n) in enumerate(tnames)
         @async begin
@@ -789,7 +797,7 @@ function run_publish(nb::LiveNotebook, target_names; archive::Bool = false, on_e
     mismatch = _verb_mismatch(led, names, archive)
     mismatch === nothing || error(mismatch)
     di = _ensure_doc!(led, nb; target_names = names)
-    secrets = _secrets_load()
+    secrets = _secrets_or_empty()
     slg = isempty(strip(String(slug))) ? di.slug : String(slug)
     results = publish_document!(nb, led, di.docId, store; target_names = names, secrets = secrets,
                                slug = slg, site_title = String(site_title), theme = String(theme),
@@ -858,7 +866,12 @@ function _sse_stream(stream::HTTP.Stream, run_fn; start_verb::AbstractString = "
             close(ch)
         end
     end
-    for (ev, data) in ch; emit(ev, data) || break; end
+    gone = false
+    for (ev, data) in ch; emit(ev, data) || (gone = true; break); end
+    # If the client vanished mid-stream, KEEP draining the channel so the producer's `put!` never blocks
+    # on the 128-slot buffer (its `finally` closes `ch`, ending this loop). Otherwise `run_fn` would wedge
+    # and `wait(task)` below would hang forever, leaking the handler task.
+    gone && for _ in ch; end
     try; wait(task); catch; end
     return
 end
