@@ -146,14 +146,18 @@ function restart_kernel!(nb::LiveNotebook)
     # full re-eval (which respawns the worker on prepare! and streams cells back) runs async, so the
     # user gets control back immediately instead of blocking until everything re-renders. Same
     # "open instantly" pattern as load_notebook.
-    lock(nb.lock) do
-        # An explicit restart must yield a FRESH worker — with a detached (still-warm) remote,
-        # prepare!'s reattach-first would re-adopt the same process and the restart would no-op.
-        try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
-        _teardown_region!(nb; kill = true)   # the region kernel restarts fresh too (+ sync state reset)
-        ReportEngine.reset!(nb.kernel, nb.report)
-        build_dependencies!(nb.report)
-        nb.report.meta["hydrating"] = true
+    # An explicit restart must yield a FRESH worker — with a detached (still-warm) remote, prepare!'s
+    # reattach-first would re-adopt the same process and the restart would no-op. The worker teardown is
+    # a BLOCKING round-trip, so it runs OFF `nb.lock` (protocol: never hold nb.lock across a kernel call).
+    # Interrupt any in-flight eval first so `shutdown!` doesn't block behind it (the deadlock this fixes:
+    # holding nb.lock across `shutdown!` while the runner needs nb.lock to finish → hub wedges).
+    _interrupt_inflight!(nb)
+    try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
+    _teardown_region!(nb; kill = true)       # region kernels restart fresh too (+ sync state reset)
+    with_report(nb) do report                # lock only for the report reset/mutate (no round-trip)
+        ReportEngine.reset!(nb.kernel, report)
+        build_dependencies!(report)
+        report.meta["hydrating"] = true
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -189,16 +193,16 @@ end
 # and re-runs — async, same "instant" pattern as restart_kernel!. Runtime-only (not written to the .jl).
 function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
     _interrupt_inflight!(nb)   # switching workers stops the current evaluation immediately (don't drain)
-    lock(nb.lock) do
+    try; ReportEngine.shutdown!(nb.kernel); catch; end         # blocking teardown — OFF nb.lock (local killed; remote detached, idles warm)
+    with_report(nb) do report
         s = strip(String(spec))
-        isempty(s) ? delete!(nb.report.meta, "remoteworker") : (nb.report.meta["remoteworker"] = String(s))
-        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → detached (idles warm)
-        nb.kernel = _select_kernel(nb.path, nb.report)         # remote attach vs local, per the meta
-        build_dependencies!(nb.report)
+        isempty(s) ? delete!(report.meta, "remoteworker") : (report.meta["remoteworker"] = String(s))
+        nb.kernel = _select_kernel(nb.path, report)            # remote attach vs local, per the meta
+        build_dependencies!(report)
         # New worker → empty namespace → re-run every cell (this is what drives prepare!→attach). Cells
         # left FRESH would give the runner nothing to do and the worker would never be reached. See reset!.
-        ReportEngine.reset_all!(nb.report)
-        nb.report.meta["hydrating"] = true
+        ReportEngine.reset_all!(report)
+        report.meta["hydrating"] = true
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -257,21 +261,21 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
     end
     # Actually switching → stop the current evaluation NOW (don't drain it), then tear down + re-pick.
     _interrupt_inflight!(nb)
-    lock(nb.lock) do
-        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → detached (idles warm, switch-back reattaches)
-        nb.kernel = _select_kernel(nb.path, nb.report)
+    try; ReportEngine.shutdown!(nb.kernel); catch; end         # blocking teardown — OFF nb.lock (local killed; remote detached)
+    with_report(nb) do report
+        nb.kernel = _select_kernel(nb.path, report)
         remotehost = (nb.kernel isa ReportEngine.GateKernel && nb.kernel.target isa ReportEngine.RemoteTarget) ?
                      nb.kernel.target.ssh_host : ""
-        build_dependencies!(nb.report)
+        build_dependencies!(report)
         # The new worker has an EMPTY namespace → every cell must re-run on it. Invalidate all cells so
         # `_drain!` re-evaluates them; mirrors ReportEngine.reset!.
-        ReportEngine.reset_all!(nb.report)
-        delete!(nb.report.meta, "hydrate_error")
-        nb.report.meta["hydrating"] = true
+        ReportEngine.reset_all!(report)
+        delete!(report.meta, "hydrate_error")
+        report.meta["hydrating"] = true
         # Tell the banner this is a remote bring-up (provision + connect can take minutes) rather than a
         # plain re-run — so the UI stops implying it's "running cells" while the worker isn't even up yet.
-        isempty(remotehost) ? delete!(nb.report.meta, "hydratingKind") :
-            (nb.report.meta["hydratingKind"] = "remote"; nb.report.meta["hydratingHost"] = remotehost)
+        isempty(remotehost) ? delete!(report.meta, "hydratingKind") :
+            (report.meta["hydratingKind"] = "remote"; report.meta["hydratingHost"] = remotehost)
         nb.version += 1
     end
     _broadcast(nb, "restart")
