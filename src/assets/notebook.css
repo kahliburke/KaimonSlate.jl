@@ -412,13 +412,33 @@ body.zen .zenexit:hover { opacity:1; color:var(--text); border-color:var(--accen
 .filespanel .phead strong { font-size:.9rem; color:var(--strong); }
 .filespanel #filesroot { flex:1; font-family:'Cascadia Code',ui-monospace,monospace; }
 .filesbody { flex:1; display:flex; min-height:0; }
-.filestree { width:250px; flex:0 0 250px; overflow:auto; border-right:1px solid var(--border); padding:6px 0; }
+.filestree-wrap { width:250px; flex:0 0 250px; display:flex; flex-direction:column; min-height:0;
+  border-right:1px solid var(--border); }
+.filestreebar { display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--border); }
+.ftbtn { border:1px solid var(--border); background:none; color:var(--text); border-radius:5px;
+  padding:2px 9px; font-size:.74rem; cursor:pointer; text-decoration:none; line-height:1.5; }
+.ftbtn:hover { border-color:var(--accent); color:var(--accent); }
+.filestree { flex:1; overflow:auto; padding:6px 0; }
 .ftrow { padding:3px 8px; font-size:.82rem; cursor:pointer; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis; color:var(--dim); user-select:none; border-radius:4px; }
 .ftrow:hover { background:var(--bg3); color:var(--text); }
 .ftrow.ftdir { color:var(--text); font-weight:600; }
 .fttw { display:inline-block; width:12px; color:var(--dim); font-size:.7rem; }
+.ftico { display:inline-block; width:16px; text-align:center; }
 .ftfile.sel { background:rgba(86,156,214,.16); color:var(--accent); }
+.ftfile .ftsize { color:var(--dim); font-size:.68rem; margin-left:5px; opacity:.7; }
+/* Media / binary preview pane (shares the edit column; the CM editor hides while it shows). */
+.filepreview { flex:1; overflow:auto; min-height:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:flex-start; gap:12px; padding:18px; }
+.filepreview img { max-width:100%; max-height:70vh; border-radius:6px;
+  background:repeating-conic-gradient(#2a2a2a 0% 25%, #333 0% 50%) 50%/20px 20px; }
+.filepreview audio, .filepreview video { max-width:100%; }
+.filepreview video { max-height:70vh; border-radius:6px; }
+.filepreview .fpmeta { color:var(--dim); font-size:.78rem; text-align:center; line-height:1.6; }
+.filepreview .fpcard { border:1px solid var(--border); border-radius:8px; padding:22px 26px;
+  text-align:center; color:var(--dim); max-width:420px; }
+.filepreview .fpcard .fpicon { font-size:2.2rem; }
+.filepreview .fprow { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
 .filesedit-wrap { flex:1; display:flex; flex-direction:column; min-width:0; }
 .filebar { display:flex; align-items:center; gap:8px; padding:5px 10px; border-bottom:1px solid var(--border); }
 .filedirty { color:var(--accent); font-size:.62rem; visibility:hidden; }

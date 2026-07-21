@@ -1116,7 +1116,8 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
         else
             absarg = "none"
             if !isempty(strip(fm.abstract))
-                write(joinpath(dir, "abstract.md"), _rewrite_citations(fm.abstract, citekeys))
+                write(joinpath(dir, "abstract.md"),
+                      _stage_typst_md_media(_rewrite_citations(fm.abstract, citekeys), dir, "abstract", _proj_root(nb)))
                 absarg = "cmarker.render(read(\"abstract.md\"), math: mathfn)"
             end
             print(io, "#metablock(", arg(fm.title), ", ", arg(fm.subtitle), ", ", arg(fm.byline), ", ", absarg, ")\n\n")
@@ -1137,6 +1138,7 @@ function _build_typst_project(nb::LiveNotebook; include_source::Bool = true,
             if c.kind == MARKDOWN
                 src = c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source   # hoisted H1 → not in body
                 md = _md_for_typst(c, src; citekeys = citekeys, figrefs = figidx.labels)
+                md = _stage_typst_md_media(md, dir, base, _proj_root(nb))   # author-embedded images → staged files
                 if isempty(strip(md))
                     inrow || continue                # empty markdown: standalone → skip; in a row → empty slot
                 else
@@ -1179,6 +1181,7 @@ function _emit_slide_frag!(io::IO, dir, base, nb, frag::SlideFrag; theme, chartt
     c, override = frag
     if c.kind == MARKDOWN
         md = _md_for_typst(c, override === nothing ? c.source : override; citekeys = citekeys)
+        md = _stage_typst_md_media(md, dir, base, _proj_root(nb))   # author-embedded images → staged files
         isempty(strip(md)) && return
         write(joinpath(dir, base * ".md"), md)
         print(io, "#cmarker.render(read(\"", base, ".md\"), math: mathfn)\n\n")
@@ -1258,6 +1261,7 @@ function _build_slides_project(nb::LiveNotebook; theme::AbstractString = "dark",
             for (si, seg) in enumerate(segs)
                 isempty(seg.notes) && continue
                 ntext = join((_md_for_typst(n; citekeys = citekeys) for n in seg.notes), "\n\n")
+                ntext = _stage_typst_md_media(ntext, dir, "notes$(si)", _proj_root(nb))   # embedded images → staged files
                 isempty(strip(ntext)) && continue
                 write(joinpath(dir, "notes$(si).md"), ntext)
                 print(io, "#slide[\n#text(fill: luma(130))[Notes · slide $(si)]\n#v(6pt)\n",

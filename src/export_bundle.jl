@@ -362,9 +362,23 @@ end
 # (the common Slate case — a per-notebook env that `dev`s the parent package). Path-deps inside the repo
 # resolve from the tree; those `dev`'d from outside are vendored under `local/<name>`.
 function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::AbstractString, cells::AbstractString;
-                          history::Bool = true)
+                          history::Bool = true, assetbase::AbstractString = "", assetfiles = Dict{String,String}())
     stage = mktempdir()
     top = _root_repo(projectdir, pathdeps, nbpath)
+    # Author-embedded media (drag/drop / paste → project files the asset route serves) is UNTRACKED,
+    # so it rides in neither the git tree/bundle nor the env staging — copy each REFERENCED file
+    # explicitly (any subdir, not just `assets/`) so a `/n/…/asset/<rel>` reference in an expanded
+    # notebook still resolves. `assetfiles` is `rel => source` (rel relative to the asset base);
+    # `placement` is the asset base's position within the reproduced tree, so the file lands where the
+    # expanded notebook's route (rooted at meta `assetbase`) looks. Inline `data:` media needs nothing
+    # here — it travels in the cell source.
+    stage_assets!(destroot::AbstractString, placement::AbstractString) = begin
+        for (rel, src) in assetfiles
+            isfile(src) || continue
+            dst = normpath(joinpath(destroot, placement, rel))
+            mkpath(dirname(dst)); cp(src, dst; force = true)
+        end
+    end
     if top !== nothing
         nrel = _within(top, _safe_realpath(nbpath))                           # notebook file relative to repo
         prel = _within(top, _safe_realpath(projectdir))                       # env dir relative to repo, or `nothing`
@@ -374,6 +388,9 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
             _stage_env_and_deps!(ov, stage, projectdir, pathdeps, top, envrel)
             mkpath(dirname(joinpath(ov, nrel)))
             write(joinpath(ov, nrel), cells)                                  # live notebook cells
+            let arel = _within(top, _safe_realpath(assetbase))                # untracked embedded media (if the base is in-tree)
+                arel === nothing || stage_assets!(ov, arel)
+            end
             write(joinpath(stage, "bundle.json"),
                   JSON.json(Dict("mode" => "repo-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
             return Base64.base64encode(_pack_tree(stage))
@@ -384,6 +401,9 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
             _stage_env_and_deps!(stage, stage, projectdir, pathdeps, top, envrel)
             mkpath(dirname(joinpath(stage, nrel)))
             write(joinpath(stage, nrel), cells)                               # live cells overwrite the committed notebook
+            let arel = _within(top, _safe_realpath(assetbase))                # untracked embedded media (if the base is in-tree)
+                arel === nothing || stage_assets!(stage, arel)
+            end
             write(joinpath(stage, "bundle.json"),
                   JSON.json(Dict("mode" => "source-rooted", "env" => envrel, "notebook" => nrel, "parent" => ".")))
             return Base64.base64encode(_pack_tree(stage))
@@ -410,6 +430,7 @@ function _make_bundle_b64(projectdir::AbstractString, pathdeps, nbpath::Abstract
         isdir(s) && _copy_tree!(joinpath(stage, d), s)
     end
     write(joinpath(stage, basename(nbpath)), cells)
+    stage_assets!(stage, ".")                        # flat layout: notebook + assets/ at the expanded root
     return Base64.base64encode(_pack_tree(stage))
 end
 
@@ -566,7 +587,9 @@ function export_standalone(nb::LiveNotebook; include_preview::Bool = true, histo
         isempty(info.projectdir) &&
             error("this notebook has no project environment to bundle (in-process kernel)")
         cells = _serialize_cells_inlining_bibs(nb.report, dirname(abspath(nb.path)))
-        b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells; history = history)
+        b64 = _make_bundle_b64(info.projectdir, info.pathdeps, abspath(nb.path), cells;
+                               history = history, assetbase = String(get(nb.report.meta, "assetbase", "")),
+                               assetfiles = _embedded_asset_files(nb.report.cells, String(get(nb.report.meta, "assetbase", ""))))
         out = cells
         # Carry the reproducibility env footer (the notebook's declared package delta) so a reopened
         # standalone can LIST its packages at parse time — no instantiation needed (the inactive launch
