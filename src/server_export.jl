@@ -80,6 +80,131 @@ function _rewrite_geomap_url!(spec, oldurl::AbstractString, newurl::AbstractStri
     return spec
 end
 
+# ── Author-embedded media (drag/drop / paste into a Markdown or web cell) ────────────────────────────
+# A cell can reference media two ways: an inline `data:<mime>;base64,…` URL (bytes live in the source),
+# or the live asset route `/n/<id>/asset/<rel>` (bytes are a file under the notebook's project dir).
+# Neither survives a STATIC export untouched — the route is a dead link once the server is gone, and
+# Typst (sandboxed) can't resolve either form — so every export flow routes such references through
+# these shared helpers to inline, copy, or stage the bytes. `_EMBED_SRC_RE` matches a media `src="…"`
+# in RENDERED HTML; `_EMBED_MD_RE` matches a Markdown `![alt](…)` image in cell SOURCE (the PDF path
+# transforms the markdown string, not rendered HTML).
+const _EMBED_SRC_RE = Regex(raw"""\bsrc=(["'])(data:[^"']+|/n/[^"'/]+/asset/[^"']+)\1""")
+# The URL, then an OPTIONAL CommonMark title (` "…"`) before the `)` — so `![a](url "cap")` still matches.
+const _EMBED_MD_RE  = Regex(raw"""!\[([^\]]*)\]\(\s*(data:[^)\s]+|/n/[^)/\s]+/asset/[^)\s]+)(?:\s+"[^"]*")?\s*\)""")
+# mime → a file extension for a data-URL blob written to disk (PDF/publish externalization).
+const _MIME_EXT = Dict("image/png" => ".png", "image/jpeg" => ".jpg", "image/gif" => ".gif",
+    "image/webp" => ".webp", "image/svg+xml" => ".svg", "image/bmp" => ".bmp", "image/avif" => ".avif",
+    "image/x-icon" => ".ico", "audio/mpeg" => ".mp3", "audio/wav" => ".wav", "audio/ogg" => ".ogg",
+    "audio/flac" => ".flac", "video/mp4" => ".mp4", "video/webm" => ".webm")
+_mime_ext(mime::AbstractString) = get(_MIME_EXT, lowercase(strip(String(mime))), ".bin")
+# Backslash-escape CommonMark-active punctuation so fallback alt text renders LITERALLY (never as
+# math/code/emphasis) when it lands in a `.md` fed to cmarker — e.g. an alt of `price $5–$9` must not
+# open Typst math and abort the compile.
+_md_escape_text(s::AbstractString) = replace(String(s), r"[\\`*_\[\]<$]" => s"\\\0")
+
+# Resolve a project-relative `/asset/` path (already URL-decoded) to its confined absolute file, or
+# `nothing` if `assetbase` is unset or the path escapes the project. Shared by every embedded-media path.
+function _asset_abspath(assetbase::AbstractString, rel::AbstractString)
+    isempty(assetbase) && return nothing
+    rootn = normpath(String(assetbase))
+    p = normpath(joinpath(rootn, strip(String(rel), '/')))
+    (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) || return nothing
+    isfile(p) ? p : nothing
+end
+
+# Decode ONE embedded-media URL to (bytes, mime, ext), or `nothing` if it isn't a `data:`/asset ref or
+# the file is unreadable / escapes the project. `assetbase` is the notebook's asset root (`_proj_root`).
+function _embedded_media(assetbase::AbstractString, url::AbstractString)
+    u = String(url)
+    if startswith(u, "data:")
+        m = match(r"^data:([^;,]*)((?:;[^,]*)*),(.*)$"s, u)
+        m === nothing && return nothing
+        mime = isempty(m.captures[1]) ? "text/plain" : String(m.captures[1])
+        b64 = occursin("base64", something(m.captures[2], ""))
+        payload = String(m.captures[3])
+        bytes = try
+            b64 ? Vector{UInt8}(Base64.base64decode(payload)) :
+                  Vector{UInt8}(codeunits(HTTP.URIs.unescapeuri(payload)))
+        catch; return nothing; end
+        return (bytes, mime, _mime_ext(mime))
+    end
+    mm = match(r"^/n/[^/]+/asset/(.*)$", u)
+    mm === nothing && return nothing
+    p = _asset_abspath(assetbase, HTTP.URIs.unescapeuri(String(mm.captures[1])))
+    p === nothing && return nothing
+    bytes = try; read(p); catch; return nothing; end
+    # `_site_ctype` may carry a `; charset=…` suffix — harmless in a data: URI, but strip for a clean mime.
+    return (bytes, first(split(_site_ctype(p), ';')), lowercase(splitext(p)[2]))
+end
+
+# Make author-embedded media in a rendered-HTML fragment survive a static export. `inline=true`
+# (standalone) rewrites an asset-route `src` to an inline `data:` URI; `inline=false` (published)
+# rewrites it to a page-relative path (the file itself is copied by `_write_page_assets!` via
+# `_markdown_asset_files`). Already-inline `data:` srcs are self-contained and pass through untouched.
+function _export_embed_html(html::AbstractString, assetbase::AbstractString; inline::Bool)
+    s = String(html)
+    occursin("/n/", s) || return s   # fast path: only asset-route srcs need rewriting (data: is already fine)
+    replace(s, _EMBED_SRC_RE => function (m)
+        mm = match(_EMBED_SRC_RE, m); q = mm.captures[1]; url = String(mm.captures[2])
+        startswith(url, "data:") && return m
+        if inline
+            got = _embedded_media(assetbase, url); got === nothing && return m
+            bytes, mime, _ = got
+            return string("src=", q, "data:", mime, ";base64,", Base64.base64encode(bytes), q)
+        else
+            am = match(r"^/n/[^/]+/asset/(.*)$", url); am === nothing && return m
+            rel = HTTP.URIs.unescapeuri(String(am.captures[1]))
+            href = join((HTTP.URIs.escapeuri(x) for x in split(rel, '/')), "/")
+            return string("src=", q, href, q)
+        end
+    end)
+end
+
+# Every project file a notebook references through the asset route — `![](/n/<id>/asset/…)` or a raw
+# `<img src="/n/<id>/asset/…">`, in ANY cell's SOURCE (markdown / web panes) or in a code/web cell's
+# rendered HTML OUTPUT — as `project-relative path => source file`. Feeds both `_referenced_page_assets`
+# (publish copies each into the page dir) and the bundle staging (untracked media travels with the .jl).
+# `data:` refs are skipped (they carry their own bytes). Any subdir is honoured — the rel is verbatim.
+function _embedded_asset_files(cells, assetbase::AbstractString)
+    out = Dict{String,String}()
+    base = String(assetbase); isempty(base) && return out
+    add(url) = begin
+        am = match(r"^/n/[^/]+/asset/(.*)$", String(url)); am === nothing && return   # asset-route only (skip data:)
+        rel = HTTP.URIs.unescapeuri(String(am.captures[1]))
+        p = _asset_abspath(base, rel); p === nothing || (out[rel] = p)
+    end
+    scan(s) = (for re in (_EMBED_MD_RE, _EMBED_SRC_RE), mt in eachmatch(re, String(s)); add(mt.captures[2]); end)
+    for c in cells
+        scan(c.source)
+        c.output === nothing && continue
+        for ch in c.output.display                              # code/web cell HTML output (e.g. a WebPage)
+            ch.mime == "text/html" && scan(String(copy(ch.data)))
+        end
+    end
+    return out
+end
+
+# Stage author-embedded Markdown images into a Typst project dir so `image()` resolves (Typst is
+# sandboxed to `dir`). Each `data:`/asset IMAGE → bytes written as `<base>_media<N>.<ext>`, its
+# `![alt](…)` rewritten to that local filename. Non-image media (audio/video, which a PDF can't play)
+# and unresolvable refs collapse to their alt text — so an embedded image never aborts the compile.
+function _stage_typst_md_media(md::AbstractString, dir::AbstractString, base::AbstractString, assetbase::AbstractString)
+    s = String(md)
+    (occursin("data:", s) || occursin("/asset/", s)) || return s
+    n = Ref(0)
+    replace(s, _EMBED_MD_RE => function (m)
+        mm = match(_EMBED_MD_RE, m); alt = String(mm.captures[1]); url = String(mm.captures[2])
+        got = _embedded_media(assetbase, url)
+        got === nothing && return isempty(alt) ? "" : _md_escape_text(alt)
+        bytes, mime, ext = got
+        startswith(lowercase(mime), "image/") || return isempty(alt) ? "" : _md_escape_text(alt)
+        n[] += 1
+        fname = string(base, "_media", n[], isempty(ext) ? _mime_ext(mime) : ext)
+        write(joinpath(dir, fname), bytes)
+        return string("![", alt, "](", fname, ")")
+    end)
+end
+
 # The `save_asset` blobs a notebook produced → Vector of (spec, bytes), where `spec` is the shared
 # metadata dict (`_asset_common`: path, mime, name, size, sha, cell, created, dtype/shape/order). The
 # producing cell stored them on its output. Empty unless a cell called `save_asset`.
@@ -137,6 +262,9 @@ function _referenced_page_assets(nb::LiveNotebook)
     end
     for (rel, bytes) in _web_asset_modules(nb)                             # @asset JS modules → bytes
         files[rel] = bytes
+    end
+    for (rel, path) in _embedded_asset_files(nb.report.cells, _proj_root(nb))   # author-embedded media → file
+        files[rel] = path
     end
     return files
 end
@@ -692,7 +820,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         isempty(strip(fm.byline)) || print(io, "<div class=\"exp-byline\">", _esc(fm.byline), "</div>")
         if !isempty(strip(fm.abstract))
             print(io, "<div class=\"exp-abstract\"><span class=\"exp-abslabel\">Abstract</span>",
-                  markdown_html(rw(fm.abstract), CellOutput[]), "</div>")
+                  _export_embed_html(markdown_html(rw(fm.abstract), CellOutput[]), _proj_root(nb); inline = inline_assets), "</div>")
         end
         runnable && print(io, "<div class=\"exp-run\"><button id=\"exp-run-btn\">▶ Run this notebook live</button></div>")
         print(io, "</header>")
@@ -717,9 +845,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 mdsrc = rw(c.id == fm.titlecell ? _strip_leading_h1(c.source) : c.source)   # citations/refs + hoisted H1
                 if haskey(figidx.numbers, c.id)     # caption cell → numbered "Figure N." block
                     print(io, "<figcaption class=\"exp-figcap\" id=\"fig-", _esc(c.id), "\"><b>Figure ",
-                          figidx.numbers[c.id], ".</b> ", markdown_html(mdsrc, c.interp), "</figcaption>")
+                          figidx.numbers[c.id], ".</b> ",
+                          _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets), "</figcaption>")
                 else
-                    print(io, "<section class=\"exp-md\">", markdown_html(mdsrc, c.interp), "</section>")
+                    print(io, "<section class=\"exp-md\">",
+                          _export_embed_html(markdown_html(mdsrc, c.interp), _proj_root(nb); inline = inline_assets), "</section>")
                 end
             else
                 print(io, "<section class=\"exp-code\">")
@@ -736,12 +866,14 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                     themed = override ? _snapshot_fig(nb.id, c.id, palette; raster = true) : nothing
                     if _outputs_text_ok(outputs)
                         themed === nothing ?
-                            print(io, "<div class=\"exp-out\">", output_html(c), "</div>") :
+                            # Wrap so an author-embedded `/asset/` <img> in a code/web cell's HTML output
+                            # is inlined/rewritten like a markdown image (see `_export_embed_html`).
+                            print(io, "<div class=\"exp-out\">", _export_embed_html(output_html(c), _proj_root(nb); inline = inline_assets), "</div>") :
                             print(io, "<div class=\"exp-out\">", _output_text_only_html(c),
                                   "<div class=\"dispwrap\">", _themed_fig_html(themed[1], themed[2]), "</div></div>")
                     elseif o !== nothing && !isempty(o.display)
                         print(io, "<div class=\"exp-out\"><div class=\"dispwrap\">",
-                              themed === nothing ? ReportRender._render_chunks(o.display) : _themed_fig_html(themed[1], themed[2]),
+                              themed === nothing ? _export_embed_html(ReportRender._render_chunks(o.display), _proj_root(nb); inline = inline_assets) : _themed_fig_html(themed[1], themed[2]),
                               "</div></div>")
                     end
                     for (si, spec) in enumerate(_echarts_specs(c))   # embed each chart's spec → client renders it
