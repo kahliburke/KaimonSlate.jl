@@ -90,7 +90,19 @@ function register_extension(; auto_start::Bool = true, enabled::Bool = true, for
     project_path === nothing && return false                 # can't locate ourselves (unusual)
     path = abspath(String(project_path))
     file = joinpath(kdir, "extensions.json")
-    data = isfile(file) ? (try; JSON.parsefile(file); catch; Dict{String,Any}(); end) : Dict{String,Any}()
+    # Fail closed: a corrupt extensions.json must NOT read as empty — the identity-dedup below would then
+    # see no existing entry and append a DUPLICATE hub registration (multiple hubs fighting over ports).
+    # Only a MISSING file means "no registrations yet".
+    data = if isfile(file)
+        try
+            JSON.parsefile(file)
+        catch e
+            @warn "KaimonSlate: extensions.json won't parse — aborting registration (fix or remove the file, then re-run register_extension)" file exception = (e, catch_backtrace())
+            return false
+        end
+    else
+        Dict{String,Any}()
+    end
     exts = get(data, "extensions", nothing)
     exts isa AbstractVector || (exts = Any[])
     # Dedup by IDENTITY, not exact path: if a KaimonSlate is already registered (from any checkout,
