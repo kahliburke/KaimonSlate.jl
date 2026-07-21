@@ -87,19 +87,24 @@ end
 # Sync the `.jl` reproducibility footer (`report.meta["env"]`) to the notebook's current
 # package delta and persist if it changed. Called after package operations.
 function _refresh_env_meta!(nb::LiveNotebook)
+    # `_notebook_adds` queries the worker env (`env_info` — a round-trip), so compute the footer OFF
+    # nb.lock (protocol), then apply the change + persist under the lock. Sole caller: `notebook_pkg_op!`.
     env = Dict{String,Any}[Dict{String,Any}("name" => string(get(d, "name", "")),
                                              "version" => string(get(d, "version", "")),
                                              "uuid" => string(get(d, "uuid", "")))
                            for d in _notebook_adds(nb).adds]
-    cur = get(nb.report.meta, "env", Dict{String,Any}[])
-    if isempty(env)
-        haskey(nb.report.meta, "env") || return nb
-        delete!(nb.report.meta, "env")
-    else
-        env == cur && return nb
-        nb.report.meta["env"] = env
+    @report_op nb report begin
+        cur = get(report.meta, "env", Dict{String,Any}[])
+        changed = if isempty(env)
+            haskey(report.meta, "env") ? (delete!(report.meta, "env"); true) : false
+        elseif env == cur
+            false
+        else
+            report.meta["env"] = env; true
+        end
+        changed && _persist!(nb; source = "packages")   # local file write, no round-trip → lock-safe
     end
-    return _persist!(nb; source = "packages")
+    return nb
 end
 
 # Add/remove a package in THIS NOTEBOOK's own forked env (not the parent project), then re-run the
@@ -109,17 +114,21 @@ end
 function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractString;
                           target::AbstractString = "notebook")
     (op in ("add", "rm")) || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
-    res = lock(nb.lock) do
-        r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name; target = target)
-        if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
-            for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
-            _eval!(nb)
-            _refresh_env_meta!(nb)                   # update the .jl reproducibility footer
-        end
-        r
+    # `pkg_op` is a long worker round-trip (resolve + precompile — minutes on a fresh env) — run it OFF
+    # nb.lock (protocol), serialized vs eval on the notebook's gate mutex. Holding nb.lock across it was a
+    # teardown-deadlock hazard: a concurrent close/restart needing nb.lock would wedge behind the install.
+    r = lock(_eval_mutex(nb)) do
+        ReportEngine.pkg_op(nb.kernel, nb.report, op, name; target = target)
     end
-    get(res, "ok", false) === true && (_autoindex!(nb); _agent_push!(nb))
-    return res
+    if get(r, "ok", false) === true                  # env changed → re-run so `using` cells pick it up
+        @report_op nb report begin
+            for c in report.cells; c.kind == CODE && (c.state = STALE); end
+        end
+        _eval!(nb)                                   # non-blocking; the runner drains the restaled cells
+        _refresh_env_meta!(nb)                       # sync the .jl footer (itself round-trips off-lock)
+        _autoindex!(nb); _agent_push!(nb)
+    end
+    return r
 end
 
 # ── Durable per-notebook config registry (the "Notebook config" panel SSOT) ────────────────────────
@@ -851,12 +860,16 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
     idx === nothing && return nb
     cell = nb.report.cells[idx]
     isempty(cell.binds) && return nb
-    lock(nb.lock) do
-        # Push the value to the kernel the DEFINING cell runs on. A region-tagged `@bind` cell lives on
-        # its region kernel, so the control must set the value THERE — else the region never sees the
-        # slider move (and same-side readers like a remote plot re-run with the stale value). A local
-        # bind cell keeps the main kernel; a cross-side reader picks the value up via boundary transfer.
-        side = _region_active(nb) ? _cell_side(nb, cell) : ""
+    nsym = Symbol(name)
+    any(b -> b.name == nsym, cell.binds) || return nb   # not a bind of this cell → no-op (no phantom worker assign)
+    # Push the value to the kernel the DEFINING cell runs on, OFF nb.lock (protocol): a region-tagged
+    # `@bind` cell lives on its region kernel (attach + `prepare!` are round-trips), and `assign_bind!`
+    # coerces the value on the worker — all shared-gate work, serialized on the notebook's eval mutex (as
+    # the runner does), NOT nb.lock, which a concurrent teardown needs. Setting the value THERE is what
+    # lets the region see the slider move (else same-side readers re-run with the stale value); a local
+    # bind cell keeps the main kernel; a cross-side reader picks the value up via boundary transfer.
+    side = _region_active(nb) ? _cell_side(nb, cell) : ""
+    coerced = lock(_eval_mutex(nb)) do
         bk = nb.kernel
         if !isempty(side)
             bk = _side_kernel!(nb, side)
@@ -864,22 +877,30 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
                 ReportEngine._rlog("bind: region kernel prepare failed: " * first(sprint(showerror, e), 120))
             end
         end
-        set_bind_value!(nb.report, cell, Symbol(name), value, bk)
+        ReportEngine.assign_bind!(bk, nb.report, nsym, value)   # coerce on the worker + update its registry/global
+    end
+    # Mirror the coerced value into the host BindSpec + restale readers under nb.lock (host mutation only).
+    @report_op nb report begin
+        i = findfirst(b -> b.name == nsym, cell.binds)
+        if i !== nothing
+            cell.binds[i].value = coerced
+            ReportEngine.mark_fresh!(cell)
+        end
         # Re-run the defining cell itself ONLY when it actually depends on the control
         # that changed — i.e. the changed var is in its `reads` (its own code or another
         # widget's args use it: `@bind a …; y = a*2`, or `@bind d Slider(1:a)`). The
         # registry preserves the value across that re-run. A cell that defines the control
         # but doesn't read it (incl. a pure bind cell) is skipped, so dragging its slider
         # never needlessly re-evaluates (and re-renders) the control.
-        reruns_self = Symbol(name) in cell.reads
-        for did in dependents_of(nb.report, Set([id]))
+        reruns_self = nsym in cell.reads
+        for did in dependents_of(report, Set([id]))
             (did == id && !reruns_self) && continue
-            j = findfirst(c -> c.id == did, nb.report.cells)
+            j = findfirst(c -> c.id == did, report.cells)
             j === nothing && continue
-            ReportEngine.restale!(nb.report.cells[j])
+            ReportEngine.restale!(report.cells[j])
         end
-        _eval!(nb)
     end
+    _eval!(nb)
     return nb
 end
 

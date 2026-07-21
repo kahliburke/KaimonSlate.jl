@@ -57,6 +57,71 @@ mutable struct LiveNotebook
         new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents, Cell[])
 end
 
+# ── Notebook-lock protocol (`nb.lock`) ─────────────────────────────────────────────────────────────
+# `nb.lock` serializes access to a notebook's in-memory `nb.report` (cells, deps, meta, version, the
+# `kernel` field) — UI actions vs. the async runner vs. agent ops.
+#
+# THE INVARIANT: never hold `nb.lock` across a KERNEL round-trip or a BLOCKING call. Take the lock only
+# to READ or MUTATE the report; do worker work (`prepare!`, `eval_cell!`, `refine_*`, `resolve_*`,
+# `_module_exports`, `_dep_versions`, `cancel_eval`, …) and anything that blocks (network / subprocess /
+# `wait` / `fetch`) OUTSIDE the lock, then RE-take the lock to apply the result. Holding the lock across a
+# worker call is the teardown-deadlock hazard: a remote round-trip — or even a cold first-run compile of
+# the callee — pins the lock while another task (teardown, a UI request) waits on it, and the whole hub
+# wedges. The three-phase resolve→(unlocked kernel)→rebuild dance in `_run_loop!` is the reference.
+#
+# `with_report(nb) do report … end` is the ONE sanctioned way to take `nb.lock`. The closure is handed
+# `report`, NOT `nb`, so reaching for `nb.kernel` (a round-trip) inside is a visible smell, not the
+# default. `@report_op` adds a compile-time guard (below).
+@inline with_report(f, nb::LiveNotebook) = lock(() -> f(nb.report), nb.lock)
+
+# Kernel round-trip / blocking-boundary calls that must NEVER run while `nb.lock` is held.
+const _KERNEL_BOUNDARY = Set{Symbol}((:prepare!, :eval_cell!, :eval_stale!, :_eval!, :_eval_one!,
+    :_run_code_batch!, :refine_usings!, :refine_macros!, :resolve_usings!, :resolve_macros!,
+    :_module_exports, :_dep_versions, :cancel_eval, :shutdown!))
+
+# Scan an expression for a synchronous call to a boundary symbol (`f(…)` or `Mod.f(…)`). Skips
+# `@async`/`@spawn` and `quote` subtrees — work scheduled there runs LATER, not under the held lock —
+# so only calls that actually execute inside the locked region are flagged. Returns the Symbol or nothing.
+function _find_boundary_call(ex)
+    ex isa Expr || return nothing
+    (ex.head === :quote) && return nothing
+    if ex.head === :macrocall
+        m = ex.args[1]
+        (m === Symbol("@async") || m === Symbol("@spawn") || m === Symbol("@spawnat")) && return nothing
+    end
+    if ex.head === :call
+        f = ex.args[1]
+        fn = f isa Symbol ? f :
+             (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode ? f.args[2].value : nothing)
+        fn isa Symbol && fn in _KERNEL_BOUNDARY && return fn
+    end
+    for a in ex.args
+        r = _find_boundary_call(a)
+        r === nothing || return r
+    end
+    return nothing
+end
+
+"""
+    @report_op nb report begin … end
+
+Guarded `with_report`: take `nb.lock`, bind `report = nb.report`, run the body — and at macro-expansion
+REJECT any direct kernel round-trip / blocking call inside the locked region (see `_KERNEL_BOUNDARY`),
+so the notebook-lock invariant can't be broken by a direct call (it would have caught the post-drain
+`refine_usings!` bug). Indirect calls through a helper still rely on the protocol + review.
+"""
+macro report_op(nb, report, body)
+    bad = _find_boundary_call(body)
+    bad === nothing ||
+        error("@report_op: `$bad` is a kernel round-trip / blocking call and must not run while nb.lock " *
+              "is held — phase it out (read under lock → kernel work unlocked → re-lock to apply).")
+    return quote
+        with_report($(esc(nb))) do $(esc(report))
+            $(esc(body))
+        end
+    end
+end
+
 # Wire/unwire the engine's out-of-band callback registry (eval.jl) for one notebook — the seam
 # between the dependency-light engine and the HTTP/SSE layer. Both `load_notebook` paths (fresh
 # `.jl` bundle vs. ordinary notebook) wire the identical set; close/restart paths unwire it. Kept
@@ -1881,10 +1946,10 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         _prepare_region_for_cell!(nb, cell, kernel, side) || return nothing
         _region_active(nb) && !isempty(side) && _stats_ran_on!(nb, cell.id, _side_label(nb, side))
         try; _region_presync!(nb, cell, kernel; dst_side = side); catch e; @warn "slate region: md presync failed" cell = cell.id exception = e; end
-        lock(nb.lock) do
-            ReportEngine.eval_cell!(nb.report, cell, kernel)
-            isempty(side) || _broadcast_progress(nb, cell)   # region md set RUNNING above → push the final state
-        end
+        # `eval_cell!` runs the md `$(…)` interpolation on the worker — a kernel round-trip — so it runs
+        # OFF nb.lock (protocol; mirrors the code-cell branch below). Re-take the lock only to push state.
+        ReportEngine.eval_cell!(nb.report, cell, kernel)
+        isempty(side) || lock(nb.lock) do; _broadcast_progress(nb, cell); end   # region md set RUNNING above → push the final state
         return nothing
     end
     # The cell's cross-boundary inputs ship over after the kernel is primed. A presync failure is the
@@ -2337,16 +2402,17 @@ function _run_loop!(nb::LiveNotebook)
         # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the
         # "barrier" marking. Kept off the hot per-cell path — it fires once per drain and no-ops unless
         # a NEW module got resolved.
-        refined = lock(nb.lock) do
-            a = ReportEngine.refine_usings!(nb.report, nb.kernel)
-            # Notebook-defined macros now exist; a PARALLEL drain may have raced a reader past its
-            # just-recovered producer, so restale those — the `again` re-arm below re-drains them.
-            b = ReportEngine.refine_macros!(nb.report, nb.kernel;
-                                            restale_racers = _parallel_enabled(nb))
-            a || b
-        end
-        if refined
-            lock(nb.lock) do; nb.version += 1; end
+        # PROTOCOL: the export/macro RESOLVE against the kernel is a round-trip, so it runs OFF nb.lock
+        # (`rebuild=false`); we then re-take the lock ONLY for the graph rebuild (a report mutation).
+        # Holding nb.lock across these resolves was the teardown-deadlock hazard. (`again` re-arm below
+        # re-drains any cell left stale — covering the racer-restale that `refine_macros!` skips here.)
+        resolved_u = ReportEngine.refine_usings!(nb.report, nb.kernel; rebuild = false)
+        resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false)
+        if resolved_u || resolved_m
+            with_report(nb) do report
+                ReportEngine.rebuild_precise!(report)
+                nb.version += 1
+            end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
         end
         lock(_RUNNER_LOCK) do; delete!(_RUNNER_FAILS, nb.id); end   # clean drain (cells may have ERRORED, but no throw) → clear the streak
