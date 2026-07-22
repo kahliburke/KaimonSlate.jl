@@ -21,14 +21,39 @@
     _reconnT = setTimeout(() => { _reconnT = null; connect().catch(() => {}); }, RECONNECT_MS);
   }
 
+  // Decode a binary numeric frame (SlateExtensionsBase.encode_binary_frame) and route it to the channel's
+  // slateOnStream handler as {…meta, d: TypedArray} — no JSON, no parse of the array (the whole point).
+  // Layout: [u8 ver=1][u16 chanLen][chan][u16 metaLen][metaJSON][u8 dtype][u8 rank][rank×u32 dims][raw LE bytes].
+  const _TYPED = [Float32Array, Float64Array, Int32Array, Int16Array, Uint8Array];   // keep in sync with core.js _SLATE_TYPED
+  const _td = new TextDecoder();
+  function _dispatchBinary(buf) {
+    try {
+      const dv = new DataView(buf); let o = 0;
+      if (dv.getUint8(o) !== 1) return; o += 1;
+      const cl = dv.getUint16(o, true); o += 2;
+      const channel = _td.decode(new Uint8Array(buf, o, cl)); o += cl;
+      const ml = dv.getUint16(o, true); o += 2;
+      let meta = {}; if (ml) { try { meta = JSON.parse(_td.decode(new Uint8Array(buf, o, ml))); } catch (_) {} } o += ml;
+      const dtype = dv.getUint8(o); o += 1;
+      const rank = dv.getUint8(o); o += 1;
+      const dims = []; for (let i = 0; i < rank; i++) { dims.push(dv.getUint32(o, true)); o += 4; }
+      const Ctor = _TYPED[dtype]; if (!Ctor) return;
+      meta.d = new Ctor(new Uint8Array(buf, o).slice().buffer);   // copy the payload → element-aligned buffer
+      meta.dims = dims;
+      window.onCellStream && window.onCellStream(channel, meta);
+    } catch (_) {}
+  }
+
   function connect() {
     if (ready) return ready;
     ready = new Promise((resolve, reject) => {
       let sock;
       try { sock = new WebSocket(WS_URL); } catch (e) { ready = null; scheduleReconnect(); reject(e); return; }
       ws = sock;
+      sock.binaryType = 'arraybuffer';                      // receive binary numeric frames as ArrayBuffer
       sock.onopen = () => resolve(sock);
       sock.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) { _dispatchBinary(ev.data); return; }   // binary numeric frame
         let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
         if (m.t === 'emit') {                                 // slate_emit push → the slateOnStream registry
           if (m.channel === '__slate_call_progress') {        // framework progress → THIS call's onProgress (by id)

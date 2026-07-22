@@ -631,4 +631,31 @@ x = 1
         @test "p1" in bl["p2"]                                  # graphics ↔ graphics serialised
         @test NS.co_runnable(["p1", "calc"], bl)                # graphics ∥ pure compute is fine
     end
+
+    # Package-declared front-end scripts (SlateExtensionsBase manifest → `_refresh_extensions!`). The
+    # sticky per-notebook registry dedups by id (last wins, order preserved) and rides `state_json` so
+    # the browser injects each `<script>` once with no boot cell.
+    @testset "front-end script registry → state_json.frontendScripts" begin
+        nb = _mknb("#%% code id=c\n1 + 1\n")
+        @test isempty(NS._frontend_scripts(nb))
+        @test !haskey(NS.state_json(nb), "frontendScripts")     # absent when a notebook declares none
+
+        # A component entry: ES module + a namespaced kind (Slate wraps its default export under it).
+        @test NS._register_frontend!(nb, "widget:Pkg.Stars", "REG_STARS", true, "Pkg.Stars")   # new → changed
+        @test NS._register_frontend!(nb, "editor:giac", "REG_EDITOR")         # classic (esm/kind default)
+        @test NS._register_frontend!(nb, "widget:Pkg.Stars", "REG_STARS_V2", true, "Pkg.Stars") # new js → changed
+        @test !NS._register_frontend!(nb, "widget:Pkg.Stars", "REG_STARS_V2", true, "Pkg.Stars") # identical → no change
+        fe = NS._frontend_scripts(nb)
+        @test [e.id for e in fe] == ["widget:Pkg.Stars", "editor:giac"]  # order preserved, no duplicate
+        @test fe[1].js == "REG_STARS_V2" && fe[1].esm == true && fe[1].kind == "Pkg.Stars"
+        @test fe[2].esm == false && fe[2].kind == ""
+
+        NS._register_frontend!(nb, nothing, "ANON_JS")               # missing id → content-hash key
+        @test endswith(last(NS._frontend_scripts(nb)).id, string(hash("ANON_JS"); base = 16))
+
+        sj = NS.state_json(nb)["frontendScripts"]
+        @test sj isa AbstractVector && length(sj) == 3
+        @test sj[1]["id"] == "widget:Pkg.Stars" && sj[1]["js"] == "REG_STARS_V2"
+        @test sj[1]["esm"] == true && sj[1]["kind"] == "Pkg.Stars"
+    end
 end

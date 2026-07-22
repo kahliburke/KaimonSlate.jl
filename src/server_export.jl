@@ -326,6 +326,43 @@ Promise.resolve().then(function(){return fn(root,echo);}).catch(function(e){cons
 try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠ "+((e&&e.stack)||e);(root||document.body).appendChild(b);}catch(_){}});};
 """
 
+# Package-declared front-end scripts (SlateExtensionsBase manifest) as a body-top `<script>` block for a
+# static export, or "" when none. CLASSIC scripts are prefixed with tolerant no-op stubs for the
+# registration globals so a frozen export doesn't throw on an undefined `slateRegisterWidget`. ESM
+# (component) widgets are emitted as `<script type="module">`; they resolve the widget SDK + Preact/htm
+# via the export's import map (see `_export_importmap_for`). A pure single-file standalone that can't
+# resolve those simply doesn't mount the widget — it never breaks the rest of the page.
+function _frontend_export_head(nb)
+    fe = _frontend_scripts(nb)
+    isempty(fe) && return ""
+    # Break any literal `</script` in the JS so it can't terminate the tag early (the live path uses
+    # textContent/Blob and is immune); the sequence is inert JS once the parser is past the string boundary.
+    safe(js) = replace(js, r"</script"i => "<\\/script")
+    parts = String[]
+    if any(e -> !e.esm, fe)
+        push!(parts, raw"""<script>window.slateWidgets=window.slateWidgets||{};
+window.slateRegisterWidget=window.slateRegisterWidget||function(k,i){window.slateWidgets[k]=i||{};};
+window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||function(){};</script>""")
+    end
+    for e in fe
+        if !isempty(e.kind)
+            # Component module: import its default export (inlined as a data: module) + register under the kind.
+            mod = "data:text/javascript;charset=utf-8;base64," * Base64.base64encode(e.js)
+            push!(parts, string("<script type=\"module\" data-slate-fe=\"", _esc(e.id), "\">",
+                "import C from ", JSON.json(mod), ";import { registerComponent } from \"@slate/widget\";",
+                "registerComponent(", JSON.json(e.kind), ", C);</script>"))
+        else
+            ty = e.esm ? " type=\"module\"" : ""
+            push!(parts, string("<script", ty, " data-slate-fe=\"", _esc(e.id), "\">", safe(e.js), "</script>"))
+        end
+    end
+    return join(parts)
+end
+
+# True if the notebook has any ESM (component) front-end widget — so the export head must carry the
+# Preact/htm/signals + widget-SDK import map even without a web cell.
+_has_esm_frontend(nb) = any(e -> e.esm, _frontend_scripts(nb))
+
 # Light-family Slate palettes — page chrome + code-highlight theme flip on these; all others are dark.
 const _LIGHT_PALETTES = Set(["daylight", "solarized-light"])
 _export_is_light(name::AbstractString) = String(name) in _LIGHT_PALETTES
@@ -713,13 +750,28 @@ function _slate_ui_imports()
     )
 end
 
-# The export's full importmap: the Slate UI stack (only when a web cell is present — it's what imports
-# those specifiers) MERGED UNDER the notebook's `@use` declarations (a `@use` wins on a key clash).
+# The Slate widget SDK for an export: `@slate/widget` → the SDK module inlined as a data: URL, so a
+# component widget's `import { registerComponent } from "@slate/widget"` resolves in a self-contained
+# page (the SDK itself imports Preact/htm by bare specifier, re-resolved through the same map).
+function _slate_widget_sdk_import()
+    js = try
+        read(joinpath(@__DIR__, "assets", "js", "slate-widget.js"), String)
+    catch
+        return Dict{String,String}()
+    end
+    return Dict{String,String}("@slate/widget" => "data:text/javascript;base64," * Base64.base64encode(js))
+end
+
+# The export's full importmap: the Slate UI stack (Preact/htm/signals) + the widget SDK are included when
+# a web cell OR an ESM (component) front-end widget is present — they're what import those specifiers —
+# MERGED UNDER the notebook's `@use` declarations (a `@use` wins on a key clash).
 function _export_importmap_for(nb::LiveNotebook)
     uses = get(nb.report.meta, "imports", nothing)
     usemap = uses === nothing ? Dict{String,String}() : Dict{String,String}(String(k) => String(v) for (k, v) in uses)
-    uimap = any(c -> c.kind == ReportEngine.WEB, nb.report.cells) ? _slate_ui_imports() : Dict{String,String}()
-    merged = merge(uimap, usemap)
+    esm = _has_esm_frontend(nb)
+    uimap = (esm || any(c -> c.kind == ReportEngine.WEB, nb.report.cells)) ? _slate_ui_imports() : Dict{String,String}()
+    sdk = esm ? _slate_widget_sdk_import() : Dict{String,String}()
+    merged = merge(uimap, sdk, usemap)
     return _export_importmap(isempty(merged) ? nothing : merged)
 end
 
@@ -799,7 +851,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # so the widget bails (blank canvas). Load it here (sync, before the body widget scripts run)
               # so such widgets FUNCTION in the export instead of being frozen to a snapshot.
               "<script src=\"https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js\"></script>",
-              "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head, "<article class=\"export\">")
+              "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
+              _frontend_export_head(nb), "<article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
         # (name => local file, read into the page). Otherwise (published page) the map rides as a

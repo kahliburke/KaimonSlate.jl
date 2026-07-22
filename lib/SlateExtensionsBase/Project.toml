@@ -1,0 +1,17 @@
+name = "SlateExtensionsBase"
+uuid = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
+version = "0.1.0"
+authors = ["Kahli Burke <kahli@kahliburke.com>"]
+
+[deps]
+Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+
+[compat]
+Base64 = "1.11.0"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

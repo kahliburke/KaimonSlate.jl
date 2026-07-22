@@ -48,6 +48,11 @@ window.slateRegisterWidget = function (kind, impl) {
       if (im.sync) { const bs = _bindSpec(el.dataset.bind, el.dataset.name); if (bs) im.sync(el, bs.value, bs.params || {}); }
     } catch (e) { console.error(e); }
   });
+  // Same for return-value component OUTPUTS (`slate_render`): a `.slatecomponent` placeholder rendered
+  // before this kind registered now gets wired (wireOutputComponent re-reads its descriptor + matches kind).
+  document.querySelectorAll('.slatecomponent').forEach(el => {
+    try { if (!el._customWired) wireOutputComponent(el); } catch (e) { console.error(e); }
+  });
 };
 // Tear down any custom widgets under `root` before their DOM is discarded (a bind/control-strip
 // rebuild). Mirrors the inline-echart dispose before an innerHTML swap — a plugin holding resources
@@ -61,6 +66,40 @@ window.teardownCustomWidgets = function (root) {
     if (impl && impl.destroy) { try { impl.destroy(el); } catch (e) { console.error(e); } }
   });
 };
+
+// Package-declared front-end scripts (`nbState.frontendScripts` = [{id, js, esm, kind}], from the worker's
+// SlateExtensionsBase manifest — `register_component!`/`register_widget!` in a module `__init__`). Inject each
+// ONCE (deduped by id across the session), with no boot cell. Three shapes:
+//   • kind set  → a COMPONENT module: import its `export default` from a blob URL and register it under the
+//                 (namespaced) kind via the widget SDK. The author's JS never names the kind.
+//   • esm only  → a self-registering ES module (e.g. an editor extension that imports + calls a global).
+//   • classic   → a self-registering `<script>` (calls `window.slateRegisterWidget(...)`).
+// A re-declaration keeps the same id → not re-run here (the registry replaces on the Julia side; a reload
+// re-runs from a clean page). Already-mounted controls are re-wired by slateRegisterWidget itself.
+window._slateFEInjected = window._slateFEInjected || new Set();
+function injectFrontendScripts(state) {
+  const list = (state && state.frontendScripts) || [];
+  for (const fe of list) {
+    if (!fe || !fe.id || !fe.js || window._slateFEInjected.has(fe.id)) continue;
+    window._slateFEInjected.add(fe.id);
+    try {
+      const s = document.createElement('script');
+      s.dataset.slateFe = fe.id;
+      if (fe.kind) {
+        const url = URL.createObjectURL(new Blob([fe.js], { type: 'text/javascript' }));  // module import honors the importmap
+        s.type = 'module';
+        s.textContent =
+          'import C from ' + JSON.stringify(url) + ';\n' +
+          'import { registerComponent } from "@slate/widget";\n' +
+          'registerComponent(' + JSON.stringify(fe.kind) + ', C);';
+      } else {
+        if (fe.esm) s.type = 'module';
+        s.textContent = fe.js;
+      }
+      document.head.appendChild(s);
+    } catch (e) { console.error('frontend script inject failed (' + fe.id + ')', e); }
+  }
+}
 
 function controlMarkup(bindId, b) {
   const p = b.params || {}, w = b.widget;
@@ -451,12 +490,39 @@ function _bindSpec(bindId, name) {
   const c = _cellById(bindId); if (!c) return null;
   return (c.binds || []).find(b => b.name === name) || null;
 }
+// Mount return-value component OUTPUTS: a `slate_render` descriptor {v, component, props} is emitted as a
+// `.slatecomponent` placeholder plus a sibling JSON `<script class="slatecomponent-desc">`. Look the
+// component up in the widget registry and wire it with the props + a DISPLAY ctx (call/stream, no bind
+// value). Distinct from a @bind control — an output component has no `data-bind`. Idempotent per element;
+// an as-yet-unregistered component just waits for `slateRegisterWidget` to re-scan (see above).
+function wireOutputComponent(el) {
+  if (el._customWired) return;
+  const scr = el.parentNode && el.parentNode.querySelector('script.slatecomponent-desc');
+  if (!scr) return;
+  let desc; try { desc = JSON.parse(scr.textContent); } catch (e) { return; }
+  const kind = desc && desc.component;
+  const reg = kind && window.slateWidgets && window.slateWidgets[kind];
+  el.dataset.component = kind || '';
+  if (!reg || !reg.wire) return;                       // await registration
+  el._customWired = true;
+  reg.wire(el, {
+    params: (desc && desc.props) || {},
+    value: undefined,                                  // a returned value has no bound state
+    display: true,
+    call: (ch, payload, onProgress) => window.slateCall(String(ch), payload, onProgress),
+  });
+}
+function mountOutputComponents(root) {
+  (root || document).querySelectorAll('.slatecomponent').forEach(wireOutputComponent);
+}
+
 // Wire every bound widget in a cell — its own @bind widget and/or control strip.
 function mountControls(c) {
   const cell = document.getElementById('cell-' + c.id);
   if (!cell) return;
   cell.querySelectorAll('[data-bind]').forEach(wireControl);
   cell.querySelectorAll('.radiogroup, .checkgroup, .mslist').forEach(typeset);   // render rich ($math$) option labels
+  mountOutputComponents(cell);                                                   // return-value component outputs
 }
 
 // Source editing for non-code cells (markdown + @bind widgets): reveal a raw
@@ -663,6 +729,7 @@ function _publishState(state) {
                                                 // module) can seed from it even if it loads AFTER
                                                 // this first ran (the boot reload() is async).
   if (selectedId && !(state.cells || []).some(c => c.id === selectedId)) selectedId = null;   // dropped/renamed
+  injectFrontendScripts(state);                 // package-declared widget/editor scripts (before the re-render)
   window.slateStore && window.slateStore.applyState(state);   // → Preact re-renders #nb reactively
   window.onNbState && window.onNbState(state);                // graph-shaped consumers (DAG panel)
   updateChrome(state);
@@ -876,6 +943,7 @@ function _swapOutput(out, html) {
   out.style.minHeight = out.offsetHeight + 'px';
   out.innerHTML = html;
   runScripts(out);   // <script> set via innerHTML is inert — re-create so figures boot
+  mountOutputComponents(out);   // mount any `slate_render` component OUTPUTS in the freshly-swapped output
   const imgs = out.querySelectorAll('img');
   const release = () => { out.style.minHeight = ''; };
   if (!imgs.length) { requestAnimationFrame(release); return; }
