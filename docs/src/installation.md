@@ -29,12 +29,13 @@ From the Pkg REPL (press `]`), add KaimonSlate as an **app** — this puts a `sl
 your `PATH`:
 
 ```julia-repl
-pkg> app add KaimonSlate
+pkg> app add https://github.com/kahliburke/KaimonSlate.jl
 ```
 
-(For an unregistered checkout, point at the repo:
-`pkg> app add https://github.com/kahliburke/KaimonSlate.jl`.) The launcher lands in Julia's app
-bin — if `slate` isn't found, add that directory (printed by `app add`) to your `PATH`.
+(KaimonSlate is soon to be registered in the General registry; until then, point `app add` at the
+repo URL as shown above. Once registered, `pkg> app add KaimonSlate` will work.) The launcher
+lands in Julia's app bin — if `slate` isn't found, add that directory (printed by `app add`) to
+your `PATH`.
 
 ### 3. Run `slate`
 
