@@ -5,7 +5,8 @@ a task to the AI agent.
 
 ## Open a notebook
 
-Run the **`slate` app** (installed with `pkg> app add KaimonSlate` — see
+Run the **`slate` app** (installed with `pkg> app add https://github.com/kahliburke/KaimonSlate.jl` —
+KaimonSlate is soon to be registered, so add it from the repo URL for now; see
 [Installation](installation.md)):
 
 ```sh
