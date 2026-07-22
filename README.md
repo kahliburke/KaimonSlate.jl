@@ -87,8 +87,11 @@ Every run is recorded. The timeline steps back through a notebook's earlier stat
 The `slate` app is the usual entry point. From the Pkg REPL (press `]`):
 
 ```julia-repl
-pkg> app add KaimonSlate
+pkg> app add https://github.com/kahliburke/KaimonSlate.jl
 ```
+
+(KaimonSlate is soon to be registered; until then, add it from the repo URL as shown above. Once
+registered, `pkg> app add KaimonSlate` will work.)
 
 This puts a `slate` launcher on your `PATH`:
 
