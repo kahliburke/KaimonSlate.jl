@@ -1911,8 +1911,13 @@ function _try_slate_call(nb::LiveNotebook, k, channel::AbstractString, args, cal
         f === nothing && return (false, Dict{String,Any}("ok" => false, "error" => "no slate_on handler registered for channel '$channel'"))
         progress = isempty(call_id) ? (p -> nothing) :
             (p -> ReportEngine._do_emit(nb.report.id, "__slate_call_progress", (id = String(call_id), data = p)))
+        # Establish the execution context so a handler that STREAMS (`slate_emit` via SlateExtensionsBase's
+        # ctx accessors) works — the in-process twin of the worker fix.
+        ctx = ReportEngine._build_slate_ctx(m, nb.report.id, "", String[])
         return (true, Dict{String,Any}("ok" => true,
-            "value" => ReportEngine._invoke_slate_handler(f, ReportEngine._slate_args(args), progress)))
+            "value" => task_local_storage(:slate_ctx, ctx) do
+                ReportEngine._invoke_slate_handler(f, ReportEngine._slate_args(args), progress)
+            end))
     catch e
         return (false, Dict{String,Any}("ok" => false, "error" => first(sprint(showerror, e), 300)))
     end
@@ -1926,10 +1931,10 @@ end
 # own task, so a slow client never blocks the poller/reactivity; on overflow we drop + emit an explicit
 # `{t:"dropped",n}` marker rather than silently coalescing. (SSE keeps the idempotent cell patches.)
 mutable struct _WSConn
-    out::Channel{String}
+    out::Channel{Union{String,Vector{UInt8}}}   # a String → text frame; Vector{UInt8} → binary frame (numeric stream)
     dropped::Threads.Atomic{Int}
 end
-_wsconn(cap::Int) = _WSConn(Channel{String}(cap), Threads.Atomic{Int}(0))
+_wsconn(cap::Int) = _WSConn(Channel{Union{String,Vector{UInt8}}}(cap), Threads.Atomic{Int}(0))
 
 const _WS_CONNS = Dict{String,Vector{_WSConn}}()   # nb id → live page sockets (slate_emit push targets)
 const _WS_LOCK = ReentrantLock()
@@ -1941,23 +1946,27 @@ end
 # Enqueue one frame to a connection, NON-blocking. Full queue ⇒ drop + count; the next successful
 # enqueue is preceded by a `{t:"dropped",n}` marker so the client knows it fell behind. Thread-safe:
 # emits arrive on the poller task, replies on per-call tasks — `put!` is safe, the count is atomic.
-function _ws_send!(c::_WSConn, msg::AbstractString)
+function _ws_send!(c::_WSConn, msg::Union{AbstractString,Vector{UInt8}})
     isopen(c.out) || return nothing
     if Base.n_avail(c.out) >= c.out.sz_max
         Threads.atomic_add!(c.dropped, 1); return nothing
     end
     d = Threads.atomic_xchg!(c.dropped, 0)
     d > 0 && (try; put!(c.out, "{\"t\":\"dropped\",\"n\":$d}"); catch; end)
-    try; put!(c.out, String(msg)); catch; end
+    try; put!(c.out, msg isa AbstractString ? String(msg) : msg); catch; end
     return nothing
 end
 
-# Send a pre-built JSON frame to every live page socket of a notebook (no-op when none are connected).
-function _ws_broadcast!(nb::LiveNotebook, frame::AbstractString)
+# Send a pre-built frame (a JSON text frame, or a raw binary numeric frame) to every live page socket of a
+# notebook (no-op when none are connected).
+function _ws_broadcast!(nb::LiveNotebook, frame::Union{AbstractString,Vector{UInt8}})
     conns = lock(_WS_LOCK) do; v = get(_WS_CONNS, nb.id, nothing); v === nothing ? _WSConn[] : copy(v); end
     for c in conns; _ws_send!(c, frame); end
     return nothing
 end
+# slate_emit_bin → forward the raw binary frame (SlateExtensionsBase.encode_binary_frame) to every page
+# socket as a WebSocket BINARY frame, untouched. Channel + meta + dtype + shape are inside the frame.
+_ws_broadcast_bin!(nb::LiveNotebook, frame::Vector{UInt8}) = _ws_broadcast!(nb, frame)
 
 # slate_emit → push `{t:"emit",channel,data}` to every live page socket. `value` is a Julia value (the
 # slate_emit unification); JSON-encoded once here on the hub.

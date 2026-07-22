@@ -7,8 +7,8 @@
 # re-parseable output — `Expr(:meta)` nodes, qualified-operator comparison chains — which forced a
 # whack-a-mole sanitizer. Analyzing at the source deletes that entire failure class.) Each side
 # imports its own ExpressionExplorer at the SAME pinned version: the engine via Project.toml, the
-# worker via the slate-owned `worker_ee` env on its LOAD_PATH (after the notebook project, so a
-# notebook's own EE wins — the same delivery as the Revise env).
+# worker via the slate-owned `worker_infra` env on its LOAD_PATH (after the notebook project, so a
+# notebook's own EE wins — the same env that carries Revise and SlateExtensionsBase).
 #
 # Statements headed by a Slate handler macro are EXCLUDED from expansion: their bespoke static
 # analysis (deps.jl) is already precise, and expanding one would fabricate bindings the analysis

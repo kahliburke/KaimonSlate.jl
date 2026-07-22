@@ -50,6 +50,7 @@ include(joinpath(@__DIR__, "slate_matrix.jl")) # slate_matrix — auto-render fo
 include(joinpath(@__DIR__, "trace.jl"))     # @trace / SlateTrace inline value tracing (engine + worker)
 include(joinpath(@__DIR__, "paged.jl"))     # PagedProvider / SlatePagedTable / slate_query (provider registry)
 include(joinpath(@__DIR__, "widgets.jl"))   # shared @bind widgets + namespace contract (engine + worker)
+include(joinpath(@__DIR__, "envprep.jl"))   # shared notebook-env prep policy (seed/dev-path/staleness; engine + worker + remote)
 include(joinpath(@__DIR__, "docharvest.jl")) # shared docstring harvest (runs where the deps are loaded)
 include(joinpath(@__DIR__, "demux.jl"))     # task-demux output capture (parallel evaluator I/O isolation)
 include(joinpath(@__DIR__, "parsched.jl"))  # ParCell / par_blockers / run_scheduled — parallel batch scheduler
@@ -78,8 +79,15 @@ function _new_ns()
         # base64's alphabet); the hub deserializes it back to a Julia value and JSON-encodes it for the
         # `cellstream:` frame. (In-process notebooks skip this and pass the value straight through.) Bulk
         # data belongs on the blob channel, not here — base64+serialize suits small streaming payloads.
-        slate_emit = (channel, value) -> KaimonGate._publish_stream("slate_emit",
-            string(channel) * "\x1f" * Base64.base64encode(Serialization.serialize, value)),
+        # A SlateBinary rides a raw binary frame on the `slate_emit_bin` channel (encode_binary_frame packs
+        # channel+meta+dtype+shape+raw bytes) — published via `_publish_stream_raw` (multipart, NO
+        # Serialization envelope: the frame moves by reference, copied only once at the wire) → forwarded as
+        # a binary WS frame → a TypedArray in the browser. Any other value takes the string path
+        # (Serialization+base64; the hub deserializes + JSON-encodes it).
+        slate_emit = (channel, value) -> value isa SlateExtensionsBase.SlateBinary ?
+            KaimonGate._publish_stream_raw("slate_emit_bin", SlateExtensionsBase.encode_binary_frame(string(channel), value)) :
+            KaimonGate._publish_stream("slate_emit",
+                string(channel) * "\x1f" * Base64.base64encode(Serialization.serialize, value)),
         # `@asset`/`readfile` resolve relative paths against the notebook's project dir (what
         # `pkgdir(...)` gives, and where a package notebook's assets live). Read at call time so a
         # provenance change is picked up; falls back to the active project when PARENT_PROJECT is unset.
@@ -914,7 +922,14 @@ function __slate_call(channel::String, args; call_id::String = "")
                 Base64.base64encode(Serialization.serialize, (id = call_id, data = p)))
         catch; end; nothing))
     try
-        return (; ok = true, value = _invoke_slate_handler(f, _slate_args(args), progress))   # Dict → NamedTuple so the handler reads `args.field`
+        # Establish the per-cell execution context for the handler task, so a package that STREAMS from its
+        # `slate_on` action — `slate_emit`/`slate_effect` via SlateExtensionsBase's ctx accessors — works the
+        # same inside a handler as inside a cell eval. Without this, `slate_emit` in a handler is a silent
+        # no-op (its `_ctx_field(:emit)` is unset). A browser call is main-side, so no region/notebook needed.
+        ctx = _build_slate_ctx(m, "", "", String[])
+        return task_local_storage(:slate_ctx, ctx) do
+            (; ok = true, value = _invoke_slate_handler(f, _slate_args(args), progress))   # Dict → NamedTuple so the handler reads `args.field`
+        end
     catch e
         return (; ok = false, error = first(sprint(showerror, e), 400))
     end
@@ -1523,7 +1538,7 @@ function __slate_module_help(name::String)
     return module_help(m, name)
 end
 
-# ExpressionExplorer for macro-aware analysis, delivered by the slate-owned `worker_ee` env on
+# ExpressionExplorer for macro-aware analysis, delivered by the slate-owned `worker_infra` env on
 # LOAD_PATH (after the notebook project — a notebook's own EE wins). Guarded like Serialization:
 # absent (env build failure, offline first-instantiate) → no macro recovery, the server keeps its
 # conservative analysis; never a boot failure.
@@ -1642,26 +1657,14 @@ function __slate_env_info()
     return Dict{String,Any}("notebook" => nb, "parent" => parent, "payload_sha" => PAYLOAD_SHA[])
 end
 
-# Seed a forked notebook env from `parent`: copy the parent's deps + compat (NOT its package
-# identity) and its Manifest as the resolution baseline, activate the env, then `dev` the
-# parent package in so `using ParentModule` works — all preserving the parent's pinned
-# versions, so anything already loaded in this worker stays valid. One consistent env.
+# Seed a forked notebook env from `parent`: write the env's Project/Manifest from the parent (the
+# shared `seed_env_project!` policy — deps/compat/sources with dev paths made absolute — from
+# envprep.jl), stamp the parent fingerprint (so a later parent change is detected stale), then
+# activate + `dev` the parent package in so `using ParentModule` works, preserving the parent's
+# pinned versions. One consistent env.
 function _seed_notebook_env!(envdir::AbstractString, parent::AbstractString)
-    mkpath(envdir)
-    pname = ""
-    ppf = joinpath(parent, "Project.toml")
-    if isfile(ppf)
-        pt = Pkg.TOML.parsefile(ppf)
-        seed = Dict{String,Any}()
-        haskey(pt, "deps") && (seed["deps"] = pt["deps"])
-        haskey(pt, "compat") && (seed["compat"] = pt["compat"])
-        open(joinpath(envdir, "Project.toml"), "w") do io; Pkg.TOML.print(io, seed); end
-        pmf = joinpath(parent, "Manifest.toml")
-        isfile(pmf) && cp(pmf, joinpath(envdir, "Manifest.toml"); force = true)
-        (haskey(pt, "name") && haskey(pt, "uuid")) && (pname = String(pt["name"]))
-    else
-        write(joinpath(envdir, "Project.toml"), "")
-    end
+    pname = seed_env_project!(envdir, parent)   # shared policy (envprep.jl)
+    stamp_env!(envdir, parent)
     Pkg.activate(envdir)
     if !isempty(pname)
         try
@@ -1744,6 +1747,23 @@ function __slate_bundle_info()
                 push!(out["pathdeps"], Dict{String,Any}("name" => pi.name, "source" => String(pi.source)))
             end
         end
+    catch
+    end
+    return out
+end
+
+"The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
+page to mirror: `{frontend:[{id, js, esm, kind}]}` (widget renderers + editor extensions declared from
+`__init__`; `esm` ⇒ ES module; a non-empty `kind` ⇒ a component whose default export Slate wraps). The
+server pulls this once per run drain and injects the scripts into the page. Empty when no such package
+is loaded."
+function __slate_extension_manifest()
+    out = Dict{String,Any}("frontend" => Dict{String,Any}[])
+    try
+        m = inprocess_extension_manifest(_NS[])
+        out["frontend"] = Dict{String,Any}[Dict{String,Any}(
+            "id" => String(e.id), "js" => String(e.js), "esm" => e.esm, "kind" => String(e.kind))
+            for e in m.frontend]
     catch
     end
     return out
@@ -2243,6 +2263,7 @@ function tools()
         KaimonGate.GateTool("__slate_sync_parent", __slate_sync_parent),
         KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
         KaimonGate.GateTool("__slate_bundle_info", __slate_bundle_info),
+        KaimonGate.GateTool("__slate_extension_manifest", __slate_extension_manifest),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
         KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
         KaimonGate.GateTool("__slate_revise", __slate_revise),

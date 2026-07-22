@@ -56,14 +56,12 @@ function _worker_tag(label::AbstractString, region::AbstractString, port::Intege
 end
 
 const _WORKER_JL = joinpath(@__DIR__, "worker.jl")
-# Slate-owned env carrying ONLY Revise (+ its deps), so the worker can hot-reload the
-# notebook's parent-project /src without adding Revise to the user's project. Stacked AFTER
-# the notebook project on LOAD_PATH so the notebook's own deps always win.
-const _REVISE_ENV = joinpath(@__DIR__, "worker_revise")
-# Slate-owned env carrying ONLY ExpressionExplorer (same pinned version as the engine's), so the
-# worker can analyze macro EXPANSIONS where the macros live (see macroexpand.jl) without adding
-# EE to the user's project. Placed after the notebook project like the Revise env.
-const _EE_ENV = joinpath(@__DIR__, "worker_ee")
+# Slate-owned WORKER INFRA env — Revise (hot-reload the parent project's /src), ExpressionExplorer
+# (macro-aware dep recovery, pinned to the engine's version — see macroexpand.jl), and
+# SlateExtensionsBase (the extension SDK: Widget/Choice/WebPage/slate_context). Carried in ONE env
+# (was three single-package dirs) so the worker gets them without the user's project declaring them.
+# Stacked AFTER the notebook project on LOAD_PATH so the notebook's own copies always win.
+const _INFRA_ENV = joinpath(@__DIR__, "worker_infra")
 
 # ── Worker KaimonGate env ──────────────────────────────────────────────────────
 # The worker imports KaimonGate (the ZMQ bridge) from LOAD_PATH[1]. Pointing that at
@@ -360,6 +358,7 @@ function _ensure_poller!()
                 srcerr = Dict{String,String}()          # parent /src parse/apply errors
                 prog = Dict{Tuple{String,String},Tuple{Float64,String,Bool}}()   # (notebook, bar id) → LATEST (frac,msg,done)
                 emits = Tuple{String,String,Any}[]   # ordered slate_emit pushes (rid, channel, deserialized VALUE) — NOT coalesced; each event matters
+                binemits = Tuple{String,Vector{UInt8}}[]   # ordered slate_emit_bin frames (rid, raw binary frame) — forwarded to the page WS as-is
                 prepares = Dict{String,String}()     # notebook → LATEST env-prep status JSON (coalesced per wake; a burst collapses harmlessly)
                 # Block until a gate-stream message arrives (drain-first, then park in poll() on
                 # the SUB FDs up to a 250 ms idle ceiling) instead of busy-polling at 20 Hz: an
@@ -398,6 +397,8 @@ function _ensure_poller!()
                             val = try; Serialization.deserialize(IOBuffer(Base64.base64decode(String(parts[2])))); catch; nothing; end
                             push!(emits, (rid, String(parts[1]), val))
                         end
+                    elseif m.channel == "slate_emit_bin"      # a raw binary numeric frame (bytes carry channel+meta+dtype+shape+payload)
+                        m.data isa Vector{UInt8} && push!(binemits, (rid, m.data))
                     elseif m.channel == "slate_telemetry"     # worker's 2s sample — per-kernel ring + WS push
                         _record_telemetry!(m.conn_name, String(m.data))
                     elseif m.channel == "slate_log"           # worker log record → live tail push (no store)
@@ -423,6 +424,9 @@ function _ensure_poller!()
                 end
                 for (rid, ch, d) in emits
                     _do_emit(rid, ch, d)
+                end
+                for (rid, frame) in binemits
+                    _do_emit_bin(rid, frame)
                 end
             catch e
                 # Surface a persistent failure (this class of bug — a missing/renamed Kaimon
@@ -451,8 +455,7 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # worker can attribute package provenance (which deps are notebook adds vs parent).
     return """
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
-    insert!(LOAD_PATH, 3, $(repr(_REVISE_ENV)))   # slate-owned Revise — after the notebook project (@), before globals
-    insert!(LOAD_PATH, 4, $(repr(_EE_ENV)))       # slate-owned ExpressionExplorer — macro-aware deps (worker.jl _EE_OK)
+    insert!(LOAD_PATH, 3, $(repr(_INFRA_ENV)))   # slate-owned infra (Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
     import KaimonGate
     # Load Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
     # KaimonGate.serve auto-starts a watcher that PUBs `files_changed` on Revise.revision_event.
@@ -1030,6 +1033,20 @@ function env_info(k::GateKernel, report::Report)
     nb = _grp(get(wire, :notebook, get(wire, "notebook", nothing)))
     par = _grp(get(wire, :parent, get(wire, "parent", nothing)))
     return (notebook = nb === nothing ? (path = "", name = "", deps = Dict{String,Any}[]) : nb, parent = par)
+end
+
+# The worker's SlateExtensionsBase extension manifest — what its loaded packages registered for the
+# page to mirror (`frontend` scripts now; more fields as SEB grows). Pulled once per run drain (see
+# `_refresh_extensions!`); returns `nothing` when there's no live worker, so the caller keeps its
+# current registry. No `prepare!`: we only ask a worker that just ran, never spawn one to query.
+function extension_manifest(k::GateKernel)
+    k.conn === nothing && return nothing
+    return try
+        _tool(k, "__slate_extension_manifest", Dict{String,Any}(); timeout = 15.0)
+    catch e
+        @debug "slate: extension manifest gate call failed" exception = e
+        nothing
+    end
 end
 
 # Filesystem coordinates for a self-contained export (active project dir + path-dep sources).

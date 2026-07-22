@@ -51,10 +51,16 @@ mutable struct LiveNotebook
     agent_busy::Bool                     # true while ANY bound agent has a turn in flight (history attribution)
     agents::Dict{String,String}          # crew label → Kaimon agent id (multi-agent crew; "" = default)
     scratch::Vector{Cell}                # in-memory scratchpad cells (slate.eval) — never persisted/exported/graphed
-    # Inner constructor takes the original 13 fields and starts an empty scratchpad, so every existing
-    # positional call site (server + tests) is unchanged; scratch is populated at runtime by slate.eval.
+    frontend::Vector{@NamedTuple{id::String, js::String, esm::Bool, kind::String}}  # package-declared front-end
+                                         # scripts, refreshed once per drain from the worker's SlateExtensionsBase
+                                         # manifest (`_refresh_extensions!`); sticky within a session, id-deduped,
+                                         # declaration order. `esm` ⇒ ES module; non-empty `kind` ⇒ a component whose
+                                         # default export Slate wraps + registers. See `_frontend_scripts`.
+    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend registry, so every
+    # existing positional call site (server + tests) is unchanged; both are populated at runtime.
     LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
-        new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents, Cell[])
+        new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents,
+            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[])
 end
 
 # ── Notebook-lock protocol (`nb.lock`) ─────────────────────────────────────────────────────────────
@@ -134,6 +140,7 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_userprog!(nb.report.id, (frac, msg, id, done) -> (try; _broadcast(nb, "cellprog:" * JSON.json(Dict("frac" => frac, "msg" => msg, "id" => id, "done" => done))); catch; end))
     register_prepare!(nb.report.id, json -> (try; _broadcast(nb, "prepare:" * json); catch; end))   # env precompile progress → "Preparing packages" banner
     register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
+    register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
     return nb
 end
@@ -141,7 +148,7 @@ function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
-    unregister_prepare!(nb.report.id)
+    unregister_prepare!(nb.report.id); unregister_bin_emit!(nb.report.id)
     return nb
 end
 
@@ -153,10 +160,12 @@ end
 # callback fed the subprocess's stdout/stderr line-by-line as it precompiles — mirrors the
 # remote-provision path's `_run_streamed`, so a slow first-run instantiate narrates itself into
 # the boot banner instead of being silent for however long `Pkg.instantiate()` takes.
-function _instantiate_env!(envdir::AbstractString; online = nothing)
+function _instantiate_env!(envdir::AbstractString; online = nothing,
+                           code::AbstractString = "using Pkg; Pkg.instantiate()", quiet::Bool = true)
     jl = Base.julia_cmd()[1]
+    ok = true
     try
-        cmd = `$jl --project=$envdir --startup-file=no -e 'using Pkg; Pkg.instantiate()'`
+        cmd = `$jl --project=$envdir --startup-file=no -e $code`
         if online === nothing
             run(pipeline(cmd; stdout = devnull, stderr = devnull))
         else
@@ -168,8 +177,34 @@ function _instantiate_env!(envdir::AbstractString; online = nothing)
                 isempty(s) || (try; online(String(s)); catch; end)
             end
             wait(proc)
+            ok = success(proc)
         end
     catch
+        ok = false
+        quiet || rethrow()
+    end
+    return ok
+end
+
+# Rebuild a STALE or broken forked notebook env from its parent: re-seed via the shared policy
+# (`seed_env_project!` — dev paths made absolute), then a subprocess `develop(parent)` + instantiate,
+# with ONE reset-and-retry from the authoritative parent. The local mirror of the remote provisioner's
+# self-healing `build_env!`, and the counterpart to the worker's in-process `_seed_notebook_env!` for
+# when the worker can't run yet (a stale env would crash it at boot). Streams into the boot banner.
+function _rebuild_notebook_env!(envdir::AbstractString, parent::AbstractString; online = nothing)
+    build = function ()
+        pname = ReportEngine.seed_env_project!(envdir, parent)
+        dev = isempty(pname) ? "" :
+              "Pkg.develop(Pkg.PackageSpec(path=raw\"$(parent)\"); preserve=Pkg.PRESERVE_ALL); "
+        ok = _instantiate_env!(envdir; online = online, code = "using Pkg; $(dev)Pkg.instantiate()")
+        ok && ReportEngine.stamp_env!(envdir, parent)
+        return ok
+    end
+    if !build()
+        # Reset the env + rebuild ONCE from the authoritative parent (a half-written / stale env dir
+        # self-heals instead of wedging every future open — same policy as the remote provisioner).
+        for f in ("Project.toml", "Manifest.toml"); try; rm(joinpath(envdir, f); force = true); catch; end; end
+        build()
     end
     return envdir
 end
@@ -268,7 +303,14 @@ function _select_kernel(path::AbstractString, report; threads::AbstractString = 
             ReportEngine.ensure_notebook_env!(envdir)
             return GateKernel(envdir; parent = "", envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
         elseif env_exists
-            # Already has its own packages → run in the forked env (extends the parent).
+            # Already has its own packages → run in the forked env (extends the parent). But first, if
+            # the PARENT changed since this fork was seeded (a dep added, a re-resolve — e.g. an
+            # extension package that gained a dependency), REBUILD it: a stale fork would crash the
+            # worker at boot on `using` a dep the fork never received. Self-healing, before spawn.
+            if ReportEngine.env_stale(envdir, parent)
+                ReportEngine._rlog("_select_kernel: notebook env stale vs parent → rebuilding $(basename(envdir))")
+                _rebuild_notebook_env!(envdir, parent; online = online)
+            end
             return GateKernel(envdir; parent = parent, envdir = envdir, threads = th, extra_flags = ef, label = lbl, online = online)
         else
             # Base mode: no notebook-specific packages yet → run directly in the parent.
@@ -980,6 +1022,71 @@ function _reestablish_effects!(report)
     end
     return nothing
 end
+
+# Read a field tolerant of a NamedTuple (local) or a Dict/JSON3 shape (off the gate) — for extension
+# manifest entries (`(; id, js)`), which arrive as JSON3 objects across the gate.
+_manifest_field(e, f::Symbol) = e isa AbstractDict ? get(e, f, get(e, String(f), nothing)) :
+                                (hasproperty(e, f) ? getproperty(e, f) : nothing)
+
+# Add/replace one front-end script in a notebook's sticky registry, deduped by `id` (a re-declaration
+# replaces in place; declaration order is otherwise preserved). An empty/missing `id` keys on the
+# script's content hash — matching SlateExtensionsBase `provide_frontend!`. `esm` marks an ES module;
+# a non-empty `kind` marks a component (Slate wraps its default export under `kind`). Returns true if
+# the registry CHANGED (new id, or an existing id's fields differ), so the caller can bump the version.
+function _register_frontend!(nb::LiveNotebook, idv, js::AbstractString, esm::Bool = false,
+                            kind::AbstractString = "")
+    id = (idv === nothing || isempty(String(idv))) ? "fe:" * string(hash(js); base = 16) : String(idv)
+    entry = (id = id, js = String(js), esm = esm, kind = String(kind))
+    i = findfirst(e -> e.id == id, nb.frontend)
+    if i === nothing
+        push!(nb.frontend, entry); return true
+    elseif nb.frontend[i] != entry
+        nb.frontend[i] = entry; return true
+    end
+    return false
+end
+
+# Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
+# (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
+# which may run during namespace priming (no harvestable eval), so the process-global registry is the
+# authoritative source. Pulled ONCE per drain (see `_run_loop!`) — the gate worker is queried, the
+# in-process kernel read directly. Merges each script (sticky, id-deduped); returns true if anything
+# changed, so the caller pushes a fresh state for the browser to inject. Best-effort: a query failure
+# leaves the registry as-is. Runs under `nb.lock`.
+function _refresh_extensions!(nb::LiveNotebook)
+    manifest = try
+        nb.kernel isa ReportEngine.GateKernel ?
+            ReportEngine.extension_manifest(nb.kernel) :
+            ReportEngine.inprocess_extension_manifest(ReportEngine.report_module(nb.report))
+    catch e
+        ReportEngine._rlog("slate: extension manifest refresh failed: $(first(sprint(showerror, e), 120))")
+        return false
+    end
+    manifest === nothing && return false
+    fe = _manifest_field(manifest, :frontend)
+    fe === nothing && return false
+    changed = false
+    for e in fe
+        js = _manifest_field(e, :js); js === nothing && continue
+        esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
+        kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
+        # The manifest was pulled OFF nb.lock (a round-trip); take the lock only for the registry mutation,
+        # so this stays protocol-safe when the runner calls `_refresh_extensions!` off-lock.
+        lock(nb.lock) do
+            _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
+        end && (changed = true)
+    end
+    return changed
+end
+
+# The notebook's package-declared front-end scripts, as `(; id, js, esm)` entries in declaration order.
+# Slate injects each ONCE — live (`state_json` → the browser appends every unseen `<script>`, as a module
+# when `esm`) and in a static export — so a package's widget renderer / editor extension registers with
+# no boot cell. Populated by `_refresh_extensions!` from the worker's SlateExtensionsBase manifest.
+_frontend_scripts(nb::LiveNotebook) = nb.frontend
+
+_frontend_scripts_json(nb::LiveNotebook) =
+    [Dict{String,Any}("id" => e.id, "js" => e.js, "esm" => e.esm, "kind" => e.kind) for e in nb.frontend]
 
 # Read a table spec's declared id, tolerating both JSON3.Object (Symbol keys, as
 # deserialized off the gate) and a plain Dict{String,Any} (server-built specs).
@@ -2388,15 +2495,21 @@ function _run_loop!(nb::LiveNotebook)
         # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the
         # "barrier" marking. Kept off the hot per-cell path — it fires once per drain and no-ops unless
         # a NEW module got resolved.
-        # PROTOCOL: the export/macro RESOLVE against the kernel is a round-trip, so it runs OFF nb.lock
-        # (`rebuild=false`); we then re-take the lock ONLY for the graph rebuild (a report mutation).
-        # Holding nb.lock across these resolves was the teardown-deadlock hazard. (`again` re-arm below
-        # re-drains any cell left stale — covering the racer-restale that `refine_macros!` skips here.)
+        # PROTOCOL: the export/macro RESOLVE and the extension-manifest pull are kernel round-trips, so
+        # they run OFF nb.lock (`rebuild=false`); we re-take the lock ONLY for the graph rebuild + version
+        # bump (report mutations). Holding nb.lock across these was the teardown-deadlock hazard. (`again`
+        # re-arm below re-drains any cell left stale — covering the racer-restale refine_macros! skips.)
         resolved_u = ReportEngine.refine_usings!(nb.report, nb.kernel; rebuild = false)
+        # `rebuild=false` returns before the racer-restale (it needs the rebuilt graph) — a parallel drain's
+        # raced readers are re-drained by the `again` re-arm below instead.
         resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false)
-        if resolved_u || resolved_m
+        # A package loaded this drain may have declared front-end scripts (widget renderers, editor
+        # extensions) from `__init__` — pull the worker's extension manifest into the notebook registry so
+        # the browser injects them. Once-per-drain; no-ops unless a NEW package registered something.
+        resolved_x = _refresh_extensions!(nb)
+        if resolved_u || resolved_m || resolved_x
             with_report(nb) do report
-                ReportEngine.rebuild_precise!(report)
+                (resolved_u || resolved_m) && ReportEngine.rebuild_precise!(report)   # rebuild only if the graph changed
                 nb.version += 1
             end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
