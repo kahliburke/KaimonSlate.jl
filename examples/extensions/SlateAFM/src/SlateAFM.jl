@@ -9,21 +9,34 @@ top of Slate's own seams — no fork of the server:
 - `provide_frontend!` injects the **host shim** (`assets/afm-host.js`), which registers the `SlateAFM.AFM`
   widget kind via Slate's low-level `slateRegisterWidget` and adapts Slate's bound value into an AFM
   `model`, with `AbortSignal`-based cleanup.
-- `provide_assets!` **serves** the bundled example modules (and is how any multi-file AFM module ships).
+- `provide_assets!` **serves** module files (and is how any multi-file AFM module ships).
 - The bound value is the widget's **traits dict**; `model.save_changes()` commits it (reactive to reader
   cells), and a value pushed from Julia fires `change:<key>`.
 
+The core API is just `afm(src; css, traits…)` where `src` is the URL of an AFM ES module. Where that URL
+comes from is the "install" model (increasing power):
+
+1. **A CDN/npm URL** — `afm("https://esm.sh/…")`. Zero install; the browser fetches it.
+2. **A module served from a package** — `afm(ext_asset_url(SomePkg, "widget.js"))`, i.e. a package that
+   `provide_assets!`es the ESM (this package's own demo modules work exactly this way).
+3. **A local ESM file / a PyPI anywidget** (roadmap) — a helper that serves a `.js` you point it at, or,
+   best-effort, shells out to a `pip`/`python` found on `PATH` to fetch a published anywidget's
+   `_esm`/`_css`/trait-defaults into a served scratch dir. SlateAFM takes **no** Python/Conda dependency —
+   an AFM module is plain JS; the system tools are an optional convenience with a manual fallback.
+
 ```julia
 using SlateAFM
-@bind st afm(afm_example("counter.js"); count = 0)   # a self-contained AFM counter
-st                                                    # → Dict("count" => n), reactive
+@bind st afm(ext_asset_url(SlateAFM, "examples/counter.js"); count = 0)   # a self-contained AFM counter
+st                                                                        # → Dict("count" => n), reactive
 ```
 """
 module SlateAFM
 
 using SlateExtensionsBase
 
-export AFM, afm, afm_example, afm_on_msg, afm_emit
+# `ext_asset_url` (from SlateExtensionsBase) is the mechanism for pointing `afm` at a module served from a
+# package's `provide_assets!` scope — re-exported so a notebook builds those URLs without a bespoke helper.
+export AFM, afm, afm_on_msg, afm_emit, ext_asset_url
 
 # The wire kind Slate registers the host shim under. A namespaced (dotted) kind renders as a generic
 # `customwidget` container that delegates to the registered impl — exactly what an AFM module needs, since
@@ -34,8 +47,9 @@ const KIND = "SlateAFM.AFM"
     afm(src; traits...) -> AFM
 
 An AFM widget bound to a **traits dict** (`traits...` seed it). `src` is the URL of the AFM ES module to
-load — a served asset ([`afm_example`](@ref) / [`ext_asset_url`](@ref)) or any CDN/ESM URL. Bind it with
-`@bind`; the bound value is the trait dict the module reads/writes via its `model`.
+load — a package-served module via [`ext_asset_url`](@ref), or any CDN/ESM URL. `css` injects
+stylesheet URL(s) some widgets assume the host loads. Bind it with `@bind`; the bound value is the trait
+dict the module reads/writes via its `model`.
 """
 struct AFM
     src::String
@@ -77,14 +91,6 @@ afm_on_msg(f, id::AbstractString) = (_MSG["SlateAFM.msg:" * String(id)] = f; not
 Send `content` TO a widget (received by its `model.on("msg:custom", cb)`). Call from a cell.
 """
 afm_emit(id::AbstractString, content) = slate_emit("SlateAFM.msg:" * String(id), (content = content,))
-
-"""
-    afm_example(name) -> String
-
-The served URL of a bundled example AFM module under `assets/examples/<name>` (e.g. `"counter.js"`),
-via this package's `provide_assets!` scope.
-"""
-afm_example(name::AbstractString) = ext_asset_url(@__MODULE__, "examples/" * name)
 
 # Package front-end: serve the bundled asset tree (host shim + example modules) and inject the host shim,
 # which self-registers the `SlateAFM.AFM` widget kind. Both are idempotent per drain.
