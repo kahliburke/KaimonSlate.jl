@@ -183,6 +183,81 @@ macro pkg_asset(path)
     :(read(joinpath(pkgdir($(__module__)), $(esc(path))), String))
 end
 
+# ── Package-vendored asset DIRECTORIES (served from disk, not inlined) ─────────
+# `provide_frontend!` inlines ONE script's text into the page — fine for a component module, useless
+# for a multi-file front-end library that can't be reduced to a single string (Cesium's Workers/Assets,
+# echarts-gl, a lib that ships fonts/wasm). Such a library must be SERVED from disk: a package declares a
+# directory, Slate serves its files from a stable package-scoped route (`/ext-assets/<pkg>/<sub>`) while
+# the package is loaded, and the tree travels in a static export. Offline + pinned, no fork of Slate's
+# `vendor.json`. The registry carries a package NAME → an ABSOLUTE dir on disk (the worker and the hub
+# are co-located, so the hub reads the path directly; remote-worker file-shipping is a later seam).
+const _ASSETS = Dict{String,String}()
+
+# The package-scoped route prefix Slate serves vendored asset dirs under. This is the SDK-owned end of
+# the CONTRACT — Slate's hub router (`/ext-assets/**`) and its static-export URL rewriter MUST match it.
+const EXT_ASSET_PREFIX = "/ext-assets/"
+
+"""
+    ext_asset_url(pkg, sub = "") -> String
+
+The URL a package-vendored asset (declared with [`provide_assets!`](@ref)) is served at:
+`/ext-assets/<pkg>/<sub>`. Build asset URLs with this instead of hardcoding the route — the prefix is
+owned by the SDK (Slate rewrites it to a page-local sibling in a static export). `sub=""` gives the
+base URL for the package's tree.
+
+```julia
+_gl = ext_asset_url("GlobeSlate", "echarts-gl.min.js")   # "/ext-assets/GlobeSlate/echarts-gl.min.js"
+```
+"""
+ext_asset_url(pkg::AbstractString, sub::AbstractString = "") =
+    EXT_ASSET_PREFIX * String(pkg) * "/" * lstrip(String(sub), '/')
+
+"""
+    provide_assets!(pkg, dir) -> String
+
+Declare a directory of front-end assets that Slate should SERVE while this package is loaded — call it
+from your module's `__slate_frontend` hook (or `__init__`). `pkg` is a stable, package-scoped name (its
+files are served at `/ext-assets/<pkg>/<subpath>` live, and copied into a static export); `dir` is an
+absolute directory, typically [`@pkg_dir`](@ref). Returns the package's base URL (see
+[`ext_asset_url`](@ref)) so you needn't hardcode the route:
+
+```julia
+function __slate_frontend(slate_on)
+    base = provide_assets!("GlobeSlate", @pkg_dir("assets/echarts-gl"))
+    # build asset URLs from `base` / `ext_asset_url("GlobeSlate", "echarts-gl.min.js")`
+end
+```
+
+For a front-end LIBRARY too large or multi-file to inline as a `provide_frontend!` string (Cesium,
+echarts-gl, anything shipping fonts/workers/wasm). A re-declaration of the same `pkg` replaces the dir.
+The served files are pinned + offline-capable and travel in a static export. To inject a *single* script,
+prefer [`provide_frontend!`](@ref)/[`register_component!`](@ref); use this to serve the files that script
+(or a widget) then `fetch`es / `import`s / `<script src=>`s from `/ext-assets/<pkg>/…`.
+"""
+function provide_assets!(pkg::AbstractString, dir::AbstractString)
+    _ASSETS[String(pkg)] = abspath(String(dir))
+    return ext_asset_url(pkg)
+end
+
+"""
+    @pkg_dir(path) -> String
+
+Absolute path to a directory bundled in the CALLING package, resolved against its package root
+(`pkgdir`) — the directory analogue of [`@pkg_asset`](@ref). For declaring a vendored asset tree:
+`provide_assets!("GlobeSlate", @pkg_dir("assets/echarts-gl"))`.
+"""
+macro pkg_dir(path)
+    :(abspath(joinpath(pkgdir($(__module__)), $(esc(path)))))
+end
+
+"""
+    asset_dirs() -> Dict{String,String}
+
+Every package-vendored asset directory declared by the loaded packages (`pkg => absolute dir`) — a copy,
+so callers can't mutate the registry. See [`extension_manifest`](@ref) for what Slate pulls.
+"""
+asset_dirs() = copy(_ASSETS)
+
 """
     frontend_scripts() -> Dict{String,String}
 
@@ -199,9 +274,13 @@ page — Slate pulls it once per run drain and merges it into the notebook. Fiel
 - `frontend`: the front-end scripts (`(; id, js, esm, kind)` each) from [`provide_frontend!`](@ref) /
   [`register_widget!`](@ref) / [`register_component!`](@ref). `esm=true` ⇒ inject as an ES module;
   a non-empty `kind` ⇒ a component (Slate wraps its `export default` and registers it under `kind`).
+- `assets`: the package-vendored asset DIRECTORIES (`(; pkg, dir)` each) from [`provide_assets!`](@ref) —
+  Slate serves each `dir` at `/ext-assets/<pkg>/…` while the package is loaded and copies it into a
+  static export.
 
-Extensible: as new package-registration seams are added (e.g. package-served asset directories), they
-surface as additional fields here, carried by the same query — no new transport per feature.
+Extensible: as new package-registration seams are added they surface as additional fields here, carried
+by the same query — no new transport per feature.
 """
 extension_manifest() =
-    (; frontend = [(; id = k, js = v.js, esm = v.esm, kind = v.kind) for (k, v) in _FRONTEND])
+    (; frontend = [(; id = k, js = v.js, esm = v.esm, kind = v.kind) for (k, v) in _FRONTEND],
+       assets = [(; pkg = k, dir = v) for (k, v) in _ASSETS])

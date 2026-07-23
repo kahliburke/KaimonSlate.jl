@@ -625,6 +625,35 @@ function _make_router(h::Hub)
         p = joinpath(_JS_DIR, f)
         isfile(p) ? _asset(read(p, String), "application/javascript; charset=utf-8") : HTTP.Response(404)
     end)
+    # Package-vendored asset directories (SlateExtensionsBase `provide_assets!`): serve a loaded package's
+    # front-end asset tree (echarts-gl, Cesium's Workers/Assets, …) from disk at `/ext-assets/<pkg>/<sub>`.
+    # `<pkg>` is package-scoped (the manifest maps it to an absolute dir on THIS host — the worker is
+    # co-located with the hub); the dir is identical across notebooks, so the first notebook that declared
+    # `<pkg>` resolves it. Immutable-cached; the same `**`-greedy + `..`-traversal discipline as the sibling
+    # asset routes. A static export rewrites these URLs to page-local siblings (see `_frontend_export_head`).
+    HTTP.register!(router, "GET", "/ext-assets/**", req -> begin
+        m = match(r"^/ext-assets/([^/]+)/(.*)$", HTTP.URI(req.target).path)
+        m === nothing && return HTTP.Response(404)
+        pkg = HTTP.URIs.unescapeuri(String(m.captures[1]))
+        sub = HTTP.URIs.unescapeuri(String(m.captures[2]))
+        root = lock(h.lock) do
+            for nb in values(h.notebooks)
+                d = get(nb.assets, pkg, nothing); d === nothing || return d
+            end
+            return nothing
+        end
+        root === nothing && return HTTP.Response(404, "no such package asset dir (package loaded?)")
+        rootn = normpath(root)
+        p = normpath(joinpath(rootn, strip(sub, '/')))
+        # stay inside the vendored dir (accept either separator so the guard holds on Windows too)
+        (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) || return HTTP.Response(404)
+        isfile(p) || return HTTP.Response(404, "no such asset")
+        # `nosniff`: these files are same-origin, so pin the declared type — a mislabelled or author-crafted
+        # asset can't be content-sniffed into an executable type (proposal security item #3).
+        HTTP.Response(200, ["Content-Type" => _site_ctype(p),
+                            "X-Content-Type-Options" => "nosniff",
+                            "Cache-Control" => "public, max-age=31536000, immutable"], read(p))
+    end)
     # Vendored map GeoJSON for echarts `registerMap` (e.g. /assets/maps/world.json) — served
     # immutable; the front-end fetches + registers a map once per page.
     HTTP.register!(router, "GET", "/assets/maps/{file}", req -> begin

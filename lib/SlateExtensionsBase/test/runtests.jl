@@ -263,6 +263,41 @@ SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</
         empty!(SlateExtensionsBase._FRONTEND)
     end
 
+    # Package-vendored asset DIRECTORIES: `provide_assets!(pkg, dir)` declares a front-end asset tree
+    # (echarts-gl, Cesium's workers/assets) Slate serves from disk at `/ext-assets/<pkg>/…` while the
+    # package is loaded, surfacing in `extension_manifest().assets` alongside the front-end scripts.
+    @testset "provide_assets! (vendored asset dirs)" begin
+        empty!(SlateExtensionsBase._ASSETS)                       # isolate
+
+        @test asset_dirs() == Dict{String,String}()              # empty to start
+        # `ext_asset_url` builds the served route; the prefix is SDK-owned (packages don't hardcode it).
+        @test ext_asset_url("GlobeSlate") == "/ext-assets/GlobeSlate/"
+        @test ext_asset_url("GlobeSlate", "echarts-gl.min.js") == "/ext-assets/GlobeSlate/echarts-gl.min.js"
+        @test ext_asset_url("P", "/lead/slash.js") == "/ext-assets/P/lead/slash.js"   # leading slash trimmed
+        base = provide_assets!("GlobeSlate", "assets/echarts-gl")  # a relative dir → absolutised
+        @test base == "/ext-assets/GlobeSlate/"                    # returns the package's base URL
+        d = asset_dirs()
+        @test d["GlobeSlate"] == abspath("assets/echarts-gl")     # stored absolute
+        @test isabspath(d["GlobeSlate"])
+        d["GlobeSlate"] = "tampered"                              # returned dict is a COPY
+        @test asset_dirs()["GlobeSlate"] == abspath("assets/echarts-gl")
+
+        provide_assets!("GlobeSlate", "assets/v2")                # same pkg re-declared → replaces
+        @test asset_dirs()["GlobeSlate"] == abspath("assets/v2")
+        @test length(asset_dirs()) == 1
+
+        # The manifest the hub pulls carries an `assets` list of (; pkg, dir) mirroring the registry.
+        provide_assets!("CesiumSlate", "/abs/cesium")            # already absolute → kept as-is
+        m = extension_manifest()
+        @test hasproperty(m, :assets)
+        byp = Dict(e.pkg => e.dir for e in m.assets)
+        @test byp["GlobeSlate"] == abspath("assets/v2")
+        @test byp["CesiumSlate"] == "/abs/cesium"
+        @test length(m.assets) == 2
+
+        empty!(SlateExtensionsBase._ASSETS)
+    end
+
     # Lazy front-end: `required_assets(::Type{W})` + `ensure_widget_assets!` — Slate loads a widget's JS the
     # first time it's seen (no __init__), under the type-derived kind, idempotently.
     @testset "required_assets lazy loading" begin

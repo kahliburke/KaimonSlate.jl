@@ -46,7 +46,8 @@ export WebPage, register_widget_js
 # Auto-registered front-end (no boot cell)
 export register_widget!, register_component!, provide_frontend!, @pkg_asset,
        required_assets, ensure_widget_assets!, ensure_module_frontend!, ensure_module_frontends!,
-       frontend_scripts, extension_manifest
+       frontend_scripts, extension_manifest, provide_assets!, @pkg_dir, asset_dirs,
+       ext_asset_url
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere, slate_on
