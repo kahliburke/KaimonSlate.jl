@@ -32,6 +32,9 @@ Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
 Typst_jll = "eb4b1da6-20f6-5c66-9826-fdb8ad410d0e"
 
+[sources]
+SlateExtensionsBase = {path = "lib/SlateExtensionsBase"}
+
 [compat]
 Base64 = "1.11.0"
 CodecZlib = "0.7.8"
@@ -63,12 +66,6 @@ Typst_jll = "0.14"
 julia = "1.10"
 
 [apps.slate]
-
-# The extension SDK lives in the monorepo lib/ and versions in lockstep with the server (so the
-# injected notebook namespace and an external extension agree on Widget/Choice/WebPage/…). A
-# registered install resolves the registered package instead.
-[sources]
-SlateExtensionsBase = {path = "lib/SlateExtensionsBase"}
 
 [extras]
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
