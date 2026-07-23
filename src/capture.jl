@@ -626,25 +626,37 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     tables = Any[]
     animations = Any[]
     if err === nothing && value !== nothing && !quiet
-        # A bare Matrix/SparseMatrixCSC/structured-LinearAlgebra return auto-renders via
-        # slate_matrix (KaTeX / dotted notation / downsampled heatmap, picked by size and
-        # type) instead of dumping the terminal grid below — replace, then fall through the
-        # SAME dispatch (a heatmap comes back as an EChart; the KaTeX forms fall to the
-        # generic rich-MIME branch below via their `show(io, MIME"text/latex", …)` method).
-        if value isa AbstractMatrix
-            value = try; Base.invokelatest(slate_matrix, value); catch; value; end
-        end
-        if value isa EChart
-            push!(echarts, value.option)
-        elseif value isa Animation
-            push!(animations, (manifest = value.manifest, frames = value.frames, lut = value.lut))
-        elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
-            push!(tables, _table_wire(st))
-        else
-            try
-                Base.invokelatest(_capture_rich!, chunks, value)
-            catch
+        # Re-establish this eval's execution context around the RETURN VALUE's rich render. The value's
+        # `show` runs HERE — AFTER the eval's `finally` already cleared `:slate_ctx`/`:slate_cell` — but a
+        # package `show` method (e.g. a Bonito figure's `setup_connection`) registers per-cell teardown via
+        # `slate_on_cleanup`, which is a no-op without the context. Set it for the render, clear it after
+        # (finally), so a re-run of the cell actually tears down what the LAST render allocated (a live
+        # session, a subscription) instead of leaking it. Explicit `display(…)` during the eval already
+        # ran inside the context; only the trailing return-value render falls outside it.
+        slate_ctx === nothing || (task_local_storage(:slate_ctx, slate_ctx); task_local_storage(:slate_cell, cid))
+        try
+            # A bare Matrix/SparseMatrixCSC/structured-LinearAlgebra return auto-renders via
+            # slate_matrix (KaTeX / dotted notation / downsampled heatmap, picked by size and
+            # type) instead of dumping the terminal grid below — replace, then fall through the
+            # SAME dispatch (a heatmap comes back as an EChart; the KaTeX forms fall to the
+            # generic rich-MIME branch below via their `show(io, MIME"text/latex", …)` method).
+            if value isa AbstractMatrix
+                value = try; Base.invokelatest(slate_matrix, value); catch; value; end
             end
+            if value isa EChart
+                push!(echarts, value.option)
+            elseif value isa Animation
+                push!(animations, (manifest = value.manifest, frames = value.frames, lut = value.lut))
+            elseif (st = (try Base.invokelatest(_as_slate_table, value) catch; nothing end)) !== nothing
+                push!(tables, _table_wire(st))
+            else
+                try
+                    Base.invokelatest(_capture_rich!, chunks, value)
+                catch
+                end
+            end
+        finally
+            slate_ctx === nothing || (delete!(task_local_storage(), :slate_ctx); delete!(task_local_storage(), :slate_cell))
         end
     end
 
