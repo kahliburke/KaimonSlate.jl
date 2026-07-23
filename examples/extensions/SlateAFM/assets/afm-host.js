@@ -62,18 +62,42 @@
     };
   }
 
+  // Inject one or more stylesheet URLs into the page head, once each (anywidget modules often assume their
+  // CSS is loaded by the host — e.g. pdbe-molstar). Deduped page-wide by href.
+  function ensureCss(urls) {
+    if (!urls) return;
+    var seen = window.__slateAFMcss || (window.__slateAFMcss = {});
+    [].concat(urls).forEach(function (u) {
+      u = String(u);
+      if (seen[u]) return;
+      seen[u] = true;
+      var link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = u;
+      document.head.appendChild(link);
+    });
+  }
+
   window.slateRegisterWidget("SlateAFM.AFM", {
     wire: function (el, api) {
       var controller = new AbortController();
       var signal = controller.signal;
       var params = api.params || {};
+      ensureCss(params.css);
       var msgCh = "SlateAFM.msg:" + (params.id || api.bindId || "");
       var model = makeModel(api, function (content /*, buffers */) {
         // JS → Julia custom message. (Binary buffers are a follow-up — SlateBinary transport exists.)
         try { window.slateCall("SlateAFM.msg", { ch: msgCh, content: content }); } catch (e) {}
       });
-      var state = { controller: controller, model: model, cleanups: [], msgCh: msgCh };
+      // A mounted-instance record so OTHER widgets can compose with this one (AFM host.getWidget/getModel).
+      // Keyed by the widget's `id` (afm(src; id="…")) in a page-global registry.
+      var instId = String(params.id || api.bindId || "");
+      var readyResolve;
+      var record = { model: model, widget: null, exports: undefined,
+                     ready: new Promise(function (res) { readyResolve = res; }) };  // resolves after initialize
+      var state = { controller: controller, model: model, cleanups: [], msgCh: msgCh, id: instId, record: record };
       el._afm = state;
+      if (instId) { (window.__slateAFM || (window.__slateAFM = {}))[instId] = record; }
 
       // Julia → JS custom messages: slate_emit(msgCh, {content}) → model "msg:custom" listeners.
       try { window.slateOnStream(msgCh, function (m) { model._recv(m && m.content, m && m.buffers); }); } catch (e) {}
@@ -81,19 +105,38 @@
       var src = params.src;
       if (!src) { el.innerHTML = '<pre class="afm-err">SlateAFM: widget has no module `src`</pre>'; return; }
 
-      // Minimal host surface for widget composition (AFM `host.getWidget/getModel`) — stubbed for v1.
+      // AFM host surface: resolve another mounted AFM instance by ref. A ref is the widget's `id` (with or
+      // without the "anywidget:" prefix, for compatibility with the spec's ref format).
+      function refId(ref) { ref = String(ref); return ref.lastIndexOf("anywidget:", 0) === 0 ? ref.slice(10) : ref; }
+      function lookup(ref) { return (window.__slateAFM || {})[refId(ref)]; }
       var host = {
-        getWidget: function () { return Promise.reject(new Error("SlateAFM: host.getWidget not implemented")); },
-        getModel: function () { return Promise.reject(new Error("SlateAFM: host.getModel not implemented")); },
+        getWidget: function (ref) {
+          var rec = lookup(ref);
+          if (!rec) return Promise.reject(new Error("SlateAFM: no widget for ref '" + ref + "'"));
+          return rec.ready.then(function () {   // wait until the target's initialize has completed
+            return {
+              exports: rec.exports,
+              render: function (opts) {
+                opts = opts || {};
+                return Promise.resolve(rec.widget && rec.widget.render &&
+                  rec.widget.render({ model: rec.model, el: opts.el, signal: opts.signal, host: host }));
+              },
+            };
+          });
+        },
+        getModel: function (ref) {
+          var rec = lookup(ref);
+          return rec ? Promise.resolve(rec.model)
+                     : Promise.reject(new Error("SlateAFM: no model for ref '" + ref + "'"));
+        },
       };
 
-      // Load the AFM module and run its lifecycle. A plain-object or factory-function default export is
-      // supported; hooks MAY be async and are awaited; a returned function is a cleanup callback.
+      // Load the AFM module and run its lifecycle. Every export shape is accepted; hooks MAY be async and
+      // are awaited; a returned FUNCTION is a cleanup callback; an OBJECT returned from initialize is the
+      // widget's EXPORTS (surfaced via host.getWidget().exports).
       Promise.resolve()
         .then(function () { return import(/* webpackIgnore: true */ src); })
         .then(function (mod) {
-          // Accept every AFM / anywidget export shape: a default object, a default factory function, or
-          // the legacy named exports (`export function render(...)` / `export async function initialize`).
           var def = mod && mod.default;
           if (def == null && mod && (mod.render || mod.initialize)) {
             def = { initialize: mod.initialize, render: mod.render };
@@ -102,9 +145,14 @@
         })
         .then(function (widget) {
           if (!widget) throw new Error("AFM module exports no default (or render/initialize)");
+          record.widget = widget;
           if (signal.aborted) return;
           return Promise.resolve(widget.initialize && widget.initialize({ model: model, signal: signal }))
-            .then(function (r) { if (typeof r === "function") state.cleanups.push(r); })
+            .then(function (r) {
+              if (typeof r === "function") state.cleanups.push(r);
+              else if (r && typeof r === "object") record.exports = r;   // initialize() exports
+              readyResolve();                                            // composition may now read exports
+            })
             .then(function () {
               if (signal.aborted || !widget.render) return;
               return Promise.resolve(widget.render({ model: model, el: el, signal: signal, host: host }))
@@ -115,6 +163,8 @@
           console.error("SlateAFM load error", e);
           el.innerHTML = '<pre class="afm-err" style="color:#f88;white-space:pre-wrap;margin:0">' +
             "SlateAFM load error: " + (e && e.message ? e.message : e) + "</pre>";
+          readyResolve();                             // don't hang a composer waiting on a failed widget
+          try { controller.abort(); } catch (x) {}   // AFM: a failed hook aborts the signal (runs cleanup)
         });
     },
 
@@ -126,6 +176,7 @@
       s.cleanups.forEach(function (fn) { try { fn(); } catch (e) {} });
       try { s.controller.abort(); } catch (e) {}
       if (s.msgCh && window.__slateStream) delete window.__slateStream[s.msgCh];
+      if (s.id && window.__slateAFM) delete window.__slateAFM[s.id];
       el._afm = null;
       el.innerHTML = "";
     },
