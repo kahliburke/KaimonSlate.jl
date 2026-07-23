@@ -17,12 +17,12 @@ using SlateAFM
 @md"""
 ## Counter — the canonical AFM module
 
-`afm_example("counter.js")` is a self-contained AFM module (no imports): `model.get/set("count")` +
+`ext_asset_url(SlateAFM, "examples/counter.js")` is a self-contained AFM module (no imports): `model.get/set("count")` +
 `save_changes()` on click, and `on("change:count")` to redraw. Bound below to the trait dict `st`.
 """
 
 #%% code id=counter
-@bind st afm(afm_example("counter.js"); count = 0)
+@bind st afm(ext_asset_url(SlateAFM, "examples/counter.js"); count = 0)
 
 #%% md id=counter_read
 @md"""
@@ -39,7 +39,7 @@ traits over the same bound dict.
 """
 
 #%% code id=slider
-@bind sl afm(afm_example("slider.js"); value = 25, min = 0, max = 100, label = "gain")
+@bind sl afm(ext_asset_url(SlateAFM, "examples/slider.js"); value = 25, min = 0, max = 100, label = "gain")
 
 #%% md id=slider_read
 @md"""
@@ -56,29 +56,10 @@ view of the control, and shows its value. Drag either slider — both views + th
 """
 
 #%% code id=control
-@bind ctl afm(afm_example("control.js"); id = "ctl", value = 40, min = 0, max = 100)
+@bind ctl afm(ext_asset_url(SlateAFM, "examples/control.js"); id = "ctl", value = 40, min = 0, max = 100)
 
 #%% code id=readout
-@bind ro afm(afm_example("readout.js"); control = "ctl")
-
-#%% md id=h_molstar
-@md"""
-## A real, complex published anywidget — **ipymolstar** (PDBe Mol\*)
-
-This loads the *unmodified* front-end module from the published `ipymolstar` wheel — a full 3D molecular
-structure viewer (Mol\*). It's pure AFM: `export default { render }`, trait-driven, and it `import`s the
-Mol\* plugin from a CDN. We feed its traits from Julia and inject its stylesheet via the host's `css`
-param. Nothing about the widget was changed.
-"""
-
-#%% code id=1c64fd
-afm_example("pdbemolstar.js")
-
-#%% code id=molstar
-@bind mol afm(afm_example("pdbemolstar.js");
-    css = "https://cdn.jsdelivr.net/npm/pdbe-molstar@3.3.2/build/pdbe-molstar.css",
-    molecule_id = "1cbs", height = "480px", width = "100%",
-    bg_color = "#101418", spin = false, hide_water = true, hide_controls_icon = false)
+@bind ro afm(ext_asset_url(SlateAFM, "examples/readout.js"); control = "ctl")
 
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
 #   docid = a1f0c2d4-5e6b-47a8-9c1d-3b2e4f6a7c88
