@@ -32,9 +32,11 @@ using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indic
 # handing it that namespace's injected `slate_on`. So a package's editor-ext + handlers register lazily
 # from the once-per-drain manifest pull, no `__init__` and no boot cell. Idempotent (see the hook).
 function inprocess_extension_manifest(ns::Union{Module,Nothing} = nothing)
-    if ns !== nothing && isdefined(ns, :slate_on)
+    if ns !== nothing && Base.invokelatest(isdefined, ns, :slate_on)
         try
-            SlateExtensionsBase.ensure_module_frontends!(getglobal(ns, :slate_on))
+            # `invokelatest`: `slate_on` is `Core.eval`'d into `ns`, possibly in a newer world than
+            # here — reading it directly warns under Julia 1.12's global world-age rules.
+            SlateExtensionsBase.ensure_module_frontends!(Base.invokelatest(getglobal, ns, :slate_on))
         catch
         end
     end
