@@ -35,6 +35,20 @@ SlateExtensionsBase.slate_render(m::Meter) = component("Demo.Meter"; value = m.v
 struct Banner; text::String; end
 SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</b>")
 
+# Per-cell toolbar action: a struct that reflects into a CellAction (auto_cell_action), and one that
+# omits a REQUIRED field (`onclick`) so reflection must error — mirrors the Knob/Dial widget pattern.
+Base.@kwdef struct InsertBtn
+    icon::String    = "➕"
+    title::String   = "insert a snippet"
+    show::String    = "cell.kind === 'code'"
+    onclick::String = "window.myExtInsert(cellId)"
+end
+SlateExtensionsBase.to_cell_action(a::InsertBtn) = auto_cell_action(a)
+struct NoClickBtn; icon::String; end   # no `onclick` field → auto_cell_action must throw
+# Only the REQUIRED fields — `title`/`show` are absent, so reflection must default them to "".
+Base.@kwdef struct MinBtn; icon::String = "•"; onclick::String = "f(cellId)"; end
+SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
+
 @testset "SlateExtensionsBase" begin
 
     @testset "Widget construction" begin
@@ -357,6 +371,62 @@ SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</
             slate_on("compute", a -> a + 1)
         end
         @test haskey(handlers, "compute") && handlers["compute"](1) == 2
+    end
+
+    # Per-cell toolbar actions — the toolbar counterpart of the @bind Widget path.
+    @testset "cell actions" begin
+        empty!(SlateExtensionsBase._FRONTEND)               # isolate from earlier registrations
+        # Direct construction + keyword defaults.
+        a = CellAction("Pkg.Btn"; icon = "★", onclick = "doThing(cellId)")
+        @test (a.id, a.icon, a.title, a.show, a.onclick) == ("Pkg.Btn", "★", "", "", "doThing(cellId)")
+        @test to_cell_action(a) === a                       # identity passthrough
+
+        # id must be a namespaced identifier — no quotes/spaces/brackets that break the DOM emit.
+        @test_throws ArgumentError CellAction("has space"; icon = "x", onclick = "y")
+        @test_throws ArgumentError CellAction("qu'ote"; icon = "x", onclick = "y")
+
+        # auto_cell_action reflects fields; id is kind_for(T) (module-qualified, collision-proof).
+        b = to_cell_action(InsertBtn())
+        @test b.id == "Main.InsertBtn"
+        @test b.icon == "➕" && b.show == "cell.kind === 'code'" && b.onclick == "window.myExtInsert(cellId)"
+
+        # A missing REQUIRED field errors; a non-convertible value errors too.
+        @test_throws ArgumentError auto_cell_action(NoClickBtn("x"))
+        @test_throws ArgumentError to_cell_action(42)
+
+        # register_cell_action! injects a plain (non-esm) frontend script that calls the host seam,
+        # keyed so a re-register replaces rather than stacks.
+        register_cell_action!(a)
+        man = extension_manifest()
+        entry = only(filter(e -> e.id == "cellaction:Pkg.Btn", man.frontend))
+        @test entry.esm == false
+        @test occursin("window.slateRegisterCellAction", entry.js)
+        n_before = length(man.frontend)
+        register_cell_action!(a)                            # idempotent — same id
+        @test length(extension_manifest().frontend) == n_before
+
+        # Reflection edges: a struct without `title`/`show` defaults them to ""; `exclude` drops a field.
+        m = to_cell_action(MinBtn())
+        @test (m.id, m.icon, m.title, m.show, m.onclick) == ("Main.MinBtn", "•", "", "", "f(cellId)")
+        @test auto_cell_action(InsertBtn(); exclude = (:title,)).title == ""   # excluded → back to default ""
+
+        # _js_string is the escaping that keeps injected data from breaking out of the <script> or the JS
+        # string literal — the security-relevant core. Test it directly.
+        jstr = SlateExtensionsBase._js_string
+        @test jstr("hi") == "\"hi\""
+        @test jstr("a\"b") == "\"a\\\"b\""                  # double quote escaped
+        @test jstr("a\\b") == "\"a\\\\b\""                  # backslash escaped
+        @test jstr("a\nb") == "\"a\\nb\""                   # newline → \n
+        @test occursin("\\u003c", jstr("</script>")) && !occursin("<", jstr("</script>"))  # < never literal
+        @test occursin("\\u0000", jstr("\0"))               # control char → \uXXXX
+
+        # Defense-in-depth end to end: a `<` in `icon` / a `"` in `title` is escaped in the emitted JS,
+        # so an action's DATA fields can't break the injected registration script.
+        empty!(SlateExtensionsBase._FRONTEND)
+        register_cell_action!(CellAction("Pkg.Esc"; icon = "<b>", title = "a\"b", onclick = "z()"))
+        ejs = only(extension_manifest().frontend).js
+        @test !occursin("<", ejs) && occursin("\\u003c", ejs)   # icon's `<` escaped, none left literal
+        @test !occursin("a\"b", ejs)                            # title's quote escaped
     end
 
 end
