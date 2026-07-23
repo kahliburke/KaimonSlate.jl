@@ -317,11 +317,22 @@ function Logging.handle_message(l::_ProgressLogger, level, message, _module, gro
     return nothing
 end
 
+# Read a notebook-namespace binding (`slate_emit`, `slate_on`, `slate_progress`, …) that was
+# `Core.eval`'d into `mod`. On Julia 1.12 a global bound in a NEWER world than the running eval
+# triggers a "access to binding … in a world prior to its definition world" warning on every cell;
+# reading it via `invokelatest` (latest world) is the documented fix and keeps the same value.
+_ns_read(mod::Module, name::Symbol) = Base.invokelatest(getfield, mod, name)
+
+# `isdefined`'s world-age twin: on Julia 1.12 a plain `isdefined(mod, name)` for a global bound in a
+# NEWER world than the running eval trips the SAME "access to binding … in a world prior to its
+# definition world" warning as a direct read. Probe presence at the latest world so the guard is quiet.
+_ns_defined(mod::Module, name::Symbol) = Base.invokelatest(isdefined, mod, name)
+
 # The progress sink for `mod`: the namespace's injected `slate_progress` (in-process → live cell
 # update; worker → PUB on the gate stream), or a no-op on a bare module (tests).
 function _progress_sink(mod::Module)
-    isdefined(mod, :slate_progress) || return (_i, _f, _m, _d) -> nothing
-    sp = getfield(mod, :slate_progress)
+    _ns_defined(mod, :slate_progress) || return (_i, _f, _m, _d) -> nothing
+    sp = _ns_read(mod, :slate_progress)
     return (i, f, m, d) -> (try; Base.invokelatest(sp, f; msg = m, id = i, done = d); catch; end)
 end
 
@@ -491,10 +502,10 @@ end
 
 function _build_slate_ctx(mod::Module, notebook::AbstractString, region::AbstractString,
                           regions::AbstractVector)
-    emit = isdefined(mod, :slate_emit) ? getfield(mod, :slate_emit) : (channel, value) -> nothing
+    emit = _ns_defined(mod, :slate_emit) ? _ns_read(mod, :slate_emit) : (channel, value) -> nothing
     # The notebook's injected `slate_on` (registers a JS→Julia handler into `__slate_handlers`), so package
     # code can wire an interactive widget's handlers via SEB's `slate_on` accessor — mirrors `emit`.
-    on   = isdefined(mod, :slate_on) ? getfield(mod, :slate_on) : (channel, f) -> nothing
+    on   = _ns_defined(mod, :slate_on) ? _ns_read(mod, :slate_on) : (channel, f) -> nothing
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
               side     = String(region),
@@ -532,7 +543,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     task_local_storage(:slate_assets, Any[])
 
     # `@trace` publishes its row buffer here (one per traced cell). Reset before eval; read after.
-    tracesink = isdefined(mod, :__slate_trace_sink) ? getfield(mod, :__slate_trace_sink) : nothing
+    tracesink = _ns_defined(mod, :__slate_trace_sink) ? _ns_read(mod, :__slate_trace_sink) : nothing
     tracesink === nothing || (tracesink[] = nothing)
 
     value = nothing
