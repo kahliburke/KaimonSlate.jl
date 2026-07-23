@@ -108,3 +108,34 @@ function slate_on(channel, f)
     on(channel, f)
     return nothing
 end
+
+"""
+    slate_off(channel) -> nothing
+
+Drop the JS→Julia handler registered for `channel` — the symmetric counterpart to [`slate_on`](@ref).
+Use it to remove a TRANSIENT per-cell handler (e.g. a Bonito session's inbox feed, keyed by its session
+id) on teardown so a re-run/close doesn't leak dead closures. A no-op outside a Slate cell.
+"""
+function slate_off(channel)
+    off = _ctx_field(:off)
+    off === nothing && return nothing
+    off(channel)
+    return nothing
+end
+
+"""
+    slate_on_cleanup(f) -> nothing
+
+Register a zero-arg callback `f` to run when the CURRENT cell is torn down — before it RE-EVALUATES,
+when it is DELETED, and before a namespace rebuild. Use it to release a live per-cell resource a package
+sets up during eval — a Bonito `Session`, a subscription, a spawned task — so a re-run or a delete
+doesn't leak it. The callback runs LATER, possibly outside any cell eval (a delete fires it off a worker
+teardown call), so it must be self-contained — close over the resource and any captured emit/off it
+needs, not [`slate_context`](@ref) (which is unset then). A no-op outside a Slate cell.
+"""
+function slate_on_cleanup(f)
+    c = _ctx_field(:cleanup)
+    c === nothing && return nothing
+    c(f)
+    return nothing
+end

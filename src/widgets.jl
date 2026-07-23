@@ -604,6 +604,19 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # rebuild drops stale closures; a cell re-run just replaces its channel's handler.
     Core.eval(m, :(const __slate_handlers = $(Dict{String,Any}())))
     Core.eval(m, :(const slate_on = (channel, f) -> (__slate_handlers[string(channel)] = f; nothing)))
+    # Drop a JS→Julia handler — the symmetric counterpart to `slate_on`. A package that wires a
+    # TRANSIENT per-cell handler (e.g. a Bonito session's inbox feed, keyed by its session id) removes
+    # it here on teardown so a re-run/close doesn't leak dead closures. A no-op for an absent channel.
+    Core.eval(m, :(const slate_off = (channel) -> (delete!(__slate_handlers, string(channel)); nothing)))
+    # Per-cell CLEANUP callbacks (cell id => [fns]). A cell — or a package it calls — registers
+    # `slate_on_cleanup(f)` to release a LIVE per-cell resource (a Bonito `Session`, a subscription, a
+    # spawned task) it set up during eval. Slate runs + clears a cell's callbacks BEFORE it re-evaluates
+    # (run_capture), when it is DELETED (the server broadcasts removed ids), and before a namespace
+    # rebuild — so re-running or dropping a cell doesn't leak what the last run allocated. Keyed by the
+    # executing cell (task-local `:slate_cell`, seeded by run_capture); a rebuild drops the whole dict.
+    Core.eval(m, :(const __slate_cleanups = $(Dict{String,Vector{Any}}())))
+    Core.eval(m, :(const slate_on_cleanup = (f) -> (push!(get!($(Vector{Any}), __slate_cleanups,
+        get(task_local_storage(), :slate_cell, "")), f); nothing)))
     # Invoke a `slate_on` handler FROM Julia (same as `window.slateCall` does from JS, but in-process —
     # no round-trip). For testing a handler in a cell, or wiring one to a control:
     # `@onclick go slate_call("compute", (n = n_slider,))`. Errors if the channel isn't registered.

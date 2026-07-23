@@ -49,7 +49,7 @@ export register_widget!, register_component!, provide_frontend!, @pkg_asset,
        frontend_scripts, extension_manifest
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
-       slate_emit, slate_effect, slate_everywhere, slate_on
+       slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup
 # Rich output (Slate display MIMEs)
 export slate_render, component, html_fragment, SlateComponentMIME, SlateHtmlMIME
 # Binary numeric streaming

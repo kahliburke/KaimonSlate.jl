@@ -937,8 +937,23 @@ function __slate_call(channel::String, args; call_id::String = "")
     end
 end
 
-"Discard the namespace (full rebuild)."
-__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _NS[] = _new_ns(); true)
+"Discard the namespace (full rebuild). Fire the outgoing namespace's per-cell cleanups first so a live
+resource it holds (a Bonito `Session`) is released rather than orphaned in the discarded module."
+__slate_reset() = (@info "slate: namespace reset (fresh rebuild)"; _run_all_cleanups!(_NS[]); _NS[] = _new_ns(); true)
+
+"Run the given cells' `slate_on_cleanup` callbacks in the warm namespace — deleted-cell teardown, driven
+by the server (`run_cleanups!` → this) when `update_source!` detects removed cells. Unknown ids no-op."
+function __slate_cleanup_cells(; ids::Vector = Any[])
+    reg = isdefined(_NS[], :__slate_cleanups) ? getfield(_NS[], :__slate_cleanups) : nothing
+    reg === nothing && return 0
+    n = 0
+    for id in ids
+        haskey(reg, String(id)) && (n += 1)
+        _run_cell_cleanups!(reg, String(id))
+    end
+    n > 0 && @info "slate: ran cleanups for deleted cells" count = n
+    return n
+end
 
 "Encode the namespace global `name` into this worker's content-addressed store and return its
 address — `(; hash, codec, bytes)` (or `(; error)`). One half of cross-kernel value transport
@@ -1425,6 +1440,7 @@ function __slate_adopt(parent::String; datadir::AbstractString = "")
     else
         ENV["KAIMONSLATE_DATADIR"] = String(datadir)
     end
+    _run_all_cleanups!(_NS[])   # release the prior namespace's live per-cell resources before rebuild
     _NS[] = _new_ns()
     @info "slate: adopted by a notebook" parent = parent datadir = datadir
     return true
@@ -2202,6 +2218,7 @@ function tools()
         KaimonGate.GateTool("__slate_set_bind", __slate_set_bind),
         KaimonGate.GateTool("__slate_call", __slate_call),
         KaimonGate.GateTool("__slate_reset", __slate_reset),
+        KaimonGate.GateTool("__slate_cleanup_cells", __slate_cleanup_cells),
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),

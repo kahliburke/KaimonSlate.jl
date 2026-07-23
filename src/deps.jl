@@ -966,6 +966,10 @@ function update_source!(report::Report, new_source::AbstractString)
                 delete!(_BIND_TICKS, id)
             end
         end
+        # Run a deleted cell's `slate_on_cleanup` callbacks so a live per-cell resource (a Bonito
+        # `Session`) it held is torn down — the callbacks live in the kernel's namespace, so the server
+        # (wired via `register_cleanup_cells!`) routes this to its worker(s). Out-of-band, like celldone.
+        _do_cleanup_cells(report.id, collect(removed))
     end
 
     report.cells = newr.cells
