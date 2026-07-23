@@ -40,15 +40,22 @@ load — a served asset ([`afm_example`](@ref) / [`ext_asset_url`](@ref)) or any
 struct AFM
     src::String
     id::String
+    css::Vector{String}
     traits::Dict{String,Any}
 end
-afm(src::AbstractString; id::AbstractString = "", traits...) =
-    AFM(String(src), String(id), Dict{String,Any}(String(k) => v for (k, v) in traits))
+# `css` = stylesheet URL(s) the host injects before render (many anywidgets assume their CSS is host-loaded).
+afm(src::AbstractString; id::AbstractString = "", css = String[], traits...) =
+    AFM(String(src), String(id), css isa AbstractString ? [String(css)] : String[String(c) for c in css],
+        Dict{String,Any}(String(k) => v for (k, v) in traits))
 
 # Reflect an AFM handle into its wire `Widget`: the bound value is the trait dict; the module URL (and an
-# optional message `id`) ride as params. (No hand-typed kind at the call site — it's this package's constant.)
-SlateExtensionsBase.to_widget(a::AFM) =
-    isempty(a.id) ? Widget(KIND, a.traits; src = a.src) : Widget(KIND, a.traits; src = a.src, id = a.id)
+# optional message `id` / `css`) ride as params. (No hand-typed kind — it's this package's constant.)
+function SlateExtensionsBase.to_widget(a::AFM)
+    p = Dict{Symbol,Any}(:src => a.src)
+    isempty(a.id)  || (p[:id]  = a.id)
+    isempty(a.css) || (p[:css] = a.css)
+    Widget(KIND, a.traits; p...)
+end
 
 # ── Custom messages: the AFM `model.send` / `on("msg:custom")` half, over Slate's slate_on/slate_emit ──
 const _MSG = Dict{String,Any}()   # "SlateAFM.msg:<id>" -> Julia handler(content)
