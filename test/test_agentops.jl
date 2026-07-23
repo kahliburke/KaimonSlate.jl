@@ -329,12 +329,18 @@ end
 
         NS.close_notebook!(hub, id)
         nb2 = hub.notebooks[NS.open_notebook!(hub, nbp; autorun = false)]
-        sleep(0.3)   # self-heal runs in the background @async task — give it a moment
+        # Self-heal runs in a background @async task — POLL for it to finish instead of a fixed sleep,
+        # which can expire before the restore completes on a loaded / coverage-instrumented CI run
+        # (leaving `output === nothing` → a spurious failure).
+        bfind() = nb2.report.cells[findfirst(c -> c.id == "b", nb2.report.cells)]
+        timedwait(10.0; pollint = 0.05) do
+            bc = bfind(); bc.state == KaimonSlate.ReportEngine.FRESH && bc.output !== nothing
+        end
         acell2 = nb2.report.cells[findfirst(c -> c.id == "a", nb2.report.cells)]
-        bcell2 = nb2.report.cells[findfirst(c -> c.id == "b", nb2.report.cells)]
+        bcell2 = bfind()
         @test acell2.state == KaimonSlate.ReportEngine.STALE     # unlocked: untouched, per autorun=false
         @test bcell2.state == KaimonSlate.ReportEngine.FRESH     # locked: self-healed despite autorun=false
-        @test bcell2.output.value_repr == "10"
+        @test bcell2.output !== nothing && bcell2.output.value_repr == "10"
     finally
         NS.stop_hub(hub)
     end
