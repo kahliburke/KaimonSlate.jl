@@ -1,0 +1,32 @@
+name = "BonitoSlate"
+uuid = "9172b072-6bcf-488b-b185-96c3319d1521"
+authors = ["Kahli Burke <kahli@kahliburke.com>"]
+version = "0.1.0"
+
+# A Slate extension bringing first-class Bonito.jl support — and with it WGLMakie's interactive
+# WebGL figures and the wider Bonito widget ecosystem — into KaimonSlate's reactive notebook.
+# It depends on the lean SlateExtensionsBase SDK (NOT the heavy KaimonSlate server) plus Bonito
+# itself, and bridges Bonito's Connection/Session model onto Slate's existing page transport
+# (the bidirectional per-notebook WebSocket) so Bonito never opens its own socket or port.
+[deps]
+Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+Bonito = "824d6782-a2ef-11e9-3a09-e5662e0c26f8"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
+Observables = "510215fc-4207-5dde-b226-833fc4488ee2"
+SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
+WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
+
+# SlateExtensionsBase is dev-sourced from the in-tree SDK while it is unregistered; swap for the
+# registered version once it lands in the General registry.
+[sources]
+SlateExtensionsBase = {path = "../../../lib/SlateExtensionsBase"}
+
+[compat]
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

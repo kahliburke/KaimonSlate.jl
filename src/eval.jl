@@ -14,6 +14,7 @@ export register_userprog!, unregister_userprog!
 export register_prepare!, unregister_prepare!
 export register_emit!, unregister_emit!, register_bin_emit!, unregister_bin_emit!
 export register_celldone!, unregister_celldone!
+export register_cleanup_cells!, unregister_cleanup_cells!, run_cleanups!
 
 # ── Async reactivity hook ─────────────────────────────────────────────────────
 #
@@ -129,6 +130,23 @@ function _do_celldone(report_id::AbstractString, run_id, cell_id, wire)
     return nothing
 end
 
+# Cell DELETE teardown: `update_source!` (deps.jl) detects removed cells and fires this so the server can
+# run those cells' `slate_on_cleanup` callbacks — closing a live per-cell resource (a Bonito `Session`)
+# a deleted cell held. The callback lives WHERE the sessions do (a worker's namespace), so the server
+# broadcasts to its kernel(s); a re-eval/rebuild path fires cleanups worker-locally without this. Same
+# out-of-band registry as celldone. The callback takes the removed cell ids.
+const _CLEANUP_CELLS_REGISTRY = Dict{String,Any}()
+register_cleanup_cells!(report_id::AbstractString, cb) = (_CLEANUP_CELLS_REGISTRY[String(report_id)] = cb; nothing)
+unregister_cleanup_cells!(report_id::AbstractString) = (delete!(_CLEANUP_CELLS_REGISTRY, String(report_id)); nothing)
+function _do_cleanup_cells(report_id::AbstractString, ids)
+    cb = get(_CLEANUP_CELLS_REGISTRY, String(report_id), nothing)
+    cb === nothing && return nothing
+    sids = String[String(i) for i in ids]
+    isempty(sids) && return nothing
+    try; cb(sids); catch e; @warn "slate: cell-delete cleanup failed" ids = sids exception = e; end
+    return nothing
+end
+
 # Parent-project /src hot-reload: the worker's Revise watcher fires `files_changed`; the
 # server registers a per-report callback (out-of-band, like refresh) that applies the
 # revisions and invalidates the cells that read the changed definitions.
@@ -177,6 +195,7 @@ Discard the report's namespace and mark every cell stale — the basis of a full
 rebuild (ground truth, §6). Returns the fresh module.
 """
 function reset_module!(report::Report)
+    report.mod === nothing || _run_all_cleanups!(report.mod)   # release the old namespace's live per-cell resources
     report.mod = _new_module(report)
     reset_all!(report)
     return report.mod
@@ -217,6 +236,15 @@ abstract type Kernel end
 shutdown!(::Kernel; kill_remote::Bool = false) = nothing
 
 """
+    run_cleanups!(kernel, report, ids)
+
+Run the `slate_on_cleanup` callbacks that the given cells registered, in the namespace where they live
+(this kernel's) — used to tear down a DELETED cell's live per-cell resources (a Bonito `Session`). The
+gate kernel dispatches to its worker; in-process fires directly. A no-op for a base kernel / unknown ids.
+"""
+run_cleanups!(::Kernel, ::Report, ids) = nothing
+
+"""
     InProcessKernel <: Kernel
 
 Evaluate cells in the report's own in-process `Module`. Stateless — the namespace
@@ -229,6 +257,17 @@ prepare!(::InProcessKernel, report::Report) = report_module(report)
 
 "Discard the kernel's namespace (full rebuild); cells are marked stale by the caller."
 reset!(::InProcessKernel, report::Report) = reset_module!(report)
+
+"Fire the given cells' cleanup callbacks in the report's in-process namespace (deleted-cell teardown)."
+function run_cleanups!(::InProcessKernel, report::Report, ids)
+    report.mod === nothing && return nothing
+    reg = isdefined(report.mod, :__slate_cleanups) ? getfield(report.mod, :__slate_cleanups) : nothing
+    reg === nothing && return nothing
+    for id in ids
+        _run_cell_cleanups!(reg, String(id))
+    end
+    return nothing
+end
 
 "Evaluate `source` in the kernel and capture stdout + rich output → `CellOutput`. `region`/`regions`
 seed the task-local Slate execution context (see `_build_slate_ctx`); `region=\"\"` ⇒ the main kernel."

@@ -487,19 +487,50 @@ function _harvest_effects(raw, srcs::AbstractVector)
     return out
 end
 
+# Run + clear the cleanup callbacks a cell registered (see the notebook namespace's `__slate_cleanups`).
+# Clears FIRST so a callback that itself re-registers targets the imminent new run, and isolates each
+# callback so one bad cleanup can't block the others (or the re-eval about to follow). Fired on re-eval
+# (run_capture), on delete (server broadcast → `__slate_cleanup_cells`), and on namespace rebuild.
+function _run_cell_cleanups!(reg::AbstractDict, cid::AbstractString)
+    cbs = get(reg, cid, nothing)
+    cbs === nothing && return nothing
+    delete!(reg, cid)
+    for cb in cbs
+        try; cb(); catch e; @warn "slate: cell cleanup failed" cell = cid exception = e; end
+    end
+    return nothing
+end
+
+# Fire EVERY cell's cleanups (a namespace rebuild / worker reset discards the whole module — release all
+# live per-cell resources it holds first). Order-independent; each is isolated by `_run_cell_cleanups!`.
+function _run_all_cleanups!(mod::Module)
+    isdefined(mod, :__slate_cleanups) || return nothing
+    reg = getfield(mod, :__slate_cleanups)
+    for cid in collect(keys(reg))
+        _run_cell_cleanups!(reg, cid)
+    end
+    return nothing
+end
+
 function _build_slate_ctx(mod::Module, notebook::AbstractString, region::AbstractString,
                           regions::AbstractVector)
     emit = isdefined(mod, :slate_emit) ? getfield(mod, :slate_emit) : (channel, value) -> nothing
     # The notebook's injected `slate_on` (registers a JS→Julia handler into `__slate_handlers`), so package
     # code can wire an interactive widget's handlers via SEB's `slate_on` accessor — mirrors `emit`.
     on   = isdefined(mod, :slate_on) ? getfield(mod, :slate_on) : (channel, f) -> nothing
+    off  = isdefined(mod, :slate_off) ? getfield(mod, :slate_off) : (channel) -> nothing
+    # Register a per-cell cleanup callback (see the namespace's `__slate_cleanups`) — attributed to the
+    # cell currently evaluating (task-local `:slate_cell`, seeded by run_capture).
+    cleanup = isdefined(mod, :slate_on_cleanup) ? getfield(mod, :slate_on_cleanup) : (f) -> nothing
     return (; region   = isempty(region) ? nothing : Symbol(region),
               notebook = String(notebook),
               side     = String(region),
               emit     = emit,
               regions  = Symbol[Symbol(r) for r in regions],
               effect   = _slate_effect,          # code→Slate declaration channel (zero-dep for packages)
-              on       = on)
+              on       = on,
+              off      = off,
+              cleanup  = cleanup)
 end
 
 function run_capture(mod::Module, source::AbstractString, filename::AbstractString = "string";
@@ -519,6 +550,14 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # in the `finally` so it never leaks across cells that share a task (the parallel batch reuses tasks);
     # `nothing` ⇒ leave it unset (a plain `run_capture` with no notebook context, e.g. `__slate_interp`).
     slate_ctx === nothing || task_local_storage(:slate_ctx, slate_ctx)
+
+    # This eval's cell id (from the `cell:<id>` filename) — seeds the per-cell CLEANUP key so a package's
+    # `slate_on_cleanup(f)` attributes its callback to THIS cell, and lets us fire the PREVIOUS run's
+    # cleanups now, before re-evaluating: releasing the resources the last run of this cell registered
+    # (a Bonito `Session`, a subscription) so a re-run doesn't leak them. Cleared in the `finally`.
+    cid = replace(filename, r"^cell:" => "")
+    task_local_storage(:slate_cell, cid)
+    isdefined(mod, :__slate_cleanups) && _run_cell_cleanups!(getfield(mod, :__slate_cleanups), cid)
 
     # Cell-effects sink (see `_slate_effect`): declarations a cell / a package it calls makes during eval,
     # attributed to the executing statement. Seeded here, harvested + cleared after the eval — like the
@@ -552,6 +591,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     finally
         raw_out, raw_err = _finish_capture!(capture)
         slate_ctx === nothing || delete!(task_local_storage(), :slate_ctx)   # never outlive this eval
+        delete!(task_local_storage(), :slate_cell)
     end
     binds = copy(get(task_local_storage(), :__slate_binds, NamedTuple[]))
     delete!(task_local_storage(), :__slate_binds)

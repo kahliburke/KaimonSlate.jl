@@ -77,14 +77,39 @@ function _wire_callbacks!(nb::LiveNotebook)
     register_emit!(nb.report.id, (channel, payload) -> (try; _ws_emit!(nb, channel, payload); catch; end))   # slate_emit → push over the page WebSocket (NOT the coalescing SSE); payload is a Julia value, JSON-encoded in _ws_emit!
     register_bin_emit!(nb.report.id, frame -> (try; _ws_broadcast_bin!(nb, frame); catch; end))   # slate_emit_bin → forward the raw binary frame over the page WebSocket as-is
     register_celldone!(nb.report.id, (run_id, cid, wire) -> server_celldone(nb, run_id, cid, wire))   # parallel-batch result merge
+    register_cleanup_cells!(nb.report.id, ids -> (try; _cleanup_deleted_cells(nb, ids); catch; end))   # deleted-cell slate_on_cleanup teardown
     return nb
 end
 function _unwire_callbacks!(nb::LiveNotebook)
     unregister_refresh!(nb.report.id); unregister_srcchange!(nb.report.id)
     unregister_progress!(nb.report.id); unregister_runbatch!(nb.report.id)
     unregister_userprog!(nb.report.id); unregister_emit!(nb.report.id); unregister_celldone!(nb.report.id)
-    unregister_prepare!(nb.report.id); unregister_bin_emit!(nb.report.id)
+    unregister_prepare!(nb.report.id); unregister_bin_emit!(nb.report.id); unregister_cleanup_cells!(nb.report.id)
     return nb
+end
+
+# Run deleted cells' `slate_on_cleanup` callbacks wherever they might live. A cell can have run on the
+# main kernel OR on any of the notebook's region kernels (its session lives on that worker), and we don't
+# track which — so broadcast the removed ids to the main kernel AND every active region kernel. Each
+# fires only the ids its own namespace holds (unknown ids no-op), so the broadcast is cheap + correct.
+function _cleanup_deleted_cells(nb::LiveNotebook, ids)
+    sids = String[String(i) for i in ids]
+    isempty(sids) && return nothing
+    # OFF-LOCK + fire-and-forget: this fires from `update_source!`, reachable from edit paths that hold
+    # nb.lock, and a GateKernel teardown is a worker round-trip — which must NEVER run under the lock
+    # (deadlock protocol). Teardown has no ordering constraint, so a detached task is safe.
+    @async try
+        ReportEngine.run_cleanups!(nb.kernel, nb.report, sids)
+        regionks = lock(_REGION_LOCK) do
+            Any[k for ((rid, _name), k) in _REGION_KERNELS if rid == nb.id]
+        end
+        for k in regionks
+            try; ReportEngine.run_cleanups!(k, nb.report, sids); catch; end
+        end
+    catch e
+        @debug "slate: deleted-cell cleanup failed" exception = e
+    end
+    return nothing
 end
 
 # GateKernel when running as the Kaimon extension AND the notebook is inside a

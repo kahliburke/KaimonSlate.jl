@@ -359,4 +359,24 @@ SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</
         @test haskey(handlers, "compute") && handlers["compute"](1) == 2
     end
 
+    # `slate_off` — the symmetric handler removal — routed through the context's `:off`.
+    @testset "slate_off context accessor" begin
+        @test slate_off("ch") === nothing             # outside a cell → no-op
+        handlers = Dict{String,Any}("keep" => 1, "drop" => 2)
+        task_local_storage(:slate_ctx, (; off = c -> (delete!(handlers, string(c)); nothing))) do
+            slate_off("drop")
+        end
+        @test haskey(handlers, "keep") && !haskey(handlers, "drop")
+    end
+
+    # `slate_on_cleanup` — register a teardown callback through the context's `:cleanup`.
+    @testset "slate_on_cleanup context accessor" begin
+        @test slate_on_cleanup(() -> nothing) === nothing   # outside a cell → no-op
+        sink = Any[]
+        task_local_storage(:slate_ctx, (; cleanup = f -> (push!(sink, f); nothing))) do
+            slate_on_cleanup(() -> 42)
+        end
+        @test length(sink) == 1 && sink[1]() == 42
+    end
+
 end

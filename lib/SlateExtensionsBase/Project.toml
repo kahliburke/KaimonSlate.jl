@@ -6,8 +6,18 @@ authors = ["Kahli Burke <kahli@kahliburke.com>"]
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 
+# Weak dependency — SEB adds NO hard dependency and stays install-light. The extension loads only
+# when Makie is already present in the process, and resolves the `showable` ambiguity between SEB's
+# Slate-MIME methods and Makie's greedy `showable(::MIME, ::Figure)` (see ext/…MakieExt.jl).
+[weakdeps]
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+
+[extensions]
+SlateExtensionsBaseMakieExt = "Makie"
+
 [compat]
 Base64 = "1.11.0"
+Makie = "0.20 - 0.24"
 julia = "1.10"
 
 [extras]

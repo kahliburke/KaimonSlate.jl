@@ -1189,6 +1189,17 @@ function reset!(k::GateKernel, report::Report)
     return nothing
 end
 
+# Fire deleted cells' cleanup callbacks in the WORKER namespace (see worker.jl `__slate_cleanup_cells`).
+# Best-effort + fire-and-forget: a teardown must never block or fail an edit. No-op if the worker is down
+# (its namespace — and the sessions — died with it).
+function run_cleanups!(k::GateKernel, ::Report, ids)
+    k.conn === nothing && return nothing
+    sids = String[String(i) for i in ids]
+    isempty(sids) && return nothing
+    try; _tool(k, "__slate_cleanup_cells", Dict{String,Any}("ids" => sids); timeout = 20.0); catch; end
+    return nothing
+end
+
 """
 Shut the kernel down and clear gate state. A LOCAL worker is killed (clean exit request +
 SIGTERM/SIGKILL backstop). A spawned-remote worker is DETACHED by default — tunnel/sync closed,
