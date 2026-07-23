@@ -898,7 +898,11 @@ end
 and assign the global — via the namespace's injected `__slate_set_bind`. Returns the
 coerced value."
 function __slate_set_bind(name::String, value)
-    return Base.invokelatest(getfield(_NS[], :__slate_set_bind), Symbol(name), value)
+    # invokelatest must span the `getfield` too — the injected `__slate_set_bind` is bound in a newer
+    # world than this method, so reading it eagerly (outside invokelatest) trips Julia 1.12's binding
+    # world-age warning. The closure runs the whole access at the latest world.
+    ns = _NS[]
+    return Base.invokelatest(() -> getfield(ns, :__slate_set_bind)(Symbol(name), value))
 end
 
 # JS→Julia CALL — the `window.slateCall` counterpart to `slate_emit`'s one-way push. Look up the
@@ -1944,10 +1948,12 @@ function _run_revised_inits!(queue, changed)
             pd = item[1]
             id = pd.info.id                                   # Revise PkgData → PkgId
             m = get(Base.loaded_modules, id, nothing)
-            (m isa Module && !(m in seen) && isdefined(m, :__init__)) || continue
+            (m isa Module && !(m in seen) && Base.invokelatest(isdefined, m, :__init__)) || continue
             push!(seen, m)
             try
-                Base.invokelatest(getfield(m, :__init__))
+                # invokelatest spans the `getfield` so reading `__init__` (a binding that may be newer
+                # than this method) stays at the latest world — Julia 1.12 binding world-age discipline.
+                Base.invokelatest(() -> getfield(m, :__init__)())
                 push!(ran, String(nameof(m)))
             catch e
                 @warn "slate hot-reload: package __init__ threw on re-run" pkg = string(m) exception = e

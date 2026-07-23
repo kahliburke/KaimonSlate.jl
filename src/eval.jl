@@ -332,7 +332,10 @@ the per-notebook registry (so a later re-run preserves it), and assign the globa
 readers see it. Returns the coerced value. Routed through the namespace's injected
 `__slate_set_bind` so the logic lives in exactly one place (widgets.jl)."""
 assign_bind!(::InProcessKernel, report::Report, name::Symbol, value) =
-    Base.invokelatest(getfield(report_module(report), :__slate_set_bind), name, value)
+    # invokelatest wraps the WHOLE access: the `getfield` runs at the latest world too, so reading
+    # `__slate_set_bind` (Core.eval'd into the module in a newer world) doesn't trip Julia 1.12's
+    # binding-world warning — wrapping only the call would still read the binding at the stale world.
+    (m = report_module(report); Base.invokelatest(() -> getfield(m, :__slate_set_bind)(name, value)))
 
 """
     table_page(kernel, report, table_id, request) -> (rows, total)
