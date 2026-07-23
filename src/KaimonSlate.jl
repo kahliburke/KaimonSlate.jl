@@ -334,36 +334,6 @@ function set_configured_port!(port::Integer)
     return p
 end
 
-"Persisted hub port; 0 means unset — the `KAIMONSLATE_PORT` env var or the 8765 default applies."
-configured_port()::Int = something(tryparse(Int, string(get(_slate_config(), "port", ""))), 0)
-
-# Boot-time port precedence (pure, for `__init__` + tests): a valid `KAIMONSLATE_PORT` env value wins,
-# else the persisted config value when set (>0), else the 8765 default.
-function _resolve_boot_port(envval::AbstractString, cfgport::Integer)
-    env = tryparse(Int, envval)
-    env !== nothing ? env : (cfgport > 0 ? Int(cfgport) : 8765)
-end
-
-"""
-    set_configured_port!(port) -> Int
-
-Persist the hub port to the Slate config so it survives restarts (read at hub start by both `slate`
-and the Kaimon extension subprocess). Does NOT rebind a running hub — the change applies on the next
-launch or a hub restart. A value ≤ 0 clears the setting (revert to the env var / 8765 default).
-Precedence at boot: `KAIMONSLATE_PORT` env > this persisted value > 8765.
-"""
-function set_configured_port!(port::Integer)
-    p = Int(port)
-    cfg = _slate_config()
-    p > 0 ? (cfg["port"] = p) : delete!(cfg, "port")
-    try
-        mkpath(SlateHome.config_home()); write(_slate_config_path(), JSON.json(cfg, 2))
-    catch e
-        @warn "slate: could not persist port setting" exception = e
-    end
-    return p
-end
-
 "Configured durable memo-store cap in GB; 0.0 means unset (worker env / adaptive default applies)."
 memo_cap_gb()::Float64 = something(tryparse(Float64, string(get(_slate_config(), "memo_cap_gb", ""))), 0.0)
 
