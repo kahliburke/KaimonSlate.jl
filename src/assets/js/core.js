@@ -287,16 +287,21 @@ const _SLATE_VIRIDIS = ['#440154', '#472d7b', '#3b528b', '#2c728e', '#21918c',
 // Build the Slate ECharts theme from a var-getter `V(name, default)` — decoupled from WHERE the
 // palette comes from, so the live theme (computed styles) and an export render in an arbitrary
 // named palette (its stylesheet rule) share one builder.
-function _slateEchartsThemeFrom(V) {
+function _slateEchartsThemeFrom(V, fam) {
   const text = V('--text', '#d4d8e8'), dim = V('--dim', '#6a7090'),
         border = V('--border', '#2a2e40'), bg2 = V('--bg2', '#141828');
   const cycle = [['--accent', '#569cd6'], ['--green', '#56d364'], ['--orange', '#ce9178'],
     ['--purple', '#c586c0'], ['--teal', '#4ec9b0'], ['--gold', '#ffd700'], ['--red', '#e57575']]
     .map(([n, d]) => V(n, d));
   const ax = _slateAxisTheme(border, dim, text);
+  // The canvas renderer sets `ctx.font = fontSize + 'px ' + fontFamily`; the CSS keyword 'inherit' is
+  // NOT a valid canvas font-family, so the whole assignment is rejected and EVERY fontSize silently
+  // reverts to the canvas default (color still applies — it's set via fillStyle, not the font string).
+  // Resolve to a real stack so per-chart fontSize overrides actually take effect.
+  const family = fam || 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
   return {
     color: cycle, backgroundColor: 'transparent',
-    textStyle: { color: text, fontFamily: 'inherit', fontSize: 14 },
+    textStyle: { color: text, fontFamily: family, fontSize: 14 },
     title: { left: 'center', textStyle: { color: text, fontSize: 19, fontWeight: 'bold' }, subtextStyle: { color: dim, fontSize: 12 } },
     legend: { textStyle: { color: dim, fontSize: 14 } },
     categoryAxis: ax, valueAxis: ax, logAxis: ax, timeAxis: ax,
@@ -310,7 +315,9 @@ function _slateEchartsThemeFrom(V) {
 // The live-theme ECharts theme (registered as 'slate') — reads the currently-applied CSS vars.
 function _slateEchartsTheme() {
   const cs = getComputedStyle(document.documentElement);
-  return _slateEchartsThemeFrom((n, d) => _slateThemeVar(cs, n, d));
+  // The document's real computed font stack — a valid canvas font-family that still matches the page.
+  const fam = (getComputedStyle(document.body || document.documentElement).fontFamily || '').trim();
+  return _slateEchartsThemeFrom((n, d) => _slateThemeVar(cs, n, d), fam || undefined);
 }
 // Read ONE Slate palette's CSS custom properties straight from its stylesheet rule (":root" for
 // midnight, `html[data-slate-theme="<name>"]` otherwise), merged over :root so a block that omits a
