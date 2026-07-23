@@ -19,7 +19,7 @@ owns (the same trust boundary as shipping a front-end asset):
 - `show` — a boolean expression over `cell` (the cell's JSON: `cell.kind`, `cell.tags`, …); `""` ⇒
   always shown. e.g. `"cell.kind === 'code'"`.
 - `onclick` — statement(s) run on click, with `cellId`, `cell` and `event` in scope. e.g.
-  `"window.slateGiacInsert(cellId)"`.
+  `"window.myExtInsert(cellId)"` (a front-end helper your extension shipped).
 
 Build one directly, or return one from [`to_cell_action`](@ref) / [`auto_cell_action`](@ref).
 """
@@ -30,9 +30,18 @@ struct CellAction
     show::String
     onclick::String
 end
+
+# A stable, namespaced identifier: it's emitted UNESCAPED-for-quotes into an inline `onclick="…('id',…)"`
+# and used as a DOM class (`cellact-<id>`), so restrict it to a leading letter + word/./- chars — no
+# quotes, spaces, or angle brackets that could break out of the attribute or the class token. `kind_for`
+# (the usual source, `Module.Type`) already satisfies this.
+const _CELL_ACTION_ID = r"^[A-Za-z][\w.\-]*$"
 CellAction(id::AbstractString; icon::AbstractString, title::AbstractString = "",
            show::AbstractString = "", onclick::AbstractString) =
-    CellAction(String(id), String(icon), String(title), String(show), String(onclick))
+    occursin(_CELL_ACTION_ID, id) ?
+        CellAction(String(id), String(icon), String(title), String(show), String(onclick)) :
+        throw(ArgumentError("CellAction id $(repr(id)) must be a namespaced identifier matching " *
+                            "$(_CELL_ACTION_ID) (e.g. \"MyPackage.MyButton\", as `kind_for` yields)."))
 
 """
     to_cell_action(x) -> CellAction
@@ -43,13 +52,13 @@ Turn `x` into a [`CellAction`](@ref). [`register_cell_action!`](@ref) calls this
 reflect-the-struct case):
 
 ```julia
-Base.@kwdef struct MathfieldButton
-    icon::String    = "∫"
-    title::String   = "insert a math field"
+Base.@kwdef struct InsertSnippetButton
+    icon::String    = "➕"
+    title::String   = "insert a snippet"
     show::String    = "cell.kind === 'code'"
-    onclick::String = "window.slateGiacInsert(cellId)"
+    onclick::String = "window.myExtInsert(cellId)"   # a helper this extension shipped
 end
-SlateExtensionsBase.to_cell_action(a::MathfieldButton) = auto_cell_action(a)
+SlateExtensionsBase.to_cell_action(a::InsertSnippetButton) = auto_cell_action(a)
 ```
 
 The identity method means an existing `CellAction` passes through unchanged.
@@ -69,7 +78,7 @@ struct has no such field); the `id` is [`kind_for`](@ref)`(typeof(x))`, so it's 
 package and can't collide with another extension's button. `exclude` drops named fields.
 
 ```julia
-SlateExtensionsBase.to_cell_action(a::MathfieldButton) = auto_cell_action(a)   # id = "GiacSlate.MathfieldButton"
+SlateExtensionsBase.to_cell_action(a::InsertSnippetButton) = auto_cell_action(a)   # id = "MyPackage.InsertSnippetButton"
 ```
 """
 function auto_cell_action(x; exclude = ())
@@ -137,7 +146,8 @@ is any [`to_cell_action`](@ref)-convertible value: a [`CellAction`](@ref), or yo
 Slate injects a small script that calls the front-end seam `window.slateRegisterCellAction`, so the
 button appears in every cell's action strip (gated by the action's `show`), clicking it runs the
 action's `onclick`. Idempotent — deduped by the action's `id` (a re-run replaces rather than stacks
-duplicates); live and in a static export, no boot cell.
+duplicates), no boot cell. A cell action is an EDITING affordance: it shows in the live editor; a
+read-only static export renders no cell toolbar, so the button simply doesn't appear there.
 """
 function register_cell_action!(x)
     a = to_cell_action(x)

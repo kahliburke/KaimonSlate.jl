@@ -112,7 +112,7 @@
   window._slateRunCellAction = (id, cellId, ev) => {
     const s = (window._slateCellActions || []).find(x => x.id === id);
     if (!s) return;
-    const c = ((window.__slateState || {}).cells || []).find(x => x.id === cellId) || { id: cellId };
+    const c = ((window.__slateState || window.nbState || {}).cells || []).find(x => x.id === cellId) || { id: cellId };
     try { s.onClick(cellId, c, ev); } catch (e) { console.error('slate cell action failed', e); }
   };
 
