@@ -342,30 +342,56 @@ end
         @test bcell2.state == KaimonSlate.ReportEngine.FRESH     # locked: self-healed despite autorun=false
         @test bcell2.output !== nothing && bcell2.output.value_repr == "10"
     finally
+        Core.println(Core.stderr, "RKDIAG: self-heal testset before stop_hub(8861)")
         NS.stop_hub(hub)
+        Core.println(Core.stderr, "RKDIAG: self-heal testset after stop_hub(8861)")
     end
 end
+Core.println(Core.stderr, "RKDIAG: self-heal testset fully exited")
 
 @testset "restart_kernel!: a locked cell restores ahead of a slow preceding cell, not queued behind it" begin
-    hub = NS.start_hub(; port = 8862)
+    # TEMPORARY CI DIAGNOSTIC: this testset crashes the process on CI (exit 1, no output) while passing
+    # locally; the stderr-capture mux swallows the real error. Emit step markers + any caught exception to
+    # Core.stderr (the raw fd that bypasses the mux) so CI shows what actually dies. Revert once diagnosed.
+    _diag(msg) = (Core.println(Core.stderr, "RKDIAG: " * msg))
+    _diag("enter")
     try
-        nbp = tempname() * ".jl"
-        write(nbp, "#%% code id=slow\nsleep(1.0); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
-        nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
-        NS._eval!(nb; wait_all = true)
-        NS.set_cell_tags!(nb, "fast", ["locked"])
-        NS._eval!(nb; wait_all = true)   # runs the surgical force-run queued by locking a FRESH cell
-        fastcell() = nb.report.cells[findfirst(c -> c.id == "fast", nb.report.cells)]
-        @test any(f -> startswith(String(f), "lockedkey="), fastcell().flags)
+        hub = NS.start_hub(; port = 8862)
+        _diag("hub started")
+        try
+            nbp = tempname() * ".jl"
+            write(nbp, "#%% code id=slow\nsleep(1.0); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
+            nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
+            _diag("opened")
+            NS._eval!(nb; wait_all = true)
+            _diag("eval1 done")
+            NS.set_cell_tags!(nb, "fast", ["locked"])
+            NS._eval!(nb; wait_all = true)   # runs the surgical force-run queued by locking a FRESH cell
+            _diag("eval2 (lock force-run) done")
+            fastcell() = nb.report.cells[findfirst(c -> c.id == "fast", nb.report.cells)]
+            @test any(f -> startswith(String(f), "lockedkey="), fastcell().flags)
 
-        NS.restart_kernel!(nb)
-        sleep(0.3)   # self-heal runs before the slow cell's 1s sleep finishes
-        @test fastcell().state == KaimonSlate.ReportEngine.FRESH   # restored already — did NOT wait on `slow`
-        slowcell() = nb.report.cells[findfirst(c -> c.id == "slow", nb.report.cells)]
-        @test slowcell().state in (KaimonSlate.ReportEngine.STALE, KaimonSlate.ReportEngine.RUNNING)   # still queued/running
-    finally
-        NS.stop_hub(hub)
+            _diag("before restart_kernel!")
+            NS.restart_kernel!(nb)
+            _diag("after restart_kernel!")
+            sleep(0.3)   # self-heal runs before the slow cell's 1s sleep finishes
+            _diag("after sleep(0.3)")
+            @test fastcell().state == KaimonSlate.ReportEngine.FRESH   # restored already — did NOT wait on `slow`
+            slowcell() = nb.report.cells[findfirst(c -> c.id == "slow", nb.report.cells)]
+            @test slowcell().state in (KaimonSlate.ReportEngine.STALE, KaimonSlate.ReportEngine.RUNNING)   # still queued/running
+            _diag("asserts done")
+        finally
+            _diag("before stop_hub")
+            NS.stop_hub(hub)
+            _diag("after stop_hub")
+        end
+    catch e
+        Core.println(Core.stderr, "RKDIAG: CAUGHT EXCEPTION:")
+        Core.println(Core.stderr, sprint(showerror, e))
+        Core.println(Core.stderr, sprint(Base.show_backtrace, catch_backtrace()))
+        rethrow()
     end
+    _diag("exit")
 end
 
 @testset "▶ force-run on an upstream cell does not restale a locked FRESH dependent" begin
