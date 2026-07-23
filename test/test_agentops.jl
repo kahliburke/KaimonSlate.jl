@@ -380,6 +380,11 @@ Core.println(Core.stderr, "RKDIAG: self-heal testset fully exited")
             slowcell() = nb.report.cells[findfirst(c -> c.id == "slow", nb.report.cells)]
             @test slowcell().state in (KaimonSlate.ReportEngine.STALE, KaimonSlate.ReportEngine.RUNNING)   # still queued/running
             _diag("asserts done")
+            # Let the slow cell's re-run FINISH before teardown — otherwise `stop_hub` tears down while a
+            # `Threads.@spawn` eval is mid-`sleep(1.0)`, and that orphaned eval crashes ~1s later against
+            # the torn-down notebook (an async failure the stderr-capture mux swallows → silent exit 1).
+            timedwait(5.0; pollint = 0.05) do; slowcell().state == KaimonSlate.ReportEngine.FRESH; end
+            _diag("slow cell settled: state=$(slowcell().state)")
         finally
             _diag("before stop_hub")
             NS.stop_hub(hub)
