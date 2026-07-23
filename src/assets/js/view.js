@@ -329,6 +329,12 @@ function cellHeaderInner(c) {
   const _someOn = bu.some(n => _present.has(n));
   const autoctl = bu.length
     ? `<button class="autoctl${_someOn ? ' on' : ''}" onclick="openControlPicker('${c.id}', event)" title="pick which @bind controls to surface on this cell (${bu.join(', ')})">🎛</button>` : '';
+  // Extension-contributed toolbar buttons (slateRegisterCellAction). Each visible action becomes a
+  // <button> in the action strip; the handler is looked up by id at click time (_slateRunCellAction).
+  const cellActions = (window._slateCellActions || [])
+    .filter(a => { try { return a.show ? !!a.show(c) : true; } catch (e) { return false; } })
+    .map(a => `<button class="cellact cellact-${_esc(a.id)}" onclick="_slateRunCellAction('${_esc(a.id)}','${c.id}',event)" title="${_esc(a.title || '')}">${a.icon || '•'}</button>`)
+    .join('');
   return '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
@@ -362,6 +368,7 @@ function cellHeaderInner(c) {
       // last (code · web · md), so the prose toggle sits in a consistent spot.
       ['code', 'web', 'md'].filter(k => k !== c.kind).map(k =>
         `<button class="kindbtn" onclick="toggleType('${c.id}','${k}')" title="convert to ${k === 'md' ? 'markdown' : k} cell">${k === 'code' ? '{·}' : k === 'md' ? 'M↓' : '&lt;/&gt;'}</button>`).join('') +
+      cellActions +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved

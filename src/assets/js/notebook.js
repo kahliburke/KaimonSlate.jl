@@ -15,6 +15,21 @@ import { cells as cellsSignal, selected as selectedSignal, selectedSet as select
 const raw = s => ({ __html: s || '' });
 const _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
+// Let extension seams re-render the cell headers after they register post-hydration (e.g.
+// slateRegisterCellAction adding a toolbar button once the bundle + extension scripts have loaded).
+// Nudge the state signal — the render effect reads the `cells` COMPUTED, which dedups on Object.is, so
+// a shallow `{...nbState}` (same `.cells` array) wouldn't notify. Copy the cells array too to force a
+// fresh identity, so the top-level render re-runs cellHeaderInner for every cell (payload unchanged).
+window._slateRefreshCells = () => {
+  try {
+    const s = window.slateStore;
+    if (s && s.nbState && s.nbState.value) {
+      const st = s.nbState.value;
+      s.nbState.value = { ...st, cells: Array.isArray(st.cells) ? [...st.cells] : st.cells };
+    }
+  } catch (e) {}
+};
+
 // Dep-focus: the SET of cell ids in `id`'s dependency CHAIN — itself, its transitive precursors
 // (deps), and its transitive dependents — so focusing on a cell shows just that flow. Returns a
 // Set, or `null` when nothing is focused (→ every cell visible). All cells stay mounted either

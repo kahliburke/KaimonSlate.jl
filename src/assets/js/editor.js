@@ -90,6 +90,32 @@
     }
   };
 
+  // ── Cell-action registry (extension point) ───────────────────────────────────
+  // The header-toolbar counterpart of slateRegisterEditorExtension: a package can add a
+  // button to EVERY cell's action strip (the `.cellacts` cluster in cellHeaderInner) without
+  // editing core. A spec is:
+  //   { id, icon, title?, show?(cell)->bool, onClick(cellId, cell, event) }
+  // `id` dedups (re-register replaces — a reload doesn't stack duplicates); `icon` is the glyph
+  // (emoji / entity, like the built-in buttons); `show` gates per cell (default: all); `onClick`
+  // runs on click. cellHeaderInner reads the registry and emits a `<button>` per visible action,
+  // wired to _slateRunCellAction so the handler survives the innerHTML round-trip. Registering
+  // after cells have mounted asks the notebook view to re-render the headers.
+  window._slateCellActions = window._slateCellActions || [];
+  window.slateRegisterCellAction = spec => {
+    if (!spec || !spec.id || typeof spec.onClick !== 'function') return;
+    const i = window._slateCellActions.findIndex(s => s.id === spec.id);
+    if (i >= 0) window._slateCellActions[i] = spec; else window._slateCellActions.push(spec);
+    if (window._slateRefreshCells) window._slateRefreshCells();   // re-render open headers
+  };
+  // Invoked from a cell button's inline onclick (id + cell id) — looks the action and cell up and
+  // runs its handler. Kept off the button element so it survives cellHeaderInner's innerHTML render.
+  window._slateRunCellAction = (id, cellId, ev) => {
+    const s = (window._slateCellActions || []).find(x => x.id === id);
+    if (!s) return;
+    const c = ((window.__slateState || window.nbState || {}).cells || []).find(x => x.id === cellId) || { id: cellId };
+    try { s.onClick(cellId, c, ev); } catch (e) { console.error('slate cell action failed', e); }
+  };
+
   // Complete Julia keywords — a finished one is a token, not a completion prefix (e.g. `end`).
   const JL_KEYWORDS = new Set(['baremodule', 'begin', 'break', 'catch', 'const', 'continue', 'do',
     'else', 'elseif', 'end', 'export', 'false', 'finally', 'for', 'function', 'global', 'if', 'import',
