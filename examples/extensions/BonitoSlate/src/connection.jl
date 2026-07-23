@@ -9,9 +9,10 @@
 #                     a `slate_on` handler decodes and `put!`s it into `session.inbox` (Bonito's inbox
 #                     task then `process_message`s it). Base64 because `slateCall` args are JSON.
 #
-# One channel per Bonito session id keeps multiple figures independent. Paired with `NoServer` (which
-# inlines the Bonito bundle + init blob as `data:` URLs), the emitted fragment references NO localhost
-# URL and opens NO extra port — so it also works for a remote/region worker.
+# Every figure on a page shares ONE ROOT session + transport channel (see `use_parent_session` below) —
+# Bonito routes a page's sub-sessions over the root's connection. Paired with `NoServer` (which inlines
+# the Bonito bundle + init blob as `data:` URLs), the emitted fragment references NO localhost URL and
+# opens NO extra port — so it also works for a remote/region worker.
 
 # Slate's per-cell emit / JS→Julia-handler registrars, captured from the execution context by
 # `enable!()` (a Slate worker serves ONE notebook, so a process-global is per-notebook). `slate_emit`,
@@ -58,6 +59,32 @@ end
 Base.isopen(c::SlateConnection) = c.open
 Base.close(c::SlateConnection) = (c.open = false; nothing)
 
+# A Slate notebook PAGE carries every figure over ONE transport, so — exactly like Bonito's IJulia/Pluto
+# connections — all figures must share ONE ROOT session. Otherwise each figure is its own root and both
+# Bonito's ordered-message system AND WGLMakie's `orderedExecutor` (each a GLOBAL, monotonic scheduler in
+# the browser) get a fresh "order 1" per figure: after the first render the counter has already advanced,
+# so a re-render's order-1 task never fires → `setup_scene_init` never runs → a permanent spinner. With
+# this, the FIRST figure establishes the page root (`show_html` sets `Bonito.CURRENT_SESSION`) and every
+# later figure is a SUB-session sharing it — monotonic orders, one connection, one browser→Julia sender.
+Bonito.use_parent_session(::Bonito.Session{SlateConnection}) = true
+
+# The live page-root session, captured when its `setup_connection` runs. Held so `enable!()` can tear the
+# OLD page down and reset `CURRENT_SESSION`: a browser reload gives a fresh `window.Bonito` (its schedulers
+# and the global CONNECTION reset to empty), so the next figure must establish a NEW root rather than sub a
+# dead one whose browser-side connection no longer exists.
+const _PAGE_ROOT = Ref{Any}(nothing)
+
+# Start the page clean: drop the current page-root (close its Bonito session + inbox task, its JS→Julia
+# handler, and signal the browser to free it) and clear `CURRENT_SESSION` so the next figure opens a fresh
+# root. Called by `enable!()`. A no-op when no root is live.
+function _reset_page!()
+    root = _PAGE_ROOT[]
+    root === nothing || _teardown_session!(root)
+    _PAGE_ROOT[] = nothing
+    Bonito.CURRENT_SESSION[] = nothing
+    return nothing
+end
+
 # Called once per session before its DOM is rendered. Wire the Julia RECEIVE side (a `slate_on` handler
 # feeding `session.inbox`) and return the JS that wires the browser side (inbound decode + outbound send).
 function Bonito.setup_connection(session::Bonito.Session{SlateConnection})
@@ -69,10 +96,11 @@ function Bonito.setup_connection(session::Bonito.Session{SlateConnection})
         # browser → Julia: base64 payload → raw bytes → Bonito's inbox task (`process_message`).
         on(chan, payload -> (put!(session.inbox, Base64.base64decode(String(payload))); nothing))
     end
-    # Close this session when its cell re-runs / is deleted / the namespace rebuilds. `setup_connection`
-    # runs synchronously during the figure's `show`, on the cell's EVAL task — so the registration lands
-    # against the right cell (the callback itself is self-contained; see `_teardown_session!`).
-    SlateExtensionsBase.slate_on_cleanup(() -> _teardown_session!(session))
+    # Runs ONCE per page — for the ROOT session (`use_parent_session` makes every figure a sub of it, and
+    # Bonito wires the connection only for `isroot`). Hold the root so `enable!()` can reset the page. It
+    # deliberately OUTLIVES individual cells (subs come and go as figure cells re-run), so it is NOT torn
+    # down per-cell — only when the page is re-enabled / reloaded (`_reset_page!`) or the worker resets.
+    _PAGE_ROOT[] = session
     comp = session.compression_enabled
     return Bonito.js"""
     (() => {

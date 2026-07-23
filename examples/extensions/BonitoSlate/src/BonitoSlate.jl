@@ -47,6 +47,11 @@ function enable!()
     _SLATE_OFF[]  = ctx.off      # captured for session teardown (drop the per-session inbox handler)
     Bonito.force_connection!(SlateConnection)
     Bonito.force_asset_server!(Bonito.NoServer)
+    # Start this page's Bonito session tree fresh: drop any prior page-root and clear `CURRENT_SESSION`, so
+    # the next figure establishes a NEW root for THIS browser page. Re-running `enable!()` (a reload re-runs
+    # its cell, or the user re-runs it) therefore recovers cleanly rather than subbing figures onto a dead
+    # root left from the previous page. All figures after this share the one root (see `use_parent_session`).
+    _reset_page!()
     return nothing
 end
 
