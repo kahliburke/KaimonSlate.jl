@@ -120,9 +120,38 @@ function _ensureMaps(spec) {
   }));
 }
 function _sansMaps(s) {
-  if (!s || (!s.registerMap && !s.__size)) return s;
-  const c = Object.assign({}, s); delete c.registerMap; delete c.__size; return c;
+  if (!s || (!s.registerMap && !s.__size && !s.requireScripts)) return s;
+  const c = Object.assign({}, s); delete c.registerMap; delete c.__size; delete c.requireScripts; return c;
 }
+
+// Package-vendored front-end libraries (SlateExtensionsBase `provide_assets!`): a spec may carry
+// `requireScripts` — a URL (or list of them) for JS that must load before the chart renders. The
+// motivating case is echarts-gl, which registers the `globe`/`surface`/`bar3D`/`scatter3D` series
+// types onto the global `echarts`; a 3D chart that `setOption`s before it loads blanks on an unknown
+// series type and won't self-heal. Each URL is loaded via a <script> tag ONCE per page (in-flight
+// promise shared, ordered `async=false` so dependents see their deps), and setOption waits on it — the
+// exact `registerMap` discipline, generalised to any echarts extension. The key is stripped before
+// setOption (not an ECharts option); a static export rewrites the URL to a page-local sibling
+// (server_export.jl) so the frozen copy loads offline. A failed load resolves (doesn't reject) so one
+// missing lib can't wedge every chart's render — the chart just paints without it.
+const _scriptRegistry = {};                          // url → Promise (load done / in flight)
+function _loadScript(url) {
+  if (_scriptRegistry[url]) return _scriptRegistry[url];
+  _scriptRegistry[url] = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url; s.async = false;                    // preserve load order (echarts-gl needs echarts first)
+    s.onload = () => resolve();
+    s.onerror = () => { delete _scriptRegistry[url]; reject(new Error('failed to load ' + url)); };
+    document.head.appendChild(s);
+  });
+  return _scriptRegistry[url];
+}
+function _ensureScripts(spec) {
+  const reqs = spec && spec.requireScripts ? [].concat(spec.requireScripts) : [];
+  return Promise.all(reqs.map(u => u ? _loadScript(u).catch(() => {}) : Promise.resolve()));
+}
+// Everything a chart's render must await before setOption: registered geo maps AND loaded libraries.
+const _ensurePrereqs = spec => Promise.all([_ensureMaps(spec), _ensureScripts(spec)]);
 
 // Generated assets (`save_asset`): a cell's `assets` specs — {path, url, mime} — populate a page-wide
 // path→asset registry so `Slate.asset(path)` resolves what a widget/chart references. Live, each asset
@@ -325,6 +354,15 @@ window._onSlateThemeChange = () => {
 function renderCharts(c) {
   _registerAssets(c);                               // publish this cell's save_asset blobs → Slate.asset
   const specs = c.echarts || [];
+  // A package-vendored lib (echarts-gl via `requireScripts`) must load BEFORE `echarts.init`: an
+  // ECharts instance created before echarts-gl registers its 3D views can't render a GL series — it
+  // paints blank and throws on the next resize. So when any spec needs a lib, defer the ENTIRE render
+  // (init included) until it's loaded; a cell with no `requireScripts` renders synchronously as before.
+  if (specs.some(s => s && s.requireScripts))
+    return void Promise.all(specs.map(_ensureScripts)).then(() => _renderChartsBody(c, specs));
+  _renderChartsBody(c, specs);
+}
+function _renderChartsBody(c, specs) {
   const host = document.querySelector('#cell-' + c.id + ' .echarts');
   if (host) {                                   // code-cell echarts host
     if (!charts[c.id]) charts[c.id] = [];
@@ -348,7 +386,7 @@ function renderCharts(c) {
     }
     while (host.children.length > specs.length) { host.removeChild(host.lastChild); const inst = insts.pop(); if (inst) try { inst.dispose(); } catch (_) {} }
     specs.forEach((s, i) => _applySize(host.children[i], insts[i], s));
-    Promise.all(specs.map((s, i) => _ensureMaps(s).then(() => _geoSafeSetOption(insts[i], s))))
+    Promise.all(specs.map((s, i) => _ensurePrereqs(s).then(() => _geoSafeSetOption(insts[i], s))))
       .then(() => { if (insts.length) _snapCell(c.id, insts, _sansMaps(specs[0])); });
     _healSizesSoon(insts);
   }
@@ -357,7 +395,7 @@ function renderCharts(c) {
     const spec = specs[+el.dataset.i]; if (!spec) return;
     if (!el._inst) { _ensureSlateTheme(); el._inst = echarts.init(el, 'slate'); }
     _applySize(el, el._inst, spec);
-    _ensureMaps(spec).then(() => _geoSafeSetOption(el._inst, spec));
+    _ensurePrereqs(spec).then(() => _geoSafeSetOption(el._inst, spec));
   });
 }
 // setOption that can't leave a DEAD geo bind. If a spec needs a registered map but a setOption ever

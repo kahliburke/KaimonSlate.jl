@@ -1762,12 +1762,14 @@ page to mirror: `{frontend:[{id, js, esm, kind}]}` (widget renderers + editor ex
 server pulls this once per run drain and injects the scripts into the page. Empty when no such package
 is loaded."
 function __slate_extension_manifest()
-    out = Dict{String,Any}("frontend" => Dict{String,Any}[])
+    out = Dict{String,Any}("frontend" => Dict{String,Any}[], "assets" => Dict{String,Any}[])
     try
         m = inprocess_extension_manifest(_NS[])
         out["frontend"] = Dict{String,Any}[Dict{String,Any}(
             "id" => String(e.id), "js" => String(e.js), "esm" => e.esm, "kind" => String(e.kind))
             for e in m.frontend]
+        out["assets"] = Dict{String,Any}[Dict{String,Any}(
+            "pkg" => String(e.pkg), "dir" => String(e.dir)) for e in m.assets]
     catch
     end
     return out

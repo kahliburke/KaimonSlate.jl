@@ -80,6 +80,72 @@ function _rewrite_geomap_url!(spec, oldurl::AbstractString, newurl::AbstractStri
     return spec
 end
 
+# Resolve a live `/ext-assets/<pkg>/<sub>` url (a SlateExtensionsBase `provide_assets!` file) to its
+# on-disk source via the notebook's asset registry, or `nothing` if the package/file isn't found or the
+# path escapes the vendored dir. The export mirror of the `/ext-assets/**` router in server_complete.jl.
+function _ext_asset_file(nb::LiveNotebook, url::AbstractString)
+    m = match(r"^/ext-assets/([^/]+)/(.*)$", String(url))
+    m === nothing && return nothing
+    dir = get(nb.assets, HTTP.URIs.unescapeuri(String(m.captures[1])), nothing)
+    dir === nothing && return nothing
+    rootn = normpath(dir)
+    p = normpath(joinpath(rootn, strip(HTTP.URIs.unescapeuri(String(m.captures[2])), '/')))
+    (p == rootn || startswith(p, rootn * "/")) && isfile(p) ? p : nothing
+end
+
+# A chart spec's `requireScripts` (echarts extensions a chart needs loaded before render, e.g.
+# echarts-gl from `provide_assets!`). Live they're served at `/ext-assets/<pkg>/…`; a frozen export has
+# no server, so each such url is repointed: a published site → the page-local sibling
+# (`ext-assets/<pkg>/…`, written by `_package_asset_files`); a standalone page → an inline `data:` URL
+# carrying the file's bytes, so the single HTML stays self-contained. A non-`/ext-assets/` url (a CDN
+# reference) is left untouched. Rewrites in place.
+function _rewrite_requirescripts!(spec, nb::LiveNotebook; inline::Bool)
+    spec isa AbstractDict || return spec
+    reqs = get(spec, "requireScripts", nothing)
+    reqs === nothing && return spec
+    lst = collect(reqs isa AbstractVector ? reqs : (reqs,))
+    for (i, u) in enumerate(lst)
+        us = String(u)
+        startswith(us, "/ext-assets/") || continue
+        if inline
+            f = _ext_asset_file(nb, us)
+            f === nothing && continue
+            lst[i] = "data:text/javascript;base64," * Base64.base64encode(read(f))
+        else
+            lst[i] = replace(us, "/ext-assets/" => "ext-assets/"; count = 1)
+        end
+    end
+    spec["requireScripts"] = lst
+    return spec
+end
+
+# A `/ext-assets/<pkg>/…` url can sit ANYWHERE in a chart spec, not just `requireScripts` — a `globe`
+# `baseTexture` (a vendored earth image), a `graphic` element's `image`, a symbol url. `requireScripts`
+# is handled above (it's a script, inlined as `text/javascript`); this repoints EVERY OTHER such url the
+# same way, recursively over the spec: a published site → the page-local `ext-assets/…` sibling (written
+# by `_package_asset_files`), a standalone page → a `data:<mime>;base64,…` url of the file's bytes (mime
+# by extension — `image/jpeg` for a texture) so the single HTML carries the binary. A non-`/ext-assets/`
+# url (a CDN texture) is left untouched. Runs AFTER `_rewrite_requirescripts!`, so already-rewritten
+# script urls (now `data:`/`ext-assets/…`) no longer match. Rebuilds a fresh copy (`_echarts_specs` already
+# deep-copies via `_json_finite`), mutating the spec's containers in place.
+function _rewrite_ext_asset_urls!(spec, nb::LiveNotebook; inline::Bool)
+    rw(s::AbstractString) = begin
+        startswith(s, "/ext-assets/") || return s
+        inline || return replace(s, "/ext-assets/" => "ext-assets/"; count = 1)
+        f = _ext_asset_file(nb, s)
+        f === nothing ? s : "data:" * _site_ctype(f) * ";base64," * Base64.base64encode(read(f))
+    end
+    walk!(x) =
+        if x isa AbstractDict
+            for (k, v) in x; x[k] = v isa AbstractString ? rw(v) : walk!(v); end; x
+        elseif x isa AbstractVector
+            for i in eachindex(x); v = x[i]; x[i] = v isa AbstractString ? rw(v) : walk!(v); end; x
+        else
+            x
+        end
+    return walk!(spec)
+end
+
 # ── Author-embedded media (drag/drop / paste into a Markdown or web cell) ────────────────────────────
 # A cell can reference media two ways: an inline `data:<mime>;base64,…` URL (bytes live in the source),
 # or the live asset route `/n/<id>/asset/<rel>` (bytes are a file under the notebook's project dir).
@@ -266,7 +332,27 @@ function _referenced_page_assets(nb::LiveNotebook)
     for (rel, path) in _embedded_asset_files(nb.report.cells, _proj_root(nb))   # author-embedded media → file
         files[rel] = path
     end
+    for (rel, path) in _package_asset_files(nb)                                 # provide_assets! dirs → files
+        files[rel] = path
+    end
     return files
+end
+
+# Every file under a package's vendored asset dir (`provide_assets!`) as `ext-assets/<pkg>/<rel> => path`,
+# so a static export carries the whole tree as page-local siblings — the offline mirror of the live
+# `/ext-assets/<pkg>/…` route (the URL is rewritten to the leading-slash-stripped relative form in
+# `_frontend_export_head`). A missing dir contributes nothing.
+function _package_asset_files(nb::LiveNotebook)
+    out = Pair{String,String}[]
+    for (pkg, dir) in nb.assets
+        isdir(dir) || continue
+        for (root, _, fnames) in walkdir(dir), f in fnames
+            src = joinpath(root, f)
+            rel = relpath(src, dir)
+            push!(out, joinpath("ext-assets", pkg, rel) => src)
+        end
+    end
+    return out
 end
 
 # Write every asset a notebook's page references into `<page_dir>` at its relative path — so the
@@ -335,9 +421,17 @@ try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠
 function _frontend_export_head(nb)
     fe = _frontend_scripts(nb)
     isempty(fe) && return ""
+    # Rewrite the live `/ext-assets/<pkg>/…` route (served by the hub) to the page-local `./ext-assets/<pkg>/…`
+    # sibling written by `_package_asset_files` — a frozen export has no server, so a package-vendored asset a
+    # script `fetch`es / `<script src=>`s / dynamic-`import()`s must resolve as a plain sibling. The `./` is
+    # load-bearing: an ES `import()` specifier without a leading `/`, `./`, or scheme is a BARE specifier and
+    # throws unless an import map defines it — a page-relative `ext-assets/…` would break the very multi-file
+    # modules this route exists to serve. `./` is a valid relative specifier for `import()` and equivalent to
+    # the bare form for `fetch`/`<script src>`, so it's correct for every consumer.
+    rw(js) = replace(js, "/ext-assets/" => "./ext-assets/")
     # Break any literal `</script` in the JS so it can't terminate the tag early (the live path uses
     # textContent/Blob and is immune); the sequence is inert JS once the parser is past the string boundary.
-    safe(js) = replace(js, r"</script"i => "<\\/script")
+    safe(js) = replace(rw(js), r"</script"i => "<\\/script")
     parts = String[]
     if any(e -> !e.esm, fe)
         push!(parts, raw"""<script>window.slateWidgets=window.slateWidgets||{};
@@ -347,7 +441,7 @@ window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||functio
     for e in fe
         if !isempty(e.kind)
             # Component module: import its default export (inlined as a data: module) + register under the kind.
-            mod = "data:text/javascript;charset=utf-8;base64," * Base64.base64encode(e.js)
+            mod = "data:text/javascript;charset=utf-8;base64," * Base64.base64encode(rw(e.js))
             push!(parts, string("<script type=\"module\" data-slate-fe=\"", _esc(e.id), "\">",
                 "import C from ", JSON.json(mod), ";import { registerComponent } from \"@slate/widget\";",
                 "registerComponent(", JSON.json(e.kind), ", C);</script>"))
@@ -942,6 +1036,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                                 _rewrite_geomap_url!(spec, url, _geo_asset_path(url))
                             end
                         end
+                        # Package-vendored libs a chart needs (echarts-gl): inline as data: (standalone) or
+                        # repoint at the page-local `ext-assets/…` sibling (site).
+                        _rewrite_requirescripts!(spec, nb; inline = inline_assets)
+                        # Any OTHER vendored-asset url in the spec (a globe `baseTexture`, a graphic image).
+                        _rewrite_ext_asset_urls!(spec, nb; inline = inline_assets)
                         print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:", _chart_css_height(spec), "\"></div>")
                         push!(charts, (did, JSON.json(spec)))
                     end
@@ -1027,15 +1126,24 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
                   "if(!r.url)return Promise.resolve();",
                   "return fetch(r.url).then(function(x){return x.json();}).then(function(j){echarts.registerMap(r.name,j);}).catch(function(){});}));}",
-                  # `registerMap`/`__size` are Slate extensions, not ECharts options — strip before setOption.
-                  "function _slateSansMaps(o){if(!o||(!o.registerMap&&!o.__size))return o;var c=Object.assign({},o);delete c.registerMap;delete c.__size;return c;}",
+                  # `registerMap`/`__size`/`requireScripts` are Slate extensions, not ECharts options — strip before setOption.
+                  "function _slateSansMaps(o){if(!o||(!o.registerMap&&!o.__size&&!o.requireScripts))return o;var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;return c;}",
+                  # Load a chart's `requireScripts` (echarts-gl etc.) before render — ONE <script> per url
+                  # (shared promise), ordered so a lib sees its deps; a failed load resolves so it can't wedge.
+                  "var _slateScripts={};function _slateLoadScript(u){if(_slateScripts[u])return _slateScripts[u];",
+                  "_slateScripts[u]=new Promise(function(res){var s=document.createElement('script');s.src=u;s.async=false;",
+                  "s.onload=function(){res();};s.onerror=function(){res();};document.head.appendChild(s);});return _slateScripts[u];}",
+                  "function _slateEnsureScripts(reqs){return Promise.all((reqs?[].concat(reqs):[]).map(function(u){return u?_slateLoadScript(u):Promise.resolve();}));}",
                   "function _slateRenderCharts(){if(!window.echarts)return;",
                   "try{echarts.registerTheme('slate',_slateExportTheme());}catch(e){}",
                   "_slateCharts.forEach(function(c){",
-                  "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];var ch=echarts.init(el,'slate');",
+                  "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];",
                   "var reqs=opt&&opt.registerMap?[].concat(opt.registerMap):[];",
-                  "_slateEnsureMaps(reqs).then(function(){ch.setOption(_slateSansMaps(opt));});",
-                  "window.addEventListener('resize',function(){ch.resize();});});}",
+                  # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
+                  # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
+                  "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
+                  "var ch=echarts.init(el,'slate');ch.setOption(_slateSansMaps(opt));",
+                  "window.addEventListener('resize',function(){ch.resize();});});});}",
                   "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
         end
         if runnable
@@ -2025,6 +2133,9 @@ _site_ctype(p) = (e = lowercase(splitext(p)[2]);
     e == ".woff2" ? "font/woff2" :
     e == ".woff" ? "font/woff" :
     e == ".ttf" ? "font/ttf" :
+    e == ".wasm" ? "application/wasm" :             # WebAssembly.instantiateStreaming requires this exact MIME
+    e == ".glb" ? "model/gltf-binary" :
+    e == ".gltf" ? "model/gltf+json" :
     e in (".txt", ".jl", ".map") ? "text/plain; charset=utf-8" :
     "application/octet-stream")
 

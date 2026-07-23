@@ -56,11 +56,14 @@ mutable struct LiveNotebook
                                          # manifest (`_refresh_extensions!`); sticky within a session, id-deduped,
                                          # declaration order. `esm` ⇒ ES module; non-empty `kind` ⇒ a component whose
                                          # default export Slate wraps + registers. See `_frontend_scripts`.
-    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend registry, so every
-    # existing positional call site (server + tests) is unchanged; both are populated at runtime.
+    assets::Dict{String,String}          # package-vendored asset DIRECTORIES (pkg → absolute dir on disk), from the
+                                         # same manifest (`provide_assets!`). Served at `/ext-assets/<pkg>/…` while the
+                                         # package is loaded, and copied into a static export. See `_register_assets!`.
+    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend/asset registries, so every
+    # existing positional call site (server + tests) is unchanged; all are populated at runtime.
     LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
         new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents,
-            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[])
+            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[], Dict{String,String}())
 end
 
 # ── Notebook-lock protocol (`nb.lock`) ─────────────────────────────────────────────────────────────
@@ -1046,6 +1049,17 @@ function _register_frontend!(nb::LiveNotebook, idv, js::AbstractString, esm::Boo
     return false
 end
 
+# Add/replace one package-vendored asset directory (pkg → absolute dir) in the notebook's registry — the
+# files under `dir` are served at `/ext-assets/<pkg>/…` (see `_make_router`) and copied into a static
+# export. Returns true if the registry CHANGED (new pkg, or the dir moved), so the caller bumps the version.
+function _register_assets!(nb::LiveNotebook, pkg::AbstractString, dir::AbstractString)
+    (isempty(pkg) || isempty(dir)) && return false
+    p, d = String(pkg), String(dir)
+    get(nb.assets, p, nothing) == d && return false
+    nb.assets[p] = d
+    return true
+end
+
 # Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
 # (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
 # which may run during namespace priming (no harvestable eval), so the process-global registry is the
@@ -1063,18 +1077,29 @@ function _refresh_extensions!(nb::LiveNotebook)
         return false
     end
     manifest === nothing && return false
-    fe = _manifest_field(manifest, :frontend)
-    fe === nothing && return false
     changed = false
-    for e in fe
-        js = _manifest_field(e, :js); js === nothing && continue
-        esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
-        kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
-        # The manifest was pulled OFF nb.lock (a round-trip); take the lock only for the registry mutation,
-        # so this stays protocol-safe when the runner calls `_refresh_extensions!` off-lock.
-        lock(nb.lock) do
-            _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
-        end && (changed = true)
+    # The manifest was pulled OFF nb.lock (a round-trip); take the lock only for each registry mutation,
+    # so this stays protocol-safe when the runner calls `_refresh_extensions!` off-lock.
+    fe = _manifest_field(manifest, :frontend)
+    if fe !== nothing
+        for e in fe
+            js = _manifest_field(e, :js); js === nothing && continue
+            esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
+            kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
+            lock(nb.lock) do
+                _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
+            end && (changed = true)
+        end
+    end
+    as = _manifest_field(manifest, :assets)
+    if as !== nothing
+        for e in as
+            pkg = _manifest_field(e, :pkg); dir = _manifest_field(e, :dir)
+            (pkg === nothing || dir === nothing) && continue
+            lock(nb.lock) do
+                _register_assets!(nb, String(pkg), String(dir))
+            end && (changed = true)
+        end
     end
     return changed
 end
