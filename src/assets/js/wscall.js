@@ -101,12 +101,40 @@
     return ready;
   }
 
+  // Encode ONE browser→server binary buffer as a self-describing frame — the SAME layout the server→browser
+  // numeric stream uses (see `_dispatchBinary` / SlateExtensionsBase.encode_binary_frame), so both directions
+  // share one wire format. `channel` carries the correlating call id; `meta` is the tiny {i,n} header; the
+  // payload is raw bytes (dtype UInt8, rank 1). The server reads it with plain byte reads + JSON for meta.
+  // Layout: [u8 ver=1][u16 chanLen][chan][u16 metaLen][metaJSON][u8 dtype][u8 rank][rank×u32 dims][bytes].
+  const _te = new TextEncoder();
+  function _encodeU8Frame(channel, meta, u8) {
+    const chB = _te.encode(String(channel)), metaB = _te.encode(JSON.stringify(meta));
+    const buf = new ArrayBuffer(1 + 2 + chB.length + 2 + metaB.length + 1 + 1 + 4 + u8.length);
+    const dv = new DataView(buf); let o = 0;
+    dv.setUint8(o, 1); o += 1;
+    dv.setUint16(o, chB.length, true); o += 2; new Uint8Array(buf, o, chB.length).set(chB); o += chB.length;
+    dv.setUint16(o, metaB.length, true); o += 2; new Uint8Array(buf, o, metaB.length).set(metaB); o += metaB.length;
+    dv.setUint8(o, 4); o += 1;   // dtype: UInt8 (keep in sync with _TYPED / _bin_dtype)
+    dv.setUint8(o, 1); o += 1;   // rank 1
+    dv.setUint32(o, u8.length, true); o += 4;
+    new Uint8Array(buf, o, u8.length).set(u8);
+    return buf;
+  }
+  function _asU8(b) {
+    return (b instanceof ArrayBuffer) ? new Uint8Array(b)
+         : ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength)
+         : new Uint8Array(b);
+  }
+
   // Call a Julia `slate_on` handler and await its (JSON-serializable) result. Rejects on a throwing
   // handler, an unregistered channel, a timeout, or a dropped socket (just call again — it reconnects).
   // `onProgress` (optional): called with each progress frame a 2-arg Julia handler streams via its
   // `progress(...)` closure during this call — correlated by the call id, framework-side (no token). The
   // final result is still the resolved value. Progress frames after the reply/timeout are ignored.
-  window.slateCall = async function (channel, args, onProgress) {
+  // `buffers` (optional): an array of ArrayBuffer/TypedArray sent as native binary WS frames (correlated by
+  // call id) BEFORE the JSON call — the server decodes them and hands the handler `args.__slate_buffers`
+  // (a `Vector{Vector{UInt8}}`). No base64: real binary on the same socket the numeric stream already uses.
+  window.slateCall = async function (channel, args, onProgress, buffers) {
     if (!NB_ID) throw new Error('slateCall: no notebook id in the page URL');
     await connect();
     const id = 'c' + (++seq);
@@ -119,8 +147,13 @@
       pending.set(id, { resolve: (v) => { clearTimeout(to); done(); resolve(v); },
                         reject:  (e) => { clearTimeout(to); done(); reject(e); } });
     });
-    try { ws.send(JSON.stringify({ id, channel: String(channel), args: args === undefined ? null : args })); }
-    catch (e) { const q = pending.get(id); if (q) { pending.delete(id); done(); q.reject(e); } }
+    const nbuf = buffers && buffers.length ? buffers.length : 0;
+    try {
+      // Buffer frames FIRST — the socket preserves order, so the server has them buffered by the time the
+      // JSON call (carrying `nbuf`) arrives and dispatches.
+      for (let i = 0; i < nbuf; i++) ws.send(_encodeU8Frame(id, { i, n: nbuf }, _asU8(buffers[i])));
+      ws.send(JSON.stringify({ id, channel: String(channel), args: args === undefined ? null : args, nbuf }));
+    } catch (e) { const q = pending.get(id); if (q) { pending.delete(id); done(); q.reject(e); } }
     return p;
   };
 

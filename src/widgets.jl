@@ -555,6 +555,10 @@ end
 # a given call uses (the field names ARE the type); don't route huge dynamic key-sets through it.
 _slate_args(x::AbstractDict) = NamedTuple{Tuple(Symbol.(keys(x)))}(Tuple(_slate_args(v) for v in values(x)))
 _slate_args(x::AbstractVector) = Any[_slate_args(v) for v in x]
+# A raw byte buffer (a `slateCall` binary buffer, delivered as `args.__slate_buffers`) is already a plain
+# Base type — pass it through WHOLE. Without this it would hit the `AbstractVector` clause above and explode
+# into a boxed `Vector{Any}` of `UInt8`, defeating the point of the binary transport.
+_slate_args(x::Vector{UInt8}) = x
 _slate_args(x) = x
 
 # Invoke a `slate_on` handler with the (NamedTuple-shaped) call args. A 2-parameter handler
