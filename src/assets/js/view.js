@@ -568,6 +568,14 @@ function editSource(id, mode) {
   if (!cell) return;
   const d = _disp(cell); if (d) d.style.display = 'none';
   const sed = cell.querySelector('.srcedit'); sed.style.display = '';
+  // A prior cell re-render (a live widget/output refresh — e.g. a Mol* viewer streaming frames) can swap
+  // out the .srcedit DOM, detaching the CM6 editor while `editors[id]` still points at it. The first
+  // editSource would then reveal the raw, empty, unstyled <textarea> instead of remounting. Drop a stale
+  // (detached) editor so the block below remounts it against the current .srcedit.
+  if (editors[id] && editors[id].dom && !sed.contains(editors[id].dom)) {
+    try { editors[id].destroy(); } catch (_) {}
+    delete editors[id];
+  }
   if (!editors[id]) {
     const ta = sed.querySelector('textarea'); if (ta) ta.style.display = 'none';   // CM6 mounts a sibling editor
     window.mkEditor(sed, {
