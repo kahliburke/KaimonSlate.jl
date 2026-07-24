@@ -834,6 +834,50 @@ end
 # capability, so fall back to the already-rendered figure bytes (no override for the in-process kernel).
 rerender_fig(::Kernel, ::Report, ::AbstractString, ::AbstractString; cellid::AbstractString = "export", raster::Bool = false) = nothing
 
+# Fetch a byte asset an extension registered on the WORKER via `provide_served_asset!` (keyed by content
+# hash), so the hub can serve it at a stable URL. Returns `(mime, bytes)` or `nothing`. The hub caches by
+# hash after the first fetch (content-addressed → immutable), so this round-trips at most once per asset.
+function get_served_asset(k::GateKernel, report::Report, hash::AbstractString)
+    res = try
+        prepare!(k, report)
+        _tool(k, "__slate_get_served_asset", Dict{String,Any}("hash" => String(hash)); timeout = 30.0)
+    catch
+        return nothing
+    end
+    (res !== nothing && hasproperty(res, :ok) && res.ok === true) || return nothing
+    b64 = hasproperty(res, :b64) ? String(res.b64) : ""
+    isempty(b64) && return nothing
+    bytes = try; Vector{UInt8}(Base64.base64decode(b64)); catch; return nothing; end
+    return (hasproperty(res, :mime) ? String(res.mime) : "application/octet-stream", bytes)
+end
+get_served_asset(::Kernel, ::Report, ::AbstractString) = nothing
+
+# Ask the worker to re-render its retained LIVE (session-bound) outputs — WGLMakie figures — for a browser
+# page that just connected, the way a Bonito server serves a fresh session per page. Returns `[(cid, wire),
+# …]` (empty if there's no live worker or nothing is live); the hub applies each via `server_celldone`. No
+# `prepare!` — this must NOT spawn a worker just because a page connected; if the worker's down it no-ops.
+function rerender_live(k::GateKernel, report::Report)
+    res = try
+        _tool(k, "__slate_rerender_live", Dict{String,Any}(); timeout = _eval_timeout())
+    catch
+        return Tuple{String,Any}[]
+    end
+    (res !== nothing && hasproperty(res, :cids)) || return Tuple{String,Any}[]
+    cids, mts, b64s = res.cids, res.mimetypes, res.b64s
+    out = Tuple{String,Any}[]
+    for i in eachindex(cids)
+        bytes = try; Vector{UInt8}(Base64.base64decode(String(b64s[i]))); catch; continue; end
+        # Rebuild the minimal cell wire `_wire_to_output` expects (the fresh live figure's one rich chunk).
+        wire = (stdout = "", mime = [(String(mts[i]), bytes)], echarts = Any[], tables = Any[],
+                binds = NamedTuple[], value_repr = "", exception = nothing, backtrace = nothing,
+                duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
+                animations = Any[], effects = Any[], assets = Any[])
+        push!(out, (String(cids[i]), wire))
+    end
+    return out
+end
+rerender_live(::Kernel, ::Report) = Tuple{String,Any}[]
+
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString, memo;
                       region::AbstractString = "", regions::AbstractVector = String[])
     (memo === nothing || isempty(memo.key)) && return eval_capture(k, report, source, filename; region = region, regions = regions)

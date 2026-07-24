@@ -43,6 +43,67 @@ end
 # chunk — unlike the high-level `sse_stream`/`SSEStream`, whose chunked writer
 # blocks for a full 16 KiB buffer before flushing and so can't drive a long-lived
 # push connection.
+# Re-rendering live outputs on browser connect must be DEBOUNCED + SERIALIZED: a burst of quick reloads
+# fires a burst of connects, and running a re-render per connect makes them race — each re-render resets
+# the ONE Bonito page-root and re-renders the SAME retained figures, so overlapping ones clobber each
+# other's session (the "figure loading" that gets worse the faster you reload). So per notebook we run ONE
+# immortal debouncer task: a `_sse` connect just KICKS it; the task waits out the burst, coalesces it into a
+# single re-render against the final settled page, delivers, and loops back to waiting. Crucially there is
+# NO "a re-render is running" flag to get stuck — the task is the only thing that ever re-renders and it
+# always returns to `take!`, so a single slow/hung round-trip can't permanently wedge a notebook's figures
+# (an earlier running/dirty flag-pair could, if the loop failed to clear the flag).
+const _LIVE_RERENDER_LOCK = ReentrantLock()
+const _LIVE_RERENDER_KICK = Dict{String,Channel{Nothing}}()   # nb.id → debounce mailbox (buffered, lossy)
+const _LIVE_RERENDER_DEBOUNCE = 0.30                          # seconds to let a reload burst settle
+
+# Kick this notebook's live-re-render debouncer (starting it on first use). Never blocks the `_sse` handler:
+# the mailbox is buffered, so a kick just enqueues (a full buffer already means a re-render is pending).
+function _schedule_live_rerender!(nb::LiveNotebook)
+    ch = lock(_LIVE_RERENDER_LOCK) do
+        get!(_LIVE_RERENDER_KICK, nb.id) do
+            c = Channel{Nothing}(256)
+            _run_live_rerender_loop!(nb, c)
+            c
+        end
+    end
+    try; put!(ch, nothing); catch; end   # buffered → effectively non-blocking; closed → notebook gone
+    return nothing
+end
+
+# The immortal per-notebook debouncer: wait for the first connect of a burst, sleep out the burst, drain
+# the rest, then re-render once and deliver each live output via `server_celldone`. Loops until the mailbox
+# is closed (notebook teardown). Any error is logged and the loop continues — one bad re-render never stops
+# future ones. `rerender_live` no-ops without a live worker and carries its own gate timeout, so a down or
+# slow worker can't hang this loop indefinitely.
+function _run_live_rerender_loop!(nb::LiveNotebook, ch::Channel{Nothing})
+    @async while true
+        try
+            take!(ch)                              # wait for a connect
+            sleep(_LIVE_RERENDER_DEBOUNCE)         # let a reload burst settle to the final page
+            while isready(ch); take!(ch); end      # coalesce the rest of the burst into this one pass
+            for (cid, wire) in ReportEngine.rerender_live(nb.kernel, nb.report)
+                try; server_celldone(nb, "reconnect", cid, wire); catch; end
+            end
+        catch e
+            e isa InvalidStateException && break    # mailbox closed → notebook closing → end the task
+            @warn "Kaimon Slate: live re-render loop error" id = nb.id exception = (e, catch_backtrace())
+            sleep(0.5)                              # avoid a hot error loop
+        end
+    end
+    return nothing
+end
+
+# Stop a notebook's live-re-render debouncer (close its mailbox → the loop ends). Called from teardown.
+function _stop_live_rerender!(nb::LiveNotebook)
+    ch = lock(_LIVE_RERENDER_LOCK) do
+        c = get(_LIVE_RERENDER_KICK, nb.id, nothing)
+        delete!(_LIVE_RERENDER_KICK, nb.id)
+        c
+    end
+    ch === nothing || try; close(ch); catch; end
+    return nothing
+end
+
 function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     HTTP.setheader(stream, "Content-Type" => "text/event-stream")
     HTTP.setheader(stream, "Cache-Control" => "no-cache")
@@ -50,6 +111,10 @@ function _sse(stream::HTTP.Stream, nb::LiveNotebook)
     ch = Channel{String}(256)   # headroom so the slow-client resync tokens (see _broadcast) don't block
     n = lock(nb.llock) do; push!(nb.listeners, ch); length(nb.listeners); end
     @info "Kaimon Slate: browser connected" id = nb.id clients = n
+    # A freshly-connected browser page needs any LIVE (session-bound) outputs — WGLMakie figures, whose
+    # scene + interaction live in the worker session, not the replayed HTML — re-rendered for IT, the way a
+    # Bonito server serves a fresh session per page load (see `_schedule_live_rerender!`).
+    _schedule_live_rerender!(nb)
     try
         write(stream, "data: $(nb.version)\n\n")
         while true

@@ -1488,6 +1488,29 @@ function __slate_rerender_fig(; source::String = "", theme::String = "", raster:
     return (; ok = false)
 end
 
+"Fetch a byte asset an extension registered via `SlateExtensionsBase.provide_served_asset!` (keyed by
+content hash) so the hub can serve it at a stable URL. Returns `(; ok, mime, b64)` (base64 bytes)."
+function __slate_get_served_asset(; hash::String = "")
+    a = SlateExtensionsBase.served_asset(hash)
+    a === nothing && return (; ok = false)
+    return (; ok = true, mime = a.mime, b64 = Base64.base64encode(a.bytes))
+end
+
+"Re-render every retained live (session-bound) cell output for a browser page that just (re)connected —
+resets per-page runtime (SEB `on_live_reset`) then re-renders each retained value. Returns FLAT parallel
+arrays `(; cids, mimetypes, b64s)` (base64 bytes) — a nested `[(cid, wire)…]` doesn't survive the gate's
+structured-return serialization. The hub rebuilds each cell's wire (see `rerender_live`). A live figure
+has ONE rich chunk (its `html+html` card), so we take the first chunk per cell."
+function __slate_rerender_live()
+    cids = String[]; mimetypes = String[]; b64s = String[]
+    for (cid, chunks) in rerender_live_outputs(_NS[])
+        isempty(chunks) && continue
+        m, b = chunks[1]
+        push!(cids, cid); push!(mimetypes, String(m)); push!(b64s, Base64.base64encode(b))
+    end
+    return (; cids = cids, mimetypes = mimetypes, b64s = b64s)
+end
+
 "Completion candidates in the warm namespace → `(; items, from, to)` (see `slate_completions`)."
 __slate_complete(code::String, pos::Int) = slate_completions(_NS[], code, pos)
 
@@ -2251,6 +2274,8 @@ function tools()
         KaimonGate.GateTool("__slate_reconstruct", __slate_reconstruct),
         KaimonGate.GateTool("__slate_bundle_info", __slate_bundle_info),
         KaimonGate.GateTool("__slate_extension_manifest", __slate_extension_manifest),
+        KaimonGate.GateTool("__slate_get_served_asset", __slate_get_served_asset),
+        KaimonGate.GateTool("__slate_rerender_live", __slate_rerender_live),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
         KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
         KaimonGate.GateTool("__slate_revise", __slate_revise),

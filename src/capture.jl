@@ -37,6 +37,13 @@ const _MAX_HTML_BYTES = 4_000_000   # per text/html | text/latex output chunk (R
 # even the saved file is clipped — guards against a pathological multi-GB repr eating the disk.
 const _MAX_KEEP_BYTES = Ref(50_000_000)
 
+# Session-bound (live) return values retained per cell so a browser (re)connect can re-render them fresh —
+# the way a Bonito server serves a fresh session per page load. Keyed by cell id; an extension opts a value
+# in via `SlateExtensionsBase.slate_live_render` (e.g. a WGLMakie figure, whose scene + interaction live in
+# a worker session, not in the captured HTML). Process-global — one worker serves one notebook. Read by the
+# `__slate_rerender_live` worker tool; the value is the ORIGINAL object so `show` re-renders it live.
+const _LIVE_OUTPUTS = Dict{String,Any}()
+
 _cap_text(s::AbstractString, limit::Int = _MAX_OUT_CHARS) =
     (str = String(s); length(str) <= limit ? str :
      string(first(str, limit), "\n\n… ⚠ truncated — ", length(str) - limit, " more characters."))
@@ -702,10 +709,37 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
         end
     end
 
+    # Retain a session-bound (live) cell so a browser (re)connect can re-render it fresh (see
+    # `_LIVE_OUTPUTS`). Store the SOURCE, not the value: re-`show`ing the SAME `Figure` accumulates WGLMakie
+    # screens and the second render's scene won't init (permanent spinner); re-running the source builds a
+    # clean fresh figure every time. Clear the slot when the cell errors, is quiet, or stops being live.
+    if err === nothing && value !== nothing && !quiet &&
+       (try Base.invokelatest(SlateExtensionsBase.slate_live_render, value) catch; false end) === true
+        _LIVE_OUTPUTS[cid] = (source = String(source), filename = String(filename))
+    else
+        delete!(_LIVE_OUTPUTS, cid)
+    end
+
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
             duration_ms = dur_ms, trace = trace, stderr = stderr_str, overflow = overflow,
             animations = animations, effects = effects, assets = assets)
+end
+
+# Re-render every retained live output (see `_LIVE_OUTPUTS`) fresh, for a browser that just (re)connected —
+# the way a Bonito server serves a fresh session per page load. First run the extensions' page-reset hooks
+# (SEB `on_live_reset` — e.g. BonitoSlate drops its Bonito page-root so figures re-render as a fresh session
+# tree), then RE-RUN each retained cell's source in `mod` (a clean fresh figure, no accumulated screens) and
+# collect its wire. Returns `[(cid, wire), …]` (empty if nothing is live). Best-effort per cell.
+function rerender_live_outputs(mod::Module)
+    try; Base.invokelatest(SlateExtensionsBase.run_live_resets); catch; end
+    outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}}}[]
+    for (cid, spec) in collect(_LIVE_OUTPUTS)
+        w = try; run_capture(mod, spec.source, spec.filename; capture = DemuxCapture()) catch; nothing end
+        (w !== nothing && !isempty(w.mime)) || continue
+        push!(outs, (String(cid), collect(Tuple{String,Vector{UInt8}}, w.mime)))
+    end
+    return outs
 end
 
 # The raw `:slate_assets` sink → wire records, deduped by content path (the same asset registered twice

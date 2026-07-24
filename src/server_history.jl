@@ -352,6 +352,16 @@ function _blob_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UIn
     end
 end
 blob_get(key::AbstractString) = lock(_BLOB_LOCK) do; get(_BLOBS, String(key), nothing); end
+
+# Extension-served byte assets (see SlateExtensionsBase.provide_served_asset!) — a large shared runtime a
+# page loads ONCE (e.g. the Bonito JS bundle), fetched lazily from the worker by content hash the first
+# time a browser requests it, then cached and served immutable. Keyed by "id/hash" like `_BLOBS`, but with
+# NO eviction cap: a served module must stay resident for the life of any page that imported it.
+const _SERVED_MODULES = Dict{String,Tuple{String,Vector{UInt8}}}()   # "id/hash" → (mime, bytes)
+const _SERVED_LOCK = ReentrantLock()
+_served_module_put!(key::AbstractString, mime::AbstractString, bytes::Vector{UInt8}) =
+    lock(_SERVED_LOCK) do; _SERVED_MODULES[String(key)] = (String(mime), bytes); end
+served_module_get(key::AbstractString) = lock(_SERVED_LOCK) do; get(_SERVED_MODULES, String(key), nothing); end
 # Intrinsic (w, h) of a PNG from its IHDR header, else nothing — lets the <img> reserve its box.
 function _png_dims(b::Vector{UInt8})
     (length(b) >= 24 && b[1] == 0x89 && b[2] == 0x50) || return nothing
@@ -434,7 +444,7 @@ end
 # the render context (bind index, citations, figure numbering) when not supplied by the caller.
 function _render_cells(nb::LiveNotebook; bindref = nothing, hostednames = nothing,
                        md = nothing, nbdir = nothing, cited = nothing, bibctx = :unset,
-                       figidx = :unset, br = nothing)
+                       figidx = :unset, br = nothing, live_placeholder::Bool = false)
     if bindref === nothing || hostednames === nothing
         bindref, hostednames = _bind_index(nb.report)
     end
@@ -445,7 +455,8 @@ function _render_cells(nb::LiveNotebook; bindref = nothing, hostednames = nothin
     bibctx === :unset && (bibctx = _bib_link_ctx(nb))
     figidx === :unset && (figidx = figure_index(nb.report))
     return [cell_json(c, bindref, hostednames; multidef = md, nbid = nb.id, nbdir = nbdir,
-        cited = cited, bibctx = bibctx, figidx = figidx, backref = br, report = nb.report)
+        cited = cited, bibctx = bibctx, figidx = figidx, backref = br, report = nb.report,
+        live_placeholder = live_placeholder)
             for c in nb.report.cells]
 end
 
@@ -682,12 +693,27 @@ function _bib_link_ctx(nb)
 end
 _bib_keys_meta(ctx) = ctx === nothing ? nothing : [Dict("key" => k, "label" => v) for (k, v) in ctx.tips]
 
+# A LIVE (session-bound) figure — a WGLMakie figure whose output HTML carries the BonitoSlate card + its
+# served runtime — must NOT boot from the STORED output on a page (re)load: the stale fragment would queue
+# a scene-init task in WGLMakie's browser-global ordered scheduler and collide with the fresh re-render the
+# browser-connect hook pushes. So when we serve the page state (a reload), we swap a live figure's output
+# for a non-booting placeholder card; the connect-hook then re-renders the real, live figure into it. The
+# `celldone` broadcast path passes `live_placeholder=false`, so a fresh render still shows the full figure.
+function _live_figure_placeholder(html::AbstractString)
+    occursin("bonito-fig-card", html) || return html
+    return string("<div class=\"bonito-fig-wrap\"><div class=\"bonito-fig-card\" ",
+        "style=\"min-width:280px;min-height:180px;display:flex;align-items:center;justify-content:center\">",
+        "<span style=\"color:#8891a5;font-size:0.9em\">⟳ interactive figure — connecting…</span>",
+        "</div></div>")
+end
+
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
                    multidef::Set{String} = Set{String}(), nbid::AbstractString = "",
                    nbdir::AbstractString = "", cited::Set{String} = Set{String}(),
                    bibctx = nothing, figidx = nothing, report = nothing,
-                   backref::Dict{String,Vector{String}} = Dict{String,Vector{String}}())
+                   backref::Dict{String,Vector{String}} = Dict{String,Vector{String}}(),
+                   live_placeholder::Bool = false)
     fignums = figidx === nothing ? Dict{String,Int}() : figidx.numbers
     figrefs = figidx === nothing ? Dict{String,Tuple{Int,String}}() : figidx.labels
     # Markdown citations → links to the bibliography cell (per bibstyle), and `[@fig:label]` → a live
@@ -704,7 +730,8 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         # keys reconcile off, instead of a fuzzy string comparison that can drift.
         "hash"    => SlateHistory._sha(c.source),
         "state"   => lowercase(string(c.state)),
-        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) : output_html(c)),
+        "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) :
+                        (live_placeholder ? _live_figure_placeholder(output_html(c)) : output_html(c))),
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
@@ -1058,8 +1085,11 @@ function state_json(nb::LiveNotebook)
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
     bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
     figidx = figure_index(nb.report)            # caption numbering + [@fig:] cross-ref labels
+    # `live_placeholder`: a LIVE figure's STORED output is swapped for a non-booting placeholder when we
+    # serve page state (a reload), so a stale WGLMakie fragment never boots + collides with the fresh
+    # re-render the browser-connect hook pushes (see `_live_figure_placeholder`).
     meta["cells"] = _render_cells(nb; bindref = bindref, hostednames = hostednames, md = md,
-        nbdir = nbdir, cited = cited, bibctx = bibctx, figidx = figidx, br = br)
+        nbdir = nbdir, cited = cited, bibctx = bibctx, figidx = figidx, br = br, live_placeholder = true)
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
     isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.
