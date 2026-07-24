@@ -629,8 +629,9 @@ function _make_router(h::Hub)
     # front-end asset tree (echarts-gl, Cesium's Workers/Assets, …) from disk at `/ext-assets/<pkg>/<sub>`.
     # `<pkg>` is package-scoped (the manifest maps it to an absolute dir on THIS host — the worker is
     # co-located with the hub); the dir is identical across notebooks, so the first notebook that declared
-    # `<pkg>` resolves it. Immutable-cached; the same `**`-greedy + `..`-traversal discipline as the sibling
-    # asset routes. A static export rewrites these URLs to page-local siblings (see `_frontend_export_head`).
+    # `<pkg>` resolves it. ETag-revalidated (the path is mutable — see below); the same `**`-greedy +
+    # `..`-traversal discipline as the sibling asset routes. A static export rewrites these URLs to
+    # page-local siblings (see `_frontend_export_head`).
     HTTP.register!(router, "GET", "/ext-assets/**", req -> begin
         m = match(r"^/ext-assets/([^/]+)/(.*)$", HTTP.URI(req.target).path)
         m === nothing && return HTTP.Response(404)
@@ -648,11 +649,23 @@ function _make_router(h::Hub)
         # stay inside the vendored dir (accept either separator so the guard holds on Windows too)
         (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) || return HTTP.Response(404)
         isfile(p) || return HTTP.Response(404, "no such asset")
+        bytes = read(p)
+        # `provide_assets!` serves a STABLE but MUTABLE path — the file on disk changes when the package is
+        # updated (or edited during front-end development). So it must NOT be `immutable`-cached like a
+        # content-addressed URL would be: that pins a stale copy in the browser for a year and no reload or
+        # worker restart can dislodge it. Use validator-based caching instead — a content ETag with
+        # `no-cache` (cache, but revalidate every load): unchanged files come back as a cheap 304, and the
+        # moment the file changes the browser fetches the new bytes.
+        etag = string('"', string(hash(bytes); base = 16), '"')
+        if HTTP.header(req, "If-None-Match") == etag
+            return HTTP.Response(304, ["ETag" => etag, "Cache-Control" => "no-cache"])
+        end
         # `nosniff`: these files are same-origin, so pin the declared type — a mislabelled or author-crafted
         # asset can't be content-sniffed into an executable type (proposal security item #3).
         HTTP.Response(200, ["Content-Type" => _site_ctype(p),
                             "X-Content-Type-Options" => "nosniff",
-                            "Cache-Control" => "public, max-age=31536000, immutable"], read(p))
+                            "ETag" => etag,
+                            "Cache-Control" => "no-cache"], bytes)
     end)
     # Vendored map GeoJSON for echarts `registerMap` (e.g. /assets/maps/world.json) — served
     # immutable; the front-end fetches + registers a map once per page.
