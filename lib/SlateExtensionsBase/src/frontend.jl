@@ -198,38 +198,52 @@ const _ASSETS = Dict{String,String}()
 const EXT_ASSET_PREFIX = "/ext-assets/"
 
 """
-    ext_asset_url(pkg, sub = "") -> String
+    pkg_key(m::Module) -> String
+
+The stable, package-scoped key for a MODULE — its package root's name (e.g. `"GlobeSlate"`). The asset
+analogue of [`kind_for`](@ref) for a widget type: a module-derived identity an author never hand-types
+(and so never drifts on, nor clashes with another package's bare string). It's what a package's vendored
+assets are served under — `/ext-assets/<pkg_key>/…`. Two packages can't share a name in one session, so
+the key is unique per process. Pass `@__MODULE__` to [`provide_assets!`](@ref) / [`ext_asset_url`](@ref).
+"""
+pkg_key(m::Module) = string(nameof(Base.moduleroot(m)))
+
+"""
+    ext_asset_url(mod_or_pkg, sub = "") -> String
 
 The URL a package-vendored asset (declared with [`provide_assets!`](@ref)) is served at:
-`/ext-assets/<pkg>/<sub>`. Build asset URLs with this instead of hardcoding the route — the prefix is
-owned by the SDK (Slate rewrites it to a page-local sibling in a static export). `sub=""` gives the
-base URL for the package's tree.
+`/ext-assets/<pkg>/<sub>`. Prefer the MODULE form — pass `@__MODULE__` and the package key is derived
+([`pkg_key`](@ref)), so it can't drift from the string you passed to `provide_assets!`. The prefix is
+owned by the SDK (Slate rewrites it to a page-local sibling in a static export); `sub=""` gives the base
+URL for the package's tree.
 
 ```julia
-_gl = ext_asset_url("GlobeSlate", "echarts-gl.min.js")   # "/ext-assets/GlobeSlate/echarts-gl.min.js"
+_gl = ext_asset_url(@__MODULE__, "echarts-gl.min.js")   # "/ext-assets/GlobeSlate/echarts-gl.min.js"
 ```
 """
 ext_asset_url(pkg::AbstractString, sub::AbstractString = "") =
     EXT_ASSET_PREFIX * String(pkg) * "/" * lstrip(String(sub), '/')
+ext_asset_url(m::Module, sub::AbstractString = "") = ext_asset_url(pkg_key(m), sub)
 
 """
-    provide_assets!(pkg, dir) -> String
+    provide_assets!(mod_or_pkg, dir) -> String
 
 Declare a directory of front-end assets that Slate should SERVE while this package is loaded — call it
-from your module's `__slate_frontend` hook (or `__init__`). `pkg` is a stable, package-scoped name (its
-files are served at `/ext-assets/<pkg>/<subpath>` live, and copied into a static export); `dir` is an
-absolute directory, typically [`@pkg_dir`](@ref). Returns the package's base URL (see
-[`ext_asset_url`](@ref)) so you needn't hardcode the route:
+from your module's `__slate_frontend` hook (or `__init__`). Prefer the MODULE form: pass `@__MODULE__`
+and the package key is derived ([`pkg_key`](@ref)) — the same module-scoped identity `kind_for` gives a
+widget type — so there's no hand-typed string to keep in sync with your [`ext_asset_url`](@ref) calls.
+The files are served at `/ext-assets/<pkg>/<subpath>` live and copied into a static export; `dir` is an
+absolute directory, typically [`@pkg_dir`](@ref). Returns the package's base URL:
 
 ```julia
 function __slate_frontend(slate_on)
-    base = provide_assets!("GlobeSlate", @pkg_dir("assets/echarts-gl"))
-    # build asset URLs from `base` / `ext_asset_url("GlobeSlate", "echarts-gl.min.js")`
+    provide_assets!(@__MODULE__, @pkg_dir("assets"))
+    # build urls with ext_asset_url(@__MODULE__, "echarts-gl/echarts-gl.min.js")
 end
 ```
 
 For a front-end LIBRARY too large or multi-file to inline as a `provide_frontend!` string (Cesium,
-echarts-gl, anything shipping fonts/workers/wasm). A re-declaration of the same `pkg` replaces the dir.
+echarts-gl, anything shipping fonts/workers/wasm). A re-declaration of the same package replaces the dir.
 The served files are pinned + offline-capable and travel in a static export. To inject a *single* script,
 prefer [`provide_frontend!`](@ref)/[`register_component!`](@ref); use this to serve the files that script
 (or a widget) then `fetch`es / `import`s / `<script src=>`s from `/ext-assets/<pkg>/…`.
@@ -237,6 +251,36 @@ prefer [`provide_frontend!`](@ref)/[`register_component!`](@ref); use this to se
 function provide_assets!(pkg::AbstractString, dir::AbstractString)
     _ASSETS[String(pkg)] = abspath(String(dir))
     return ext_asset_url(pkg)
+end
+provide_assets!(m::Module, dir::AbstractString) = provide_assets!(pkg_key(m), dir)
+
+"""
+    @provide_assets!(dir) -> String
+
+[`provide_assets!`](@ref) for the CALLING package — the key is derived from the enclosing module
+([`pkg_key`](@ref)), so there's no `@__MODULE__` to write and no string to keep in sync. Pair it with
+[`@pkg_dir`](@ref) (or an `Artifacts`/`Scratch` dir):
+
+```julia
+@provide_assets!(@pkg_dir("assets"))
+```
+"""
+macro provide_assets!(dir)
+    :(provide_assets!($(__module__), $(esc(dir))))
+end
+
+"""
+    @ext_asset_url(sub = "") -> String
+
+[`ext_asset_url`](@ref) for the CALLING package — the key is derived from the enclosing module, so a
+package builds its served-asset URLs with just the subpath, no key at all:
+
+```julia
+@ext_asset_url("echarts-gl/echarts-gl.min.js")   # "/ext-assets/GlobeSlate/echarts-gl/echarts-gl.min.js"
+```
+"""
+macro ext_asset_url(sub = "")
+    :(ext_asset_url($(__module__), $(esc(sub))))
 end
 
 """

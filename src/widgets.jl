@@ -567,6 +567,10 @@ end
 # a given call uses (the field names ARE the type); don't route huge dynamic key-sets through it.
 _slate_args(x::AbstractDict) = NamedTuple{Tuple(Symbol.(keys(x)))}(Tuple(_slate_args(v) for v in values(x)))
 _slate_args(x::AbstractVector) = Any[_slate_args(v) for v in x]
+# A raw byte buffer (a `slateCall` binary buffer, delivered as `args.__slate_buffers`) is already a plain
+# Base type — pass it through WHOLE. Without this it would hit the `AbstractVector` clause above and explode
+# into a boxed `Vector{Any}` of `UInt8`, defeating the point of the binary transport.
+_slate_args(x::Vector{UInt8}) = x
 _slate_args(x) = x
 
 # Invoke a `slate_on` handler with the (NamedTuple-shaped) call args. A 2-parameter handler
@@ -645,6 +649,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     reglock = ReentrantLock()
     handlers = Dict{Symbol,Any}()                 # @onclick: button name → handler closure (event model)
     tokens = Dict{Symbol,Base.RefValue{Bool}}()   # button name → running handler's cancel token
+    # The Slate execution context a fired @onclick/@onchange handler runs under, so it can STREAM
+    # (`slate_emit`/`afm_emit`) just like a cell or a `slate_on` handler — same shape as `_build_slate_ctx`.
+    # The fire path (`__slate_set_bind` → `__on_fire!`) runs on a server task with no context; this supplies it.
+    bind_ctx = (; region = nothing, notebook = "", side = "", emit = slate_emit,
+                  regions = Symbol[], effect = _slate_effect, on = getfield(m, :slate_on))
     Core.eval(m, :(const __slate_bind_registry = $reg))
     Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, reglock, name, w))))
     # Browser value change: coerce + update registry, set the global so readers see it, then
@@ -656,7 +665,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         wv = wrap_value(w, cv)
         Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
         h = get(handlers, name, nothing)
-        h === nothing || __on_fire!(tokens, name, h, wv)      # dispatch @onclick/@onchange with the new value
+        h === nothing || __on_fire!(tokens, name, h, wv, bind_ctx)   # dispatch @onclick/@onchange (streaming-capable)
         cv
     end)))
     # `@bind name W(args…)` → assign the reconciled value, then return `nothing` so a
