@@ -80,17 +80,45 @@ _afmfield(a, k) = a isa AbstractDict ? get(a, String(k), get(a, k, nothing)) :
 """
     afm_on_msg(f, id)
 
-Register `f(content)` to receive custom messages a widget sends via `model.send(content)`. `id` is the
-widget's message id — bind it with `afm(src; id = "…")`.
+Register a handler to receive custom messages a widget sends via `model.send(content, cb, buffers)`. `f`
+is called `f(content, buffers)` — `buffers::Vector{Vector{UInt8}}` are the widget's binary buffers (empty
+when none) — or, for convenience, `f(content)` if it takes a single argument. `id` is the widget's message
+id — bind it with `afm(src; id = "…")`.
 """
 afm_on_msg(f, id::AbstractString) = (_MSG["SlateAFM.msg:" * String(id)] = f; nothing)
 
-"""
-    afm_emit(id, content)
+# Coerce an emit buffer to raw bytes: a byte vector rides as-is; anything else is `Vector{UInt8}`-converted.
+_as_bytes(b::Vector{UInt8}) = b
+_as_bytes(b::AbstractVector{UInt8}) = collect(b)
+_as_bytes(b) = Vector{UInt8}(b)
 
-Send `content` TO a widget (received by its `model.on("msg:custom", cb)`). Call from a cell.
+const _MID = Ref(0)   # message-id counter, correlating a content frame with its trailing binary buffers
+
 """
-afm_emit(id::AbstractString, content) = slate_emit("SlateAFM.msg:" * String(id), (content = content,))
+    afm_emit(id, content; buffers = ())
+
+Send `content` TO a widget — received by its `model.on("msg:custom", (content, buffers) => …)`. `buffers`
+is an iterable of byte buffers (each `Vector{UInt8}`), delivered to the widget as `ArrayBuffer`s. Call from
+a cell (or from an [`afm_on_msg`](@ref) handler, to reply). No buffers ⇒ a single plain content frame.
+"""
+function afm_emit(id::AbstractString, content; buffers = ())
+    ch = "SlateAFM.msg:" * String(id)
+    bufs = Vector{UInt8}[_as_bytes(b) for b in buffers]
+    n = length(bufs)
+    if n == 0
+        slate_emit(ch, (content = content,))   # fast path: no buffers, no message id
+        return nothing
+    end
+    # A buffered message rides N+1 frames on one channel, correlated by a message id: a JSON `content` frame
+    # (carrying the buffer count) followed by one binary frame per buffer (a UInt8 `SlateBinary` whose meta
+    # tags it with the message id + index). The host shim reassembles them in its `slateOnStream` handler.
+    mid = (_MID[] += 1)
+    slate_emit(ch, (content = content, mid = mid, nbuf = n))
+    for (i, b) in enumerate(bufs)
+        slate_emit(ch, SlateBinary(b, Dict{String,Any}("mid" => mid, "bi" => i - 1, "nbuf" => n)))
+    end
+    return nothing
+end
 
 # Package front-end: serve the bundled asset tree (host shim + example modules) and inject the host shim,
 # which self-registers the `SlateAFM.AFM` widget kind. Both are idempotent per drain.
@@ -98,13 +126,23 @@ function __slate_frontend(slate_on)
     provide_assets!(@__MODULE__, @pkg_dir("assets"))
     register_widget!(KIND, @pkg_asset("assets/afm-host.js"))
     # JS→Julia custom messages (a widget's `model.send`): route by channel to a registered handler.
-    slate_on("SlateAFM.msg") do a
+    # NB: `slate_on` is `(channel, f)` — pass the handler as the 2nd argument, NOT via `do` (a do-block
+    # would bind the closure as the FIRST arg, registering under the closure's name instead of the channel).
+    slate_on("SlateAFM.msg", function (a)
         ch = _afmfield(a, :ch)
         ch === nothing && return nothing
         h = get(_MSG, String(ch), nothing)
-        h === nothing || Base.invokelatest(h, _afmfield(a, :content))
+        h === nothing && return nothing
+        content = _afmfield(a, :content)
+        # `model.send` buffers arrive as native binary WS frames, decoded by Slate into
+        # `args.__slate_buffers::Vector{Vector{UInt8}}` — real bytes, no base64.
+        raw = _afmfield(a, :__slate_buffers)
+        buffers = raw === nothing ? Vector{UInt8}[] : Vector{UInt8}[Vector{UInt8}(b) for b in raw]
+        # Prefer a 2-arg handler `(content, buffers)`; fall back to a 1-arg `(content)` handler.
+        applicable(h, content, buffers) ? Base.invokelatest(h, content, buffers) :
+                                          Base.invokelatest(h, content)
         return nothing
-    end
+    end)
     return nothing
 end
 
