@@ -169,6 +169,74 @@ end
 #%% code id=bench_widget
 @bind bench afm(ext_asset_url(SlateAFM, "examples/benchmark.js"); id = "bench")
 
+#%% md id=h_pypi
+@md"""
+## Third-party widget from PyPI — `pypi_afm`
+
+An anywidget published on PyPI runs here **unchanged**. `pypi_afm` shells out to the system `python3 -m pip`
+(SlateAFM takes no Python dependency) to install the package into a cached deploy dir and read its
+`_esm`/`_css`/trait-defaults — no widget instantiation, no kernel. The provisioned module is kept strictly
+apart from this package's own assets (served under `/ext-assets/SlateAFMpypi/…`, in `SlateAFM.deploy_dir()`).
+If no `pip` is present it errors with the manual fallbacks (a CDN URL / `ext_asset_url`).
+
+Below: **ipymolstar** (PDBe Mol\*) — a real molecular viewer, hosted unchanged. First run installs it (a few
+seconds); after that it's cached. Needs network for the Mol\* plugin + stylesheet it pulls from a CDN.
+"""
+
+#%% code id=molstar
+@bind mol pypi_afm("ipymolstar"; class = "PDBeMolstar",
+    css = "https://cdn.jsdelivr.net/npm/pdbe-molstar@3.3.2/build/pdbe-molstar.css",
+    molecule_id = "1cbs", hide_water = true, height = "440px")
+
+#%% md id=h_assemble
+@md"""
+## Julia in the driver's seat — assembling a molecule over the binary channel
+
+A widget doesn't have to be a passive viewer of a bound value — Julia can **push** to it. This custom AFM
+widget renders a rotating 3D molecule; the `@onclick` handler below has **Julia compute a DNA double helix
+and stream its atom coordinates (raw `Float32`) to the browser one base pair at a time** via
+`afm_emit(id, content; buffers)` — the same binary `msg:custom` channel the round-trip demo uses. Click and
+watch the helix build itself, then the bonds snap in.
+"""
+
+#%% code id=mol_gen
+# Build a DNA-like double helix: two helical backbones (element codes 0/1) + rungs. Returns flat Float32
+# xyz, per-atom element codes, and 0-based-ready bond index pairs. Pure Julia — the "molecule" is computed
+# here and streamed to the browser widget; nothing about the geometry lives in JS.
+function dna_helix(nbp::Int; rad::Float32 = 1.0f0, rise::Float32 = 0.5f0, twist = deg2rad(34.3))
+    xyz = Float32[]; els = Int[]; A = Int[]; B = Int[]
+    for i in 0:nbp-1
+        a = Float32(i * twist); y = (i - (nbp - 1) / 2.0f0) * rise
+        push!(xyz, rad * cos(a), y, rad * sin(a)); push!(els, 0); push!(A, length(els))
+        push!(xyz, rad * cos(a + Float32(π)), y, rad * sin(a + Float32(π))); push!(els, 1); push!(B, length(els))
+    end
+    bonds = Tuple{Int,Int}[]
+    for i in 1:nbp-1; push!(bonds, (A[i], A[i+1]), (B[i], B[i+1])); end   # backbones
+    for i in 1:nbp;   push!(bonds, (A[i], B[i])); end                     # base-pair rungs
+    return xyz, els, bonds
+end
+
+#%% code id=assembler
+@bind asm afm(ext_asset_url(SlateAFM, "examples/molecule_builder.js") * "?v=2"; id = "asm", height = 440)
+
+#%% code id=assemble_btn
+@bind grow Button("⚛ Assemble DNA helix")
+
+#%% code id=assemble_driver
+@onclick grow begin
+    xyz, els, bonds = dna_helix(20)
+    afm_emit("asm", Dict("op" => "reset"))
+    n = length(els)
+    for s in 1:2:n                                   # one base pair (2 atoms) per frame → it grows
+        e = min(s + 1, n)
+        seg = xyz[(s-1)*3+1 : e*3]                    # Float32 slice for this batch
+        afm_emit("asm", Dict("op" => "atoms", "els" => els[s:e]); buffers = [collect(reinterpret(UInt8, seg))])
+        pause(0.09)
+    end
+    pairs = Int32[]; for (i, j) in bonds; push!(pairs, Int32(i - 1), Int32(j - 1)); end
+    afm_emit("asm", Dict("op" => "bonds"); buffers = [collect(reinterpret(UInt8, pairs))])   # bonds snap in
+end
+
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
 #   docid = a1f0c2d4-5e6b-47a8-9c1d-3b2e4f6a7c88
 # ╚═╡

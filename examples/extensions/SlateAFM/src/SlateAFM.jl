@@ -33,10 +33,11 @@ st                                                                        # → 
 module SlateAFM
 
 using SlateExtensionsBase
+import JSON   # parse the `meta.json` an introspected PyPI widget writes (defaults/css) — see pypi.jl
 
 # `ext_asset_url` (from SlateExtensionsBase) is the mechanism for pointing `afm` at a module served from a
 # package's `provide_assets!` scope — re-exported so a notebook builds those URLs without a bespoke helper.
-export AFM, afm, afm_on_msg, afm_emit, ext_asset_url
+export AFM, afm, afm_on_msg, afm_emit, ext_asset_url, pypi_afm
 
 # The wire kind Slate registers the host shim under. A namespaced (dotted) kind renders as a generic
 # `customwidget` container that delegates to the registered impl — exactly what an AFM module needs, since
@@ -123,8 +124,12 @@ end
 # Package front-end: serve the bundled asset tree (host shim + example modules) and inject the host shim,
 # which self-registers the `SlateAFM.AFM` widget kind. Both are idempotent per drain.
 function __slate_frontend(slate_on)
+    # Authored web assets (host shim + example modules) — served under `/ext-assets/SlateAFM/…`.
     provide_assets!(@__MODULE__, @pkg_dir("assets"))
     register_widget!(KIND, @pkg_asset("assets/afm-host.js"))
+    # PyPI-provisioned widgets are kept STRICTLY SEPARATE: a distinct served root (the deploy dir) under a
+    # distinct key (`_PYPI_KEY`), so fetched third-party modules never mingle with the package's own assets.
+    provide_assets!(_PYPI_KEY, (mkpath(_served_root()); _served_root()))
     # JS→Julia custom messages (a widget's `model.send`): route by channel to a registered handler.
     # NB: `slate_on` is `(channel, f)` — pass the handler as the 2nd argument, NOT via `do` (a do-block
     # would bind the closure as the FIRST arg, registering under the closure's name instead of the channel).
@@ -145,5 +150,7 @@ function __slate_frontend(slate_on)
     end)
     return nothing
 end
+
+include("pypi.jl")   # pypi_afm: host a published anywidget from PyPI (system pip, no Python dep)
 
 end # module

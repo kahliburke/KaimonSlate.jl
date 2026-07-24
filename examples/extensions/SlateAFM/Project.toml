@@ -7,6 +7,7 @@ version = "0.1.0"
 # it dogfoods provide_frontend! (the host shim), provide_assets! (served modules) and the widget seam to
 # run framework-agnostic AFM widgets (anywidget-style) inside a Slate notebook.
 [deps]
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 SlateExtensionsBase = "bc31d39e-4442-48fa-b9ae-1bd99fed63f7"
 
 [sources]
