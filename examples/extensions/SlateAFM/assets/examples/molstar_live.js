@@ -35,16 +35,17 @@ export default {
     const viewer = new window.PDBeMolstarPlugin();
 
     // pdbe-molstar's customData fetches by URL (there is no inline `data` field — this is exactly what the
-    // ipymolstar widget does), so wrap the streamed PDB text in a blob URL. Keep the current URL so we can
-    // revoke it when a new structure arrives.
-    let curUrl = null;
-    const urlFor = (pdb) => {
-      if (curUrl) { URL.revokeObjectURL(curUrl); curUrl = null; }
-      curUrl = URL.createObjectURL(new Blob([pdb], { type: "text/plain" }));
-      return curUrl;
-    };
-    const opts = (pdb) => ({
-      customData: { url: urlFor(pdb), format: "pdb", binary: false },
+    // ipymolstar widget does), so wrap the streamed PDB text in a blob URL. The blob must outlive the
+    // load's ASYNC trajectory parse — revoking it the instant the next frame arrives yields "Invalid data
+    // cell" mid-parse — so `revokeStale()` frees old blobs only AFTER a newer load has fully settled,
+    // always keeping the just-loaded one alive.
+    let liveUrls = [];
+    const makeUrl = (pdb) => { const u = URL.createObjectURL(new Blob([pdb], { type: "text/plain" }));
+      liveUrls.push(u); return u; };
+    const revokeStale = (keep) => { const stale = liveUrls.filter((u) => u !== keep);
+      liveUrls = keep ? [keep] : []; stale.forEach((u) => { try { URL.revokeObjectURL(u); } catch (e) {} }); };
+    const opts = (url) => ({
+      customData: { url: url, format: "pdb", binary: false },
       bgColor: { r: 6, g: 9, b: 16 },
       hideControls: true,
       hideCanvasControls: ["selection", "animation", "controlToggle", "controlInfo"],
@@ -54,32 +55,60 @@ export default {
       visualStyle: "ball-and-stick",
     });
 
-    // loadComplete fires once the structure is in the scene — the reliable "it worked" signal (mirrors the
-    // ipymolstar widget's events.loadComplete.subscribe). Log an atom count if the API exposes one.
-    let subscribed = false;
+    const pause = (ms) => new Promise((res) => setTimeout(res, ms));
+    // loadComplete fires when a structure lands in the scene — but empirically ONLY on the initial
+    // `render()`, not on a later `visual.update()`. So use it for the first frame's status + settle, and
+    // fall back to a fixed short gap after each update: both render() and update() resolve BEFORE molstar's
+    // async trajectory parse finishes, so firing the next frame immediately corrupts the in-flight parse
+    // (→ "Invalid data cell"). A ~350ms gap lets a small structure fully parse; the stream still grows
+    // visibly (latest-wins coalesces anything that piles up during the gap).
+    const SETTLE_MS = 350;
+    let subscribed = false, firstResolve = null;
     const watchLoad = () => {
       if (subscribed) return; subscribed = true;
       try {
         viewer.events?.loadComplete?.subscribe?.((ok) => {
-          if (ok === false) { say("load failed (see console)", true); return; }
-          let n = null;
-          try { n = viewer.plugin?.managers?.structure?.hierarchy?.current?.structures?.length ?? null; } catch (e) {}
-          say(n ? ("loaded ✓ (" + n + " structure" + (n > 1 ? "s" : "") + ")") : "loaded ✓");
+          if (ok === false) say("load failed (see console)", true);
+          const r = firstResolve; firstResolve = null; if (r) r(ok !== false);
         });
       } catch (e) { console.warn("molstar_live: no loadComplete event", e); }
     };
+    const sayLoaded = () => {
+      let n = null;
+      try { n = viewer.plugin?.managers?.structure?.hierarchy?.current?.structures?.length ?? null; } catch (e) {}
+      say(n ? ("loaded ✓ (" + n + " structure" + (n > 1 ? "s" : "") + ")") : "loaded ✓");
+    };
 
     // Render lazily: the engine requires a data source at render time, so don't call render() until a
-    // structure exists. The first load renders; later loads reuse visual.update — the same call the native
-    // widget uses for change:custom_data.
-    let ready = null;
+    // structure exists. The first load renders (subscribing to loadComplete first); later loads reuse
+    // visual.update — the same call the native widget uses for change:custom_data.
+    // Serialize with latest-wins + a settle gap: while one load is settling, a burst of stream frames just
+    // updates `pending`; each iteration processes the newest and pauses before the next, so molstar fully
+    // digests each frame (no parse collision) while the structure still visibly grows.
+    let ready = null, inflight = false, pending = null;
     async function load(pdb) {
       if (!pdb) return;
-      say("loading structure…");
+      pending = pdb;
+      if (inflight) return;
+      inflight = true;
       try {
-        if (!ready) { ready = viewer.render(box, opts(pdb)); await ready; watchLoad(); }
-        else { await ready; await viewer.visual.update(opts(pdb), true); }
+        while (pending != null) {
+          const p = pending; pending = null;
+          say("loading structure…");
+          const url = makeUrl(p);
+          if (!ready) {
+            const first = new Promise((res) => { firstResolve = res; setTimeout(() => { if (firstResolve === res) { firstResolve = null; res(false); } }, 4000); });
+            ready = viewer.render(box, opts(url)); watchLoad(); await ready;
+            await first;              // loadComplete fires on render — wait for the real settle
+          } else {
+            await viewer.visual.update(opts(url), true);
+            await pause(SETTLE_MS);   // update() has no completion event — a short gap lets the parse finish
+          }
+          revokeStale(url);   // now safe to free earlier blobs, keeping this one for the live scene
+        }
+        sayLoaded();   // stream drained — settle the status from the live scene
       } catch (e) { say("error: " + (e && e.message || e), true); console.error("molstar_live load", e); }
+      finally { inflight = false; }
     }
 
     // An initial structure may ride along on the bind.
@@ -92,10 +121,17 @@ export default {
       else if (content.op === "spin" && ready) { ready.then(() => { try { viewer.visual.toggleSpin(!!content.on); } catch (e) {} }); }
     });
 
+    // React to a live `height` change (a re-bind syncs the trait without remounting) — resize the box and
+    // let the engine re-measure, so the viewer honors an updated height without a full reload.
+    model.on("change:height", () => {
+      box.style.height = (model.get("height") || 440) + "px";
+      try { viewer.plugin?.canvas3d?.handleResize?.(); } catch (e) {}
+    });
+
     signal.addEventListener("abort", () => {
       try { ro.disconnect(); } catch (e) {}
       try { viewer.visual && viewer.visual.dispose && viewer.visual.dispose(); } catch (e) {}
-      if (curUrl) { URL.revokeObjectURL(curUrl); curUrl = null; }
+      revokeStale(null);   // free every outstanding blob
     });
   },
 };
