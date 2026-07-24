@@ -84,14 +84,27 @@ Every run is recorded. The timeline steps back through a notebook's earlier stat
 
 ## Install
 
-The `slate` app is the usual entry point. From the Pkg REPL (press `]`):
+The `slate` app is the usual entry point. **Requires Julia 1.12+.**
+
+KaimonSlate isn't registered yet, so during the pre-release install it as a **developed app** — a plain
+`app add <url>` can't resolve the bundled `SlateExtensionsBase` until registration. From the Pkg REPL
+(press `]`):
 
 ```julia-repl
-pkg> app add https://github.com/kahliburke/KaimonSlate.jl
+pkg> app dev https://github.com/kahliburke/KaimonSlate.jl
 ```
 
-(KaimonSlate is soon to be registered; until then, add it from the repo URL as shown above. Once
-registered, `pkg> app add KaimonSlate` will work.)
+This clones the repo to `~/.julia/dev/KaimonSlate` and puts a `slate` launcher on your `PATH`. Then
+instantiate that dev clone once — `Pkg.Apps` doesn't do it for you — so its dependencies (including the
+bundled `SlateExtensionsBase`) are installed:
+
+```julia-repl
+pkg> activate ~/.julia/dev/KaimonSlate
+pkg> instantiate
+pkg> activate                 # back to your default environment
+```
+
+(Once KaimonSlate is registered, `pkg> app add KaimonSlate` will be the one-liner.)
 
 This puts a `slate` launcher on your `PATH`:
 
