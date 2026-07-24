@@ -172,6 +172,56 @@ function ensure_module_frontends!(slate_on)
     return nothing
 end
 
+# ── Package-served byte assets (content-addressed) ────────────────────────────
+# A registry insert (like `_FRONTEND`) — NOT a task-local effect — so an extension can register bytes to
+# be SERVED at a stable URL from ANYWHERE, including from inside a value's `show` (where the cell-effect /
+# `save_asset` sinks are already harvested and gone). The bytes stay in the worker; the hub fetches them
+# lazily by hash (over the gate) the first time a browser requests the URL, caches, and serves them
+# immutable (content-addressed → safe). This is how BonitoSlate serves the ~3.5 MB Bonito JS runtime ONCE
+# per page instead of re-inlining it into every figure. Keyed by content hash → automatic dedup.
+const _SERVED_ASSETS = Dict{String,@NamedTuple{mime::String, bytes::Vector{UInt8}}}()
+
+"""
+    provide_served_asset!(bytes; mime="application/octet-stream") -> String
+
+Register `bytes` to be served by Slate at a stable, content-addressed, immutably-cacheable URL, and
+return that URL PATH (root-relative, e.g. `/served/<hash>`). Registering the same bytes again returns the
+same path (dedup). The bytes live in the worker; the hub fetches them lazily by hash and caches — so this
+is safe to call from a hot render path (it's just a `Dict` insert). Use for a large shared runtime a page
+loads once (a WASM blob, a JS bundle) rather than re-inlining it per output.
+"""
+function provide_served_asset!(bytes::AbstractVector{UInt8}; mime::AbstractString = "application/octet-stream")
+    data = Vector{UInt8}(bytes)
+    hash = string(Base.hash(data); base = 16)
+    get!(_SERVED_ASSETS, hash, (mime = String(mime), bytes = data))
+    return "/served/" * hash
+end
+
+"""
+    served_asset(hash) -> (; mime, bytes) | nothing
+
+Look up bytes registered by [`provide_served_asset!`](@ref) by content hash — the hub calls this (over the
+gate) to fetch a served asset the first time a browser requests it. `nothing` if unknown.
+"""
+served_asset(hash::AbstractString) = get(_SERVED_ASSETS, String(hash), nothing)
+
+# Callbacks an extension registers to run just BEFORE a browser (re)connect re-renders live outputs — the
+# hook to reset per-page runtime state so each new page gets a fresh session tree (e.g. BonitoSlate drops
+# its Bonito page-root + clears CURRENT_SESSION). Process-global; deduped by identity.
+const _LIVE_RESETS = Vector{Any}()
+
+"""
+    on_live_reset(f)
+
+Register a zero-arg callback `f` run right before live outputs are re-rendered for a freshly-connected
+browser page (see [`slate_live_render`]). Use it to reset per-page runtime state so the re-render starts
+clean. Deduped by identity — safe to call every time an extension is enabled.
+"""
+on_live_reset(f) = (f in _LIVE_RESETS || push!(_LIVE_RESETS, f); nothing)
+
+"Run every [`on_live_reset`](@ref) callback (isolated). Called by the worker before re-rendering live outputs."
+run_live_resets() = (for f in _LIVE_RESETS; try; Base.invokelatest(f); catch; end; end; nothing)
+
 """
     @pkg_asset(path) -> String
 
