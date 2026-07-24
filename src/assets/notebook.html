@@ -329,6 +329,8 @@
     <span class="rt"><input type="range" id="setpage" min="720" max="1600" step="20"/><span id="setpagev"></span> px</span></div>
   <div class="setrow"><label title="Cap the display width of rendered figures/images — keeps a plot from blowing up to the whole window in full-page-width mode">Figure width</label>
     <span class="rt"><input type="range" id="setfig" min="480" max="1800" step="20"/><span id="setfigv"></span> px</span></div>
+  <div class="setrow"><label title="How strongly a scroll / trackpad gesture zooms an interactive chart when it's ACTIVE (click a chart to activate — its border lights up). 0 = never zoom on scroll, so the wheel always scrolls the page. Lower is gentler; handy for a sensitive trackpad.">Chart scroll-zoom</label>
+    <span class="rt"><input type="range" id="setzoom" min="0" max="100" step="5"/><span id="setzoomv"></span> %</span></div>
   <div class="setrow"><label title="Wrap wide text output (matrices, wide tables) instead of scrolling it horizontally">Wrap text output</label>
     <span class="rt"><input type="checkbox" id="setwrap"/></span></div>
   <div class="setrow"><label title="Soft-wrap long lines in the code editor. Markdown cells always wrap.">Wrap code editor</label>

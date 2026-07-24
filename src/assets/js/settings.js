@@ -54,6 +54,32 @@ function setPageMax(px) {
 function applyPageMax() { document.body.style.setProperty('--page-max', _pageMax() + 'px'); }
 applyPageMax();   // apply the saved column width at load
 
+// ── Chart scroll-zoom gate ──────────────────────────────────────────────────────
+// An interactive chart (a WGLMakie figure card today; ECharts to follow) zooms on the mouse/trackpad
+// wheel, which hijacks page scrolling — scroll down, your pointer crosses a chart, and suddenly you're
+// zooming instead of scrolling. So we only let the wheel reach a chart when it's ACTIVE (has focus — click
+// into it; the card's :focus-within border lights up), and we scale the wheel delta by the "Chart
+// scroll-zoom" setting (0 = never zoom on scroll → the wheel always scrolls the page). ONE delegated
+// capturing listener covers every chart, present or future.
+const _ZOOM_DEFAULT = 28;   // percent — a gentle default tuned for the Mac trackpad
+function scrollZoomFactor() { const n = parseInt(localStorage.getItem('slateScrollZoom'), 10); return (Number.isFinite(n) && n >= 0 ? n : _ZOOM_DEFAULT) / 100; }
+window.scrollZoomFactor = scrollZoomFactor;
+
+const _ZOOMABLE = '.bonito-fig-card';   // TODO: add the ECharts container selector to extend the gate to charts
+document.addEventListener('wheel', function (e) {
+  if (e.__slateZoom) return;                                             // our own re-dispatched (scaled) event
+  const card = e.target && e.target.closest ? e.target.closest(_ZOOMABLE) : null;
+  if (!card) return;                                                     // not over a chart — leave it alone
+  const f = scrollZoomFactor();
+  if (f <= 0 || !card.matches(':focus-within')) { e.stopPropagation(); return; }  // off / inactive → page scrolls
+  const target = card.querySelector('canvas') || card;                  // the chart's zoom surface
+  e.stopPropagation(); e.preventDefault();
+  const ev = new WheelEvent('wheel', { deltaX: e.deltaX * f, deltaY: e.deltaY * f, deltaMode: e.deltaMode,
+                                       clientX: e.clientX, clientY: e.clientY, bubbles: true, cancelable: true });
+  ev.__slateZoom = true;
+  target.dispatchEvent(ev);
+}, { capture: true, passive: false });
+
 // ── Settings modal ────────────────────────────────────────────────────────────
 function openSettings() {
   const deb = document.getElementById('setdeb'), v = document.getElementById('setdebv');
@@ -88,6 +114,13 @@ function openSettings() {
   if (fig) {
     fig.value = _figMax(); figv.textContent = _figMax();
     fig.oninput = () => { figv.textContent = fig.value; setFigMax(fig.value); };
+  }
+  // Chart scroll-zoom sensitivity (0 = off). Read live by the scroll-zoom gate above — no re-render needed.
+  const zm = document.getElementById('setzoom'), zmv = document.getElementById('setzoomv');
+  if (zm) {
+    const _z = () => { const n = parseInt(localStorage.getItem('slateScrollZoom'), 10); return Number.isFinite(n) ? n : _ZOOM_DEFAULT; };
+    zm.value = _z(); zmv.textContent = _z();
+    zm.oninput = () => { zmv.textContent = zm.value; localStorage.setItem('slateScrollZoom', zm.value); };
   }
   // Wrap wide text output (default off → matrices/wide tables scroll horizontally instead of wrapping).
   const wrap = document.getElementById('setwrap');
