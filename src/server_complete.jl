@@ -624,6 +624,26 @@ function _make_router(h::Hub)
         isfile(p) || return HTTP.Response(404, "no such asset")
         HTTP.Response(200, ["Content-Type" => _site_ctype(p), "Cache-Control" => "no-store"], read(p))
     end)
+    # Serve an extension-registered byte asset (`SlateExtensionsBase.provide_served_asset!`) at a stable,
+    # content-addressed, IMMUTABLE URL — fetched lazily from the notebook's worker by hash the first time a
+    # browser requests it, then cached. Lets a page load a large shared runtime (e.g. the Bonito JS bundle)
+    # exactly ONCE per page instead of re-inlining it into every figure. The hash pins the bytes, so the
+    # browser caches it across the page's lifetime and every reload.
+    HTTP.register!(router, "GET", "/n/{id}/served/{hash}", req -> begin
+        id = HTTP.getparam(req, "id"); hash = HTTP.getparam(req, "hash")
+        key = string(id, "/", hash)
+        got = served_module_get(key)
+        if got === nothing
+            nb = lock(h.lock) do; get(h.notebooks, id, nothing); end
+            nb === nothing && return HTTP.Response(404, "no such notebook")
+            got = try; ReportEngine.get_served_asset(nb.kernel, nb.report, hash); catch; nothing; end
+            got === nothing && return HTTP.Response(404, "no such served asset")
+            _served_module_put!(key, got[1], got[2])
+        end
+        HTTP.Response(200, ["Content-Type" => got[1],
+                            "Cache-Control" => "public, max-age=31536000, immutable",
+                            "Access-Control-Allow-Origin" => "*"], got[2])
+    end)
     HTTP.register!(router, "GET", "/api/notebooks", _ -> _json(_notebooks_json(h)))
     # Open/close a notebook by path over HTTP — lets the index page (and any
     # caller) bring up a notebook without the `slate.*` MCP tools. Mirrors
@@ -2219,6 +2239,7 @@ function close_notebook!(h::Hub, id::AbstractString)
         # Capture the final rendered state as the next reopen's interim preview, past the debounce.
         try; _save_preview!(nb; force = true); catch; end
         _close_listeners(nb)
+        _stop_live_rerender!(nb)              # end this notebook's live-re-render debouncer task
         _close_agent!(nb)
         _unwire_callbacks!(nb)
         # Signal any in-flight runner to stop BEFORE tearing anything else down — its `Threads.@spawn`
@@ -2243,7 +2264,7 @@ end
 function stop_hub(h::Hub)
     lock(h.lock) do
         for nb in values(h.notebooks)
-            _close_listeners(nb); _unwire_callbacks!(nb)
+            _close_listeners(nb); _stop_live_rerender!(nb); _unwire_callbacks!(nb)
             try; shutdown!(nb.kernel); catch; end
             _teardown_region!(nb)
         end
