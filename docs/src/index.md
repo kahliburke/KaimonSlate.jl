@@ -67,11 +67,12 @@ each notebook its own worker and powers the AI agent — then install the **`sla
 Pkg REPL:
 
 ```julia-repl
-pkg> app add https://github.com/kahliburke/KaimonSlate.jl   # puts a `slate` launcher on your PATH
+pkg> app dev https://github.com/kahliburke/KaimonSlate.jl   # dev-install the `slate` launcher (pre-release)
 ```
 
-(KaimonSlate is soon to be registered; until then, add it from the repo URL as shown. Once
-registered, `pkg> app add KaimonSlate` will work.)
+Then instantiate the dev clone once (`pkg> activate ~/.julia/dev/KaimonSlate; instantiate`) so the
+bundled `SlateExtensionsBase` resolves — see [Installation](installation.md) for the full steps. (Once
+KaimonSlate is registered, `pkg> app add KaimonSlate` will be the one-liner.)
 
 Run it:
 

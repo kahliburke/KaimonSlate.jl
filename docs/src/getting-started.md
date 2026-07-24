@@ -5,9 +5,9 @@ a task to the AI agent.
 
 ## Open a notebook
 
-Run the **`slate` app** (installed with `pkg> app add https://github.com/kahliburke/KaimonSlate.jl` —
-KaimonSlate is soon to be registered, so add it from the repo URL for now; see
-[Installation](installation.md)):
+Run the **`slate` app** (during the pre-release, install it with
+`pkg> app dev https://github.com/kahliburke/KaimonSlate.jl` and then instantiate
+`~/.julia/dev/KaimonSlate` — see [Installation](installation.md) for the full steps):
 
 ```sh
 slate                 # start the hub + status TUI, and open the front page
