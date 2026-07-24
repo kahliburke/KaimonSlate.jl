@@ -25,17 +25,28 @@ Ollama if you want the agent. This gives KaimonSlate its gate workers and the ag
 
 ### 2. Install the `slate` app
 
-From the Pkg REPL (press `]`), add KaimonSlate as an **app** — this puts a `slate` launcher on
-your `PATH`:
+From the Pkg REPL (press `]`), install KaimonSlate as an **app** — this puts a `slate` launcher on
+your `PATH`. During the pre-release, install it as a **developed app**: a plain `app add <url>` can't
+yet resolve the bundled `SlateExtensionsBase` (it's shipped in the repo's `lib/`, not a registry — that
+arrives with registration).
 
 ```julia-repl
-pkg> app add https://github.com/kahliburke/KaimonSlate.jl
+pkg> app dev https://github.com/kahliburke/KaimonSlate.jl
 ```
 
-(KaimonSlate is soon to be registered in the General registry; until then, point `app add` at the
-repo URL as shown above. Once registered, `pkg> app add KaimonSlate` will work.) The launcher
-lands in Julia's app bin — if `slate` isn't found, add that directory (printed by `app add`) to
-your `PATH`.
+This clones the repo to `~/.julia/dev/KaimonSlate`. `Pkg.Apps` doesn't instantiate the dev'd project,
+so do it once yourself — this resolves `SlateExtensionsBase` (dev'd in place from the clone's `lib/`)
+and the rest of the dependencies:
+
+```julia-repl
+pkg> activate ~/.julia/dev/KaimonSlate
+pkg> instantiate
+pkg> activate                 # back to your default environment
+```
+
+The launcher lands in Julia's app bin — if `slate` isn't found, add that directory (printed by
+`app dev`) to your `PATH`. (Once KaimonSlate is registered in General, `pkg> app add KaimonSlate` will
+be the one-liner.)
 
 ### 3. Run `slate`
 
