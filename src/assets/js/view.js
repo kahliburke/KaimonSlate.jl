@@ -321,8 +321,11 @@ function _effectBadge(c) {
 }
 function cellHeaderInner(c) {
   const isCode = (c.kind === 'code' || c.kind === 'web') && !hasBinds(c);   // web cells run too (▶)
-  const editSrc = (c.kind === 'md' || hasBinds(c))
-    ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
+  // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
+  // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
+  // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
+  // read as the same action.
+  const editSrc = `<button onclick="editCellSource('${c.id}','${c.kind}')" title="edit source">✎</button>`;
   const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
   const bu = surfaceableNames(c);
   const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
@@ -547,6 +550,17 @@ function toggleSource(id, mode) {
   } else {
     editSource(id, mode);
   }
+}
+
+// The ✎ "edit source" header button, for ANY cell kind. md / @bind cells render OUTPUT by default and
+// keep their source in a hidden `.srcedit` overlay → toggle it. code / web cells show their editor
+// inline (no overlay) → just focus it, un-hiding the code first if it was hidden via 🙈.
+function editCellSource(id, kind) {
+  const cell = document.getElementById('cell-' + id); if (!cell) return;
+  if (cell.querySelector('.srcedit')) { toggleSource(id, kind === 'md' ? 'markdown' : 'julia'); return; }
+  if (cell.classList.contains('codehidden')) toggleHideCode(id);   // reveal hidden code before focusing
+  if (window.ensureEditor) window.ensureEditor(id);                // mount if it hasn't lazily yet
+  if (window.edFocus) window.edFocus(id);
 }
 
 function editSource(id, mode) {

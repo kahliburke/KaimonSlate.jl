@@ -255,6 +255,18 @@ function _web_skin(; html::AbstractString = "", css::AbstractString = "", js::Ab
     return string("@web(", join(secs, ",\n"), ")")
 end
 
+# Inverse of `_web_skin`, for a kind change OUT of a web cell. The browser hands `set_kind!` the
+# reassembled `@web(...)` skin as the new source; a plain code/markdown cell shouldn't carry that
+# wrapper. A skin with a SINGLE section — the code↔web round-trip, where converted code lands in one
+# pane (HTML by `_web_sections`) — unwraps to that pane's body, so `code → web → code` returns the
+# original text. A genuine multi-pane web cell has no clean plain-text form, so it keeps its runnable
+# `@web(...)` intact. Non-skin source (already plain) round-trips through the single-section branch.
+function _web_unwrap(src::AbstractString)
+    s = _web_sections(src)
+    nonempty = filter(!isempty, [s.html, s.css, s.js])
+    return length(nonempty) == 1 ? nonempty[1] : String(src)
+end
+
 # `Widget` (kind/params/default), `Choice`, `Selection` and `WebPage` are defined in
 # SlateExtensionsBase (imported above) — the shared contract. The built-in constructors below build
 # `Widget`s at runtime (no syntactic parsing, no `Slider`-name matching); the value lifecycle for
