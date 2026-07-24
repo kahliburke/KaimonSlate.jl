@@ -309,6 +309,20 @@ SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
         @test byp["CesiumSlate"] == "/abs/cesium"
         @test length(m.assets) == 2
 
+        # The MODULE form derives the package key (`pkg_key`) — an author passes `@__MODULE__` instead of a
+        # hand-typed string, so the served key can't drift from the `ext_asset_url` calls. Any package module
+        # works; `SlateExtensionsBase` stands in here (its package root name is "SlateExtensionsBase").
+        @test pkg_key(SlateExtensionsBase) == "SlateExtensionsBase"
+        @test ext_asset_url(SlateExtensionsBase, "x.js") == ext_asset_url("SlateExtensionsBase", "x.js")
+        @test ext_asset_url(SlateExtensionsBase, "x.js") == "/ext-assets/SlateExtensionsBase/x.js"
+        @test provide_assets!(SlateExtensionsBase, "/abs/seb") == "/ext-assets/SlateExtensionsBase/"
+        @test asset_dirs()["SlateExtensionsBase"] == "/abs/seb"
+
+        # The MACRO forms capture the enclosing module implicitly (like `@pkg_dir`) — no `@__MODULE__`, no
+        # key string — so they're identical to the module methods applied to the caller's own module.
+        @test (@ext_asset_url("x.js")) == ext_asset_url(@__MODULE__, "x.js")
+        @test (@provide_assets!("/abs/macro")) == provide_assets!(@__MODULE__, "/abs/macro")
+
         empty!(SlateExtensionsBase._ASSETS)
     end
 

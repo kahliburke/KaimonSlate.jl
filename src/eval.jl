@@ -159,7 +159,12 @@ function _new_module(report::Report)
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars),
         slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, frac, msg, id, done),
-        slate_emit = (channel, data) -> _do_emit(rid, channel, data),
+        # A SlateBinary streams as a raw binary frame (encode_binary_frame packs channel+meta+dtype+shape+
+        # bytes) forwarded to the page as-is — mirrors the worker's `slate_emit`. Any other value takes the
+        # JSON emit path. Without this branch the in-process kernel would JSON-encode the SlateBinary itself.
+        slate_emit = (channel, data) -> data isa SlateExtensionsBase.SlateBinary ?
+            _do_emit_bin(rid, SlateExtensionsBase.encode_binary_frame(string(channel), data)) :
+            _do_emit(rid, channel, data),
         assetbase = () -> String(get(report.meta, "assetbase", "")))   # `@asset` base (notebook project dir)
     return m
 end

@@ -1894,11 +1894,37 @@ _plainify(x::AbstractVector) = Any[_plainify(v) for v in x]
 _plainify(x::AbstractString) = String(x)
 _plainify(x) = x
 
+# Decode a browser→server binary buffer frame — the uplink twin of `SlateExtensionsBase.encode_binary_frame`,
+# same self-describing layout. Its `channel` field carries the correlating call id and its `meta` the {i,n}
+# buffer index/count; the payload is opaque bytes (dtype UInt8, rank 1 — shape is unused here). Meta is
+# parsed with the hub's JSON (no SEB parser needed — decoding happens hub-side). Returns
+# (callId, index, count, bytes). All integers little-endian (matches the encoder; every target is LE).
+function _decode_uplink_frame(frame::AbstractVector{UInt8})
+    io = IOBuffer(frame)
+    read(io, UInt8) == 0x01 || return nothing
+    cl = read(io, UInt16); ch = String(read(io, cl))
+    ml = read(io, UInt16); meta = ml == 0 ? Dict{String,Any}() : JSON.parse(String(read(io, ml)))
+    read(io, UInt8); rank = read(io, UInt8)          # dtype (UInt8) + rank
+    for _ in 1:rank; read(io, UInt32); end           # dims — payload is opaque bytes, shape unused
+    bytes = read(io)                                  # remaining = raw payload
+    return (ch, Int(get(meta, "i", 0)), Int(get(meta, "n", 1)), bytes)
+end
+
 # Invoke a cell-registered `slate_on` handler on the notebook's kernel and normalize the outcome to a
 # JSON-able reply Dict (`ok`/`value` or `ok=false`/`error`). Never throws — a dead kernel / missing
 # channel / throwing handler all come back as a clean `error` so the browser Promise rejects cleanly.
-function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args, call_id::AbstractString = "")
+function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args, call_id::AbstractString = "";
+                        buffers::Vector{Vector{UInt8}} = Vector{UInt8}[])
     args = _plainify(args)   # strip JSON.jl types so ANY worker env can deserialize the request payload
+    # A `slateCall` with binary buffers (browser→server binary WS frames, decoded in `_ws_calls`) delivers
+    # them to the handler as `args.__slate_buffers::Vector{Vector{UInt8}}` — injected AFTER `_plainify` so
+    # the raw bytes stay compact (not exploded into `Vector{Any}`) and cross to a worker via the gate's
+    # Serialization like any other arg. `_plainify` must not see them.
+    if !isempty(buffers)
+        args = args isa AbstractDict ?
+            merge(Dict{String,Any}(args), Dict{String,Any}("__slate_buffers" => buffers)) :
+            Dict{String,Any}("value" => args, "__slate_buffers" => buffers)
+    end
     # A `slate_on` handler lives in the namespace of the kernel its cell RAN ON — under a region that may
     # be a region worker, not the main one. Try the main kernel, then each active region kernel, and use
     # whichever actually has the channel registered: a "no handler here" moves on, a handler that RETURNS
@@ -2102,15 +2128,32 @@ function _ws_calls(stream, nb::LiveNotebook)
             for msg in c.out; HTTP.WebSockets.send(ws, msg); end
         catch; end
         try; _ws_send!(c, string("{\"t\":\"health\",\"data\":", JSON.json(_health_json(nb)), "}")); catch; end   # initial health snapshot
+        # Binary buffers a `slateCall` sends ride as native binary WS frames (first byte 0x01) that arrive
+        # BEFORE their JSON call — accumulate them per call id here, then hand them to the dispatch when the
+        # call arrives. Keyed by call id, so concurrent calls never mix buffers.
+        upbuf = Dict{String,Vector{Vector{UInt8}}}()
         try
             for raw in ws
+                if raw isa AbstractVector{UInt8} && !isempty(raw) && raw[1] == 0x01   # a binary buffer frame
+                    dec = try; _decode_uplink_frame(raw); catch; nothing; end
+                    dec === nothing && continue
+                    id, i, n, bytes = dec
+                    slots = get!(upbuf, id, Vector{Vector{UInt8}}(undef, n))
+                    (length(slots) == n && 1 <= i + 1 <= n) && (slots[i + 1] = bytes)
+                    continue
+                end
                 req = try; JSON.parse(raw isa String ? raw : String(raw)); catch; nothing; end
                 (req isa AbstractDict) || continue
                 cid = get(req, "id", nothing)
                 cid === nothing && continue      # no id ⇒ not a call (a one-way send is reserved for later)
                 ch = string(get(req, "channel", "")); args = get(req, "args", nothing)
+                nbuf = get(req, "nbuf", 0)
+                bufs = pop!(upbuf, string(cid), Vector{UInt8}[])   # buffers this call announced (empty if none)
+                # Drop a call whose buffers didn't all arrive (undef slots) rather than dispatch a partial one.
+                bufs = (nbuf isa Real && nbuf > 0 && length(bufs) == nbuf && all(isassigned(bufs, j) for j in 1:nbuf)) ?
+                       bufs : Vector{UInt8}[]
                 @async begin
-                    reply = _do_slate_call(nb, ch, args, string(cid)); reply["id"] = cid; reply["t"] = "reply"
+                    reply = _do_slate_call(nb, ch, args, string(cid); buffers = bufs); reply["id"] = cid; reply["t"] = "reply"
                     payload = try
                         JSON.json(reply)
                     catch e    # non-JSON-serializable handler result → a clean error, not a client-side timeout
