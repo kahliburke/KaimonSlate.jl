@@ -106,6 +106,52 @@ function _kgate_env()::String
     end
 end
 
+# ── Worker INFRA env materialisation ─────────────────────────────────────────────
+# Same rationale as `_kgate_env()`. `worker_infra` is consumed by the worker on its LOAD_PATH, so it
+# must be RESOLVED for the local machine + Julia. Shipping a committed `Manifest.toml` there is a
+# lockfile stamped for ONE Julia version + depot state — it breaks the instant someone is on a
+# different Julia patch ("SlateExtensionsBase … is required but does not seem to be installed"). So the
+# Manifest is NOT committed; instead materialise the env ONCE per (Project.toml + SEB Project.toml +
+# Julia version) by instantiating a copy in a subprocess into a scratchspace, and put THAT on LOAD_PATH.
+# `worker_infra/Project.toml` (deps + [compat] + the SEB [sources] path) is the source of truth; the
+# SEB path-dev tracks source edits live, so only a deps/Julia change rebuilds.
+const _INFRA_ENV_ROOT = joinpath(get(DEPOT_PATH, 1, joinpath(homedir(), ".julia")),
+                                 "scratchspaces", "kaimonslate-infra")
+const _INFRA_ENV_LOCK = ReentrantLock()
+
+function _infra_env()::String
+    proj = joinpath(_INFRA_ENV, "Project.toml")
+    isfile(proj) || return _INFRA_ENV
+    ptoml = read(proj, String)
+    # The committed `[sources]` path is RELATIVE to src/worker_infra; rewrite it to ABSOLUTE so it still
+    # resolves once the Project.toml is copied into the scratchspace.
+    seb = normpath(joinpath(_INFRA_ENV, "..", "..", "lib", "SlateExtensionsBase"))
+    sebproj = joinpath(seb, "Project.toml")
+    # Key by BOTH Project.tomls (a new dep/compat here or in SEB) + the SEB path + Julia — a source edit
+    # inside SEB needs no rebuild (path-dev tracks it live), mirroring `_kgate_env()`.
+    key = string(hash((ptoml, isfile(sebproj) ? read(sebproj, String) : "", seb, string(VERSION))); base = 16)
+    dir = joinpath(_INFRA_ENV_ROOT, key)
+    lock(_INFRA_ENV_LOCK) do
+        isfile(joinpath(dir, ".ready")) && return dir
+        @info "slate: preparing the worker's infra environment (Revise + ExpressionExplorer + SlateExtensionsBase; once per Julia version)…" dir
+        buildlog = joinpath(dir, "build.log")
+        try
+            mkpath(dir)
+            write(joinpath(dir, "Project.toml"), replace(ptoml, "../../lib/SlateExtensionsBase" => seb))
+            code = "using Pkg; Pkg.instantiate()"   # no Manifest ⇒ resolve for THIS Julia, then install
+            open(buildlog, "w") do io
+                run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$dir -e $code`;
+                             stdout = io, stderr = io))
+            end
+            write(joinpath(dir, ".ready"), seb)
+            return dir
+        catch e
+            @warn "slate: could not materialise the infra worker env — falling back to the raw dir (works only if it carries a resolvable Manifest, e.g. a dev checkout that instantiated it in place)" _INFRA_ENV buildlog exception = e
+            return _INFRA_ENV
+        end
+    end
+end
+
 # Per-worker TCP ports. A simple counter (no Sockets dep); collisions are unlikely
 # and surface as a worker bind error rather than silent crosstalk.
 const _GATE_PORT = Ref(9100)
@@ -449,13 +495,14 @@ function _worker_script(port::Int, stream_port::Int, parent::AbstractString = ""
     # `_kgate_env()` hands back an INSTANTIATED env for it (see above) — the raw
     # lib/KaimonGate dir only resolves from a dev checkout.
     kgate_dir = _kgate_env()
+    infra_dir = _infra_env()   # materialised (instantiated for THIS Julia) — see `_infra_env`
     # No LOAD_PATH stacking: the notebook runs in a SINGLE active env (`@`, set by
     # `--project`) — either the parent directly (base mode) or a forked env that already
     # contains the parent's deps (forked mode). `PARENT_PROJECT` is recorded only so the
     # worker can attribute package provenance (which deps are notebook adds vs parent).
     return """
     insert!(LOAD_PATH, 1, $(repr(kgate_dir)))
-    insert!(LOAD_PATH, 3, $(repr(_INFRA_ENV)))   # slate-owned infra (Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
+    insert!(LOAD_PATH, 3, $(repr(infra_dir)))   # slate-owned infra (Revise + ExpressionExplorer + SlateExtensionsBase) — after the notebook project (@), before globals
     import KaimonGate
     # Load Revise BEFORE the notebook loads packages so it tracks the parent project's /src.
     # KaimonGate.serve auto-starts a watcher that PUBs `files_changed` on Revise.revision_event.
