@@ -146,14 +146,18 @@ function restart_kernel!(nb::LiveNotebook)
     # full re-eval (which respawns the worker on prepare! and streams cells back) runs async, so the
     # user gets control back immediately instead of blocking until everything re-renders. Same
     # "open instantly" pattern as load_notebook.
-    lock(nb.lock) do
-        # An explicit restart must yield a FRESH worker — with a detached (still-warm) remote,
-        # prepare!'s reattach-first would re-adopt the same process and the restart would no-op.
-        try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
-        _teardown_region!(nb; kill = true)   # the region kernel restarts fresh too (+ sync state reset)
-        ReportEngine.reset!(nb.kernel, nb.report)
-        build_dependencies!(nb.report)
-        nb.report.meta["hydrating"] = true
+    # An explicit restart must yield a FRESH worker — with a detached (still-warm) remote, prepare!'s
+    # reattach-first would re-adopt the same process and the restart would no-op. The worker teardown is
+    # a BLOCKING round-trip, so it runs OFF `nb.lock` (protocol: never hold nb.lock across a kernel call).
+    # Interrupt any in-flight eval first so `shutdown!` doesn't block behind it (the deadlock this fixes:
+    # holding nb.lock across `shutdown!` while the runner needs nb.lock to finish → hub wedges).
+    _interrupt_inflight!(nb)
+    try; ReportEngine.shutdown!(nb.kernel; kill_remote = true); catch; end
+    _teardown_region!(nb; kill = true)       # region kernels restart fresh too (+ sync state reset)
+    with_report(nb) do report                # lock only for the report reset/mutate (no round-trip)
+        ReportEngine.reset!(nb.kernel, report)
+        build_dependencies!(report)
+        report.meta["hydrating"] = true
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -189,16 +193,16 @@ end
 # and re-runs — async, same "instant" pattern as restart_kernel!. Runtime-only (not written to the .jl).
 function set_remote_worker!(nb::LiveNotebook, spec::AbstractString)
     _interrupt_inflight!(nb)   # switching workers stops the current evaluation immediately (don't drain)
-    lock(nb.lock) do
+    try; ReportEngine.shutdown!(nb.kernel); catch; end         # blocking teardown — OFF nb.lock (local killed; remote detached, idles warm)
+    with_report(nb) do report
         s = strip(String(spec))
-        isempty(s) ? delete!(nb.report.meta, "remoteworker") : (nb.report.meta["remoteworker"] = String(s))
-        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → detached (idles warm)
-        nb.kernel = _select_kernel(nb.path, nb.report)         # remote attach vs local, per the meta
-        build_dependencies!(nb.report)
+        isempty(s) ? delete!(report.meta, "remoteworker") : (report.meta["remoteworker"] = String(s))
+        nb.kernel = _select_kernel(nb.path, report)            # remote attach vs local, per the meta
+        build_dependencies!(report)
         # New worker → empty namespace → re-run every cell (this is what drives prepare!→attach). Cells
         # left FRESH would give the runner nothing to do and the worker would never be reached. See reset!.
-        ReportEngine.reset_all!(nb.report)
-        nb.report.meta["hydrating"] = true
+        ReportEngine.reset_all!(report)
+        report.meta["hydrating"] = true
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -257,21 +261,21 @@ function set_run_on!(nb::LiveNotebook, spec::AbstractString; scope::Symbol = :se
     end
     # Actually switching → stop the current evaluation NOW (don't drain it), then tear down + re-pick.
     _interrupt_inflight!(nb)
-    lock(nb.lock) do
-        try; ReportEngine.shutdown!(nb.kernel); catch; end     # local → killed; remote → detached (idles warm, switch-back reattaches)
-        nb.kernel = _select_kernel(nb.path, nb.report)
+    try; ReportEngine.shutdown!(nb.kernel); catch; end         # blocking teardown — OFF nb.lock (local killed; remote detached)
+    with_report(nb) do report
+        nb.kernel = _select_kernel(nb.path, report)
         remotehost = (nb.kernel isa ReportEngine.GateKernel && nb.kernel.target isa ReportEngine.RemoteTarget) ?
                      nb.kernel.target.ssh_host : ""
-        build_dependencies!(nb.report)
+        build_dependencies!(report)
         # The new worker has an EMPTY namespace → every cell must re-run on it. Invalidate all cells so
         # `_drain!` re-evaluates them; mirrors ReportEngine.reset!.
-        ReportEngine.reset_all!(nb.report)
-        delete!(nb.report.meta, "hydrate_error")
-        nb.report.meta["hydrating"] = true
+        ReportEngine.reset_all!(report)
+        delete!(report.meta, "hydrate_error")
+        report.meta["hydrating"] = true
         # Tell the banner this is a remote bring-up (provision + connect can take minutes) rather than a
         # plain re-run — so the UI stops implying it's "running cells" while the worker isn't even up yet.
-        isempty(remotehost) ? delete!(nb.report.meta, "hydratingKind") :
-            (nb.report.meta["hydratingKind"] = "remote"; nb.report.meta["hydratingHost"] = remotehost)
+        isempty(remotehost) ? delete!(report.meta, "hydratingKind") :
+            (report.meta["hydratingKind"] = "remote"; report.meta["hydratingHost"] = remotehost)
         nb.version += 1
     end
     _broadcast(nb, "restart")
@@ -559,6 +563,46 @@ function _sync_datadir_to!(nb::LiveNotebook, dst_k; cell_id::AbstractString = ""
     return nothing
 end
 
+# Sanitized download filename for an export: notebook base name with unsafe chars folded to `_`,
+# plus the given extension (which INCLUDES the leading dot, e.g. ".html", ".typ.tar.gz").
+_download_name(nb, ext) = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ext
+
+# Read an MB-valued query param (`key`) and convert to a byte budget: absent or unparseable ⇒ `default`.
+_mb_budget(qp, key, default) = begin
+    s = get(qp, key, "")
+    isempty(s) ? default : (v = tryparse(Float64, s); v === nothing ? default : round(Int, v * 1024^2))
+end
+
+# Content column width in px from the `width` query param: "full" ⇒ 0 (100%), unset/bad ⇒ 900.
+_width_px(qp) = begin
+    wq = get(qp, "width", "")
+    wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
+end
+
+# Region display names the DAG actually shows (declared footer ∪ cell-tagged), deduped and non-empty.
+_nb_display_regions(nb) = begin
+    names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
+    filter!(!isempty, names)
+    names
+end
+
+# Shared PDF/Typst export options extracted from the query params (both call sites are identical).
+_pdf_export_opts(qp, nb) = begin
+    _lay = get(qp, "layout", "article")
+    (; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
+       style = get(qp, "style", "article"),
+       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
+       theme = get(qp, "theme", "light"),
+       charttheme = get(qp, "charttheme", ""),
+       override = get(qp, "override", "0") == "1",
+       code = get(qp, "code", "normal"),
+       body = get(qp, "body", ""),
+       include_params = get(qp, "params", "0") == "1",
+       layout = _lay, notes = get(qp, "notes", "0") == "1",
+       level = get(nb.report.meta, "slidelevel", 2),
+       outputs = get(qp, "outputs", "all"))
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html()))   # front page + inlined last-known ledger (see _index_html)
@@ -580,6 +624,35 @@ function _make_router(h::Hub)
         (occursin('/', f) || occursin('\\', f) || occursin("..", f) || !endswith(f, ".js")) && return HTTP.Response(404)
         p = joinpath(_JS_DIR, f)
         isfile(p) ? _asset(read(p, String), "application/javascript; charset=utf-8") : HTTP.Response(404)
+    end)
+    # Package-vendored asset directories (SlateExtensionsBase `provide_assets!`): serve a loaded package's
+    # front-end asset tree (echarts-gl, Cesium's Workers/Assets, …) from disk at `/ext-assets/<pkg>/<sub>`.
+    # `<pkg>` is package-scoped (the manifest maps it to an absolute dir on THIS host — the worker is
+    # co-located with the hub); the dir is identical across notebooks, so the first notebook that declared
+    # `<pkg>` resolves it. Immutable-cached; the same `**`-greedy + `..`-traversal discipline as the sibling
+    # asset routes. A static export rewrites these URLs to page-local siblings (see `_frontend_export_head`).
+    HTTP.register!(router, "GET", "/ext-assets/**", req -> begin
+        m = match(r"^/ext-assets/([^/]+)/(.*)$", HTTP.URI(req.target).path)
+        m === nothing && return HTTP.Response(404)
+        pkg = HTTP.URIs.unescapeuri(String(m.captures[1]))
+        sub = HTTP.URIs.unescapeuri(String(m.captures[2]))
+        root = lock(h.lock) do
+            for nb in values(h.notebooks)
+                d = get(nb.assets, pkg, nothing); d === nothing || return d
+            end
+            return nothing
+        end
+        root === nothing && return HTTP.Response(404, "no such package asset dir (package loaded?)")
+        rootn = normpath(root)
+        p = normpath(joinpath(rootn, strip(sub, '/')))
+        # stay inside the vendored dir (accept either separator so the guard holds on Windows too)
+        (p == rootn || startswith(p, rootn * "/") || startswith(p, rootn * "\\")) || return HTTP.Response(404)
+        isfile(p) || return HTTP.Response(404, "no such asset")
+        # `nosniff`: these files are same-origin, so pin the declared type — a mislabelled or author-crafted
+        # asset can't be content-sniffed into an executable type (proposal security item #3).
+        HTTP.Response(200, ["Content-Type" => _site_ctype(p),
+                            "X-Content-Type-Options" => "nosniff",
+                            "Cache-Control" => "public, max-age=31536000, immutable"], read(p))
     end)
     # Vendored map GeoJSON for echarts `registerMap` (e.g. /assets/maps/world.json) — served
     # immutable; the front-end fetches + registers a map once per page.
@@ -1115,8 +1188,7 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/peer-plan", req -> _withnb(h, req, nb -> begin
         # The region set the DAG actually shows = declared footer ∪ cell-tagged (a cell can be tagged into a
         # region the footer never listed). Mirror `_regions_json` so the plan matches the zones on screen.
-        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
-        filter!(!isempty, names)
+        names = _nb_display_regions(nb)
         ref = get(HTTP.queryparams(HTTP.URI(req.target)), "refresh", "0") == "1"
         isempty(names) && return _json(Dict("regions" => String[], "routes" => [], "hosts" => [], "refreshed" => ref))
         data = try; ReportEngine.peer_plan_data(names; refresh = ref)
@@ -1138,8 +1210,7 @@ function _make_router(h::Hub)
     # measured NOW instead of waiting for a cell to drive one. Reuses the region kernels + the peer transport;
     # results also land in the peer-rate memory and the live `transfers` view. Returns per-pair kind/bytes/mbps.
     HTTP.register!(router, "POST", "/api/{id}/probe", req -> _withnb(h, req, nb -> begin
-        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
-        filter!(!isempty, names)
+        names = _nb_display_regions(nb)
         # Every ordered cross-region pair, counted up front so we can PUSH "i/n" progress over the notebook's
         # SSE channel (same `_broadcast` bus as `mesh-consent:`) as each probe runs — a probe is a real test
         # transfer that takes seconds, so a single blocking POST would otherwise show no step-by-step feedback.
@@ -1167,8 +1238,7 @@ function _make_router(h::Hub)
     # per-poll (t, cumulative-bytes) series → the frontend derives instantaneous throughput, timelines, the
     # peer-to-peer grid, and the distribution. Filtered to the notebook's regions; `now` anchors relative time.
     HTTP.register!(router, "GET", "/api/{id}/transfer-stats", req -> _withnb(h, req, nb -> begin
-        names = unique(String[String(get(d, "name", "")) for d in _regions_json(nb)])
-        filter!(!isempty, names); rset = Set(names)
+        names = _nb_display_regions(nb); rset = Set(names)
         traces = [Dict("src" => t.src, "dst" => t.dst, "name" => t.name, "via" => t.via,
                        "started" => t.started, "finished" => t.finished, "total" => t.total, "err" => t.err,
                        "ts" => t.ts, "bs" => t.bs)
@@ -1181,14 +1251,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.html", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         _run = get(qp, "bundle", "0") == "1"   # embed the reproducible bundle + a "Run live" launcher
-        mb = get(qp, "memo", "")               # precomputed-results budget (MB) for the embedded bundle
-        budget = isempty(mb) ? typemax(Int) :
-                 (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
-        pv = get(qp, "preview", "")            # interim-render budget (MB) for the embedded bundle's preview
-        pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
-                  (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
-        wq = get(qp, "width", "")                   # content column width: px, "full" (=100%), or unset ⇒ default
-        pw = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
+        budget = _mb_budget(qp, "memo", typemax(Int))       # precomputed-results budget (MB) for the embedded bundle
+        pbudget = _mb_budget(qp, "preview", _PREVIEW_MAX_TOTAL)  # interim-render budget (MB) for the embedded bundle's preview
+        pw = _width_px(qp)                          # content column width: px, "full" (=100%), or unset ⇒ default
         html = export_html(nb; include_source = get(qp, "source", "1") != "0",
                            theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
                            override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
@@ -1197,7 +1262,7 @@ function _make_router(h::Hub)
                            memo_budget = budget, preview_budget = pbudget, width = pw)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
-            fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".html"
+            fn = _download_name(nb, ".html")
             push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
         end
         HTTP.Response(200, headers, html)
@@ -1206,8 +1271,7 @@ function _make_router(h::Hub)
     # (theme/charttheme/override/code/outputs/width/source); returns {ok,url,preview,error} as JSON.
     HTTP.register!(router, "POST", "/api/{id}/export.gist", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
-        wq = get(qp, "width", "")
-        pw = wq == "full" ? 0 : (v = tryparse(Int, wq); v === nothing ? 900 : v)
+        pw = _width_px(qp)
         r = export_gist(nb; include_source = get(qp, "source", "1") != "0",
                         theme = get(qp, "theme", "dark"), charttheme = get(qp, "charttheme", ""),
                         override = get(qp, "override", "0") == "1", code = get(qp, "code", "normal"),
@@ -1223,7 +1287,7 @@ function _make_router(h::Hub)
                              outputs = get(qp, "outputs", "all"))
         headers = Pair{String,String}["Content-Type" => "text/markdown; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
-            fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".md"
+            fn = _download_name(nb, ".md")
             push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
         end
         HTTP.Response(200, headers, md)
@@ -1255,23 +1319,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.pdf", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         pdf = try
-            _lay = get(qp, "layout", "article")
-            export_pdf(nb; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
-                       style = get(qp, "style", "article"),
-                       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
-                       theme = get(qp, "theme", "light"),
-                       charttheme = get(qp, "charttheme", ""),
-                       override = get(qp, "override", "0") == "1",
-                       code = get(qp, "code", "normal"),
-                       body = get(qp, "body", ""),
-                       include_params = get(qp, "params", "0") == "1",
-                       layout = _lay, notes = get(qp, "notes", "0") == "1",
-                       level = get(nb.report.meta, "slidelevel", 2),
-                       outputs = get(qp, "outputs", "all"))
+            export_pdf(nb; _pdf_export_opts(qp, nb)...)
         catch e
             return HTTP.Response(500, "PDF export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".pdf"
+        fn = _download_name(nb, ".pdf")
         HTTP.Response(200, ["Content-Type" => "application/pdf",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], pdf)
     end))
@@ -1280,23 +1332,11 @@ function _make_router(h::Hub)
     HTTP.register!(router, "GET", "/api/{id}/export.typ", req -> _withnb(h, req, nb -> begin
         qp = HTTP.queryparams(HTTP.URI(req.target))
         data = try
-            _lay = get(qp, "layout", "article")
-            export_typst_bundle(nb; include_source = get(qp, "source", _lay == "slides" ? "0" : "1") != "0",
-                       style = get(qp, "style", "article"),
-                       columns = something(tryparse(Int, get(qp, "columns", "1")), 1),
-                       theme = get(qp, "theme", "light"),
-                       charttheme = get(qp, "charttheme", ""),
-                       override = get(qp, "override", "0") == "1",
-                       code = get(qp, "code", "normal"),
-                       body = get(qp, "body", ""),
-                       include_params = get(qp, "params", "0") == "1",
-                       layout = _lay, notes = get(qp, "notes", "0") == "1",
-                       level = get(nb.report.meta, "slidelevel", 2),
-                       outputs = get(qp, "outputs", "all"))
+            export_typst_bundle(nb; _pdf_export_opts(qp, nb)...)
         catch e
             return HTTP.Response(500, "Typst export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".typ.tar.gz"
+        fn = _download_name(nb, ".typ.tar.gz")
         HTTP.Response(200, ["Content-Type" => "application/gzip",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], data)
     end))
@@ -1312,7 +1352,7 @@ function _make_router(h::Hub)
         catch e
             return HTTP.Response(500, "Site export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".site.tar.gz"
+        fn = _download_name(nb, ".site.tar.gz")
         HTTP.Response(200, ["Content-Type" => "application/gzip",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], data)
     end))
@@ -1388,21 +1428,17 @@ function _make_router(h::Hub)
         qp = HTTP.queryparams(HTTP.URI(req.target))
         # `memo` = byte budget for embedded precomputed results (MB in the query, → bytes):
         # ""/absent = all memoizable results; "0" = none. Entries chosen by compute-saved-per-byte.
-        mb = get(qp, "memo", "")
-        budget = isempty(mb) ? typemax(Int) :
-                 (v = tryparse(Float64, mb); v === nothing ? typemax(Int) : round(Int, v * 1024^2))
+        budget = _mb_budget(qp, "memo", typemax(Int))
         # `preview` = byte budget for the embedded interim render (MB → bytes): ""/absent = the
         # default cap; "0" = omit the frozen preview entirely (smaller file, cells show un-run on open).
-        pv = get(qp, "preview", "")
-        pbudget = isempty(pv) ? _PREVIEW_MAX_TOTAL :
-                  (v = tryparse(Float64, pv); v === nothing ? _PREVIEW_MAX_TOTAL : round(Int, v * 1024^2))
+        pbudget = _mb_budget(qp, "preview", _PREVIEW_MAX_TOTAL)
         jl = try
             export_standalone(nb; history = get(qp, "history", "1") != "0",   # full git history by default (deliberate share)
                               memo_budget = budget, preview_budget = pbudget)
         catch e
             return HTTP.Response(500, "Standalone export failed: " * sprint(showerror, e))
         end
-        fn = replace(splitext(basename(nb.path))[1], r"[^A-Za-z0-9_.-]" => "_") * ".standalone.jl"
+        fn = _download_name(nb, ".standalone.jl")
         HTTP.Response(200, ["Content-Type" => "text/x-julia; charset=utf-8",
                             "Content-Disposition" => "attachment; filename=\"$fn\""], jl)
     end))
@@ -1550,7 +1586,9 @@ function _make_router(h::Hub)
     HTTP.register!(router, "POST", "/api/{id}/table-page", req -> _withnb(h, req, nb -> begin
         b = _body(req)
         tid = String(get(b, "table_id", ""))
-        res = lock(nb.lock) do                       # serialize vs eval (shared gate connection)
+        # `table_page` is a shared-gate round-trip — serialize it vs eval on the notebook's eval mutex
+        # (as the runner does), NOT nb.lock, which a concurrent teardown needs (protocol).
+        res = lock(_eval_mutex(nb)) do
             # A region-produced table's provider lives on that region's kernel — route there.
             k = _side_kernel!(nb, _table_side(nb, tid))
             ReportEngine.table_page(k, nb.report, tid, b)
@@ -1876,11 +1914,37 @@ _plainify(x::AbstractVector) = Any[_plainify(v) for v in x]
 _plainify(x::AbstractString) = String(x)
 _plainify(x) = x
 
+# Decode a browser→server binary buffer frame — the uplink twin of `SlateExtensionsBase.encode_binary_frame`,
+# same self-describing layout. Its `channel` field carries the correlating call id and its `meta` the {i,n}
+# buffer index/count; the payload is opaque bytes (dtype UInt8, rank 1 — shape is unused here). Meta is
+# parsed with the hub's JSON (no SEB parser needed — decoding happens hub-side). Returns
+# (callId, index, count, bytes). All integers little-endian (matches the encoder; every target is LE).
+function _decode_uplink_frame(frame::AbstractVector{UInt8})
+    io = IOBuffer(frame)
+    read(io, UInt8) == 0x01 || return nothing
+    cl = read(io, UInt16); ch = String(read(io, cl))
+    ml = read(io, UInt16); meta = ml == 0 ? Dict{String,Any}() : JSON.parse(String(read(io, ml)))
+    read(io, UInt8); rank = read(io, UInt8)          # dtype (UInt8) + rank
+    for _ in 1:rank; read(io, UInt32); end           # dims — payload is opaque bytes, shape unused
+    bytes = read(io)                                  # remaining = raw payload
+    return (ch, Int(get(meta, "i", 0)), Int(get(meta, "n", 1)), bytes)
+end
+
 # Invoke a cell-registered `slate_on` handler on the notebook's kernel and normalize the outcome to a
 # JSON-able reply Dict (`ok`/`value` or `ok=false`/`error`). Never throws — a dead kernel / missing
 # channel / throwing handler all come back as a clean `error` so the browser Promise rejects cleanly.
-function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args, call_id::AbstractString = "")
+function _do_slate_call(nb::LiveNotebook, channel::AbstractString, args, call_id::AbstractString = "";
+                        buffers::Vector{Vector{UInt8}} = Vector{UInt8}[])
     args = _plainify(args)   # strip JSON.jl types so ANY worker env can deserialize the request payload
+    # A `slateCall` with binary buffers (browser→server binary WS frames, decoded in `_ws_calls`) delivers
+    # them to the handler as `args.__slate_buffers::Vector{Vector{UInt8}}` — injected AFTER `_plainify` so
+    # the raw bytes stay compact (not exploded into `Vector{Any}`) and cross to a worker via the gate's
+    # Serialization like any other arg. `_plainify` must not see them.
+    if !isempty(buffers)
+        args = args isa AbstractDict ?
+            merge(Dict{String,Any}(args), Dict{String,Any}("__slate_buffers" => buffers)) :
+            Dict{String,Any}("value" => args, "__slate_buffers" => buffers)
+    end
     # A `slate_on` handler lives in the namespace of the kernel its cell RAN ON — under a region that may
     # be a region worker, not the main one. Try the main kernel, then each active region kernel, and use
     # whichever actually has the channel registered: a "no handler here" moves on, a handler that RETURNS
@@ -2084,15 +2148,32 @@ function _ws_calls(stream, nb::LiveNotebook)
             for msg in c.out; HTTP.WebSockets.send(ws, msg); end
         catch; end
         try; _ws_send!(c, string("{\"t\":\"health\",\"data\":", JSON.json(_health_json(nb)), "}")); catch; end   # initial health snapshot
+        # Binary buffers a `slateCall` sends ride as native binary WS frames (first byte 0x01) that arrive
+        # BEFORE their JSON call — accumulate them per call id here, then hand them to the dispatch when the
+        # call arrives. Keyed by call id, so concurrent calls never mix buffers.
+        upbuf = Dict{String,Vector{Vector{UInt8}}}()
         try
             for raw in ws
+                if raw isa AbstractVector{UInt8} && !isempty(raw) && raw[1] == 0x01   # a binary buffer frame
+                    dec = try; _decode_uplink_frame(raw); catch; nothing; end
+                    dec === nothing && continue
+                    id, i, n, bytes = dec
+                    slots = get!(upbuf, id, Vector{Vector{UInt8}}(undef, n))
+                    (length(slots) == n && 1 <= i + 1 <= n) && (slots[i + 1] = bytes)
+                    continue
+                end
                 req = try; JSON.parse(raw isa String ? raw : String(raw)); catch; nothing; end
                 (req isa AbstractDict) || continue
                 cid = get(req, "id", nothing)
                 cid === nothing && continue      # no id ⇒ not a call (a one-way send is reserved for later)
                 ch = string(get(req, "channel", "")); args = get(req, "args", nothing)
+                nbuf = get(req, "nbuf", 0)
+                bufs = pop!(upbuf, string(cid), Vector{UInt8}[])   # buffers this call announced (empty if none)
+                # Drop a call whose buffers didn't all arrive (undef slots) rather than dispatch a partial one.
+                bufs = (nbuf isa Real && nbuf > 0 && length(bufs) == nbuf && all(isassigned(bufs, j) for j in 1:nbuf)) ?
+                       bufs : Vector{UInt8}[]
                 @async begin
-                    reply = _do_slate_call(nb, ch, args, string(cid)); reply["id"] = cid; reply["t"] = "reply"
+                    reply = _do_slate_call(nb, ch, args, string(cid); buffers = bufs); reply["id"] = cid; reply["t"] = "reply"
                     payload = try
                         JSON.json(reply)
                     catch e    # non-JSON-serializable handler result → a clean error, not a client-side timeout
@@ -2228,47 +2309,54 @@ end
 
 "Remove a notebook from the hub: drain its SSE connections and drop it."
 function close_notebook!(h::Hub, id::AbstractString)
-    removed = lock(h.lock) do
-        nb = get(h.notebooks, id, nothing)
-        nb === nothing && return false
-        # Tell open tabs the close is DELIBERATE before draining their SSE. Without this the
-        # client's disconnect recovery reads the ensuing 404 as a crashed server and re-opens
-        # the notebook by path — respawning it seconds after every close. The queued message
-        # still reaches each tab: a closed Channel drains its buffered items first.
-        _broadcast(nb, "closed:hub")
-        # Capture the final rendered state as the next reopen's interim preview, past the debounce.
-        try; _save_preview!(nb; force = true); catch; end
-        _close_listeners(nb)
-        _stop_live_rerender!(nb)              # end this notebook's live-re-render debouncer task
-        _close_agent!(nb)
-        _unwire_callbacks!(nb)
-        # Signal any in-flight runner to stop BEFORE tearing anything else down — its `Threads.@spawn`
-        # task isn't otherwise interruptible, and a reopen of this same path reuses this exact id (see
-        # `_RUNNER_CANCEL`'s docstring), so an orphaned runner would silently block the reopened
-        # notebook from ever draining. Cheap even when no runner is active (most closes).
-        if lock(_RUNNER_LOCK) do; get(_RUNNERS, id, false); end
-            ReportEngine._rlog("slate: closing $(id) with its runner still draining — signalling it to stop")
-            lock(_RUNNER_LOCK) do; _RUNNER_CANCEL[id] = true; end
-        end
-        try; shutdown!(nb.kernel); catch; end
-        _teardown_region!(nb)                 # detach — a remote region idles warm like the main kernel
-        lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
+    # Remove from the hub under `h.lock` (so no new request routes to it), then tear the kernel down
+    # OUTSIDE the lock — `shutdown!`/`_teardown_region!` are blocking worker round-trips and must not run
+    # while `h.lock` is held (the teardown-deadlock hazard). Only this call touches the removed `nb`.
+    nb = lock(h.lock) do
+        n = get(h.notebooks, id, nothing)
+        n === nothing && return nothing
         delete!(h.notebooks, id)
-        return true
+        return n
     end
-    removed && _persist_registry!(h)        # forget an explicitly-closed nb so a restart won't re-open it
-    return removed
+    nb === nothing && return false
+    # Tell open tabs the close is DELIBERATE before draining their SSE. Without this the client's
+    # disconnect recovery reads the ensuing 404 as a crashed server and re-opens the notebook by path —
+    # respawning it seconds after every close. The queued message still reaches each tab: a closed
+    # Channel drains its buffered items first.
+    _broadcast(nb, "closed:hub")
+    try; _save_preview!(nb; force = true); catch; end   # final rendered state → next reopen's interim preview
+    _close_listeners(nb)
+    _stop_live_rerender!(nb)               # end this notebook's live-re-render debouncer task
+    _close_agent!(nb)
+    _unwire_callbacks!(nb)
+    # Signal any in-flight runner to stop — its `Threads.@spawn` task isn't otherwise interruptible, and a
+    # reopen of this same path reuses this exact id, so an orphaned runner would block the reopened notebook.
+    if lock(_RUNNER_LOCK) do; get(_RUNNERS, id, false); end
+        ReportEngine._rlog("slate: closing $(id) with its runner still draining — signalling it to stop")
+        lock(_RUNNER_LOCK) do; _RUNNER_CANCEL[id] = true; end
+    end
+    _interrupt_inflight!(nb)               # stop an in-flight eval so `shutdown!` doesn't block behind it
+    try; shutdown!(nb.kernel); catch; end
+    _teardown_region!(nb)                  # detach — a remote region idles warm like the main kernel
+    lock(_EVAL_MUTEX_LOCK) do; delete!(_EVAL_MUTEX, id); end
+    _persist_registry!(h)                  # forget an explicitly-closed nb so a restart won't re-open it
+    return true
 end
 
 "Stop the hub: drain every notebook's SSE connections, then close the server."
 function stop_hub(h::Hub)
-    lock(h.lock) do
-        for nb in values(h.notebooks)
-            _close_listeners(nb); _stop_live_rerender!(nb); _unwire_callbacks!(nb)
-            try; shutdown!(nb.kernel); catch; end
-            _teardown_region!(nb)
-        end
+    # Snapshot + clear the notebooks under `h.lock`, then tear each down OFF the lock (blocking worker
+    # round-trips must not run while `h.lock` is held — this is the outer half of the teardown deadlock).
+    nbs = lock(h.lock) do
+        v = collect(values(h.notebooks))
         empty!(h.notebooks)
+        v
+    end
+    for nb in nbs
+        _close_listeners(nb); _stop_live_rerender!(nb); _unwire_callbacks!(nb)
+        _interrupt_inflight!(nb)
+        try; shutdown!(nb.kernel); catch; end
+        _teardown_region!(nb)
     end
     h.server === nothing || close(h.server)
     return nothing

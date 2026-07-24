@@ -23,7 +23,6 @@ function toast(msg, ms = 4500, kind = '') {
 
 const mdHtml = c => c.output || '<em class="phantom">empty markdown — double-click to edit</em>';
 const srcEditInner = () => '<textarea></textarea><div class="mdhint">⇧⏎ commit · esc cancel</div>';
-const srcEditHTML = () => `<div class="srcedit" style="display:none">${srcEditInner()}</div>`;
 
 // Strip the interactive-only chrome from a chart spec for a clean, static, publication render.
 // ECharts has no "publication mode" flag — what reads as on-screen controls are spec components:
@@ -121,9 +120,38 @@ function _ensureMaps(spec) {
   }));
 }
 function _sansMaps(s) {
-  if (!s || (!s.registerMap && !s.__size)) return s;
-  const c = Object.assign({}, s); delete c.registerMap; delete c.__size; return c;
+  if (!s || (!s.registerMap && !s.__size && !s.requireScripts)) return s;
+  const c = Object.assign({}, s); delete c.registerMap; delete c.__size; delete c.requireScripts; return c;
 }
+
+// Package-vendored front-end libraries (SlateExtensionsBase `provide_assets!`): a spec may carry
+// `requireScripts` — a URL (or list of them) for JS that must load before the chart renders. The
+// motivating case is echarts-gl, which registers the `globe`/`surface`/`bar3D`/`scatter3D` series
+// types onto the global `echarts`; a 3D chart that `setOption`s before it loads blanks on an unknown
+// series type and won't self-heal. Each URL is loaded via a <script> tag ONCE per page (in-flight
+// promise shared, ordered `async=false` so dependents see their deps), and setOption waits on it — the
+// exact `registerMap` discipline, generalised to any echarts extension. The key is stripped before
+// setOption (not an ECharts option); a static export rewrites the URL to a page-local sibling
+// (server_export.jl) so the frozen copy loads offline. A failed load resolves (doesn't reject) so one
+// missing lib can't wedge every chart's render — the chart just paints without it.
+const _scriptRegistry = {};                          // url → Promise (load done / in flight)
+function _loadScript(url) {
+  if (_scriptRegistry[url]) return _scriptRegistry[url];
+  _scriptRegistry[url] = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url; s.async = false;                    // preserve load order (echarts-gl needs echarts first)
+    s.onload = () => resolve();
+    s.onerror = () => { delete _scriptRegistry[url]; reject(new Error('failed to load ' + url)); };
+    document.head.appendChild(s);
+  });
+  return _scriptRegistry[url];
+}
+function _ensureScripts(spec) {
+  const reqs = spec && spec.requireScripts ? [].concat(spec.requireScripts) : [];
+  return Promise.all(reqs.map(u => u ? _loadScript(u).catch(() => {}) : Promise.resolve()));
+}
+// Everything a chart's render must await before setOption: registered geo maps AND loaded libraries.
+const _ensurePrereqs = spec => Promise.all([_ensureMaps(spec), _ensureScripts(spec)]);
 
 // Generated assets (`save_asset`): a cell's `assets` specs — {path, url, mime} — populate a page-wide
 // path→asset registry so `Slate.asset(path)` resolves what a widget/chart references. Live, each asset
@@ -259,16 +287,21 @@ const _SLATE_VIRIDIS = ['#440154', '#472d7b', '#3b528b', '#2c728e', '#21918c',
 // Build the Slate ECharts theme from a var-getter `V(name, default)` — decoupled from WHERE the
 // palette comes from, so the live theme (computed styles) and an export render in an arbitrary
 // named palette (its stylesheet rule) share one builder.
-function _slateEchartsThemeFrom(V) {
+function _slateEchartsThemeFrom(V, fam) {
   const text = V('--text', '#d4d8e8'), dim = V('--dim', '#6a7090'),
         border = V('--border', '#2a2e40'), bg2 = V('--bg2', '#141828');
   const cycle = [['--accent', '#569cd6'], ['--green', '#56d364'], ['--orange', '#ce9178'],
     ['--purple', '#c586c0'], ['--teal', '#4ec9b0'], ['--gold', '#ffd700'], ['--red', '#e57575']]
     .map(([n, d]) => V(n, d));
   const ax = _slateAxisTheme(border, dim, text);
+  // The canvas renderer sets `ctx.font = fontSize + 'px ' + fontFamily`; the CSS keyword 'inherit' is
+  // NOT a valid canvas font-family, so the whole assignment is rejected and EVERY fontSize silently
+  // reverts to the canvas default (color still applies — it's set via fillStyle, not the font string).
+  // Resolve to a real stack so per-chart fontSize overrides actually take effect.
+  const family = fam || 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
   return {
     color: cycle, backgroundColor: 'transparent',
-    textStyle: { color: text, fontFamily: 'inherit', fontSize: 14 },
+    textStyle: { color: text, fontFamily: family, fontSize: 14 },
     title: { left: 'center', textStyle: { color: text, fontSize: 19, fontWeight: 'bold' }, subtextStyle: { color: dim, fontSize: 12 } },
     legend: { textStyle: { color: dim, fontSize: 14 } },
     categoryAxis: ax, valueAxis: ax, logAxis: ax, timeAxis: ax,
@@ -282,7 +315,9 @@ function _slateEchartsThemeFrom(V) {
 // The live-theme ECharts theme (registered as 'slate') — reads the currently-applied CSS vars.
 function _slateEchartsTheme() {
   const cs = getComputedStyle(document.documentElement);
-  return _slateEchartsThemeFrom((n, d) => _slateThemeVar(cs, n, d));
+  // The document's real computed font stack — a valid canvas font-family that still matches the page.
+  const fam = (getComputedStyle(document.body || document.documentElement).fontFamily || '').trim();
+  return _slateEchartsThemeFrom((n, d) => _slateThemeVar(cs, n, d), fam || undefined);
 }
 // Read ONE Slate palette's CSS custom properties straight from its stylesheet rule (":root" for
 // midnight, `html[data-slate-theme="<name>"]` otherwise), merged over :root so a block that omits a
@@ -326,6 +361,15 @@ window._onSlateThemeChange = () => {
 function renderCharts(c) {
   _registerAssets(c);                               // publish this cell's save_asset blobs → Slate.asset
   const specs = c.echarts || [];
+  // A package-vendored lib (echarts-gl via `requireScripts`) must load BEFORE `echarts.init`: an
+  // ECharts instance created before echarts-gl registers its 3D views can't render a GL series — it
+  // paints blank and throws on the next resize. So when any spec needs a lib, defer the ENTIRE render
+  // (init included) until it's loaded; a cell with no `requireScripts` renders synchronously as before.
+  if (specs.some(s => s && s.requireScripts))
+    return void Promise.all(specs.map(_ensureScripts)).then(() => _renderChartsBody(c, specs));
+  _renderChartsBody(c, specs);
+}
+function _renderChartsBody(c, specs) {
   const host = document.querySelector('#cell-' + c.id + ' .echarts');
   if (host) {                                   // code-cell echarts host
     if (!charts[c.id]) charts[c.id] = [];
@@ -349,7 +393,7 @@ function renderCharts(c) {
     }
     while (host.children.length > specs.length) { host.removeChild(host.lastChild); const inst = insts.pop(); if (inst) try { inst.dispose(); } catch (_) {} }
     specs.forEach((s, i) => _applySize(host.children[i], insts[i], s));
-    Promise.all(specs.map((s, i) => _ensureMaps(s).then(() => _geoSafeSetOption(insts[i], s))))
+    Promise.all(specs.map((s, i) => _ensurePrereqs(s).then(() => _geoSafeSetOption(insts[i], s))))
       .then(() => { if (insts.length) _snapCell(c.id, insts, _sansMaps(specs[0])); });
     _healSizesSoon(insts);
   }
@@ -358,7 +402,7 @@ function renderCharts(c) {
     const spec = specs[+el.dataset.i]; if (!spec) return;
     if (!el._inst) { _ensureSlateTheme(); el._inst = echarts.init(el, 'slate'); }
     _applySize(el, el._inst, spec);
-    _ensureMaps(spec).then(() => _geoSafeSetOption(el._inst, spec));
+    _ensurePrereqs(spec).then(() => _geoSafeSetOption(el._inst, spec));
   });
 }
 // setOption that can't leave a DEAD geo bind. If a spec needs a registered map but a setOption ever

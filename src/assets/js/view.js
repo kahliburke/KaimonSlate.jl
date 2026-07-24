@@ -7,6 +7,8 @@ const _showVal = v => Array.isArray(v) ? v.join(', ') : v;
 // Order-independent key for a control's value — used by the stale-echo guard so an in-flight
 // server echo (which may reorder a multi-select) can't reset a control the user just changed.
 const _valKey = v => Array.isArray(v) ? JSON.stringify([...v].map(String).sort()) : String(v);
+// Normalize a widget option: a bare value becomes {value, label:String(value)}; an object passes through.
+const _normOpt = o => (o && typeof o === 'object') ? o : { value: o, label: String(o) };
 // The text shown in a widget's value mirror (`.wval`). A toggle with on/off labels shows the
 // active state's word; a button shows its click count; everything else shows the raw value. Reads
 // the on/off text from the input's data- attributes so the local + server-sync paths agree.
@@ -104,7 +106,7 @@ function controlMarkup(bindId, b) {
   const a = `data-bind="${bindId}" data-name="${b.name}" data-widget="${w}"`;
   // Options are {value,label} (a bare value normalizes to value===label). The browser carries the
   // stringified VALUE in each option's `value` attr; the LABEL is what's shown (rich for radio).
-  const opts = (p.options || []).map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+  const opts = (p.options || []).map(o => _normOpt(o));
   const _selV = String(b.value);
   let ctrl = '', wval = `<span class="wval">${_esc(_showVal(b.value))}</span>`;
   if (w === 'slider')
@@ -319,14 +321,23 @@ function _effectBadge(c) {
 }
 function cellHeaderInner(c) {
   const isCode = (c.kind === 'code' || c.kind === 'web') && !hasBinds(c);   // web cells run too (▶)
-  const editSrc = (c.kind === 'md' || hasBinds(c))
-    ? `<button onclick="toggleSource('${c.id}','${c.kind === 'md' ? 'markdown' : 'julia'}')" title="edit source">&lt;/&gt;</button>` : '';
+  // ✎ edit source — on EVERY cell. md/@bind hide their source behind a rendered view, so it reveals the
+  // source overlay; code/web edit inline, so it just focuses the editor (see editCellSource). NOT </> —
+  // that's the "convert to web cell" glyph below, and both show on a @bind cell, so a shared icon would
+  // read as the same action.
+  const editSrc = `<button onclick="editCellSource('${c.id}','${c.kind}')" title="edit source">✎</button>`;
   const run = isCode ? `<button class="run" data-run="${c.id}" onclick="runCell('${c.id}', true)" title="run this cell (always re-evaluates; ⇧⏎ runs only if changed)">▶</button>` : '';
   const bu = surfaceableNames(c);
   const _present = new Set([].concat(...((c.controls || []).map(col => col.map(s => s.name)))));
   const _someOn = bu.some(n => _present.has(n));
   const autoctl = bu.length
     ? `<button class="autoctl${_someOn ? ' on' : ''}" onclick="openControlPicker('${c.id}', event)" title="pick which @bind controls to surface on this cell (${bu.join(', ')})">🎛</button>` : '';
+  // Extension-contributed toolbar buttons (slateRegisterCellAction). Each visible action becomes a
+  // <button> in the action strip; the handler is looked up by id at click time (_slateRunCellAction).
+  const cellActions = (window._slateCellActions || [])
+    .filter(a => { try { return a.show ? !!a.show(c) : true; } catch (e) { return false; } })
+    .map(a => `<button class="cellact cellact-${_esc(a.id)}" onclick="_slateRunCellAction('${_esc(a.id)}','${c.id}',event)" title="${_esc(a.title || '')}">${a.icon || '•'}</button>`)
+    .join('');
   return '<span class="drag" draggable="true" title="drag to reorder">⠿</span>' +
     `<button class="collapse" onclick="toggleCollapse('${c.id}')" title="collapse / expand">${c.collapsed ? '▸' : '▾'}</button>` + run +
     `<span class="cid" title="double-click to rename">${c.id}</span>` +
@@ -360,6 +371,7 @@ function cellHeaderInner(c) {
       // last (code · web · md), so the prose toggle sits in a consistent spot.
       ['code', 'web', 'md'].filter(k => k !== c.kind).map(k =>
         `<button class="kindbtn" onclick="toggleType('${c.id}','${k}')" title="convert to ${k === 'md' ? 'markdown' : k} cell">${k === 'code' ? '{·}' : k === 'md' ? 'M↓' : '&lt;/&gt;'}</button>`).join('') +
+      cellActions +
       `<button class="del" onclick="delCell('${c.id}')" title="delete cell">🗑</button>` +
     '</span>' +
     // Run-info cluster, right-aligned and contiguous (buttons sit to its left): run time (reserved
@@ -538,6 +550,17 @@ function toggleSource(id, mode) {
   } else {
     editSource(id, mode);
   }
+}
+
+// The ✎ "edit source" header button, for ANY cell kind. md / @bind cells render OUTPUT by default and
+// keep their source in a hidden `.srcedit` overlay → toggle it. code / web cells show their editor
+// inline (no overlay) → just focus it, un-hiding the code first if it was hidden via 🙈.
+function editCellSource(id, kind) {
+  const cell = document.getElementById('cell-' + id); if (!cell) return;
+  if (cell.querySelector('.srcedit')) { toggleSource(id, kind === 'md' ? 'markdown' : 'julia'); return; }
+  if (cell.classList.contains('codehidden')) toggleHideCode(id);   // reveal hidden code before focusing
+  if (window.ensureEditor) window.ensureEditor(id);                // mount if it hasn't lazily yet
+  if (window.edFocus) window.edFocus(id);
 }
 
 function editSource(id, mode) {
@@ -848,12 +871,6 @@ function renderPalette() {
       `<span class="pval" data-pname="${c.name}">${c.value}</span></span></div>`;
   }).join('');
 }
-function updatePaletteValues(state) {
-  state.cells.forEach(c => (c.binds || []).forEach(b => {
-    const v = document.querySelector('#palette-list .pval[data-pname="' + b.name + '"]');
-    if (v) v.textContent = b.value;
-  }));
-}
 
 // Keep every widget bound to a variable in lockstep (a control may be surfaced in
 // multiple cells). Skips the element being actively dragged so we never fight it.
@@ -891,11 +908,11 @@ function syncControlValues(state) {
     } else if (w === 'select' && Array.isArray(p.options)) {
       // Dynamic options: rebuild the <option> list only if it changed (the value-set
       // below re-applies the selection). Avoids tearing the menu down every sync.
-      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const o2 = p.options.map(o => _normOpt(o));
       const cur = [...el.options].map(o => o.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) el.innerHTML = o2.map(o => `<option value="${_esc(o.value)}">${_esc(o.label)}</option>`).join('');
     } else if (w === 'multiselect' && Array.isArray(p.options)) {
-      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const o2 = p.options.map(o => _normOpt(o));
       const cur = [...el.querySelectorAll('.msopt')].map(o => o.dataset.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) {
         el.innerHTML = o2.map(o => `<div class="msopt" data-value="${_esc(o.value)}" role="option"><span class="optlbl">${_esc(o.label)}</span></div>`).join('');
@@ -903,7 +920,7 @@ function syncControlValues(state) {
       }
     } else if ((w === 'radio' || w === 'multicheck') && Array.isArray(p.options)) {
       // Radio + checkbox-list MultiCheckBox share a label-per-input layout; rebuild only on change.
-      const o2 = p.options.map(o => (o && typeof o === 'object') ? o : { value: o, label: String(o) });
+      const o2 = p.options.map(o => _normOpt(o));
       const type = w === 'radio' ? 'radio' : 'checkbox';
       const cur = [...el.querySelectorAll('input')].map(i => i.value), want = o2.map(o => String(o.value));
       if (!_sameList(cur, want)) {
@@ -994,5 +1011,5 @@ async function runScripts(root) {
 // properties. So ONLY the consts go here (the functions are already on window). `editors`/
 // `charts`/`srcMap` are shared by reference, so the module's mutations stay in sync. (All of
 // these are defined in core.js or earlier in view.js, so they exist when this runs.)
-Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditHTML, srcEditInner, bindsInner, hasBinds });
+Object.assign(window, { editors, charts, srcMap, mdHtml, srcEditInner, bindsInner, hasBinds });
 

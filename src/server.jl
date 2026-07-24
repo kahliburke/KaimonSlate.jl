@@ -56,11 +56,79 @@ mutable struct LiveNotebook
                                          # manifest (`_refresh_extensions!`); sticky within a session, id-deduped,
                                          # declaration order. `esm` ⇒ ES module; non-empty `kind` ⇒ a component whose
                                          # default export Slate wraps + registers. See `_frontend_scripts`.
-    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend registry, so every
-    # existing positional call site (server + tests) is unchanged; both are populated at runtime.
+    assets::Dict{String,String}          # package-vendored asset DIRECTORIES (pkg → absolute dir on disk), from the
+                                         # same manifest (`provide_assets!`). Served at `/ext-assets/<pkg>/…` while the
+                                         # package is loaded, and copied into a static export. See `_register_assets!`.
+    # Inner constructor takes the original 13 fields and starts empty scratchpad + frontend/asset registries, so every
+    # existing positional call site (server + tests) is unchanged; all are populated at runtime.
     LiveNotebook(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents) =
         new(id, path, report, kernel, version, undo, redo, lock, listeners, llock, agent_id, agent_busy, agents,
-            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[])
+            Cell[], @NamedTuple{id::String, js::String, esm::Bool, kind::String}[], Dict{String,String}())
+end
+
+# ── Notebook-lock protocol (`nb.lock`) ─────────────────────────────────────────────────────────────
+# `nb.lock` serializes access to a notebook's in-memory `nb.report` (cells, deps, meta, version, the
+# `kernel` field) — UI actions vs. the async runner vs. agent ops.
+#
+# THE INVARIANT: never hold `nb.lock` across a KERNEL round-trip or a BLOCKING call. Take the lock only
+# to READ or MUTATE the report; do worker work (`prepare!`, `eval_cell!`, `refine_*`, `resolve_*`,
+# `_module_exports`, `_dep_versions`, `cancel_eval`, …) and anything that blocks (network / subprocess /
+# `wait` / `fetch`) OUTSIDE the lock, then RE-take the lock to apply the result. Holding the lock across a
+# worker call is the teardown-deadlock hazard: a remote round-trip — or even a cold first-run compile of
+# the callee — pins the lock while another task (teardown, a UI request) waits on it, and the whole hub
+# wedges. The three-phase resolve→(unlocked kernel)→rebuild dance in `_run_loop!` is the reference.
+#
+# `with_report(nb) do report … end` is the ONE sanctioned way to take `nb.lock`. The closure is handed
+# `report`, NOT `nb`, so reaching for `nb.kernel` (a round-trip) inside is a visible smell, not the
+# default. `@report_op` adds a compile-time guard (below).
+@inline with_report(f, nb::LiveNotebook) = lock(() -> f(nb.report), nb.lock)
+
+# Kernel round-trip / blocking-boundary calls that must NEVER run while `nb.lock` is held.
+const _KERNEL_BOUNDARY = Set{Symbol}((:prepare!, :eval_cell!, :eval_stale!, :_eval!, :_eval_one!,
+    :_run_code_batch!, :refine_usings!, :refine_macros!, :resolve_usings!, :resolve_macros!,
+    :_module_exports, :_dep_versions, :cancel_eval, :shutdown!))
+
+# Scan an expression for a synchronous call to a boundary symbol (`f(…)` or `Mod.f(…)`). Skips
+# `@async`/`@spawn` and `quote` subtrees — work scheduled there runs LATER, not under the held lock —
+# so only calls that actually execute inside the locked region are flagged. Returns the Symbol or nothing.
+function _find_boundary_call(ex)
+    ex isa Expr || return nothing
+    (ex.head === :quote) && return nothing
+    if ex.head === :macrocall
+        m = ex.args[1]
+        (m === Symbol("@async") || m === Symbol("@spawn") || m === Symbol("@spawnat")) && return nothing
+    end
+    if ex.head === :call
+        f = ex.args[1]
+        fn = f isa Symbol ? f :
+             (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode ? f.args[2].value : nothing)
+        fn isa Symbol && fn in _KERNEL_BOUNDARY && return fn
+    end
+    for a in ex.args
+        r = _find_boundary_call(a)
+        r === nothing || return r
+    end
+    return nothing
+end
+
+"""
+    @report_op nb report begin … end
+
+Guarded `with_report`: take `nb.lock`, bind `report = nb.report`, run the body — and at macro-expansion
+REJECT any direct kernel round-trip / blocking call inside the locked region (see `_KERNEL_BOUNDARY`),
+so the notebook-lock invariant can't be broken by a direct call (it would have caught the post-drain
+`refine_usings!` bug). Indirect calls through a helper still rely on the protocol + review.
+"""
+macro report_op(nb, report, body)
+    bad = _find_boundary_call(body)
+    bad === nothing ||
+        error("@report_op: `$bad` is a kernel round-trip / blocking call and must not run while nb.lock " *
+              "is held — phase it out (read under lock → kernel work unlocked → re-lock to apply).")
+    return quote
+        with_report($(esc(nb))) do $(esc(report))
+            $(esc(body))
+        end
+    end
 end
 
 # Wire/unwire the engine's out-of-band callback registry (eval.jl) for one notebook — the seam
@@ -172,6 +240,16 @@ end
 # Self-contained `.jl`s are intercepted earlier in `load_notebook` (background hydrate against
 # the depot cache), so this only handles ordinary notebooks: base / forked / detached.
 function _select_kernel(path::AbstractString, report; threads::AbstractString = "", online = nothing)
+    # `assetbase` — the `@asset` base, the datadir root, AND the target that dropped/pasted media attach
+    # to — is derived for EVERY open, not just the gate path. Without it (e.g. an in-process hub with no
+    # Kaimon gate), a notebook inside a project isn't recognised as one and media has nowhere to attach,
+    # so it inlines as a huge base64 blob. Project ⇒ the project dir; detached ⇒ the per-notebook fork-env
+    # dir (a stable location that resolves identically on the hub and every region worker). The gate
+    # branches below re-affirm this with their own values; this makes the in-process path get it too.
+    let proj = Base.current_project(dirname(abspath(path)))
+        parent = proj === nothing ? "" : dirname(proj)
+        report.meta["assetbase"] = isempty(parent) ? ReportEngine.notebook_env_dir(path) : parent
+    end
     if ReportEngine.gate_available()
         ReportEngine._rlog("_select_kernel nb=$(basename(String(path))) runon=[$(get(report.meta, "runon", ""))] remoteworker=[$(get(report.meta, "remoteworker", ""))]")
         # Remote-worker opt-in: run this notebook's cells on an ALREADY-RUNNING worker reached at
@@ -490,19 +568,16 @@ function _hydrate_standalone!(nb::LiveNotebook, path::AbstractString)
     return nothing
 end
 
-# Reactive push triggered by a cell's async task (`slate_refresh(:data, …)`):
-# restale the cells that READ those vars (but not the producers that WRITE them,
-# so we don't re-trigger the task), recompute, and push a lightweight live update.
-function server_refresh(nb::LiveNotebook, vars)
-    syms = Set{Symbol}(vars)
+# The shared body of a reactive push (a `@bind`/data/asset change): restale every cell the
+# `seed_predicate` selects (the direct triggers), then their dependents, recompute, and broadcast a
+# lightweight `refresh:` patch of ONLY the cells that recomputed — the browser patches just those
+# (charts `setOption`, output swap) instead of pulling the whole state.
+function _reactive_refresh!(nb::LiveNotebook, seed_predicate)
     msg = ""
     lock(nb.lock) do
         seed = String[]
         for c in nb.report.cells
-            # MARKDOWN readers seed too: a `{{ level[] }}` interpolation is a reader like any code
-            # cell (md never writes, so the don't-retrigger guard passes trivially). Skipping them
-            # left prose silently frozen at the last non-reactive render while charts moved.
-            (!isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms)) || continue
+            seed_predicate(c) || continue
             ReportEngine.restale!(c) && push!(seed, c.id)
         end
         isempty(seed) && return
@@ -513,8 +588,6 @@ function server_refresh(nb::LiveNotebook, vars)
             ReportEngine.restale!(nb.report.cells[i]) && push!(changed, id)
         end
         _eval!(nb)
-        # Push ONLY the cells that recomputed (seed + dependents), inline in the event — the browser
-        # patches just those (charts `setOption`, output swap) instead of pulling the whole state.
         bindref, hostednames = _bind_index(nb.report)
         bibctx = _bib_link_ctx(nb)
         figidx = figure_index(nb.report)
@@ -525,6 +598,14 @@ function server_refresh(nb::LiveNotebook, vars)
     return nothing
 end
 
+# Reactive push triggered by a cell's async task (`slate_refresh(:data, …)`): restale the cells that
+# READ those vars (but NOT the producers that WRITE them, so we don't re-trigger the task). MARKDOWN
+# readers seed too — a `{{ level[] }}` interpolation is a reader; md never writes, so the guard passes.
+function server_refresh(nb::LiveNotebook, vars)
+    syms = Set{Symbol}(vars)
+    return _reactive_refresh!(nb, c -> !isdisjoint(c.reads, syms) && isdisjoint(c.writes, syms))
+end
+
 # Reactive push triggered by the asset watcher (`_start_asset_watcher!`): one or more `@asset`
 # files a cell READS changed on disk → restale those cells + their dependents, recompute, and push
 # the same lightweight `refresh:` patch as a `@bind` change. `changed` are absolute paths; a cell's
@@ -533,31 +614,7 @@ function server_asset_changed(nb::LiveNotebook, changed::Vector{String})
     base = String(get(nb.report.meta, "assetbase", ""))
     chset = Set{String}(changed)
     _resolve(rel) = isabspath(rel) ? String(rel) : (isempty(base) ? String(rel) : joinpath(base, rel))
-    _inputs_changed(c) = any(rel -> _resolve(rel) in chset, c.inputs)
-    msg = ""
-    lock(nb.lock) do
-        seed = String[]
-        for c in nb.report.cells
-            _inputs_changed(c) || continue
-            ReportEngine.restale!(c) && push!(seed, c.id)
-        end
-        isempty(seed) && return
-        changedids = Set(seed)
-        for id in dependents_of(nb.report, Set(seed))
-            i = _index_of(nb.report.cells, id)
-            i === nothing && continue
-            ReportEngine.restale!(nb.report.cells[i]) && push!(changedids, id)
-        end
-        _eval!(nb)
-        bindref, hostednames = _bind_index(nb.report)
-        bibctx = _bib_link_ctx(nb)
-        figidx = figure_index(nb.report)
-        cells = [cell_json(c, bindref, hostednames; nbid = nb.id, bibctx = bibctx, figidx = figidx, report = nb.report)
-                 for c in nb.report.cells if c.id in changedids]
-        msg = "refresh:" * JSON.json(Dict("cells" => cells))
-    end
-    isempty(msg) || _broadcast(nb, msg)
-    return nothing
+    return _reactive_refresh!(nb, c -> any(rel -> _resolve(rel) in chset, c.inputs))
 end
 
 # Live per-cell run status (registered via `register_progress!` per notebook): `eval_cell!` calls
@@ -856,30 +913,27 @@ function _mesh_consent_check!(nb::LiveNotebook)
     return nothing
 end
 
-# The region NAMES this notebook uses — a comma-separated list in the durable footer (`regions` meta).
-# Each name references a GLOBAL region definition (the registry, remote.jl); the notebook stores only
-# the reference, resolved at spawn time. Deduped, order-preserved.
-function _nb_region_names(nb::LiveNotebook)
-    raw = strip(String(get(nb.report.meta, "regions", "")))
-    isempty(raw) && return String[]
+# Split a comma-separated region-name list: strip each name, drop empties, dedup preserving order.
+function _split_region_csv(s::AbstractString)
     seen = Set{String}(); out = String[]
-    for seg in split(raw, ',')
+    for seg in split(String(s), ',')
         n = String(strip(seg)); (isempty(n) || n in seen) && continue
         push!(seen, n); push!(out, n)
     end
     return out
 end
 
+# The region NAMES this notebook uses — a comma-separated list in the durable footer (`regions` meta).
+# Each name references a GLOBAL region definition (the registry, remote.jl); the notebook stores only
+# the reference, resolved at spawn time. Deduped, order-preserved.
+_nb_region_names(nb::LiveNotebook) = _split_region_csv(String(get(nb.report.meta, "regions", "")))
+
 # Set (or clear) which named regions this notebook uses. Tears the OLD region kernels down first (they
 # detach warm), rewrites the `regions` footer, and persists. Shared core of the `region_on` tool and
 # the `/api/{id}/regions` endpoint. Returns the normalized name list.
 function set_notebook_regions!(nb::LiveNotebook, csv::AbstractString)
     _teardown_region!(nb)
-    names = String[]; seen = Set{String}()
-    for seg in split(String(csv), ',')
-        n = String(strip(seg)); (isempty(n) || n in seen) && continue
-        push!(seen, n); push!(names, n)
-    end
+    names = _split_region_csv(csv)
     joined = join(names, ",")
     lock(nb.lock) do
         isempty(joined) ? delete!(nb.report.meta, "regions") : (nb.report.meta["regions"] = joined)
@@ -1020,6 +1074,17 @@ function _register_frontend!(nb::LiveNotebook, idv, js::AbstractString, esm::Boo
     return false
 end
 
+# Add/replace one package-vendored asset directory (pkg → absolute dir) in the notebook's registry — the
+# files under `dir` are served at `/ext-assets/<pkg>/…` (see `_make_router`) and copied into a static
+# export. Returns true if the registry CHANGED (new pkg, or the dir moved), so the caller bumps the version.
+function _register_assets!(nb::LiveNotebook, pkg::AbstractString, dir::AbstractString)
+    (isempty(pkg) || isempty(dir)) && return false
+    p, d = String(pkg), String(dir)
+    get(nb.assets, p, nothing) == d && return false
+    nb.assets[p] = d
+    return true
+end
+
 # Refresh the notebook's front-end registry from the worker's SlateExtensionsBase extension manifest
 # (`{frontend: [{id, js}]}`) — the packages loaded this session declare their front-end from `__init__`,
 # which may run during namespace priming (no harvestable eval), so the process-global registry is the
@@ -1037,14 +1102,29 @@ function _refresh_extensions!(nb::LiveNotebook)
         return false
     end
     manifest === nothing && return false
-    fe = _manifest_field(manifest, :frontend)
-    fe === nothing && return false
     changed = false
-    for e in fe
-        js = _manifest_field(e, :js); js === nothing && continue
-        esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
-        kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
-        _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind) && (changed = true)
+    # The manifest was pulled OFF nb.lock (a round-trip); take the lock only for each registry mutation,
+    # so this stays protocol-safe when the runner calls `_refresh_extensions!` off-lock.
+    fe = _manifest_field(manifest, :frontend)
+    if fe !== nothing
+        for e in fe
+            js = _manifest_field(e, :js); js === nothing && continue
+            esm = _manifest_field(e, :esm); esm = esm === true || esm == "true"
+            kind = _manifest_field(e, :kind); kind = kind === nothing ? "" : String(kind)
+            lock(nb.lock) do
+                _register_frontend!(nb, _manifest_field(e, :id), String(js), esm, kind)
+            end && (changed = true)
+        end
+    end
+    as = _manifest_field(manifest, :assets)
+    if as !== nothing
+        for e in as
+            pkg = _manifest_field(e, :pkg); dir = _manifest_field(e, :dir)
+            (pkg === nothing || dir === nothing) && continue
+            lock(nb.lock) do
+                _register_assets!(nb, String(pkg), String(dir))
+            end && (changed = true)
+        end
     end
     return changed
 end
@@ -2009,10 +2089,10 @@ function _eval_one!(nb::LiveNotebook, cell::Cell)
         _prepare_region_for_cell!(nb, cell, kernel, side) || return nothing
         _region_active(nb) && !isempty(side) && _stats_ran_on!(nb, cell.id, _side_label(nb, side))
         try; _region_presync!(nb, cell, kernel; dst_side = side); catch e; @warn "slate region: md presync failed" cell = cell.id exception = e; end
-        lock(nb.lock) do
-            ReportEngine.eval_cell!(nb.report, cell, kernel)
-            isempty(side) || _broadcast_progress(nb, cell)   # region md set RUNNING above → push the final state
-        end
+        # `eval_cell!` runs the md `$(…)` interpolation on the worker — a kernel round-trip — so it runs
+        # OFF nb.lock (protocol; mirrors the code-cell branch below). Re-take the lock only to push state.
+        ReportEngine.eval_cell!(nb.report, cell, kernel)
+        isempty(side) || lock(nb.lock) do; _broadcast_progress(nb, cell); end   # region md set RUNNING above → push the final state
         return nothing
     end
     # The cell's cross-boundary inputs ship over after the kernel is primed. A presync failure is the
@@ -2465,21 +2545,23 @@ function _run_loop!(nb::LiveNotebook)
         # the graph precisely (no restale — see refine_usings!). Push fresh state so the UI drops the
         # "barrier" marking. Kept off the hot per-cell path — it fires once per drain and no-ops unless
         # a NEW module got resolved.
-        refined = lock(nb.lock) do
-            a = ReportEngine.refine_usings!(nb.report, nb.kernel)
-            # Notebook-defined macros now exist; a PARALLEL drain may have raced a reader past its
-            # just-recovered producer, so restale those — the `again` re-arm below re-drains them.
-            b = ReportEngine.refine_macros!(nb.report, nb.kernel;
-                                            restale_racers = _parallel_enabled(nb))
-            # Any package loaded this drain may have declared front-end scripts (widget renderers,
-            # editor extensions) from `__init__` — pull the worker's extension manifest into the
-            # notebook's registry so the browser injects them. Same once-per-drain lifecycle; no-ops
-            # unless a NEW package registered something.
-            c = _refresh_extensions!(nb)
-            a || b || c
-        end
-        if refined
-            lock(nb.lock) do; nb.version += 1; end
+        # PROTOCOL: the export/macro RESOLVE and the extension-manifest pull are kernel round-trips, so
+        # they run OFF nb.lock (`rebuild=false`); we re-take the lock ONLY for the graph rebuild + version
+        # bump (report mutations). Holding nb.lock across these was the teardown-deadlock hazard. (`again`
+        # re-arm below re-drains any cell left stale — covering the racer-restale refine_macros! skips.)
+        resolved_u = ReportEngine.refine_usings!(nb.report, nb.kernel; rebuild = false)
+        # `rebuild=false` returns before the racer-restale (it needs the rebuilt graph) — a parallel drain's
+        # raced readers are re-drained by the `again` re-arm below instead.
+        resolved_m = ReportEngine.refine_macros!(nb.report, nb.kernel; rebuild = false)
+        # A package loaded this drain may have declared front-end scripts (widget renderers, editor
+        # extensions) from `__init__` — pull the worker's extension manifest into the notebook registry so
+        # the browser injects them. Once-per-drain; no-ops unless a NEW package registered something.
+        resolved_x = _refresh_extensions!(nb)
+        if resolved_u || resolved_m || resolved_x
+            with_report(nb) do report
+                (resolved_u || resolved_m) && ReportEngine.rebuild_precise!(report)   # rebuild only if the graph changed
+                nb.version += 1
+            end
             _broadcast(nb, string(nb.version))   # version token → browser re-pulls the precise-graph state
         end
         lock(_RUNNER_LOCK) do; delete!(_RUNNER_FAILS, nb.id); end   # clean drain (cells may have ERRORED, but no throw) → clear the streak

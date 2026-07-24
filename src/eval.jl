@@ -177,7 +177,12 @@ function _new_module(report::Report)
         echart = echart, EChart = EChart, slate_table = slate_table, SlateTable = SlateTable,
         slate_query = slate_query, slate_refresh = (vars...) -> _do_refresh(rid, vars),
         slate_progress = (frac; msg = "", id = "", done = false) -> _do_userprog(rid, frac, msg, id, done),
-        slate_emit = (channel, data) -> _do_emit(rid, channel, data),
+        # A SlateBinary streams as a raw binary frame (encode_binary_frame packs channel+meta+dtype+shape+
+        # bytes) forwarded to the page as-is — mirrors the worker's `slate_emit`. Any other value takes the
+        # JSON emit path. Without this branch the in-process kernel would JSON-encode the SlateBinary itself.
+        slate_emit = (channel, data) -> data isa SlateExtensionsBase.SlateBinary ?
+            _do_emit_bin(rid, SlateExtensionsBase.encode_binary_frame(string(channel), data)) :
+            _do_emit(rid, channel, data),
         assetbase = () -> String(get(report.meta, "assetbase", "")))   # `@asset` base (notebook project dir)
     return m
 end
@@ -371,7 +376,10 @@ the per-notebook registry (so a later re-run preserves it), and assign the globa
 readers see it. Returns the coerced value. Routed through the namespace's injected
 `__slate_set_bind` so the logic lives in exactly one place (widgets.jl)."""
 assign_bind!(::InProcessKernel, report::Report, name::Symbol, value) =
-    Base.invokelatest(getfield(report_module(report), :__slate_set_bind), name, value)
+    # invokelatest wraps the WHOLE access: the `getfield` runs at the latest world too, so reading
+    # `__slate_set_bind` (Core.eval'd into the module in a newer world) doesn't trip Julia 1.12's
+    # binding-world warning — wrapping only the call would still read the binding at the stale world.
+    (m = report_module(report); Base.invokelatest(() -> getfield(m, :__slate_set_bind)(name, value)))
 
 """
     table_page(kernel, report, table_id, request) -> (rows, total)

@@ -56,6 +56,11 @@ end
 
 # z::Matrix (rows = y, cols = x) → ECharts `[xIndex, yIndex, value]` triples + category axes +
 # a calculable visualMap spanning the data. `series(:heatmap, z)` or `series(:heatmap, xs, ys, z)`.
+# A horizontal, bottom-centred, calculable `visualMap` over [lo, hi] — shared by the heatmap and
+# calendar-heatmap layouts.
+_visualmap(lo, hi) = Dict{String,Any}("min" => lo, "max" => hi, "calculable" => true,
+                                      "orient" => "horizontal", "left" => "center", "bottom" => 0)
+
 function _heatmap!(opt, layout, args)
     if length(args) == 1 && args[1] isa AbstractMatrix
         z = args[1]; xs = string.(1:size(z, 2)); ys = string.(1:size(z, 1))
@@ -70,8 +75,7 @@ function _heatmap!(opt, layout, args)
     lo, hi = extrema(z)
     layout["xAxis"] = _cataxis(xs)
     layout["yAxis"] = _cataxis(ys)
-    layout["visualMap"] = Dict{String,Any}("min" => lo, "max" => hi, "calculable" => true,
-                                            "orient" => "horizontal", "left" => "center", "bottom" => 0)
+    layout["visualMap"] = _visualmap(lo, hi)
 end
 
 # indicators: `name => max` pairs (or raw dicts/NamedTuples); vals: one value vector, or
@@ -231,8 +235,7 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
         lo, hi = extrema(vals)
         y1, y2 = minimum(ds)[1:4], maximum(ds)[1:4]
         layout["calendar"] = Dict{String,Any}("range" => (y1 == y2 ? y1 : [y1, y2]), "cellSize" => Any["auto", 16])
-        layout["visualMap"] = Dict{String,Any}("min" => lo, "max" => hi, "calculable" => true,
-                                                "orient" => "horizontal", "left" => "center", "bottom" => 0)
+        layout["visualMap"] = _visualmap(lo, hi)
         k = "heatmap"                                       # the actual ECharts series type (calendar is the coord system)
     elseif k in ("line", "bar", "scatter", "pie", "candlestick", "radar", "boxplot")
         # A known ergonomic kind matched on `k` above but not on arg count — don't silently fall

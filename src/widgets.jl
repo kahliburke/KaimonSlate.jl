@@ -32,9 +32,11 @@ using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indic
 # handing it that namespace's injected `slate_on`. So a package's editor-ext + handlers register lazily
 # from the once-per-drain manifest pull, no `__init__` and no boot cell. Idempotent (see the hook).
 function inprocess_extension_manifest(ns::Union{Module,Nothing} = nothing)
-    if ns !== nothing && isdefined(ns, :slate_on)
+    if ns !== nothing && Base.invokelatest(isdefined, ns, :slate_on)
         try
-            SlateExtensionsBase.ensure_module_frontends!(getglobal(ns, :slate_on))
+            # `invokelatest`: `slate_on` is `Core.eval`'d into `ns`, possibly in a newer world than
+            # here — reading it directly warns under Julia 1.12's global world-age rules.
+            SlateExtensionsBase.ensure_module_frontends!(Base.invokelatest(getglobal, ns, :slate_on))
         catch
         end
     end
@@ -251,6 +253,18 @@ function _web_skin(; html::AbstractString = "", css::AbstractString = "", js::Ab
     end
     isempty(secs) && push!(secs, "html\"\"\"\"\"\"")
     return string("@web(", join(secs, ",\n"), ")")
+end
+
+# Inverse of `_web_skin`, for a kind change OUT of a web cell. The browser hands `set_kind!` the
+# reassembled `@web(...)` skin as the new source; a plain code/markdown cell shouldn't carry that
+# wrapper. A skin with a SINGLE section — the code↔web round-trip, where converted code lands in one
+# pane (HTML by `_web_sections`) — unwraps to that pane's body, so `code → web → code` returns the
+# original text. A genuine multi-pane web cell has no clean plain-text form, so it keeps its runnable
+# `@web(...)` intact. Non-skin source (already plain) round-trips through the single-section branch.
+function _web_unwrap(src::AbstractString)
+    s = _web_sections(src)
+    nonempty = filter(!isempty, [s.html, s.css, s.js])
+    return length(nonempty) == 1 ? nonempty[1] : String(src)
 end
 
 # `Widget` (kind/params/default), `Choice`, `Selection` and `WebPage` are defined in
@@ -553,6 +567,10 @@ end
 # a given call uses (the field names ARE the type); don't route huge dynamic key-sets through it.
 _slate_args(x::AbstractDict) = NamedTuple{Tuple(Symbol.(keys(x)))}(Tuple(_slate_args(v) for v in values(x)))
 _slate_args(x::AbstractVector) = Any[_slate_args(v) for v in x]
+# A raw byte buffer (a `slateCall` binary buffer, delivered as `args.__slate_buffers`) is already a plain
+# Base type — pass it through WHOLE. Without this it would hit the `AbstractVector` clause above and explode
+# into a boxed `Vector{Any}` of `UInt8`, defeating the point of the binary transport.
+_slate_args(x::Vector{UInt8}) = x
 _slate_args(x) = x
 
 # Invoke a `slate_on` handler with the (NamedTuple-shaped) call args. A 2-parameter handler
@@ -644,6 +662,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     reglock = ReentrantLock()
     handlers = Dict{Symbol,Any}()                 # @onclick: button name → handler closure (event model)
     tokens = Dict{Symbol,Base.RefValue{Bool}}()   # button name → running handler's cancel token
+    # The Slate execution context a fired @onclick/@onchange handler runs under, so it can STREAM
+    # (`slate_emit`/`afm_emit`) just like a cell or a `slate_on` handler — same shape as `_build_slate_ctx`.
+    # The fire path (`__slate_set_bind` → `__on_fire!`) runs on a server task with no context; this supplies it.
+    bind_ctx = (; region = nothing, notebook = "", side = "", emit = slate_emit,
+                  regions = Symbol[], effect = _slate_effect, on = getfield(m, :slate_on))
     Core.eval(m, :(const __slate_bind_registry = $reg))
     Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, reglock, name, w))))
     # Browser value change: coerce + update registry, set the global so readers see it, then
@@ -655,7 +678,7 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
         wv = wrap_value(w, cv)
         Core.eval(m, Expr(:(=), name, wv))                    # user var is a Choice (labeled); host gets bare cv
         h = get(handlers, name, nothing)
-        h === nothing || __on_fire!(tokens, name, h, wv)      # dispatch @onclick/@onchange with the new value
+        h === nothing || __on_fire!(tokens, name, h, wv, bind_ctx)   # dispatch @onclick/@onchange (streaming-capable)
         cv
     end)))
     # `@bind name W(args…)` → assign the reconciled value, then return `nothing` so a
@@ -901,13 +924,18 @@ end
 # no evaluation — used by the engine's dependency analysis: the bound name is a
 # write, the widget call's free variables are reads (so dynamic ranges like
 # `Slider(1:step:hi)` make the bind cell depend on `step`/`hi`).
-function _bind_macrocall(ex)
-    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@bind")) || return nothing
+# (first::Symbol, second_expr) if `ex` is `@<name> first second` — LineNumberNodes stripped, ≥2 real
+# args, first a Symbol — else nothing. The shared AST shape of the two-arg reactive macros below; each
+# thin wrapper's own comment explains how its two args feed the dependency analysis.
+function _two_arg_macrocall(ex, name::Symbol)
+    (ex isa Expr && ex.head === :macrocall && ex.args[1] === name) || return nothing
     real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
     length(real) >= 2 || return nothing
     real[1] isa Symbol || return nothing
     return (real[1], real[2])
 end
+
+_bind_macrocall(ex) = _two_arg_macrocall(ex, Symbol("@bind"))
 
 # (name::Symbol, init_expr) if `ex` is `@reactive name = init`, else nothing. Lets the dependency
 # analysis see through the sugar: `name` is a WRITE (this cell DEFINES the reactive producer — readers
@@ -923,21 +951,9 @@ end
 # this lets the dependency analysis see through the macro: the button is a READ (so a click
 # recomputes the handler cell) and the body is analysed normally (so `level[] = v` registers as a
 # write of `level`, excluding the handler from its own refresh).
-function _onclick_macrocall(ex)
-    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@onclick")) || return nothing
-    real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
-    length(real) >= 2 || return nothing
-    real[1] isa Symbol || return nothing
-    return (real[1], real[2])
-end
+_onclick_macrocall(ex) = _two_arg_macrocall(ex, Symbol("@onclick"))
 
 # (control::Symbol, body_expr) if `ex` is `@onchange ctrl body`, else nothing. The control is the
 # handler PARAMETER (the new value), not a read of the global — so the cell doesn't recompute on
 # change; only `body`'s OTHER free vars are reads, and `ctrl[]=`-style mutations are writes.
-function _onchange_macrocall(ex)
-    (ex isa Expr && ex.head === :macrocall && ex.args[1] === Symbol("@onchange")) || return nothing
-    real = filter(a -> !(a isa LineNumberNode), ex.args[2:end])
-    length(real) >= 2 || return nothing
-    real[1] isa Symbol || return nothing
-    return (real[1], real[2])
-end
+_onchange_macrocall(ex) = _two_arg_macrocall(ex, Symbol("@onchange"))

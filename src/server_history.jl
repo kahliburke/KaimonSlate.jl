@@ -69,7 +69,9 @@ function _notebook_adds(nb::LiveNotebook)
     info = try
         ReportEngine.env_info(nb.kernel, nb.report)
     catch
-        return (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true)
+        # `ok = false` distinguishes a FAILED env probe from a genuinely detached notebook (both
+        # `detached = true`) — so a transient failure can't be read as "no packages" and wipe the footer.
+        return (adds = Dict{String,Any}[], parent = Dict{String,Any}[], parentpath = "", detached = true, ok = false)
     end
     pdeps = info.parent === nothing ? Dict{String,Any}[] : info.parent.deps
     pnames = Set(string(get(d, "name", "")) for d in pdeps)
@@ -81,25 +83,32 @@ function _notebook_adds(nb::LiveNotebook)
                 by = d -> string(get(d, "name", "")))
     return (adds = adds, parent = pdeps,
             parentpath = info.parent === nothing ? "" : info.parent.path,
-            detached = info.parent === nothing)
+            detached = info.parent === nothing, ok = true)
 end
 
 # Sync the `.jl` reproducibility footer (`report.meta["env"]`) to the notebook's current
 # package delta and persist if it changed. Called after package operations.
 function _refresh_env_meta!(nb::LiveNotebook)
+    # `_notebook_adds` queries the worker env (`env_info` — a round-trip), so compute the footer OFF
+    # nb.lock (protocol), then apply the change + persist under the lock. Sole caller: `notebook_pkg_op!`.
+    info = _notebook_adds(nb)
+    info.ok || return nb   # env probe failed transiently — leave the footer as-is rather than wiping it
     env = Dict{String,Any}[Dict{String,Any}("name" => string(get(d, "name", "")),
                                              "version" => string(get(d, "version", "")),
                                              "uuid" => string(get(d, "uuid", "")))
-                           for d in _notebook_adds(nb).adds]
-    cur = get(nb.report.meta, "env", Dict{String,Any}[])
-    if isempty(env)
-        haskey(nb.report.meta, "env") || return nb
-        delete!(nb.report.meta, "env")
-    else
-        env == cur && return nb
-        nb.report.meta["env"] = env
+                           for d in info.adds]
+    @report_op nb report begin
+        cur = get(report.meta, "env", Dict{String,Any}[])
+        changed = if isempty(env)
+            haskey(report.meta, "env") ? (delete!(report.meta, "env"); true) : false
+        elseif env == cur
+            false
+        else
+            report.meta["env"] = env; true
+        end
+        changed && _persist!(nb; source = "packages")   # local file write, no round-trip → lock-safe
     end
-    return _persist!(nb; source = "packages")
+    return nb
 end
 
 # Add/remove a package in THIS NOTEBOOK's own forked env (not the parent project), then re-run the
@@ -109,17 +118,21 @@ end
 function notebook_pkg_op!(nb::LiveNotebook, op::AbstractString, name::AbstractString;
                           target::AbstractString = "notebook")
     (op in ("add", "rm")) || return Dict{String,Any}("ok" => false, "message" => "bad op '$op'")
-    res = lock(nb.lock) do
-        r = ReportEngine.pkg_op(nb.kernel, nb.report, op, name; target = target)
-        if get(r, "ok", false) === true              # env changed → re-run so `using` cells pick it up
-            for c in nb.report.cells; c.kind == CODE && (c.state = STALE); end
-            _eval!(nb)
-            _refresh_env_meta!(nb)                   # update the .jl reproducibility footer
-        end
-        r
+    # `pkg_op` is a long worker round-trip (resolve + precompile — minutes on a fresh env) — run it OFF
+    # nb.lock (protocol), serialized vs eval on the notebook's gate mutex. Holding nb.lock across it was a
+    # teardown-deadlock hazard: a concurrent close/restart needing nb.lock would wedge behind the install.
+    r = lock(_eval_mutex(nb)) do
+        ReportEngine.pkg_op(nb.kernel, nb.report, op, name; target = target)
     end
-    get(res, "ok", false) === true && (_autoindex!(nb); _agent_push!(nb))
-    return res
+    if get(r, "ok", false) === true                  # env changed → re-run so `using` cells pick it up
+        @report_op nb report begin
+            for c in report.cells; c.kind == CODE && (c.state = STALE); end
+        end
+        _eval!(nb)                                   # non-blocking; the runner drains the restaled cells
+        _refresh_env_meta!(nb)                       # sync the .jl footer (itself round-trips off-lock)
+        _autoindex!(nb); _agent_push!(nb)
+    end
+    return r
 end
 
 # ── Durable per-notebook config registry (the "Notebook config" panel SSOT) ────────────────────────
@@ -618,7 +631,7 @@ end
 const _BIB_CARD_LIMIT = 10
 function _bib_card_html(file::AbstractString, count::Integer, entries, nbid::AbstractString, cited,
                         numbers::Dict{String,Int} = Dict{String,Int}())
-    esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+    esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
     ncited = Base.count(e -> e.key in cited, entries)
     meta(e) = strip(join(filter(!isempty, [String(e.author), String(e.title)]), " · "))
     # Cited entries get their [N] (matching the in-text numbers); uncited get a hollow marker.
@@ -666,7 +679,7 @@ _fig_link_emit(num, anchor) =
 _cite_literal(key, sup, _form) = isempty(strip(sup)) ? string("[@", key, "]") : string("[@", key, ", ", strip(sup), "]")
 
 function _cite_link_emit(ctx)
-    esc(s) = replace(String(s), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "\"" => "&quot;")
+    esc = _esc   # shared HTML-escape (server_hub) — same &<>" mapping
     return (key, sup, _form) -> begin
         core = get(ctx.labels, String(key), String(key))
         inner = isempty(strip(sup)) ? core : string(core, ", ", strip(sup))
@@ -878,12 +891,16 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
     idx === nothing && return nb
     cell = nb.report.cells[idx]
     isempty(cell.binds) && return nb
-    lock(nb.lock) do
-        # Push the value to the kernel the DEFINING cell runs on. A region-tagged `@bind` cell lives on
-        # its region kernel, so the control must set the value THERE — else the region never sees the
-        # slider move (and same-side readers like a remote plot re-run with the stale value). A local
-        # bind cell keeps the main kernel; a cross-side reader picks the value up via boundary transfer.
-        side = _region_active(nb) ? _cell_side(nb, cell) : ""
+    nsym = Symbol(name)
+    any(b -> b.name == nsym, cell.binds) || return nb   # not a bind of this cell → no-op (no phantom worker assign)
+    # Push the value to the kernel the DEFINING cell runs on, OFF nb.lock (protocol): a region-tagged
+    # `@bind` cell lives on its region kernel (attach + `prepare!` are round-trips), and `assign_bind!`
+    # coerces the value on the worker — all shared-gate work, serialized on the notebook's eval mutex (as
+    # the runner does), NOT nb.lock, which a concurrent teardown needs. Setting the value THERE is what
+    # lets the region see the slider move (else same-side readers re-run with the stale value); a local
+    # bind cell keeps the main kernel; a cross-side reader picks the value up via boundary transfer.
+    side = _region_active(nb) ? _cell_side(nb, cell) : ""
+    coerced = lock(_eval_mutex(nb)) do
         bk = nb.kernel
         if !isempty(side)
             bk = _side_kernel!(nb, side)
@@ -891,22 +908,30 @@ function set_bind!(nb::LiveNotebook, id::AbstractString, name::AbstractString, v
                 ReportEngine._rlog("bind: region kernel prepare failed: " * first(sprint(showerror, e), 120))
             end
         end
-        set_bind_value!(nb.report, cell, Symbol(name), value, bk)
+        ReportEngine.assign_bind!(bk, nb.report, nsym, value)   # coerce on the worker + update its registry/global
+    end
+    # Mirror the coerced value into the host BindSpec + restale readers under nb.lock (host mutation only).
+    @report_op nb report begin
+        i = findfirst(b -> b.name == nsym, cell.binds)
+        if i !== nothing
+            cell.binds[i].value = coerced
+            ReportEngine.mark_fresh!(cell)
+        end
         # Re-run the defining cell itself ONLY when it actually depends on the control
         # that changed — i.e. the changed var is in its `reads` (its own code or another
         # widget's args use it: `@bind a …; y = a*2`, or `@bind d Slider(1:a)`). The
         # registry preserves the value across that re-run. A cell that defines the control
         # but doesn't read it (incl. a pure bind cell) is skipped, so dragging its slider
         # never needlessly re-evaluates (and re-renders) the control.
-        reruns_self = Symbol(name) in cell.reads
-        for did in dependents_of(nb.report, Set([id]))
+        reruns_self = nsym in cell.reads
+        for did in dependents_of(report, Set([id]))
             (did == id && !reruns_self) && continue
-            j = findfirst(c -> c.id == did, nb.report.cells)
+            j = findfirst(c -> c.id == did, report.cells)
             j === nothing && continue
-            ReportEngine.restale!(nb.report.cells[j])
+            ReportEngine.restale!(report.cells[j])
         end
-        _eval!(nb)
     end
+    _eval!(nb)
     return nb
 end
 
@@ -995,6 +1020,14 @@ function _worker_log(nb::LiveNotebook, side::AbstractString, lines::Int)
     return merge(_worker_entry(nb, side, k), Dict{String,Any}("log" => log))
 end
 
+# The cells payload for a NON-live state (inactive/hydrating): the embedded frozen render if present
+# (already `cell_json`-shaped), else the parsed cells rendered un-run.
+function _static_cells(nb::LiveNotebook)
+    haskey(nb.report.meta, "preview") && return nb.report.meta["preview"]
+    bindref, hostednames = _bind_index(nb.report)
+    return [cell_json(c, bindref, hostednames) for c in nb.report.cells]
+end
+
 function state_json(nb::LiveNotebook)
     meta = Dict{String,Any}(
         "id" => nb.id, "title" => nb.report.title, "path" => abspath(nb.path),
@@ -1039,12 +1072,7 @@ function state_json(nb::LiveNotebook)
         # running — the grey "click to launch" pill drives the bring-up (`/api/launch`). Distinct from
         # `hydrating` (which narrates an in-flight bring-up); the client reads `inactive` to render the
         # pill and treat cells as a static preview until launched.
-        meta["cells"] = if haskey(nb.report.meta, "preview")
-            nb.report.meta["preview"]
-        else
-            bindref, hostednames = _bind_index(nb.report)
-            [cell_json(c, bindref, hostednames) for c in nb.report.cells]
-        end
+        meta["cells"] = _static_cells(nb)
         meta["inactive"] = true
         meta["workers"] = Any[]   # nothing is running — suppress the worker-strip pill; the inactive pill stands alone
         # The packages this notebook's env carries (from the reproducibility footer, parsed at load — no
@@ -1061,12 +1089,7 @@ function state_json(nb::LiveNotebook)
     if get(nb.report.meta, "hydrating", false) === true
         # While the env reconstructs: show the embedded frozen render if present (already
         # cell_json-shaped), else the parsed cells un-run. Live cells replace these on hydrate.
-        meta["cells"] = if haskey(nb.report.meta, "preview")
-            nb.report.meta["preview"]
-        else
-            bindref, hostednames = _bind_index(nb.report)
-            [cell_json(c, bindref, hostednames) for c in nb.report.cells]
-        end
+        meta["cells"] = _static_cells(nb)
         meta["hydrating"] = true
         # "env" = reconstructing a self-contained bundle's environment (shows a frozen preview);
         # "run" = a normal open whose initial full run is happening in the background;

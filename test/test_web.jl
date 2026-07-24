@@ -111,6 +111,17 @@ end
         @test RE._web_skin(; RE._web_sections(multi)...) == multi
     end
 
+    @testset "_web_unwrap (code↔web kind round-trip)" begin
+        # code→web stores the code plain; the browser reassembles it into a single-section skin on the
+        # way back to code. Unwrapping that skin must return the ORIGINAL code, not a `@web(...)` wrapper.
+        code = "x = 5\ny = x + 1"
+        @test RE._web_unwrap(RE._web_skin(html = code)) == code
+        @test RE._web_unwrap(code) == code                       # already-plain source passes through
+        # A genuine MULTI-pane web cell has no clean plain form → keep the runnable `@web(...)` intact.
+        multi = RE._web_skin(html = "<b>hi</b>", js = "a = 1")
+        @test RE._web_unwrap(multi) == multi
+    end
+
     @testset "reactive deps + staleness (interpolating-md semantics, always evals)" begin
         r = parse_report("#%% code id=src\ncount = 5\n\n#%% web id=w\n" *
                          RE._web_skin(js = "const n = {{ count }};"))
