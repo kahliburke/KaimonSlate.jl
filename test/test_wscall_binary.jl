@@ -82,3 +82,24 @@ const NS = KaimonSlate.NotebookServer
     end
 
 end
+
+@testset "@onclick/@onchange handlers can stream" begin
+    # `__on_fire!` must re-establish the notebook's Slate execution context inside the handler's async task,
+    # so a handler that calls `slate_emit`/`afm_emit` actually pushes. The fire path runs on a server task
+    # with no context and `@async` doesn't inherit task-locals, so without this the stream is a silent no-op.
+    import SlateExtensionsBase as SEB2
+    got = Ref{Any}(nothing)
+    ctx = (; region = nothing, notebook = "", side = "", emit = (ch, v) -> (got[] = (String(ch), v)),
+             regions = Symbol[], effect = (k; kw...) -> nothing, on = (c, f) -> nothing)
+    tokens = Dict{Symbol,Base.RefValue{Bool}}()
+    handler = _ -> SEB2.slate_emit("chan", 42)
+
+    RE.__on_fire!(tokens, :btn, handler, nothing, ctx)                 # WITH ctx → the emit lands
+    for _ in 1:200; got[] === nothing || break; sleep(0.01); end
+    @test got[] == ("chan", 42)
+
+    got[] = nothing                                                    # WITHOUT ctx → silent no-op (the old bug)
+    RE.__on_fire!(tokens, :btn2, handler, nothing)
+    sleep(0.3)
+    @test got[] === nothing
+end
