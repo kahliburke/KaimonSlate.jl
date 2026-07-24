@@ -70,14 +70,22 @@ using BonitoSlate, WGLMakie
 WGLMakie.activate!()          # re-assert WGLMakie as the Makie backend (baseline_cairo activated Cairo)
 BonitoSlate.enable!()
 
-#%% code id=wgl_3d
+#%% code id=wgl_3d nocache
 let
     xs = range(-3, 3; length = 80)
     ys = range(-3, 3; length = 80)
-    zs = [exp(-(x^2 + y^2)/3) * sin(2x) * cos(2y) for x in xs, y in ys]
-    fig = Figure(size = (1120, 1060))
-    ax = Axis3(fig[1, 1]; title = "WGLMakie 3D surface over SlateConnection — drag to rotate",
-               xlabel = "x", ylabel = "y", zlabel = "z")
+    zs = [exp(-(x^2 + y^2) / 3) * sin(2x) * cos(7y) for x in xs, y in ys]
+    fig = Figure(size = (820, 860))
+    ax = Axis3(fig[1, 1]; title = "WGLMakie 3D surface — live over Slate (drag to rotate)",
+               xlabel = "x", ylabel = "y", zlabel = "z",
+               # theme_dark() turns the Axis3 box spines OFF (*spinesvisible = false) and gives the grid a
+               # near-invisible low-alpha white. Turn the box edges back on and give both the box and grid a
+               # legible light tint so the 3D frame reads on our transparent dark card.
+               xspinesvisible = true, yspinesvisible = true, zspinesvisible = true,
+               xspinecolor_1 = (:white, 0.6), yspinecolor_1 = (:white, 0.6), zspinecolor_1 = (:white, 0.6),
+               xspinecolor_2 = (:white, 0.6), yspinecolor_2 = (:white, 0.6), zspinecolor_2 = (:white, 0.6),
+               xspinecolor_3 = (:white, 0.6), yspinecolor_3 = (:white, 0.6), zspinecolor_3 = (:white, 0.6),
+               xgridcolor = (:white, 0.22), ygridcolor = (:white, 0.22), zgridcolor = (:white, 0.22))
     surface!(ax, xs, ys, zs; colormap = :viridis)
     fig
 end
