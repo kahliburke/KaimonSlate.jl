@@ -85,9 +85,11 @@
       var params = api.params || {};
       ensureCss(params.css);
       var msgCh = "SlateAFM.msg:" + (params.id || api.bindId || "");
-      var model = makeModel(api, function (content /*, buffers */) {
-        // JS → Julia custom message. (Binary buffers are a follow-up — SlateBinary transport exists.)
-        try { window.slateCall("SlateAFM.msg", { ch: msgCh, content: content }); } catch (e) {}
+      var model = makeModel(api, function (content, buffers) {
+        // JS → Julia custom message. Buffers ride as native binary WS frames (slateCall's 4th arg) on the
+        // same socket the numeric stream uses — the handler receives them as `Vector{UInt8}`, no base64.
+        try { window.slateCall("SlateAFM.msg", { ch: msgCh, content: content }, undefined, buffers || []); }
+        catch (e) {}
       });
       // A mounted-instance record so OTHER widgets can compose with this one (AFM host.getWidget/getModel).
       // Keyed by the widget's `id` (afm(src; id="…")) in a page-global registry.
@@ -99,8 +101,37 @@
       el._afm = state;
       if (instId) { (window.__slateAFM || (window.__slateAFM = {}))[instId] = record; }
 
-      // Julia → JS custom messages: slate_emit(msgCh, {content}) → model "msg:custom" listeners.
-      try { window.slateOnStream(msgCh, function (m) { model._recv(m && m.content, m && m.buffers); }); } catch (e) {}
+      // Julia → JS custom messages on `msgCh`. A plain message is one JSON frame `{content}`. A message
+      // WITH buffers is N+1 frames sharing a `mid`: a content frame `{content, mid, nbuf}` plus one binary
+      // frame per buffer (delivered here as `{mid, bi, nbuf, d: Uint8Array}` by the binary-stream decoder).
+      // Reassemble by `mid` — the two transports (JSON emit, raw binary frame) don't guarantee interleaving
+      // order — and fire "msg:custom" once content + all buffers are present, buffers as ArrayBuffers.
+      var pending = Object.create(null);   // mid -> { content, need, got, buffers[] }
+      function slot(mid, nbuf) {
+        return pending[mid] || (pending[mid] = { content: undefined, seen: false, need: nbuf, got: 0, buffers: [] });
+      }
+      function deliver(mid) {
+        var p = pending[mid];
+        if (!p || !p.seen || p.got < p.need) return;
+        delete pending[mid];
+        model._recv(p.content, p.buffers);
+      }
+      try {
+        window.slateOnStream(msgCh, function (m) {
+          if (!m) return;
+          if (m.d) {                                   // a binary buffer frame (typed array from the decoder)
+            var p = slot(m.mid, m.nbuf); p.need = m.nbuf;
+            p.buffers[m.bi] = m.d.buffer;              // payload-only, element-aligned ArrayBuffer (copied)
+            p.got++;
+            deliver(m.mid);
+          } else if (m.mid === undefined || m.mid === null) {
+            model._recv(m.content, []);                // plain content, no buffers
+          } else {                                     // a content frame announcing `nbuf` buffers to follow
+            var q = slot(m.mid, m.nbuf); q.content = m.content; q.seen = true; q.need = m.nbuf;
+            deliver(m.mid);
+          }
+        });
+      } catch (e) {}
 
       var src = params.src;
       if (!src) { el.innerHTML = '<pre class="afm-err">SlateAFM: widget has no module `src`</pre>'; return; }
