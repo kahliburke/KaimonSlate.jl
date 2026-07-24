@@ -50,8 +50,9 @@ the paint, the live channel is the interaction:
   has every object registered before the live channel sends its first ref-keyed update — so the live
   overlay re-attaches cleanly on reload instead of hitting an object-cache desync.
 
-Also installs a Slate-matching dark Makie theme so a returned figure blends into the notebook's dark
-card (see `figure.jl`). Run it once from inside a Slate cell before displaying a figure.
+Run it once from inside a Slate cell before displaying a figure. Theming is left to the notebook: call
+`use_slate_theme!()` so figures follow the active Slate palette (transparent background + palette-toned
+axes) and blend into the figure card — see `figure.jl` for the card itself.
 """
 function enable!()
     ctx = SlateExtensionsBase.slate_context()
@@ -70,13 +71,10 @@ function enable!()
     # A browser (re)connect must re-render live figures against a FRESH page root — register the reset so
     # Slate runs it before re-rendering `_LIVE_OUTPUTS` on connect (see SEB `on_live_reset`).
     SlateExtensionsBase.on_live_reset(_reset_page!)
-    # Dark, transparent-background Makie theme so a figure sits cleanly on Slate's dark figure card (the
-    # card supplies the panel colour; the figure blends into it). `theme_dark` gives light text + spines;
-    # we only override the backgrounds to transparent.
-    Makie.set_theme!(Makie.theme_dark())
-    Makie.update_theme!(backgroundcolor = :transparent,
-                        Axis  = (backgroundcolor = :transparent,),
-                        Axis3 = (backgroundcolor = :transparent,))
+    # Theming is deliberately NOT forced here. A figure should follow the notebook's active Slate theme, so
+    # the notebook applies the shared look with `use_slate_theme!()` — palette-toned axes on a transparent
+    # background, so the figure blends into Slate's card with correct contrast in BOTH light and dark
+    # palettes. Hardcoding a dark Makie theme here would override that and wash the axes out on a light one.
     _register_frontend!()
     return nothing
 end

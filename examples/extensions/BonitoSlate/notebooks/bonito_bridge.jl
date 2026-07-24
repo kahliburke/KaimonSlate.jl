@@ -76,16 +76,11 @@ let
     ys = range(-3, 3; length = 80)
     zs = [exp(-(x^2 + y^2) / 3) * sin(2x) * cos(7y) for x in xs, y in ys]
     fig = Figure(size = (820, 860))
+    # Axis label/tick colours come from `use_slate_theme!()` (see baseline_cairo). Note: WGLMakie does not
+    # currently render the Axis3 box (panels/grids/spines) that CairoMakie/GLMakie draw, so the live figure
+    # shows the surface + labels without an enclosing frame; a static/PDF export renders the full box.
     ax = Axis3(fig[1, 1]; title = "WGLMakie 3D surface — live over Slate (drag to rotate)",
-               xlabel = "x", ylabel = "y", zlabel = "z",
-               # theme_dark() turns the Axis3 box spines OFF (*spinesvisible = false) and gives the grid a
-               # near-invisible low-alpha white. Turn the box edges back on and give both the box and grid a
-               # legible light tint so the 3D frame reads on our transparent dark card.
-               xspinesvisible = true, yspinesvisible = true, zspinesvisible = true,
-               xspinecolor_1 = (:white, 0.6), yspinecolor_1 = (:white, 0.6), zspinecolor_1 = (:white, 0.6),
-               xspinecolor_2 = (:white, 0.6), yspinecolor_2 = (:white, 0.6), zspinecolor_2 = (:white, 0.6),
-               xspinecolor_3 = (:white, 0.6), yspinecolor_3 = (:white, 0.6), zspinecolor_3 = (:white, 0.6),
-               xgridcolor = (:white, 0.22), ygridcolor = (:white, 0.22), zgridcolor = (:white, 0.22))
+               xlabel = "x", ylabel = "y", zlabel = "z")
     surface!(ax, xs, ys, zs; colormap = :viridis)
     fig
 end
