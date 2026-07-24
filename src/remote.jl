@@ -133,6 +133,12 @@ const _REMOTE_KGATE_ENV = "$_REMOTE_ROOT/kgate-env"   # a project with KaimonGat
 const _REMOTE_SYSIMG    = "$_REMOTE_ROOT/sysimg"      # baked worker sysimages, keyed by payload+env hash
 const _REMOTE_SYSIMG_BUILDER = "$_REMOTE_ROOT/sysimg-builder"  # env holding PackageCompiler (kept OFF the worker env)
 const _REMOTE_KEY_PATH  = "~/.cache/kaimon/curve/server.key"
+# The extension SDK (Widget/Choice/WebPage/slate_context) is path-dev'd from the monorepo and NOT yet
+# registered, so a registry `Pkg.add` can't find it on a remote host. Ship its source and `Pkg.develop`
+# it into the worker env — the remote counterpart of the local `src/worker_infra` LOAD_PATH stack.
+const _REMOTE_SEB = "$_REMOTE_ROOT/devsrc/SlateExtensionsBase"
+const _LOCAL_SEB  = normpath(joinpath(@__DIR__, "..", "lib", "SlateExtensionsBase"))
+const _SEB_DEVELOP = "try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\")); preserve=Pkg.PRESERVE_ALL); catch; try; Pkg.develop(Pkg.PackageSpec(path=joinpath(homedir(), raw\"$_REMOTE_SEB\"))); catch; end; end"
 
 # ── Remote timing knobs ───────────────────────────────────────────────────────────────────────
 # Every value below shipped as a hardcoded literal; each is now overridable per host/deployment
@@ -513,6 +519,14 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
     finally
         rm(tmp; recursive = true, force = true)
     end
+    # 1b. Ship the unregistered extension SDK's source (a registry add can't find it); the env build
+    #     below `Pkg.develop`s it into the worker env so `worker.jl`'s `using SlateExtensionsBase` resolves.
+    if isdir(_LOCAL_SEB)
+        _rsync!(host, _LOCAL_SEB, _REMOTE_SEB; excludes = [".git", "*.cov"]) ||
+            _rlog("provision: rsync SlateExtensionsBase → $host failed (worker will miss the extension SDK)")
+    else
+        _rlog("provision: local SlateExtensionsBase source not found at $_LOCAL_SEB — remote worker may miss it")
+    end
     # 2. KaimonGate worker env (from the registry) — instantiate once
     if !_ssh_test(host, `test -f $_REMOTE_KGATE_ENV/.ready`)
         _rlog("provision [2/3] building KaimonGate env on $host (first run — adds KaimonGate+Revise; can take minutes)")
@@ -560,13 +574,13 @@ function provision_remote!(t::RemoteTarget, parent_project::AbstractString)
             # shipped here → no reliable pre-count, so the precompile bar is indeterminate ("k done"), but it
             # still shows live progress + the current package instead of going dark.
             build = _rewrite_devpaths_script(rel, rewrites) *
-                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; Pkg.instantiate()\n" *
+                "\nimport Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end; " * _SEB_DEVELOP * "; Pkg.instantiate()\n" *
                 _PREP_DONE_SNIPPET * "\n"
             first(_ssh_julia!(host, build, "instantiate parent project on $host";
                               stream = true, online = _bringup_note)) || error("provision: parent env build → $host failed")
         else
             _rlog("provision [3/3] bare notebook — worker env = worker infra only")
-            first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); Pkg.instantiate()",
+            first(_ssh_julia!(host, "import Pkg; Pkg.activate(joinpath(homedir(), raw\"$rel\")); Pkg.add($infra); " * _SEB_DEVELOP * "; Pkg.instantiate()",
                               "bare worker env on $host")) || error("provision: could not build the worker env on $host")
         end
     end
@@ -1002,6 +1016,7 @@ function _env_instantiate_script(projrel::AbstractString, rewrites::Vector{Tuple
     # invalidate the notebook's (very expensive, e.g. Makie) precompile cache — that doubles the build.
     # Fall back to a normal add only if the infra genuinely can't be satisfied against those pins.
     println(io, "try; Pkg.add($infra; preserve=Pkg.PRESERVE_ALL); catch; Pkg.add($infra); end")
+    println(io, _SEB_DEVELOP)   # the unregistered extension SDK, dev'd from its shipped source
     # The Manifest is resolved (shipped), so count what still needs precompiling BEFORE instantiate's
     # auto-precompile → the banner reads a real "Precompiling k/N · <pkg>", same as a local cold open.
     print(io, _PREP_TOTAL_SNIPPET)
