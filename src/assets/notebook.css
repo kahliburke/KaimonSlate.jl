@@ -806,6 +806,11 @@ body.celldnd #nb { padding-bottom: 96px; }
 .widget { display:flex; align-items:center; gap:12px; padding:12px 14px; }
 .wname { font-family:'Cascadia Code',monospace; color:var(--accent); min-width:64px; }
 .widget input[type=range] { flex:1; accent-color:var(--purple); }
+/* An AFM / custom-widget mount hosts anything from a compact control to a full-bleed viewer (Mol*, a
+   canvas app). Let it claim the row's width like the other expanded controls (min-width:0 so it can
+   shrink below its content), and make it a positioning context + clip so a viewer that positions itself
+   absolutely fills THIS mount rather than escaping to cover the cell header. */
+.widget .customwidget, .control .customwidget { flex:1 1 auto; min-width:0; position:relative; overflow:hidden; }
 .widget input[type=text], .widget input[type=number], .widget select {
   background:var(--bg3); color:var(--text); border:1px solid var(--border); border-radius:5px; padding:3px 8px; }
 .wval { font-family:'Cascadia Code',monospace; color:var(--val); min-width:48px; text-align:right; }

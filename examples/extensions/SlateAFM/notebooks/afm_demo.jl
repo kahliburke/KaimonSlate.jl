@@ -184,58 +184,60 @@ seconds); after that it's cached. Needs network for the Mol\* plugin + styleshee
 """
 
 #%% code id=molstar
-@bind mol pypi_afm("ipymolstar"; class = "PDBeMolstar",
+@bind pmol pypi_afm("ipymolstar"; class = "PDBeMolstar",
     css = "https://cdn.jsdelivr.net/npm/pdbe-molstar@3.3.2/build/pdbe-molstar.css",
-    molecule_id = "1cbs", hide_water = true, height = "440px")
+    molecule_id = "1cbs", hide_water = true, height = "340px")
 
-#%% md id=h_assemble
+#%% md id=h_drive
 @md"""
-## Julia in the driver's seat — assembling a molecule over the binary channel
+## Julia in the driver's seat — building a molecule *in the real Mol\* engine*
 
-A widget doesn't have to be a passive viewer of a bound value — Julia can **push** to it. This custom AFM
-widget renders a rotating 3D molecule; the `@onclick` handler below has **Julia compute a DNA double helix
-and stream its atom coordinates (raw `Float32`) to the browser one base pair at a time** via
-`afm_emit(id, content; buffers)` — the same binary `msg:custom` channel the round-trip demo uses. Click and
-watch the helix build itself, then the bonds snap in.
+Now Julia **builds** a molecule and drives the real PDBe Mol\* viewer with it. `build_dna_pdb` computes a
+B-DNA double helix (phosphate backbone + colour-coded base rungs) and emits it as a PDB; the button ships
+that PDB to the viewer over the binary `msg:custom` channel (`afm_emit`), and a thin wrapper
+(`molstar_live.js`) loads it into the actual Mol\* engine — no sticky-bind trait round-trip. The viewer
+(below the code) re-renders whatever Julia sends.
 """
 
-#%% code id=mol_gen
-# Build a DNA-like double helix: two helical backbones (element codes 0/1) + rungs. Returns flat Float32
-# xyz, per-atom element codes, and 0-based-ready bond index pairs. Pure Julia — the "molecule" is computed
-# here and streamed to the browser widget; nothing about the geometry lives in JS.
-function dna_helix(nbp::Int; rad::Float32 = 1.0f0, rise::Float32 = 0.5f0, twist = deg2rad(34.3))
-    xyz = Float32[]; els = Int[]; A = Int[]; B = Int[]
+#%% code id=dna_build
+# Build a coarse B-DNA double helix in Julia and emit it as a PDB the real Mol* engine renders: a phosphate
+# backbone (P) on each strand + colour-coded base atoms (N/O/C) on the rungs, with CONECT bonds.
+import Printf
+function _pdb_atom(ser, el, x, y, z)
+    name = " " * rpad(el, 3)                                   # cols 13-16
+    string("HETATM", lpad(ser, 5), " ", name, " ", "DNA", " ", "A", lpad(1, 4), " ", "   ",
+           Printf.@sprintf("%8.3f%8.3f%8.3f", x, y, z), "  1.00  0.00", " "^10, lpad(el, 2))
+end
+function build_dna_pdb(nbp::Int; R = 9.0, rise = 3.4, turn = 10.5, groovefrac = 0.42)
+    twist = 2π / turn; goff = 2π * groovefrac
+    lines = String[]; ser = 0
+    pA = Int[]; pB = Int[]; bA = Int[]; bB = Int[]
+    atom!(el, x, y, z) = (ser += 1; push!(lines, _pdb_atom(ser, el, x, y, z)); ser)
     for i in 0:nbp-1
-        a = Float32(i * twist); y = (i - (nbp - 1) / 2.0f0) * rise
-        push!(xyz, rad * cos(a), y, rad * sin(a)); push!(els, 0); push!(A, length(els))
-        push!(xyz, rad * cos(a + Float32(π)), y, rad * sin(a + Float32(π))); push!(els, 1); push!(B, length(els))
+        a = i * twist; y = (i - (nbp - 1) / 2) * rise
+        Ax, Az = R * cos(a), R * sin(a); Bx, Bz = R * cos(a + goff), R * sin(a + goff)
+        push!(pA, atom!("P", Ax, y, Az)); push!(pB, atom!("P", Bx, y, Bz))
+        e1, e2 = ("N", "O", "C", "N")[mod1(i + 1, 4)], ("O", "N", "N", "C")[mod1(i + 1, 4)]
+        push!(bA, atom!(e1, Ax + (Bx - Ax) * 0.34, y, Az + (Bz - Az) * 0.34))
+        push!(bB, atom!(e2, Ax + (Bx - Ax) * 0.66, y, Az + (Bz - Az) * 0.66))
     end
-    bonds = Tuple{Int,Int}[]
-    for i in 1:nbp-1; push!(bonds, (A[i], A[i+1]), (B[i], B[i+1])); end   # backbones
-    for i in 1:nbp;   push!(bonds, (A[i], B[i])); end                     # base-pair rungs
-    return xyz, els, bonds
+    conect(i, j) = push!(lines, Printf.@sprintf("CONECT%5d%5d", i, j))
+    for i in 1:nbp-1; conect(pA[i], pA[i+1]); conect(pB[i], pB[i+1]); end
+    for i in 1:nbp; conect(pA[i], bA[i]); conect(bA[i], bB[i]); conect(bB[i], pB[i]); end
+    push!(lines, "END")
+    return join(lines, "\n") * "\n"
 end
 
-#%% code id=assembler
-@bind asm afm(ext_asset_url(SlateAFM, "examples/molecule_builder.js") * "?v=2"; id = "asm", height = 440)
+#%% code id=drive_btn
+@bind buildmol Button("⚛ Build a DNA helix in Mol*")
 
-#%% code id=assemble_btn
-@bind grow Button("⚛ Assemble DNA helix")
+#%% code id=drive_driver
+# Manipulating code: on click, build the molecule and push it to the viewer below over the binary channel.
+@onclick buildmol afm_emit("mol", Dict("op" => "load", "pdb" => build_dna_pdb(24)))
 
-#%% code id=assemble_driver
-@onclick grow begin
-    xyz, els, bonds = dna_helix(20)
-    afm_emit("asm", Dict("op" => "reset"))
-    n = length(els)
-    for s in 1:2:n                                   # one base pair (2 atoms) per frame → it grows
-        e = min(s + 1, n)
-        seg = xyz[(s-1)*3+1 : e*3]                    # Float32 slice for this batch
-        afm_emit("asm", Dict("op" => "atoms", "els" => els[s:e]); buffers = [collect(reinterpret(UInt8, seg))])
-        pause(0.09)
-    end
-    pairs = Int32[]; for (i, j) in bonds; push!(pairs, Int32(i - 1), Int32(j - 1)); end
-    afm_emit("asm", Dict("op" => "bonds"); buffers = [collect(reinterpret(UInt8, pairs))])   # bonds snap in
-end
+#%% code id=molstar_live
+@bind mol afm(ext_asset_url(SlateAFM, "examples/molstar_live.js"); id = "mol",
+    css = "https://cdn.jsdelivr.net/npm/pdbe-molstar@3.3.2/build/pdbe-molstar.css", height = 440)
 
 # ╔═╡ Slate.config · per-notebook settings (Settings panel)
 #   docid = a1f0c2d4-5e6b-47a8-9c1d-3b2e4f6a7c88
