@@ -1048,7 +1048,14 @@ function set_kind!(nb::LiveNotebook, id::AbstractString, kind::AbstractString; s
     # discards edits. Convert + restale the cell and its dependents, but DON'T evaluate: changing a
     # cell's kind must not run the code (the user runs it when ready) — unlike _commit_structure!.
     src = source === nothing ? old.source : String(source)
-    cells[i] = Cell(old.id, _cellkind(kind), src)
+    # Converting OUT of a web cell: the browser sends the reassembled `@web(...)` skin as `source`, and a
+    # plain code/markdown cell shouldn't inherit that wrapper — unwrap it so `code → web → code` round-trips
+    # back to the original text instead of accumulating a `@web(...)` skin.
+    newkind = _cellkind(kind)
+    if old.kind == WEB && newkind != WEB
+        src = ReportEngine._web_unwrap(src)
+    end
+    cells[i] = Cell(old.id, newkind, src)
     build_dependencies!(nb.report)
     stale = dependents_of(nb.report, [old.id])
     for c in nb.report.cells
