@@ -10,6 +10,10 @@
 # the widget kind whose default export Slate wraps + registers (`""` for a self-registering script).
 # Process-global; a re-register by the same id REPLACES (a reload doesn't stack duplicates).
 const _FRONTEND = Dict{String,@NamedTuple{js::String, esm::Bool, kind::String}}()
+# Guarded: a widget's front-end can be registered from the CONCURRENT `@bind`/display path (via
+# `ensure_widget_assets!`), while the run drain reads the registry — writes and the reader iteration
+# must not race (`Multiple concurrent writes to Dict detected!`).
+const _FRONTEND_LOCK = ReentrantLock()
 
 """
     provide_frontend!(js; id="", esm=false, kind="")
@@ -25,7 +29,9 @@ Live and in a static export; no boot cell, no ordering.
 function provide_frontend!(js::AbstractString; id::AbstractString = "", esm::Bool = false,
                            kind::AbstractString = "")
     key = isempty(id) ? "fe:" * string(hash(js); base = 16) : String(id)
-    _FRONTEND[key] = (js = String(js), esm = esm, kind = String(kind))
+    lock(_FRONTEND_LOCK) do
+        _FRONTEND[key] = (js = String(js), esm = esm, kind = String(kind))
+    end
     return nothing
 end
 
@@ -90,7 +96,10 @@ required_assets(::Type) = nothing
 
 # Widget types whose assets we've already resolved this process (loaded, or confirmed none) — so the
 # per-bind check is a set lookup and `required_assets` (which may read a file) runs once per type ever.
+# Guarded: `@bind`/display cells run CONCURRENTLY (a parallel batch), so the set would otherwise be
+# mutated from several tasks at once (`Multiple concurrent writes to Dict detected!`).
 const _ASSET_CHECKED = Set{Any}()
+const _ASSET_LOCK = ReentrantLock()
 
 """
     ensure_widget_assets!(::Type{W})
@@ -100,8 +109,13 @@ Lazily load `W`'s front-end into the registry (once per process): the first time
 Slate calls this from the `@bind`/display path — a no-op for built-ins and any type without a method.
 """
 function ensure_widget_assets!(::Type{T}) where {T}
-    T in _ASSET_CHECKED && return nothing
-    push!(_ASSET_CHECKED, T)
+    # Claim the type atomically: only the task that first adds it proceeds to resolve/register, so the
+    # (possibly file-reading) `required_assets` + registration runs exactly once even under a parallel
+    # bind batch. Kept OUTSIDE the lock so a slow `required_assets` doesn't serialise unrelated binds.
+    newly = lock(_ASSET_LOCK) do
+        (T in _ASSET_CHECKED) ? false : (push!(_ASSET_CHECKED, T); true)
+    end
+    newly || return nothing
     js = required_assets(T)
     js === nothing || register_component!(T, js)
     return nothing
@@ -358,7 +372,9 @@ asset_dirs() = copy(_ASSETS)
 Every front-end script declared by the loaded packages (`id => js`) — a copy, so callers can't mutate
 the registry. See [`extension_manifest`](@ref) for the full record (incl. module-ness) that Slate pulls.
 """
-frontend_scripts() = Dict{String,String}(k => v.js for (k, v) in _FRONTEND)
+frontend_scripts() = lock(_FRONTEND_LOCK) do
+    Dict{String,String}(k => v.js for (k, v) in _FRONTEND)
+end
 
 """
     extension_manifest() -> NamedTuple
@@ -376,5 +392,7 @@ Extensible: as new package-registration seams are added they surface as addition
 by the same query — no new transport per feature.
 """
 extension_manifest() =
-    (; frontend = [(; id = k, js = v.js, esm = v.esm, kind = v.kind) for (k, v) in _FRONTEND],
+    (; frontend = lock(_FRONTEND_LOCK) do
+           [(; id = k, js = v.js, esm = v.esm, kind = v.kind) for (k, v) in _FRONTEND]
+       end,
        assets = [(; pkg = k, dir = v) for (k, v) in _ASSETS])
