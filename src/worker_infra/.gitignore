@@ -1,0 +1,3 @@
+# The infra env is materialised + instantiated per-Julia-version by _infra_env() (gate_kernel.jl);
+# a committed lockfile would pin one Julia version and break others. Keep the Manifest local-only.
+Manifest.toml
