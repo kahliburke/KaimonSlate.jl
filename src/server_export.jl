@@ -80,6 +80,72 @@ function _rewrite_geomap_url!(spec, oldurl::AbstractString, newurl::AbstractStri
     return spec
 end
 
+# Resolve a live `/ext-assets/<pkg>/<sub>` url (a SlateExtensionsBase `provide_assets!` file) to its
+# on-disk source via the notebook's asset registry, or `nothing` if the package/file isn't found or the
+# path escapes the vendored dir. The export mirror of the `/ext-assets/**` router in server_complete.jl.
+function _ext_asset_file(nb::LiveNotebook, url::AbstractString)
+    m = match(r"^/ext-assets/([^/]+)/(.*)$", String(url))
+    m === nothing && return nothing
+    dir = get(nb.assets, HTTP.URIs.unescapeuri(String(m.captures[1])), nothing)
+    dir === nothing && return nothing
+    rootn = normpath(dir)
+    p = normpath(joinpath(rootn, strip(HTTP.URIs.unescapeuri(String(m.captures[2])), '/')))
+    (p == rootn || startswith(p, rootn * "/")) && isfile(p) ? p : nothing
+end
+
+# A chart spec's `requireScripts` (echarts extensions a chart needs loaded before render, e.g.
+# echarts-gl from `provide_assets!`). Live they're served at `/ext-assets/<pkg>/…`; a frozen export has
+# no server, so each such url is repointed: a published site → the page-local sibling
+# (`ext-assets/<pkg>/…`, written by `_package_asset_files`); a standalone page → an inline `data:` URL
+# carrying the file's bytes, so the single HTML stays self-contained. A non-`/ext-assets/` url (a CDN
+# reference) is left untouched. Rewrites in place.
+function _rewrite_requirescripts!(spec, nb::LiveNotebook; inline::Bool)
+    spec isa AbstractDict || return spec
+    reqs = get(spec, "requireScripts", nothing)
+    reqs === nothing && return spec
+    lst = collect(reqs isa AbstractVector ? reqs : (reqs,))
+    for (i, u) in enumerate(lst)
+        us = String(u)
+        startswith(us, "/ext-assets/") || continue
+        if inline
+            f = _ext_asset_file(nb, us)
+            f === nothing && continue
+            lst[i] = "data:text/javascript;base64," * Base64.base64encode(read(f))
+        else
+            lst[i] = replace(us, "/ext-assets/" => "ext-assets/"; count = 1)
+        end
+    end
+    spec["requireScripts"] = lst
+    return spec
+end
+
+# A `/ext-assets/<pkg>/…` url can sit ANYWHERE in a chart spec, not just `requireScripts` — a `globe`
+# `baseTexture` (a vendored earth image), a `graphic` element's `image`, a symbol url. `requireScripts`
+# is handled above (it's a script, inlined as `text/javascript`); this repoints EVERY OTHER such url the
+# same way, recursively over the spec: a published site → the page-local `ext-assets/…` sibling (written
+# by `_package_asset_files`), a standalone page → a `data:<mime>;base64,…` url of the file's bytes (mime
+# by extension — `image/jpeg` for a texture) so the single HTML carries the binary. A non-`/ext-assets/`
+# url (a CDN texture) is left untouched. Runs AFTER `_rewrite_requirescripts!`, so already-rewritten
+# script urls (now `data:`/`ext-assets/…`) no longer match. Rebuilds a fresh copy (`_echarts_specs` already
+# deep-copies via `_json_finite`), mutating the spec's containers in place.
+function _rewrite_ext_asset_urls!(spec, nb::LiveNotebook; inline::Bool)
+    rw(s::AbstractString) = begin
+        startswith(s, "/ext-assets/") || return s
+        inline || return replace(s, "/ext-assets/" => "ext-assets/"; count = 1)
+        f = _ext_asset_file(nb, s)
+        f === nothing ? s : "data:" * _site_ctype(f) * ";base64," * Base64.base64encode(read(f))
+    end
+    walk!(x) =
+        if x isa AbstractDict
+            for (k, v) in x; x[k] = v isa AbstractString ? rw(v) : walk!(v); end; x
+        elseif x isa AbstractVector
+            for i in eachindex(x); v = x[i]; x[i] = v isa AbstractString ? rw(v) : walk!(v); end; x
+        else
+            x
+        end
+    return walk!(spec)
+end
+
 # ── Author-embedded media (drag/drop / paste into a Markdown or web cell) ────────────────────────────
 # A cell can reference media two ways: an inline `data:<mime>;base64,…` URL (bytes live in the source),
 # or the live asset route `/n/<id>/asset/<rel>` (bytes are a file under the notebook's project dir).
@@ -266,7 +332,27 @@ function _referenced_page_assets(nb::LiveNotebook)
     for (rel, path) in _embedded_asset_files(nb.report.cells, _proj_root(nb))   # author-embedded media → file
         files[rel] = path
     end
+    for (rel, path) in _package_asset_files(nb)                                 # provide_assets! dirs → files
+        files[rel] = path
+    end
     return files
+end
+
+# Every file under a package's vendored asset dir (`provide_assets!`) as `ext-assets/<pkg>/<rel> => path`,
+# so a static export carries the whole tree as page-local siblings — the offline mirror of the live
+# `/ext-assets/<pkg>/…` route (the URL is rewritten to the leading-slash-stripped relative form in
+# `_frontend_export_head`). A missing dir contributes nothing.
+function _package_asset_files(nb::LiveNotebook)
+    out = Pair{String,String}[]
+    for (pkg, dir) in nb.assets
+        isdir(dir) || continue
+        for (root, _, fnames) in walkdir(dir), f in fnames
+            src = joinpath(root, f)
+            rel = relpath(src, dir)
+            push!(out, joinpath("ext-assets", pkg, rel) => src)
+        end
+    end
+    return out
 end
 
 # Write every asset a notebook's page references into `<page_dir>` at its relative path — so the
@@ -335,9 +421,17 @@ try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠
 function _frontend_export_head(nb)
     fe = _frontend_scripts(nb)
     isempty(fe) && return ""
+    # Rewrite the live `/ext-assets/<pkg>/…` route (served by the hub) to the page-local `./ext-assets/<pkg>/…`
+    # sibling written by `_package_asset_files` — a frozen export has no server, so a package-vendored asset a
+    # script `fetch`es / `<script src=>`s / dynamic-`import()`s must resolve as a plain sibling. The `./` is
+    # load-bearing: an ES `import()` specifier without a leading `/`, `./`, or scheme is a BARE specifier and
+    # throws unless an import map defines it — a page-relative `ext-assets/…` would break the very multi-file
+    # modules this route exists to serve. `./` is a valid relative specifier for `import()` and equivalent to
+    # the bare form for `fetch`/`<script src>`, so it's correct for every consumer.
+    rw(js) = replace(js, "/ext-assets/" => "./ext-assets/")
     # Break any literal `</script` in the JS so it can't terminate the tag early (the live path uses
     # textContent/Blob and is immune); the sequence is inert JS once the parser is past the string boundary.
-    safe(js) = replace(js, r"</script"i => "<\\/script")
+    safe(js) = replace(rw(js), r"</script"i => "<\\/script")
     parts = String[]
     if any(e -> !e.esm, fe)
         push!(parts, raw"""<script>window.slateWidgets=window.slateWidgets||{};
@@ -347,7 +441,7 @@ window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||functio
     for e in fe
         if !isempty(e.kind)
             # Component module: import its default export (inlined as a data: module) + register under the kind.
-            mod = "data:text/javascript;charset=utf-8;base64," * Base64.base64encode(e.js)
+            mod = "data:text/javascript;charset=utf-8;base64," * Base64.base64encode(rw(e.js))
             push!(parts, string("<script type=\"module\" data-slate-fe=\"", _esc(e.id), "\">",
                 "import C from ", JSON.json(mod), ";import { registerComponent } from \"@slate/widget\";",
                 "registerComponent(", JSON.json(e.kind), ", C);</script>"))
@@ -482,8 +576,7 @@ end
 # data-URI `<img>` for a raster. Matches the `.dispwrap > .disp.img` structure `_render_chunks` emits.
 function _themed_fig_html(bytes::Vector{UInt8}, ext::AbstractString)
     ext == "svg" && return string("<div class=\"disp img\">", String(copy(bytes)), "</div>")
-    mime = ext == "png" ? "image/png" : "image/png"
-    return string("<div class=\"disp img\"><img src=\"data:", mime, ";base64,",
+    return string("<div class=\"disp img\"><img src=\"data:image/png;base64,",
                   Base64.base64encode(bytes), "\"/></div>")
 end
 # The text portions of a cell's output (stdout / warnings / scalar value) WITHOUT its display chunks —
@@ -598,29 +691,35 @@ function _viz_style_html(v, col)
     return ""
 end
 
+# Column-spec accessors shared by the HTML + Markdown table exporters. A column is either a dict
+# (`{name, align, type, format}`) or a bare value taken verbatim as the name.
+_col_name(c)    = c isa AbstractDict ? string(get(c, "name", "")) : string(c)
+_col_align(c)   = c isa AbstractDict ? string(get(c, "align", "left")) : "left"
+_col_format(c)  = c isa AbstractDict ? get(c, "format", nothing) : nothing
+_col_numeric(c) = c isa AbstractDict && (t = string(get(c, "type", "")); t == "int" || t == "float")
+# The rows a fixed export actually emits: only the first N when a per-table `export_rows` cap is set and
+# the table is longer, else all of them. Shared so the HTML + Markdown exporters cap identically.
+_capped_rows(rows, opts) =
+    (cap = get(opts, "export_rows", nothing); (cap !== nothing && length(rows) > cap) ? view(rows, 1:cap) : rows)
+
 function _export_table_html(spec)
     cols = get(spec, "columns", Any[])
     rows = get(spec, "rows", Any[])
     opts = get(spec, "opts", Dict{String,Any}())
-    _cname(c)   = c isa AbstractDict ? string(get(c, "name", "")) : string(c)
-    _calign(c)  = c isa AbstractDict ? string(get(c, "align", "left")) : "left"
-    _cnumeric(c) = c isa AbstractDict && (t = string(get(c, "type", "")); t == "int" || t == "float")
-    _cfmt(c)    = c isa AbstractDict ? get(c, "format", nothing) : nothing
     io = IOBuffer()
     print(io, "<div class=\"exp-tblwrap\"><table class=\"exp-table\"><thead><tr>")
     for c in cols
-        print(io, "<th class=\"", _cnumeric(c) ? "num " : "", "align-", _calign(c), "\">", _esc(_cname(c)), "</th>")
+        print(io, "<th class=\"", _col_numeric(c) ? "num " : "", "align-", _col_align(c), "\">", _esc(_col_name(c)), "</th>")
     end
     print(io, "</tr></thead><tbody>")
-    cap = get(opts, "export_rows", nothing)                 # per-table hint: only the first N rows in fixed exports
-    shown = (cap !== nothing && length(rows) > cap) ? view(rows, 1:cap) : rows
+    shown = _capped_rows(rows, opts)
     for r in shown
         print(io, "<tr>")
         for (ci, v) in enumerate(r)
             c = ci <= length(cols) ? cols[ci] : nothing
-            num = c !== nothing && _cnumeric(c)
-            al = c === nothing ? "left" : _calign(c)
-            txt = ReportEngine._format_cell(v, c === nothing ? nothing : _cfmt(c))
+            num = c !== nothing && _col_numeric(c)
+            al = c === nothing ? "left" : _col_align(c)
+            txt = ReportEngine._format_cell(v, c === nothing ? nothing : _col_format(c))
             # numeric cells carry the RAW value in data-v so the interactive enhancer sorts numerically
             dv = (num && v isa Real && !(v isa Bool)) ? string(" data-v=\"", v, "\"") : ""
             print(io, "<td class=\"", num ? "num " : "", "align-", al, "\"", dv, _viz_style_html(v, c), ">", _esc(txt), "</td>")
@@ -937,6 +1036,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                                 _rewrite_geomap_url!(spec, url, _geo_asset_path(url))
                             end
                         end
+                        # Package-vendored libs a chart needs (echarts-gl): inline as data: (standalone) or
+                        # repoint at the page-local `ext-assets/…` sibling (site).
+                        _rewrite_requirescripts!(spec, nb; inline = inline_assets)
+                        # Any OTHER vendored-asset url in the spec (a globe `baseTexture`, a graphic image).
+                        _rewrite_ext_asset_urls!(spec, nb; inline = inline_assets)
                         print(io, "<div class=\"exp-chart\" id=\"", did, "\" style=\"width:100%;height:", _chart_css_height(spec), "\"></div>")
                         push!(charts, (did, JSON.json(spec)))
                     end
@@ -1022,15 +1126,24 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
                   "if(!r.url)return Promise.resolve();",
                   "return fetch(r.url).then(function(x){return x.json();}).then(function(j){echarts.registerMap(r.name,j);}).catch(function(){});}));}",
-                  # `registerMap`/`__size` are Slate extensions, not ECharts options — strip before setOption.
-                  "function _slateSansMaps(o){if(!o||(!o.registerMap&&!o.__size))return o;var c=Object.assign({},o);delete c.registerMap;delete c.__size;return c;}",
+                  # `registerMap`/`__size`/`requireScripts` are Slate extensions, not ECharts options — strip before setOption.
+                  "function _slateSansMaps(o){if(!o||(!o.registerMap&&!o.__size&&!o.requireScripts))return o;var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;return c;}",
+                  # Load a chart's `requireScripts` (echarts-gl etc.) before render — ONE <script> per url
+                  # (shared promise), ordered so a lib sees its deps; a failed load resolves so it can't wedge.
+                  "var _slateScripts={};function _slateLoadScript(u){if(_slateScripts[u])return _slateScripts[u];",
+                  "_slateScripts[u]=new Promise(function(res){var s=document.createElement('script');s.src=u;s.async=false;",
+                  "s.onload=function(){res();};s.onerror=function(){res();};document.head.appendChild(s);});return _slateScripts[u];}",
+                  "function _slateEnsureScripts(reqs){return Promise.all((reqs?[].concat(reqs):[]).map(function(u){return u?_slateLoadScript(u):Promise.resolve();}));}",
                   "function _slateRenderCharts(){if(!window.echarts)return;",
                   "try{echarts.registerTheme('slate',_slateExportTheme());}catch(e){}",
                   "_slateCharts.forEach(function(c){",
-                  "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];var ch=echarts.init(el,'slate');",
+                  "var el=document.getElementById(c[0]);if(!el)return;var opt=c[1];",
                   "var reqs=opt&&opt.registerMap?[].concat(opt.registerMap):[];",
-                  "_slateEnsureMaps(reqs).then(function(){ch.setOption(_slateSansMaps(opt));});",
-                  "window.addEventListener('resize',function(){ch.resize();});});}",
+                  # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
+                  # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
+                  "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
+                  "var ch=echarts.init(el,'slate');ch.setOption(_slateSansMaps(opt));",
+                  "window.addEventListener('resize',function(){ch.resize();});});});}",
                   "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
         end
         if runnable
@@ -1329,6 +1442,16 @@ function _run_script(bundle_url::AbstractString; agent::Bool = true, bundle_name
     const NB = setup()
     let dir = choose_install_dir()
         isempty(dir) || (ENV["SLATE_INSTALL_DIR"] = dir; println("→ Setting up in ", dir))
+        # Keep THIS run's Slate state — prefs/secrets, the publish ledger, local site builds — OFF the
+        # machine-global homes (~/.config, ~/.local/share, ~/.cache under kaimonslate), so a standalone
+        # never reads or clobbers a Kaimon extension's (or another standalone's) secrets/ledger/cache.
+        # A real install keeps it under the notebook's OWN folder (self-contained + portable; delete the
+        # folder → gone); a throwaway ('-') run uses a temp home so it leaves no trace. Because every run
+        # gets its own home, multiple standalone hubs can run at once. An explicit KAIMONSLATE_HOME wins.
+        if get(ENV, "KAIMONSLATE_HOME", "") == "" && get(ENV, "KAIMONSLATE_CONFIG_HOME", "") == ""
+            ENV["KAIMONSLATE_HOME"] = isempty(dir) ? mktempdir(; prefix = "kaimonslate-run-") :
+                                                     joinpath(dir, ".kaimonslate")
+        end
     end
     port = free_port()
     println("Starting the notebook server (first run compiles the environment)…")
@@ -1458,6 +1581,22 @@ function export_gist(nb::LiveNotebook; kwargs...)
     end
 end
 
+# Write the runnable bundle + launchers into `dir` so the page's "Run this live" overlay finds them as
+# siblings: the reproducible `notebook.standalone.jl`, the `run.jl` bootstrap, and the Windows
+# run.ps1/run.bat launchers (run.bat double-click → run.ps1 → run.jl). `base_url` (the page's eventual
+# address) is baked into run.jl's bundle fetch when known; else "" ⇒ run.jl reads the sibling bundle.
+# Shared by the single-page (`_build_site_dir!`) and per-doc (`_build_doc!`) builders.
+function _write_runnable_bundle!(dir::AbstractString, nb::LiveNotebook; base_url::AbstractString = "",
+                                 agent::Bool = true, history::Bool = false)
+    bname = _bundle_filename(nb)
+    write(joinpath(dir, bname), export_standalone(nb; history = history))
+    burl = isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/" * bname
+    write(joinpath(dir, _SITE_RUNJL), _run_script(burl; agent = agent, bundle_name = bname))
+    write(joinpath(dir, _SITE_PS1), _run_ps1())
+    write(joinpath(dir, _SITE_BAT), _run_bat())
+    return dir
+end
+
 # Materialise the site into `dir`: index.html (wired to the og-image sidecar) + og-image.png +
 # .nojekyll, and — when `bundle` — the reproducible `notebook.standalone.jl` + a `run.jl` bootstrap so
 # the page can offer "Run this live". `base_url` (the eventual site URL) is baked into run.jl so it can
@@ -1470,16 +1609,7 @@ function _build_site_dir!(dir::AbstractString, nb::LiveNotebook; bundle::Bool = 
     if img !== nothing
         write(joinpath(dir, "og-image.png"), img); ogpath = "og-image.png"
     end
-    if bundle
-        bname = _bundle_filename(nb)
-        write(joinpath(dir, bname), export_standalone(nb; history = history))
-        # Absolute URL only when we know the site's address; else "" ⇒ run.jl reads the sibling bundle.
-        burl = isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/" * bname
-        write(joinpath(dir, _SITE_RUNJL), _run_script(burl; agent = agent, bundle_name = bname))
-        # Windows launchers: run.bat (double-click) → run.ps1 → run.jl.
-        write(joinpath(dir, _SITE_PS1), _run_ps1())
-        write(joinpath(dir, _SITE_BAT), _run_bat())
-    end
+    bundle && _write_runnable_bundle!(dir, nb; base_url = base_url, agent = agent, history = history)
     _write_page_assets!(dir, nb)   # referenced assets → page-local siblings (this page IS at `dir`)
     write(joinpath(dir, "index.html"),
           export_html(nb; og_image = ogpath, runnable = bundle, history = history, inline_assets = false, kwargs...))
@@ -1575,17 +1705,7 @@ function _build_doc!(docdir::AbstractString, nb::LiveNotebook; slug::AbstractStr
         # Absolute when we know the doc's URL (scrapers prefer it), else page-relative.
         ogpath = isempty(strip(base_url)) ? "og-image.png" : rstrip(String(base_url), '/') * "/og-image.png"
     end
-    if bundle
-        bname = _bundle_filename(nb)
-        write(joinpath(docdir, bname), export_standalone(nb; history = history))
-        # Absolute URL only when we know the doc's address; else "" ⇒ run.jl reads the sibling bundle.
-        burl = isempty(strip(base_url)) ? "" : rstrip(String(base_url), '/') * "/" * bname
-        write(joinpath(docdir, _SITE_RUNJL), _run_script(burl; agent = agent, bundle_name = bname))
-        # Windows launchers: run.bat (double-click) → run.ps1 → run.jl. The page's "Run live" overlay
-        # links to these as siblings, so a blog/published doc must ship them alongside run.jl.
-        write(joinpath(docdir, _SITE_PS1), _run_ps1())
-        write(joinpath(docdir, _SITE_BAT), _run_bat())
-    end
+    bundle && _write_runnable_bundle!(docdir, nb; base_url = base_url, agent = agent, history = history)
     # Referenced assets → this doc's OWN dir (<site>/<slug>/), so `registerMap` etc. use a plain
     # page-relative path with no "../" — resolves wherever the site is mounted.
     _write_page_assets!(docdir, nb)
@@ -1840,6 +1960,18 @@ function _site_index_with_home(home_html::AbstractString, docs)
     return home_html * cards
 end
 
+# (Re)write `dir`'s index.html from the current manifest: a home notebook's template
+# (`.slate-home.html`) with its `docindex` filled if one is present, else the default card index.
+# Shared by every site mutation that regenerates the index. `site_url` seeds the default index's OG tags.
+function _rewrite_index!(dir::AbstractString, manifest; site_url::AbstractString = "")
+    docs = get(manifest, "docs", Any[])
+    htmpl = joinpath(dir, ".slate-home.html")
+    write(joinpath(dir, "index.html"),
+          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) :
+          _render_site_index(manifest; site_url = site_url))
+    return dir
+end
+
 # Assemble/merge `nb` into the static site rooted at `dir` — NO git. A `home` notebook becomes the
 # front-page template (`.slate-home.html`); any other notebook builds its own `<slug>/`. Either way
 # we upsert `slate-site.json` and (re)write the client-side index, then return the bits the caller
@@ -1891,9 +2023,7 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
     end
     write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
     docs = get(manifest, "docs", Any[])
-    write(joinpath(dir, "index.html"),
-          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) :
-          _render_site_index(manifest; site_url = su))
+    _rewrite_index!(dir, manifest; site_url = su)
     write(joinpath(dir, ".nojekyll"), "")                                      # serve verbatim (no Jekyll)
     return (; home = _home_notebook(nb), slug, docUrl, commit_title, docCount = length(docs))
 end
@@ -2003,6 +2133,9 @@ _site_ctype(p) = (e = lowercase(splitext(p)[2]);
     e == ".woff2" ? "font/woff2" :
     e == ".woff" ? "font/woff" :
     e == ".ttf" ? "font/ttf" :
+    e == ".wasm" ? "application/wasm" :             # WebAssembly.instantiateStreaming requires this exact MIME
+    e == ".glb" ? "model/gltf-binary" :
+    e == ".gltf" ? "model/gltf+json" :
     e in (".txt", ".jl", ".map") ? "text/plain; charset=utf-8" :
     "application/octet-stream")
 
@@ -2101,10 +2234,32 @@ function unexport_from_site(name::AbstractString, slug::AbstractString)
     isempty(slg) || rm(joinpath(dir, slg); recursive = true, force = true)   # _slugify → no `..` traversal
     write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
     docs = get(manifest, "docs", Any[])
-    htmpl = joinpath(dir, ".slate-home.html")
-    write(joinpath(dir, "index.html"),
-          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+    _rewrite_index!(dir, manifest)
     return (; removed, docCount = length(docs))
+end
+
+# Apply an `ordering` (iterable of `{slug, section, order}`) onto `docs` in place: set each matched
+# doc's `section` and (when given) its numeric `order`. Shared by the local + published reorder paths.
+function _apply_ordering!(docs, ordering)
+    omap = Dict{String,Any}(String(get(o, "slug", "")) => o for o in ordering)
+    for d in docs
+        d isa AbstractDict || continue
+        o = get(omap, String(get(d, "slug", "")), nothing); o === nothing && continue
+        d["section"] = String(get(o, "section", ""))
+        ordv = get(o, "order", nothing); ordv === nothing || (d["order"] = Float64(ordv))
+    end
+    return docs
+end
+
+# Fetch + parse `repo`'s published `slate-site.json` from gh-pages via the gh CLI. Returns the parsed
+# manifest dict, or `nothing` when gh / the repo / the branch / the file is unreachable or unparseable.
+# (Path + header are interpolated as whole variables so `?`/`:`/spaces reach gh literally.)
+function _fetch_published_manifest(gh, repo::AbstractString)
+    apipath = "repos/$repo/contents/$_SITE_MANIFEST?ref=gh-pages"
+    accept = "Accept: application/vnd.github.raw"
+    raw = try; read(pipeline(`$gh api $apipath -H $accept`; stderr = devnull), String); catch; return nothing; end
+    m = try; JSON.parse(raw); catch; return nothing; end
+    return m isa AbstractDict ? m : nothing
 end
 
 """
@@ -2118,18 +2273,10 @@ function reorder_site!(name::AbstractString, ordering)
     (dir === nothing || !isdir(dir)) && error("site '$name' has no local build")
     manifest = _read_site_manifest(dir)
     docs = get(manifest, "docs", Any[])
-    omap = Dict{String,Any}(String(get(o, "slug", "")) => o for o in ordering)
-    for d in docs
-        d isa AbstractDict || continue
-        o = get(omap, String(get(d, "slug", "")), nothing); o === nothing && continue
-        d["section"] = String(get(o, "section", ""))
-        ordv = get(o, "order", nothing); ordv === nothing || (d["order"] = Float64(ordv))
-    end
+    _apply_ordering!(docs, ordering)
     manifest["docs"] = docs
     write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
-    htmpl = joinpath(dir, ".slate-home.html")
-    write(joinpath(dir, "index.html"),
-          isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+    _rewrite_index!(dir, manifest)
     return (; ok = true, docCount = length(docs))
 end
 
@@ -2139,10 +2286,7 @@ function published_site_docs(repo::AbstractString)
     gh = Sys.which("gh"); gh === nothing && return Any[]
     # Same owner/name guard the other gh-api paths use — keep `repo` from reaching other API routes.
     occursin(r"^[\w.-]+/[\w.-]+$", String(repo)) || return Any[]
-    apipath = "repos/$repo/contents/$_SITE_MANIFEST?ref=gh-pages"
-    accept = "Accept: application/vnd.github.raw"
-    raw = try; read(pipeline(`$gh api $apipath -H $accept`; stderr = devnull), String); catch; return Any[]; end
-    m = try; JSON.parse(raw); catch; return Any[]; end
+    m = _fetch_published_manifest(gh, repo); m === nothing && return Any[]
     return Any[Dict{String,Any}("slug" => String(get(d, "slug", "")),
                                 "title" => String(get(d, "title", get(d, "slug", ""))),
                                 "date" => String(get(d, "date", "")),
@@ -2168,19 +2312,10 @@ function reorder_published_site(repo::AbstractString, ordering)
             error("couldn't clone $repo gh-pages — is the site published?")
         manifest = _read_site_manifest(dir)
         docs = get(manifest, "docs", Any[])
-        omap = Dict{String,Any}(String(get(o, "slug", "")) => o for o in ordering)
-        for d in docs
-            d isa AbstractDict || continue
-            o = get(omap, String(get(d, "slug", "")), nothing); o === nothing && continue
-            d["section"] = String(get(o, "section", ""))
-            ordv = get(o, "order", nothing)
-            ordv === nothing || (d["order"] = Float64(ordv))
-        end
+        _apply_ordering!(docs, ordering)
         manifest["docs"] = docs
         write(joinpath(dir, _SITE_MANIFEST), JSON.json(manifest, 2))
-        htmpl = joinpath(dir, ".slate-home.html")
-        write(joinpath(dir, "index.html"),
-              isfile(htmpl) ? _site_index_with_home(read(htmpl, String), docs) : _render_site_index(manifest))
+        _rewrite_index!(dir, manifest)
         _git_run(dir, `git add -A`)
         okc, logc = _git_run(dir, `git -c user.email=slate@kaimon -c user.name=KaimonSlate commit -q -m "Reorder site"`)
         if !okc
@@ -2238,16 +2373,7 @@ end
 
 # The docs already published to `repo`'s gh-pages (from its manifest), for the preflight/UI. [] if none.
 function _existing_site_docs(gh, repo::AbstractString)
-    # Interpolate the path + header as whole variables so the `?`/`:`/space reach gh literally
-    # (a backtick command won't shell-parse an interpolated string as separate tokens).
-    apipath = "repos/$repo/contents/$_SITE_MANIFEST?ref=gh-pages"
-    accept = "Accept: application/vnd.github.raw"
-    raw = try
-        read(pipeline(`$gh api $apipath -H $accept`; stderr = devnull), String)
-    catch
-        return Dict{String,Any}[]
-    end
-    m = try; JSON.parse(raw); catch; return Dict{String,Any}[]; end
+    m = _fetch_published_manifest(gh, repo); m === nothing && return Dict{String,Any}[]
     return [Dict{String,Any}("slug" => String(get(d, "slug", "")),
                              "title" => String(get(d, "title", get(d, "slug", ""))),
                              "date" => String(get(d, "date", "")))
@@ -2502,18 +2628,15 @@ end
 function _md_table(spec)
     cols = get(spec, "columns", Any[]); rows = get(spec, "rows", Any[])
     opts = get(spec, "opts", Dict{String,Any}())
-    names = String[c isa AbstractDict ? string(get(c, "name", "")) : string(c) for c in cols]
+    names = String[_col_name(c) for c in cols]
     isempty(names) && return ""
-    _calign(c) = c isa AbstractDict ? string(get(c, "align", "left")) : "left"
-    _cfmt(c)   = c isa AbstractDict ? get(c, "format", nothing) : nothing
     _gfmsep(a) = a == "right" ? "---:" : (a == "center" ? ":--:" : ":---")   # GFM alignment row
     io = IOBuffer()
     println(io, "| ", join(names, " | "), " |")
-    println(io, "| ", join((_gfmsep(_calign(c)) for c in cols), " | "), " |")
-    cap = get(opts, "export_rows", nothing)
-    shown = (cap !== nothing && length(rows) > cap) ? view(rows, 1:cap) : rows
+    println(io, "| ", join((_gfmsep(_col_align(c)) for c in cols), " | "), " |")
+    shown = _capped_rows(rows, opts)
     for r in shown
-        cells = String[replace(ReportEngine._format_cell(v, ci <= length(cols) ? _cfmt(cols[ci]) : nothing),
+        cells = String[replace(ReportEngine._format_cell(v, ci <= length(cols) ? _col_format(cols[ci]) : nothing),
                                "|" => "\\|") for (ci, v) in enumerate(r)]
         println(io, "| ", join(cells, " | "), " |")
     end
@@ -2548,6 +2671,15 @@ end
 # References entry it targets), so a key with punctuation still yields a matching pair.
 _cite_anchor(key::AbstractString) = replace(String(key), r"[^A-Za-z0-9_-]+" => "_")
 
+# Bibliography ordering + entry formatting shared by the HTML and Markdown References sections.
+_cited_in_order(ctx) = sort([e for e in ctx.bi if haskey(ctx.numbers, e.key)]; by = e -> ctx.numbers[e.key])  # numeric: citation order
+_bib_alpha(ctx) = sort(ctx.bi; by = e -> lowercase(_author_year_label(e.author, e.year)))                    # author-date: alphabetical
+_ref_numeric_body(e) = join(filter(!isempty, [strip(e.author), strip(e.title), strip(e.year)]), ". ")        # "Author. Title. Year"
+function _ref_author_date_head(e)                                                                            # "Author (Year). Title"
+    yr = isempty(strip(e.year)) ? "" : string(" (", strip(e.year), ")")
+    return isempty(strip(e.author)) ? strip(e.title) : string(strip(e.author), yr, ". ", strip(e.title))
+end
+
 # The References section as HTML with a per-entry `id="ref-<key>"` anchor (the target of the inline
 # citation links). Numeric styles list cited entries in citation order inside an `<ol>` (its native
 # numbering matches the `[N]` labels); author-date lists all entries alphabetically in a `<ul>`.
@@ -2555,21 +2687,17 @@ function _html_references(ctx)
     ctx === nothing && return ""
     io = IOBuffer(); print(io, "<h2>References</h2>")
     if ctx.numeric
-        cited = [e for e in ctx.bi if haskey(ctx.numbers, e.key)]
-        sort!(cited; by = e -> ctx.numbers[e.key])
+        cited = _cited_in_order(ctx)
         isempty(cited) && return ""
         print(io, "<ol class=\"exp-reflist\">")
         for e in cited
-            parts = filter(!isempty, [strip(e.author), strip(e.title), strip(e.year)])
-            print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">", _esc(join(parts, ". ")), ".</li>")
+            print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">", _esc(_ref_numeric_body(e)), ".</li>")
         end
         print(io, "</ol>")
     else
         print(io, "<ul class=\"exp-reflist\">")
-        for e in sort(ctx.bi; by = e -> lowercase(_author_year_label(e.author, e.year)))
-            yr = isempty(strip(e.year)) ? "" : string(" (", strip(e.year), ")")
-            head = isempty(strip(e.author)) ? strip(e.title) : string(strip(e.author), yr, ". ", strip(e.title))
-            print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">", _esc(head), ".</li>")
+        for e in _bib_alpha(ctx)
+            print(io, "<li id=\"ref-", _cite_anchor(e.key), "\">", _esc(_ref_author_date_head(e)), ".</li>")
         end
         print(io, "</ul>")
     end
@@ -2582,17 +2710,12 @@ function _md_references(ctx)
     ctx === nothing && return ""
     io = IOBuffer(); println(io, "## References\n")
     if ctx.numeric
-        cited = [e for e in ctx.bi if haskey(ctx.numbers, e.key)]
-        sort!(cited; by = e -> ctx.numbers[e.key])
-        for e in cited
-            parts = filter(!isempty, [strip(e.author), strip(e.title), strip(e.year)])
-            println(io, ctx.numbers[e.key], ". ", join(parts, ". "), ".")
+        for e in _cited_in_order(ctx)
+            println(io, ctx.numbers[e.key], ". ", _ref_numeric_body(e), ".")
         end
     else
-        for e in sort(ctx.bi; by = e -> lowercase(_author_year_label(e.author, e.year)))
-            yr = isempty(strip(e.year)) ? "" : string(" (", strip(e.year), ")")
-            head = isempty(strip(e.author)) ? strip(e.title) : string(strip(e.author), yr, ". ", strip(e.title))
-            println(io, "- ", head, ".")
+        for e in _bib_alpha(ctx)
+            println(io, "- ", _ref_author_date_head(e), ".")
         end
     end
     return String(take!(io))

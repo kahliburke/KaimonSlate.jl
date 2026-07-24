@@ -329,12 +329,18 @@ end
 
         NS.close_notebook!(hub, id)
         nb2 = hub.notebooks[NS.open_notebook!(hub, nbp; autorun = false)]
-        sleep(0.3)   # self-heal runs in the background @async task — give it a moment
+        # Self-heal runs in a background @async task — POLL for it to finish instead of a fixed sleep,
+        # which can expire before the restore completes on a loaded / coverage-instrumented CI run
+        # (leaving `output === nothing` → a spurious failure).
+        bfind() = nb2.report.cells[findfirst(c -> c.id == "b", nb2.report.cells)]
+        timedwait(10.0; pollint = 0.05) do
+            bc = bfind(); bc.state == KaimonSlate.ReportEngine.FRESH && bc.output !== nothing
+        end
         acell2 = nb2.report.cells[findfirst(c -> c.id == "a", nb2.report.cells)]
-        bcell2 = nb2.report.cells[findfirst(c -> c.id == "b", nb2.report.cells)]
+        bcell2 = bfind()
         @test acell2.state == KaimonSlate.ReportEngine.STALE     # unlocked: untouched, per autorun=false
         @test bcell2.state == KaimonSlate.ReportEngine.FRESH     # locked: self-healed despite autorun=false
-        @test bcell2.output.value_repr == "10"
+        @test bcell2.output !== nothing && bcell2.output.value_repr == "10"
     finally
         NS.stop_hub(hub)
     end
@@ -344,19 +350,29 @@ end
     hub = NS.start_hub(; port = 8862)
     try
         nbp = tempname() * ".jl"
-        write(nbp, "#%% code id=slow\nsleep(1.0); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
+        # `slow` sleeps generously (3s) so the "fast restored WHILE slow is still running" window stays
+        # open long enough to observe reliably on a loaded CI runner — a fixed sleep here was flaky.
+        write(nbp, "#%% code id=slow\nsleep(3.0); slowval = 1\n#%% code id=fast\nfastval = 5 * 2\n")
         nb = hub.notebooks[NS.open_notebook!(hub, nbp)]
         NS._eval!(nb; wait_all = true)
         NS.set_cell_tags!(nb, "fast", ["locked"])
         NS._eval!(nb; wait_all = true)   # runs the surgical force-run queued by locking a FRESH cell
         fastcell() = nb.report.cells[findfirst(c -> c.id == "fast", nb.report.cells)]
+        slowcell() = nb.report.cells[findfirst(c -> c.id == "slow", nb.report.cells)]
         @test any(f -> startswith(String(f), "lockedkey="), fastcell().flags)
 
         NS.restart_kernel!(nb)
-        sleep(0.3)   # self-heal runs before the slow cell's 1s sleep finishes
+        # POLL for the locked cell to restore instead of a fixed sleep, which expires before the restore
+        # completes on a loaded CI run. It self-heals out of document order (a memo-key restore, near
+        # instant), so it lands FRESH well within the slow cell's 3s sleep — proving it did NOT queue
+        # behind `slow`. The poll is bounded far below 3s so `slow` is guaranteed still running.
+        @test timedwait(1.5; pollint = 0.02) do
+            fastcell().state == KaimonSlate.ReportEngine.FRESH
+        end === :ok
         @test fastcell().state == KaimonSlate.ReportEngine.FRESH   # restored already — did NOT wait on `slow`
-        slowcell() = nb.report.cells[findfirst(c -> c.id == "slow", nb.report.cells)]
         @test slowcell().state in (KaimonSlate.ReportEngine.STALE, KaimonSlate.ReportEngine.RUNNING)   # still queued/running
+        # Wait for the slow cell to finish before teardown so `stop_hub` isn't racing a live eval task.
+        timedwait(6.0; pollint = 0.05) do; slowcell().state == KaimonSlate.ReportEngine.FRESH; end
     finally
         NS.stop_hub(hub)
     end

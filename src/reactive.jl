@@ -52,16 +52,23 @@ end
 # __slate_set_bind when the control changes, NOT by recomputing a cell). `tokens` is the notebook's
 # per-control cancel-token dict; a new change flips the prior token (cooperative cancel, seen at the
 # next `pause`) before spawning the fresh task, so a re-trigger restarts cleanly.
-function __on_fire!(tokens, name::Symbol, f, value)
+function __on_fire!(tokens, name::Symbol, f, value, ctx = nothing)
     t = get(tokens, name, nothing)
     t === nothing || (t[] = true)
     tok = Ref(false); tokens[name] = tok
     @async begin
         task_local_storage(:slate_cancel, tok)
+        # Re-establish the notebook's Slate execution context in this spawned task so a handler that STREAMS
+        # (`slate_emit`/`afm_emit`/`slate_effect` via the SEB ctx accessors) works — the fire path runs on a
+        # server task with no `:slate_ctx`, and `@async` doesn't inherit task-local storage. Without this,
+        # streaming from an @onclick/@onchange body is a silent no-op (its `_ctx_field(:emit)` is unset).
+        ctx === nothing || task_local_storage(:slate_ctx, ctx)
         try
             f(value)
         catch e
-            e isa _Cancelled || rethrow()           # cancellation is expected; surface anything else
+            # Runs in an unawaited `@async`, so a rethrow would just vanish — LOG the handler error
+            # (an @onclick/@onchange body that threw) instead. Cancellation is expected and ignored.
+            e isa _Cancelled || @error "Slate: reactive handler '$name' errored" exception = (e, catch_backtrace())
         end
     end
     return nothing

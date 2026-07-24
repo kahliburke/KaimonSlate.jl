@@ -1759,9 +1759,16 @@ end
 
 # Write the manifest for a just-launched worker (flat JSON, built by hand → no JSON dep here; fed over
 # ssh stdin so the braces/quotes never touch argv). Best-effort.
-function _write_worker_manifest!(host, port::Int, fields)
+# A flat single-object JSON string from `key => value` pairs, built by hand (no JSON dep here): string
+# keys+values, each escaped for the hand-rolled encoder (backslash/quote escaped, newlines/CRs flattened
+# to spaces). Fed over ssh stdin so the braces/quotes never touch argv.
+function _flat_json(fields)
     esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => " ", "\r" => " ")
-    body = "{" * join(["\"$(esc(k))\":\"$(esc(v))\"" for (k, v) in fields], ",") * "}"
+    return "{" * join(["\"$(esc(k))\":\"$(esc(v))\"" for (k, v) in fields], ",") * "}"
+end
+
+function _write_worker_manifest!(host, port::Int, fields)
+    body = _flat_json(fields)
     path = "$_REMOTE_WORKER/worker-$port.json"
     try
         run(pipeline(_ssh(host, `$("cat > " * path)`); stdin = IOBuffer(body), stdout = devnull, stderr = devnull))
@@ -1833,23 +1840,28 @@ _xfer_confirm_s() = XFER_CONFIRM_S[] >= 0 ? XFER_CONFIRM_S[] :
 # carry's cost gate reads it; unknown hosts assume a conservative 1 MB/s (biases the FIRST
 # carry toward recompute — a boot window must never stall on an unmeasured link).
 _bw_path(host_ip) = joinpath(_slate_cache_dir(), "bw", replace(String(host_ip), r"[^A-Za-z0-9._-]" => "_") * ".json")
-function _bw_get(host_ip)
-    p = _bw_path(host_ip)
+# The get/note EMA pair shared by the hub-uplink and per-peer bandwidth memories: read the recorded rate
+# from `path_fn(key...)`'s JSON under `json_key` (0 ⇒ unmeasured/unreadable), and stamp a new sample as a
+# 0.7·old + 0.3·new EMA (one anomalous transfer can't own the estimate). Only the path helper + the JSON
+# key differ between the two memories.
+function _bw_get_at(path_fn, json_key, key...)
+    p = path_fn(key...)
     isfile(p) || return 0.0
-    v = tryparse(Float64, _manifest_get(try; read(p, String); catch; return 0.0; end, "up_bps"))
-    something(v, 0.0)
+    something(tryparse(Float64, _manifest_get(try; read(p, String); catch; return 0.0; end, json_key)), 0.0)
 end
-function _bw_note!(host_ip, bps::Float64)
+function _bw_note_at!(path_fn, json_key, bps::Float64, key...)
     bps > 0 || return nothing
-    old = _bw_get(host_ip)
+    old = _bw_get_at(path_fn, json_key, key...)
     ema = old > 0 ? 0.7 * old + 0.3 * bps : bps
     try
-        mkpath(dirname(_bw_path(host_ip)))
-        write(_bw_path(host_ip), "{\"up_bps\":\"$(round(ema; digits = 1))\",\"ts\":\"$(round(Int, time()))\"}")
+        p = path_fn(key...); mkpath(dirname(p))
+        write(p, "{\"$(json_key)\":\"$(round(ema; digits = 1))\",\"ts\":\"$(round(Int, time()))\"}")
     catch
     end
     return nothing
 end
+_bw_get(host_ip) = _bw_get_at(_bw_path, "up_bps", host_ip)
+_bw_note!(host_ip, bps::Float64) = _bw_note_at!(_bw_path, "up_bps", bps, host_ip)
 
 # ── Per-PAIR peer bandwidth — the DIRECT (worker→worker) transfer rate ────────────────────────
 # Distinct from the hub uplink (`_bw_get`): a direct pull never touches the hub's link, so pricing
@@ -1860,21 +1872,8 @@ end
 # The unmeasured default is `_peer_bw_default()` (slate.json `peer_bw_mbps` / KAIMONSLATE_PEER_BW_MBPS; 30 MB/s).
 _peer_bw_path(a, b) = joinpath(_slate_cache_dir(), "bw", "peer",
     replace("$(a)__$(b)", r"[^A-Za-z0-9._-]" => "_") * ".json")
-function _peer_bw_get(a, b)
-    p = _peer_bw_path(a, b); isfile(p) || return 0.0
-    something(tryparse(Float64, _manifest_get(try; read(p, String); catch; return 0.0; end, "bps")), 0.0)
-end
-function _peer_bw_note!(a, b, bps::Float64)
-    bps > 0 || return nothing
-    old = _peer_bw_get(a, b)
-    ema = old > 0 ? 0.7 * old + 0.3 * bps : bps
-    try
-        mkpath(dirname(_peer_bw_path(a, b)))
-        write(_peer_bw_path(a, b), "{\"bps\":\"$(round(ema; digits = 1))\",\"ts\":\"$(round(Int, time()))\"}")
-    catch
-    end
-    return nothing
-end
+_peer_bw_get(a, b) = _bw_get_at(_peer_bw_path, "bps", a, b)
+_peer_bw_note!(a, b, bps::Float64) = _bw_note_at!(_peer_bw_path, "bps", bps, a, b)
 
 # The bandwidth the confirm gate should price a transfer at: the measured PEER rate when it will actually
 # go direct (ask the SAME resolver the transfer will use — its probe verdict is cached, so this is the
@@ -1888,6 +1887,21 @@ function _plan_rate(src_k, dst_k, mode::Symbol)
     host = dst_k.target isa RemoteTarget ? dst_k.target.ssh_host :
            (src_k.target isa RemoteTarget ? src_k.target.ssh_host : "")
     return _bw_get(host)                        # 0 ⇒ the gate applies its own conservative floor
+end
+
+# The REQ data-channel socket every blob op opens: bounded rcv/snd timeout (an unbound recv against a
+# dead channel would hang a caller forever), CURVE client auth when a `server_key` is pinned (:direct;
+# tunnel passes "" — SSH already encrypts), dialled to the worker's blob port. The CALLER owns the socket
+# and closes it (its own try/finally).
+function _open_data_req(kg, Z, host_ip, data_port; server_key::AbstractString = "", timeout_ms::Integer)
+    sock = Z.Socket(Z.REQ)
+    sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
+    if !isempty(server_key)
+        cpub, csec = kg._load_or_create_client_keypair()   # the key the worker allow-lists
+        kg.make_curve_client!(sock, String(server_key), cpub, csec)
+    end
+    Z.connect(sock, "tcp://$host_ip:$data_port")
+    return sock
 end
 
 function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vector{String};
@@ -1938,18 +1952,11 @@ function push_memo_blobs!(host_ip::AbstractString, data_port::Int, srckeys::Vect
         push!(hashes, String(m.captures[1]))
     end
     unique!(hashes)
-    sock = Z.Socket(Z.REQ)
+    # Bounded I/O: this also runs on the notebook-boot path (memo carry), where an unbound
+    # REQ recv against a dead blob channel would hang the open forever. On expiry recv
+    # throws (EAGAIN) → the caller's catch downgrades to "cells recompute instead".
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
     try
-        # Bounded I/O: this also runs on the notebook-boot path (memo carry), where an unbound
-        # REQ recv against a dead blob channel would hang the open forever. On expiry recv
-        # throws (EAGAIN) → the caller's catch downgrades to "cells recompute instead".
-        sock.rcvtimeo = timeout_ms
-        sock.sndtimeo = timeout_ms
-        if !isempty(server_key)
-            cpub, csec = kg._load_or_create_client_keypair()   # the key the worker allow-lists
-            kg.make_curve_client!(sock, String(server_key), cpub, csec)
-        end
-        Z.connect(sock, "tcp://$host_ip:$data_port")
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
         # Framing probe: v2 servers answer "2" and take multipart zero-copy 'p'; a v1 server
         # answers "err: unknown cmd" (single-frame command — safe) and keeps the copy path.
@@ -2044,14 +2051,8 @@ function push_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
     isfile(p) || error("push_blob!: no local blob $hash")
     kg = getfield(_kaimon(), :KaimonGate)
     Z = kg.ZMQ
-    sock = Z.Socket(Z.REQ)
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
     try
-        sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
-        if !isempty(server_key)
-            cpub, csec = kg._load_or_create_client_keypair()
-            kg.make_curve_client!(sock, String(server_key), cpub, csec)
-        end
-        Z.connect(sock, "tcp://$host_ip:$data_port")
         req(frame) = (Z.send(sock, frame); String(copy(Z.recv(sock))))
         v2 = req(UInt8['V']) == "2"
         want = want_hashes(req, [String(hash)])
@@ -2082,14 +2083,8 @@ function pull_blob!(host_ip::AbstractString, data_port::Int, hash::AbstractStrin
     isfile(dest) && return 0                              # dedup: already here — nothing moved
     kg = getfield(_kaimon(), :KaimonGate)
     Z = kg.ZMQ
-    sock = Z.Socket(Z.REQ)
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
     try
-        sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
-        if !isempty(server_key)
-            cpub, csec = kg._load_or_create_client_keypair()
-            kg.make_curve_client!(sock, String(server_key), cpub, csec)
-        end
-        Z.connect(sock, "tcp://$host_ip:$data_port")
         chunk = _blob_chunk()
         mkpath(dirname(dest))
         tmp = tempname(dirname(dest))
@@ -2125,14 +2120,8 @@ end
 function _xfer_ctl_call(host_ip::AbstractString, data_port::Int, msg::AbstractString;
                         server_key::AbstractString = "", timeout_ms::Int = 15_000)
     kg = getfield(_kaimon(), :KaimonGate); Z = kg.ZMQ
-    sock = Z.Socket(Z.REQ)
+    sock = _open_data_req(kg, Z, host_ip, data_port; server_key = server_key, timeout_ms = timeout_ms)
     try
-        sock.rcvtimeo = timeout_ms; sock.sndtimeo = timeout_ms
-        if !isempty(server_key)
-            cpub, csec = kg._load_or_create_client_keypair()
-            kg.make_curve_client!(sock, String(server_key), cpub, csec)
-        end
-        Z.connect(sock, "tcp://$host_ip:$data_port")
         Z.send(sock, String(msg))
         return String(Z.recv(sock))
     finally
@@ -2423,10 +2412,6 @@ end
 #   :auto   — try :direct when viable, transparently fall back to :relay on any failure.
 # :direct is STRICT (errors if not viable / the pull fails) — for tests + observability; :auto is the
 # forgiving mode the region runner uses. Return gains `mode` (the path actually taken).
-_direct_viable(src_k, dst_k) =
-    src_k.target isa RemoteTarget && dst_k.target isa RemoteTarget &&
-    getfield(src_k.target, :transport) === :direct && src_k !== dst_k
-
 # ── Peer route resolution (PEER_TUNNEL_PLAN §3) ───────────────────────────────────────────────
 # How should dst (B) pull the boundary blob from src (A)? Only B can test B→A reachability, so the hub
 # asks B to probe A's blob endpoint (`__slate_probe_peer`) and picks: :direct (CURVE straight to A) when
@@ -2875,12 +2860,11 @@ _attach_path(host, label) =
 
 function _attach_record!(host, label; port::Int, stream_port::Int, transport::Symbol,
                          server_key::AbstractString = "", remote_ip::AbstractString = "")
-    esc(s) = replace(String(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => " ", "\r" => " ")
     fields = ["host" => String(host), "label" => String(label), "port" => string(port),
               "stream_port" => string(stream_port), "transport" => string(transport),
               "server_key" => String(server_key), "remote_ip" => String(remote_ip),
               "ts" => string(round(Int, time()))]
-    body = "{" * join(["\"$(esc(k))\":\"$(esc(v))\"" for (k, v) in fields], ",") * "}"
+    body = _flat_json(fields)
     try
         mkpath(_ATTACH_DIR)
         p = _attach_path(host, label); tmp = p * ".tmp"
@@ -3508,7 +3492,7 @@ function reap_remote_worker(host, port::Int)
     try; _evict_data_tunnels!(host; port = _blob_data_port_cached(host, port)); catch; end   # real port — a relocated tunnel worker's data forward isn't at gate+2
     try; _blob_dport_forget!(host, port); catch; end          # …and drop its discovered-port cache (topology changed)
     try; _attach_clear_port!(host, port); catch; end          # …and its notebook's attach record, so the next open skips a ~9s dial into the corpse
-    try; _release_pool_claim!(host, port); catch; end
+    try; _release_region_claim!(host, port); catch; end       # release the in-flight adoption claim for this port
     # SIGTERM (graceful) then SIGKILL after a short grace. A FROZEN or wedged worker — exactly the kind a
     # supersede-reap targets — never processes SIGTERM (a stopped process queues it; a signal-ignoring one
     # drops it), so the SIGKILL escalation is what actually frees its LISTEN port and RAM. Synchronous, so

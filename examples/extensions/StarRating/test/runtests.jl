@@ -36,3 +36,33 @@ using Test
     stars = only(e for e in extension_manifest().frontend if e.id == id)
     @test stars.js == js && stars.esm == true && stars.kind == "StarRating.Stars"
 end
+
+@testset "StarRating: cell action + editor extension (__slate_frontend seam)" begin
+    empty!(SlateExtensionsBase._FRONTEND)
+
+    # The toolbar action reflects into a CellAction, on code cells, wired to the insert helper.
+    a = to_cell_action(StarRating.InsertStarsButton())
+    @test a isa CellAction
+    @test a.id == "StarRating.InsertStarsButton"               # namespaced by the package, collision-proof
+    @test a.icon == "★" && a.show == "cell.kind === 'code'"
+    @test a.onclick == "window._starRatingInsert(cellId)"
+
+    # The package-global hook registers BOTH the page front-end (editor ext + helper) and the action —
+    # no __init__, no boot cell. `slate_on` is unused by this package (its extras are pure front-end).
+    StarRating.__slate_frontend((ch, f) -> nothing)
+    byid = Dict(e.id => e for e in extension_manifest().frontend)
+
+    tools = byid["StarRating.tools"]
+    @test tools.esm == false
+    @test occursin("slateRegisterEditorExtension", tools.js)   # the editor extension
+    @test occursin("window._starRatingInsert", tools.js)       # the toolbar-action helper it calls
+
+    action = byid["cellaction:StarRating.InsertStarsButton"]
+    @test action.esm == false
+    @test occursin("window.slateRegisterCellAction", action.js)
+
+    # Idempotent — Slate re-runs the hook every drain; ids dedup, nothing stacks.
+    n = length(extension_manifest().frontend)
+    StarRating.__slate_frontend((ch, f) -> nothing)
+    @test length(extension_manifest().frontend) == n
+end

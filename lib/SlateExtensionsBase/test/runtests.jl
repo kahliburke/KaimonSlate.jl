@@ -35,6 +35,20 @@ SlateExtensionsBase.slate_render(m::Meter) = component("Demo.Meter"; value = m.v
 struct Banner; text::String; end
 SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</b>")
 
+# Per-cell toolbar action: a struct that reflects into a CellAction (auto_cell_action), and one that
+# omits a REQUIRED field (`onclick`) so reflection must error — mirrors the Knob/Dial widget pattern.
+Base.@kwdef struct InsertBtn
+    icon::String    = "➕"
+    title::String   = "insert a snippet"
+    show::String    = "cell.kind === 'code'"
+    onclick::String = "window.myExtInsert(cellId)"
+end
+SlateExtensionsBase.to_cell_action(a::InsertBtn) = auto_cell_action(a)
+struct NoClickBtn; icon::String; end   # no `onclick` field → auto_cell_action must throw
+# Only the REQUIRED fields — `title`/`show` are absent, so reflection must default them to "".
+Base.@kwdef struct MinBtn; icon::String = "•"; onclick::String = "f(cellId)"; end
+SlateExtensionsBase.to_cell_action(a::MinBtn) = auto_cell_action(a)
+
 @testset "SlateExtensionsBase" begin
 
     @testset "Widget construction" begin
@@ -263,6 +277,55 @@ SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</
         empty!(SlateExtensionsBase._FRONTEND)
     end
 
+    # Package-vendored asset DIRECTORIES: `provide_assets!(pkg, dir)` declares a front-end asset tree
+    # (echarts-gl, Cesium's workers/assets) Slate serves from disk at `/ext-assets/<pkg>/…` while the
+    # package is loaded, surfacing in `extension_manifest().assets` alongside the front-end scripts.
+    @testset "provide_assets! (vendored asset dirs)" begin
+        empty!(SlateExtensionsBase._ASSETS)                       # isolate
+
+        @test asset_dirs() == Dict{String,String}()              # empty to start
+        # `ext_asset_url` builds the served route; the prefix is SDK-owned (packages don't hardcode it).
+        @test ext_asset_url("GlobeSlate") == "/ext-assets/GlobeSlate/"
+        @test ext_asset_url("GlobeSlate", "echarts-gl.min.js") == "/ext-assets/GlobeSlate/echarts-gl.min.js"
+        @test ext_asset_url("P", "/lead/slash.js") == "/ext-assets/P/lead/slash.js"   # leading slash trimmed
+        base = provide_assets!("GlobeSlate", "assets/echarts-gl")  # a relative dir → absolutised
+        @test base == "/ext-assets/GlobeSlate/"                    # returns the package's base URL
+        d = asset_dirs()
+        @test d["GlobeSlate"] == abspath("assets/echarts-gl")     # stored absolute
+        @test isabspath(d["GlobeSlate"])
+        d["GlobeSlate"] = "tampered"                              # returned dict is a COPY
+        @test asset_dirs()["GlobeSlate"] == abspath("assets/echarts-gl")
+
+        provide_assets!("GlobeSlate", "assets/v2")                # same pkg re-declared → replaces
+        @test asset_dirs()["GlobeSlate"] == abspath("assets/v2")
+        @test length(asset_dirs()) == 1
+
+        # The manifest the hub pulls carries an `assets` list of (; pkg, dir) mirroring the registry.
+        provide_assets!("CesiumSlate", "/abs/cesium")            # already absolute → kept as-is
+        m = extension_manifest()
+        @test hasproperty(m, :assets)
+        byp = Dict(e.pkg => e.dir for e in m.assets)
+        @test byp["GlobeSlate"] == abspath("assets/v2")
+        @test byp["CesiumSlate"] == "/abs/cesium"
+        @test length(m.assets) == 2
+
+        # The MODULE form derives the package key (`pkg_key`) — an author passes `@__MODULE__` instead of a
+        # hand-typed string, so the served key can't drift from the `ext_asset_url` calls. Any package module
+        # works; `SlateExtensionsBase` stands in here (its package root name is "SlateExtensionsBase").
+        @test pkg_key(SlateExtensionsBase) == "SlateExtensionsBase"
+        @test ext_asset_url(SlateExtensionsBase, "x.js") == ext_asset_url("SlateExtensionsBase", "x.js")
+        @test ext_asset_url(SlateExtensionsBase, "x.js") == "/ext-assets/SlateExtensionsBase/x.js"
+        @test provide_assets!(SlateExtensionsBase, "/abs/seb") == "/ext-assets/SlateExtensionsBase/"
+        @test asset_dirs()["SlateExtensionsBase"] == "/abs/seb"
+
+        # The MACRO forms capture the enclosing module implicitly (like `@pkg_dir`) — no `@__MODULE__`, no
+        # key string — so they're identical to the module methods applied to the caller's own module.
+        @test (@ext_asset_url("x.js")) == ext_asset_url(@__MODULE__, "x.js")
+        @test (@provide_assets!("/abs/macro")) == provide_assets!(@__MODULE__, "/abs/macro")
+
+        empty!(SlateExtensionsBase._ASSETS)
+    end
+
     # Lazy front-end: `required_assets(::Type{W})` + `ensure_widget_assets!` — Slate loads a widget's JS the
     # first time it's seen (no __init__), under the type-derived kind, idempotently.
     @testset "required_assets lazy loading" begin
@@ -377,6 +440,62 @@ SlateExtensionsBase.slate_render(b::Banner) = html_fragment("<b>" * b.text * "</
             slate_on_cleanup(() -> 42)
         end
         @test length(sink) == 1 && sink[1]() == 42
+    end
+
+    # Per-cell toolbar actions — the toolbar counterpart of the @bind Widget path.
+    @testset "cell actions" begin
+        empty!(SlateExtensionsBase._FRONTEND)               # isolate from earlier registrations
+        # Direct construction + keyword defaults.
+        a = CellAction("Pkg.Btn"; icon = "★", onclick = "doThing(cellId)")
+        @test (a.id, a.icon, a.title, a.show, a.onclick) == ("Pkg.Btn", "★", "", "", "doThing(cellId)")
+        @test to_cell_action(a) === a                       # identity passthrough
+
+        # id must be a namespaced identifier — no quotes/spaces/brackets that break the DOM emit.
+        @test_throws ArgumentError CellAction("has space"; icon = "x", onclick = "y")
+        @test_throws ArgumentError CellAction("qu'ote"; icon = "x", onclick = "y")
+
+        # auto_cell_action reflects fields; id is kind_for(T) (module-qualified, collision-proof).
+        b = to_cell_action(InsertBtn())
+        @test b.id == "Main.InsertBtn"
+        @test b.icon == "➕" && b.show == "cell.kind === 'code'" && b.onclick == "window.myExtInsert(cellId)"
+
+        # A missing REQUIRED field errors; a non-convertible value errors too.
+        @test_throws ArgumentError auto_cell_action(NoClickBtn("x"))
+        @test_throws ArgumentError to_cell_action(42)
+
+        # register_cell_action! injects a plain (non-esm) frontend script that calls the host seam,
+        # keyed so a re-register replaces rather than stacks.
+        register_cell_action!(a)
+        man = extension_manifest()
+        entry = only(filter(e -> e.id == "cellaction:Pkg.Btn", man.frontend))
+        @test entry.esm == false
+        @test occursin("window.slateRegisterCellAction", entry.js)
+        n_before = length(man.frontend)
+        register_cell_action!(a)                            # idempotent — same id
+        @test length(extension_manifest().frontend) == n_before
+
+        # Reflection edges: a struct without `title`/`show` defaults them to ""; `exclude` drops a field.
+        m = to_cell_action(MinBtn())
+        @test (m.id, m.icon, m.title, m.show, m.onclick) == ("Main.MinBtn", "•", "", "", "f(cellId)")
+        @test auto_cell_action(InsertBtn(); exclude = (:title,)).title == ""   # excluded → back to default ""
+
+        # _js_string is the escaping that keeps injected data from breaking out of the <script> or the JS
+        # string literal — the security-relevant core. Test it directly.
+        jstr = SlateExtensionsBase._js_string
+        @test jstr("hi") == "\"hi\""
+        @test jstr("a\"b") == "\"a\\\"b\""                  # double quote escaped
+        @test jstr("a\\b") == "\"a\\\\b\""                  # backslash escaped
+        @test jstr("a\nb") == "\"a\\nb\""                   # newline → \n
+        @test occursin("\\u003c", jstr("</script>")) && !occursin("<", jstr("</script>"))  # < never literal
+        @test occursin("\\u0000", jstr("\0"))               # control char → \uXXXX
+
+        # Defense-in-depth end to end: a `<` in `icon` / a `"` in `title` is escaped in the emitted JS,
+        # so an action's DATA fields can't break the injected registration script.
+        empty!(SlateExtensionsBase._FRONTEND)
+        register_cell_action!(CellAction("Pkg.Esc"; icon = "<b>", title = "a\"b", onclick = "z()"))
+        ejs = only(extension_manifest().frontend).js
+        @test !occursin("<", ejs) && occursin("\\u003c", ejs)   # icon's `<` escaped, none left literal
+        @test !occursin("a\"b", ejs)                            # title's quote escaped
     end
 
 end

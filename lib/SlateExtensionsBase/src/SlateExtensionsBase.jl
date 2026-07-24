@@ -35,19 +35,23 @@ include("controls.jl")
 include("output.jl")
 include("context.jl")
 include("frontend.jl")
+include("cell_actions.jl")
 include("render.jl")
 include("binary.jl")
 
 # Controls
 export Widget, Choice, Selection, indices, to_widget, auto_widget, kind_for
 export register_kind!, widget_kinds, coerce_bind, reconcile_bind, wrap_value, coerce_value
+# Per-cell toolbar actions
+export CellAction, to_cell_action, auto_cell_action, register_cell_action!
 # Output
 export WebPage, register_widget_js
 # Auto-registered front-end (no boot cell)
 export register_widget!, register_component!, provide_frontend!, @pkg_asset,
        provide_served_asset!, served_asset, slate_live_render, on_live_reset, run_live_resets,
        required_assets, ensure_widget_assets!, ensure_module_frontend!, ensure_module_frontends!,
-       frontend_scripts, extension_manifest
+       frontend_scripts, extension_manifest, provide_assets!, @provide_assets!, @pkg_dir, asset_dirs,
+       ext_asset_url, @ext_asset_url, pkg_key
 # Execution context
 export slate_context, slate_region, slate_regions, slate_side, slate_notebook,
        slate_emit, slate_effect, slate_everywhere, slate_on, slate_off, slate_on_cleanup

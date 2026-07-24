@@ -2,6 +2,7 @@
 # functions, no live hub needed).
 using ReTest
 using KaimonSlate
+import Base64
 const NS = KaimonSlate.NotebookServer
 
 # A minimal manifest doc entry.
@@ -242,6 +243,105 @@ end
     @test occursin("var _slateMaps={}", NS.export_html(plain; inline_assets = false))
 end
 
+# Package-vendored asset dirs (`provide_assets!` → `nb.assets`): a chart whose spec carries
+# `requireScripts` needs a served library (echarts-gl) loaded before render. Live it's `/ext-assets/…`;
+# a static export inlines it as a `data:` URL (standalone) or repoints at a page-local sibling (site),
+# with the whole vendored tree copied out. Mirrors the geo-map path.
+@testset "package-vendored asset dirs in export" begin
+    # A fake vendored package dir: one served JS file (+ a nested one, to prove the whole tree travels).
+    pkgdir = mktempdir()
+    write(joinpath(pkgdir, "echarts-gl.min.js"), "window.__eg=1;")
+    mkpath(joinpath(pkgdir, "sub"))
+    write(joinpath(pkgdir, "sub", "extra.js"), "// extra")
+
+    _gl_spec() = Dict{String,Any}(
+        "requireScripts" => ["/ext-assets/GlobeSlate/echarts-gl.min.js"],
+        "series" => [Dict{String,Any}("type" => "surface", "data" => [[0, 0, 0]])])
+    _gl_nb() = begin
+        nb = _nb_with_echart(_gl_spec(), "gl")
+        nb.assets["GlobeSlate"] = pkgdir
+        nb
+    end
+
+    # Spec-level helpers: resolve the served url to its file (with traversal guard), and rewrite.
+    nb = _gl_nb()
+    @test NS._ext_asset_file(nb, "/ext-assets/GlobeSlate/echarts-gl.min.js") == joinpath(pkgdir, "echarts-gl.min.js")
+    @test NS._ext_asset_file(nb, "/ext-assets/GlobeSlate/../../etc/passwd") === nothing   # escape blocked
+    @test NS._ext_asset_file(nb, "/ext-assets/Unknown/x.js") === nothing                  # unknown package
+    # Whole vendored tree → page-local siblings under ext-assets/<pkg>/.
+    rels = Dict(NS._package_asset_files(nb))
+    @test rels["ext-assets/GlobeSlate/echarts-gl.min.js"] == joinpath(pkgdir, "echarts-gl.min.js")
+    @test rels[joinpath("ext-assets", "GlobeSlate", "sub", "extra.js")] == joinpath(pkgdir, "sub", "extra.js")
+
+    # Site rewrite → page-relative (no leading slash); standalone → inline data: URL of the bytes.
+    site = NS._rewrite_requirescripts!(_gl_spec(), nb; inline = false)
+    @test site["requireScripts"] == ["ext-assets/GlobeSlate/echarts-gl.min.js"]
+    stand = NS._rewrite_requirescripts!(_gl_spec(), nb; inline = true)
+    @test startswith(stand["requireScripts"][1], "data:text/javascript;base64,")
+    @test String(Base64.base64decode(split(stand["requireScripts"][1], ",")[2])) == "window.__eg=1;"
+
+    # Standalone export: the render JS gates on scripts, and the lib rides inline as a data: URL.
+    standalone = NS.export_html(_gl_nb(); inline_assets = true)
+    @test occursin("_slateEnsureScripts", standalone)
+    @test occursin("data:text/javascript;base64,", standalone)
+
+    # Published export: url is page-relative, and the vendored tree is written as page-local siblings.
+    published = NS.export_html(_gl_nb(); inline_assets = false)
+    @test occursin("ext-assets/GlobeSlate/echarts-gl.min.js", published)
+    @test !occursin("/ext-assets/GlobeSlate", published)                 # no leading-slash live route
+    dir = mktempdir()
+    try
+        n = NS._write_page_assets!(dir, _gl_nb())
+        @test n == 2                                                     # both files in the tree
+        @test isfile(joinpath(dir, "ext-assets", "GlobeSlate", "echarts-gl.min.js"))
+        @test isfile(joinpath(dir, "ext-assets", "GlobeSlate", "sub", "extra.js"))
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+
+    # Served-file MIME types a vendored dir may ship: WASM needs the exact `application/wasm` for
+    # `WebAssembly.instantiateStreaming`; 3D model formats for a Cesium-style package.
+    @test NS._site_ctype("m.wasm") == "application/wasm"
+    @test NS._site_ctype("scene.glb") == "model/gltf-binary"
+    @test NS._site_ctype("scene.gltf") == "model/gltf+json"
+    @test NS._site_ctype("worker.js") == "application/javascript; charset=utf-8"
+
+    # `_register_assets!` registry semantics: new pkg → changed; identical dir → unchanged; moved → changed.
+    nb2 = _nb_with_echart(_gl_spec(), "gl2")
+    @test NS._register_assets!(nb2, "GlobeSlate", pkgdir)                 # new → true
+    @test !NS._register_assets!(nb2, "GlobeSlate", pkgdir)               # same → false
+    @test NS._register_assets!(nb2, "GlobeSlate", pkgdir * "-v2")        # moved → true
+    @test !NS._register_assets!(nb2, "", pkgdir)                         # empty pkg → false
+
+    # A front-end ES-module script that dynamic-`import()`s a served SIBLING module (the multi-file
+    # `provide_assets!` case): a static export must repoint the live `/ext-assets/…` route to a `./`-relative
+    # specifier, NOT a bare `ext-assets/…` one — a bare specifier throws in `import()` (it's not `/`, `./`, or
+    # a URL, so the resolver demands an import-map entry) and the vendored lib never loads.
+    fenb = _gl_nb()
+    NS._register_frontend!(fenb, "boot", "import(\"/ext-assets/GlobeSlate/globe-lib/globe-lib.js\").catch(()=>{});", true, "")
+    fhead = NS._frontend_export_head(fenb)
+    @test occursin("import(\"./ext-assets/GlobeSlate/globe-lib/globe-lib.js\")", fhead)   # ./-relative specifier
+    @test !occursin("import(\"ext-assets/GlobeSlate/globe-lib/globe-lib.js\")", fhead)    # never a bare specifier
+
+    # A vendored-asset url in a NON-`requireScripts` spec field — a globe `baseTexture` (a binary image) —
+    # must be repointed too: site → the page-local sibling; standalone → a `data:<mime>;base64,…` url of the
+    # BYTES (mime by extension), so a self-contained page carries the binary. The general rewrite that
+    # covers the whole spec, not just scripts. A non-`/ext-assets/` url (a CDN texture) is left untouched.
+    png = UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]           # PNG magic bytes
+    write(joinpath(pkgdir, "earth.png"), png)
+    tnb = _gl_nb()
+    _texspec() = Dict{String,Any}("globe" => Dict{String,Any}("baseTexture" => "/ext-assets/GlobeSlate/earth.png"),
+                                  "series" => [Dict{String,Any}("type" => "scatter3D")])
+    tsite = NS._rewrite_ext_asset_urls!(_texspec(), tnb; inline = false)
+    @test tsite["globe"]["baseTexture"] == "ext-assets/GlobeSlate/earth.png"          # page-relative sibling (image src, no ./ needed)
+    tstand = NS._rewrite_ext_asset_urls!(_texspec(), tnb; inline = true)
+    @test startswith(tstand["globe"]["baseTexture"], "data:image/png;base64,")       # binary inlined, mime by extension
+    @test Base64.base64decode(split(tstand["globe"]["baseTexture"], ",")[2]) == png   # exact bytes round-trip
+    cdn = NS._rewrite_ext_asset_urls!(Dict{String,Any}("globe" => Dict{String,Any}("baseTexture" => "https://cdn/x.png")), tnb; inline = false)
+    @test cdn["globe"]["baseTexture"] == "https://cdn/x.png"                          # external url untouched
+    @test NS._site_ctype("earth.png") == "image/png"                                  # image mime for the live route
+end
+
 # `save_asset` generated blobs: stored on a cell output, then served live and inlined (standalone) or
 # published as a page-local sibling — the write-side dual of `@asset`.
 @testset "save_asset export + serving" begin
@@ -311,4 +411,39 @@ end
     finally
         rm(dir; recursive = true, force = true)
     end
+end
+
+@testset "Typst slide frag preserves the override Bool (regression)" begin
+    # A slide code-cell frag is `(cell, nothing)`. `_emit_slide_frag!` must forward the themed-render
+    # `override::Bool` to `_emit_output!`, NOT shadow it with the frag's source-override — before the fix,
+    # a code cell on a slide passed `override=nothing` into a `::Bool` kwarg and threw at the call.
+    rep = _RE.parse_report("#%% code id=c\n1 + 1\n")
+    nb = NS.LiveNotebook("slidenb", "/tmp/slidenb.jl", rep, _RE.InProcessKernel(), 1, String[], String[],
+        ReentrantLock(), Channel{String}[], ReentrantLock(), "", false, Dict{String,String}())
+    c = rep.cells[end]
+    @test c.kind != NS.MARKDOWN                       # the else-branch that forwards `override` is a code cell
+    io = IOBuffer(); dir = mktempdir()
+    try
+        # override=true is the themed-render flag; it must reach _emit_output! as a Bool (no throw).
+        @test (NS._emit_slide_frag!(io, dir, "s1f1", nb, (c, nothing); theme = "dark", override = true,
+                                    show_source = false, include_params = false); true)
+    finally
+        rm(dir; recursive = true, force = true)
+    end
+end
+
+@testset "_apply_ordering! sets section/order in place, leaves unmatched" begin
+    docs = Any[Dict{String,Any}("slug" => "a"), Dict{String,Any}("slug" => "b"),
+               Dict{String,Any}("slug" => "keep")]
+    NS._apply_ordering!(docs, [Dict("slug" => "a", "section" => "Intro", "order" => 2),
+                               Dict("slug" => "b", "section" => "", "order" => 1)])
+    @test docs[1]["section"] == "Intro" && docs[1]["order"] == 2.0    # order coerced to Float64
+    @test docs[2]["section"] == "" && docs[2]["order"] == 1.0
+    @test !haskey(docs[3], "section") && !haskey(docs[3], "order")     # unmatched doc untouched
+end
+
+@testset "_split_region_csv strips, drops empties, dedups in order" begin
+    @test NS._split_region_csv("east, west , , east ,north") == ["east", "west", "north"]
+    @test NS._split_region_csv("") == String[]
+    @test NS._split_region_csv("  ,  ") == String[]
 end

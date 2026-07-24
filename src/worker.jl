@@ -348,13 +348,15 @@ end
 # stored wire is minimal (`duration_ms` + value_repr) — its VALUE blobs are what a restore injects,
 # and rich display comes from the preview; a WIRE-ONLY display cell (a self-theming plot) instead
 # reports the real-wire entry from its last interactive run, so its figure ships and restores on
+# Dual-lookup on a possibly-symbol-keyed nested Dict (raw-Dict fast-path can arrive symbol-keyed).
+_g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
+
 # import. NOTE: `cells` MUST be a keyword arg (raw-Dict fast-path
 # caveat — see __slate_macroexpand); nested dicts may arrive symbol-keyed, hence `_g` dual-lookup.
 function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
     out = Dict{String,Any}()
     _MEMO_OK || return out
     root = _memo_dir()
-    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     _strs(x) = String[String(v) for v in (x isa AbstractVector ? x : Any[])]
     for (id, spec) in cells
         spec isa AbstractDict || continue
@@ -691,11 +693,7 @@ function _eval_one(source::String, filename::String, memo_key::String,
         # captured inside run_capture). Log it loudly and return an error wire so the cell shows the
         # failure and the worker keeps running, instead of the exception vanishing into the gate.
         @error "slate eval: capture machinery threw" cell = cid exception = (e, catch_backtrace())
-        return (stdout = "", mime = Tuple{String,Vector{UInt8}}[], echarts = Any[], tables = Any[],
-                binds = NamedTuple[], value_repr = "",
-                exception = "internal capture error: " * sprint(showerror, e),
-                backtrace = nothing, duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
-                animations = Any[])
+        return merge(_interrupted_wire(), (; exception = "internal capture error: " * sprint(showerror, e)))
     end
     if r.exception !== nothing
         @warn "slate eval: cell errored" cell = cid error = first(split(String(r.exception), '\n'))
@@ -900,7 +898,11 @@ end
 and assign the global — via the namespace's injected `__slate_set_bind`. Returns the
 coerced value."
 function __slate_set_bind(name::String, value)
-    return Base.invokelatest(getfield(_NS[], :__slate_set_bind), Symbol(name), value)
+    # invokelatest must span the `getfield` too — the injected `__slate_set_bind` is bound in a newer
+    # world than this method, so reading it eagerly (outside invokelatest) trips Julia 1.12's binding
+    # world-age warning. The closure runs the whole access at the latest world.
+    ns = _NS[]
+    return Base.invokelatest(() -> getfield(ns, :__slate_set_bind)(Symbol(name), value))
 end
 
 # JS→Julia CALL — the `window.slateCall` counterpart to `slate_emit`'s one-way push. Look up the
@@ -1087,16 +1089,20 @@ _peer_pull_timeout_ms() = round(Int, 1000 * something(tryparse(Float64, get(ENV,
 # a failure drops the forward so the next attempt relaunches clean. Env-overridable.
 _peer_pull_stall_ms()   = round(Int, 1000 * something(tryparse(Float64, get(ENV, "KAIMONSLATE_BLOB_PULL_STALL_S", "")), 20.0))
 
+# The CURVE `configure!` hook for a client-side blob pull: presents this worker's client keypair when
+# `server_key` is non-empty (the hub must have authorised it on the peer), or `nothing` for plaintext.
+_curve_client_configure(server_key) = isempty(server_key) ? nothing : function (sock)
+    cpub, csec = KaimonGate._load_or_create_client_keypair()
+    KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
+end
+
 "PULL the content-addressed blob `hash` DIRECTLY from a peer worker's blob server at `ip:port` into THIS
 worker's CAS (the direct-transport data leg). CURVE is used when `server_key` is non-empty — this worker
 presents its client keypair, which the hub must have authorised on the peer (`__slate_authorize_client`).
 Streams, sha-verifies, atomic-lands; an already-present blob returns 0. Returns (; bytes) or (; error)."
 function __slate_pull_blob(ip::String, port::Int, server_key::String, hash::String; on_progress = nothing)
     _MEMO_OK || return (; error = "memo/blob layer disabled on this worker")
-    configure! = isempty(server_key) ? nothing : function (sock)
-        cpub, csec = KaimonGate._load_or_create_client_keypair()
-        KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
-    end
+    configure! = _curve_client_configure(server_key)
     try
         moved = pull_blob_into!(KaimonGate.ZMQ, ip, port, _memo_dir(), hash; configure! = configure!,
                                 chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(),
@@ -1160,50 +1166,82 @@ mutable struct _SshFwd
 end
 const _SSH_FWDS = Dict{Tuple{String,Int},_SshFwd}()
 const _SSH_FWD_LOCK = ReentrantLock()
+# Keys with a launch in flight. The ≤5s forward come-up poll runs OFF `_SSH_FWD_LOCK` (so a pull to
+# another target, the idle-reaper, and shutdown teardown never stall behind it); a second caller for
+# the SAME key waits on the condition rather than launching a duplicate forward.
+const _SSH_FWD_COND = Threads.Condition(_SSH_FWD_LOCK)
+const _SSH_FWD_LAUNCHING = Set{Tuple{String,Int}}()
 _ssh_fwd_idle_s() = something(tryparse(Float64, get(ENV, "KAIMONSLATE_SSH_FWD_IDLE_S", "")), 90.0)
 
 # Get (or launch) the standing forward for (ssh_target → 127.0.0.1:blob_port) and MARK it busy. Returns
 # (; lport, err): lport>0 and empty err on success. The caller MUST `_ssh_fwd_release!` when done.
 function _ensure_ssh_fwd(ssh_target::String, key_path::String, known_hosts::String, blob_port::Int)
     key = (ssh_target, blob_port)
-    lock(_SSH_FWD_LOCK) do
-        f = get(_SSH_FWDS, key, nothing)
-        if f !== nothing
-            if !process_exited(f.proc) && _port_open(f.lport)
-                f.busy = true; f.last = time()             # reuse — the whole point
-                return (; lport = f.lport, err = "")
+    # Phase 1 (locked): reuse a live forward, or CLAIM the launch for this key. A concurrent caller for
+    # the same key blocks on the condition until the claimant publishes, then re-checks (no duplicate launch).
+    claimed = lock(_SSH_FWD_COND) do
+        while true
+            f = get(_SSH_FWDS, key, nothing)
+            if f !== nothing
+                if !process_exited(f.proc) && _port_open(f.lport)
+                    f.busy = true; f.last = time()         # reuse — the whole point
+                    return (; lport = f.lport, err = "")
+                end
+                try; kill(f.proc); catch; end              # dead/stale forward — drop and relaunch
+                delete!(_SSH_FWDS, key)
             end
-            try; kill(f.proc); catch; end                  # dead/stale forward — drop and relaunch
-            delete!(_SSH_FWDS, key)
+            key in _SSH_FWD_LAUNCHING || break             # nobody launching this key → we claim it
+            wait(_SSH_FWD_COND)                            # someone is; wait (releases the lock), then re-check
         end
-        lport = _free_local_port()
-        kp = expanduser(key_path); kh = expanduser(known_hosts)
-        # -L lport → (from A) 127.0.0.1:blob_port (A binds 0.0.0.0, so its loopback works). ExitOnForwardFailure
-        # so a blocked permitopen/auth fails fast instead of hanging; least-privilege key is `permitopen`-scoped.
-        cmd = `ssh -i $kp -o IdentitiesOnly=yes -o UserKnownHostsFile=$kh -o StrictHostKeyChecking=yes
-                  -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ConnectTimeout=10 -o BatchMode=yes
-                  -N -L $(lport):127.0.0.1:$(blob_port) $ssh_target`
-        proc = try
-            run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
-        catch e
-            return (; lport = 0, err = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
-        end
-        up = false
-        for _ in 1:100                                     # wait ≤5s for the forward to accept
-            process_exited(proc) && break
-            if _port_open(lport); up = true; break; end
-            sleep(0.05)
-        end
-        if !up
-            exited = process_exited(proc)
-            try; kill(proc); catch; end
-            return (; lport = 0, err = exited ?
-                "ssh forward exited before coming up (auth / host key / permitopen?)" :
-                "ssh forward did not come up on 127.0.0.1:$lport within 5s")
-        end
-        _SSH_FWDS[key] = _SshFwd(proc, lport, time(), true)
-        return (; lport = lport, err = "")
+        push!(_SSH_FWD_LAUNCHING, key)
+        return nothing                                     # sentinel: WE own the launch, do it off-lock
     end
+    claimed === nothing || return claimed                  # reused an existing forward
+    # Phase 2 (OFF the lock): launch + ≤5s come-up poll — the blocking part that must not hold the pool lock.
+    # Any throw is turned into an error result so Phase 3 always releases the claim + wakes waiters (else the
+    # key would be stuck "launching" forever and same-key callers would wait indefinitely).
+    r = try
+        _launch_ssh_fwd(ssh_target, key_path, known_hosts, blob_port)
+    catch e
+        (; proc = nothing, lport = 0, err = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
+    end
+    # Phase 3 (locked): publish the result, release the claim, wake same-key waiters.
+    return lock(_SSH_FWD_COND) do
+        delete!(_SSH_FWD_LAUNCHING, key)
+        notify(_SSH_FWD_COND; all = true)                  # waiters re-check: reuse the new forward, or relaunch if it failed
+        if r.err != ""
+            r.proc === nothing || (try; kill(r.proc); catch; end)
+            return (; lport = 0, err = r.err)
+        end
+        _SSH_FWDS[key] = _SshFwd(r.proc, r.lport, time(), true)
+        return (; lport = r.lport, err = "")
+    end
+end
+
+# The blocking half of `_ensure_ssh_fwd`, run OFF `_SSH_FWD_LOCK`: launch the `ssh -N -L` forward and
+# wait ≤5s for it to accept. Returns (; proc, lport, err) — err set (and proc killed by the caller) on failure.
+function _launch_ssh_fwd(ssh_target::String, key_path::String, known_hosts::String, blob_port::Int)
+    lport = _free_local_port()
+    kp = expanduser(key_path); kh = expanduser(known_hosts)
+    # -L lport → (from A) 127.0.0.1:blob_port (A binds 0.0.0.0, so its loopback works). ExitOnForwardFailure
+    # so a blocked permitopen/auth fails fast instead of hanging; least-privilege key is `permitopen`-scoped.
+    cmd = `ssh -i $kp -o IdentitiesOnly=yes -o UserKnownHostsFile=$kh -o StrictHostKeyChecking=yes
+              -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ConnectTimeout=10 -o BatchMode=yes
+              -N -L $(lport):127.0.0.1:$(blob_port) $ssh_target`
+    proc = try
+        run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
+    catch e
+        return (; proc = nothing, lport = 0, err = "ssh forward launch failed: " * first(sprint(showerror, e), 140))
+    end
+    for _ in 1:100                                         # wait ≤5s for the forward to accept
+        process_exited(proc) && break
+        _port_open(lport) && return (; proc = proc, lport = lport, err = "")
+        sleep(0.05)
+    end
+    exited = process_exited(proc)
+    return (; proc = proc, lport = lport, err = exited ?
+        "ssh forward exited before coming up (auth / host key / permitopen?)" :
+        "ssh forward did not come up on 127.0.0.1:$lport within 5s")
 end
 
 # Release a forward after a pull. `drop=true` (the pull errored) tears it down unconditionally: a failed
@@ -1261,10 +1299,7 @@ function __slate_pull_blob_ssh(ssh_target::String, key_path::String, known_hosts
     isempty(fw.err) || return (; error = fw.err)
     ok = false
     try
-        configure! = isempty(server_key) ? nothing : function (sock)
-            cpub, csec = KaimonGate._load_or_create_client_keypair()
-            KaimonGate.make_curve_client!(sock, server_key, cpub, csec)
-        end
+        configure! = _curve_client_configure(server_key)
         moved = pull_blob_into!(KaimonGate.ZMQ, "127.0.0.1", fw.lport, _memo_dir(), hash; configure! = configure!,
                                 chunk = _peer_pull_chunk(), timeout_ms = _peer_pull_timeout_ms(),
                                 stall_ms = _peer_pull_stall_ms(), on_progress = on_progress)
@@ -1766,12 +1801,14 @@ page to mirror: `{frontend:[{id, js, esm, kind}]}` (widget renderers + editor ex
 server pulls this once per run drain and injects the scripts into the page. Empty when no such package
 is loaded."
 function __slate_extension_manifest()
-    out = Dict{String,Any}("frontend" => Dict{String,Any}[])
+    out = Dict{String,Any}("frontend" => Dict{String,Any}[], "assets" => Dict{String,Any}[])
     try
         m = inprocess_extension_manifest(_NS[])
         out["frontend"] = Dict{String,Any}[Dict{String,Any}(
             "id" => String(e.id), "js" => String(e.js), "esm" => e.esm, "kind" => String(e.kind))
             for e in m.frontend]
+        out["assets"] = Dict{String,Any}[Dict{String,Any}(
+            "pkg" => String(e.pkg), "dir" => String(e.dir)) for e in m.assets]
     catch
     end
     return out
@@ -1952,10 +1989,12 @@ function _run_revised_inits!(queue, changed)
             pd = item[1]
             id = pd.info.id                                   # Revise PkgData → PkgId
             m = get(Base.loaded_modules, id, nothing)
-            (m isa Module && !(m in seen) && isdefined(m, :__init__)) || continue
+            (m isa Module && !(m in seen) && Base.invokelatest(isdefined, m, :__init__)) || continue
             push!(seen, m)
             try
-                Base.invokelatest(getfield(m, :__init__))
+                # invokelatest spans the `getfield` so reading `__init__` (a binding that may be newer
+                # than this method) stays at the latest world — Julia 1.12 binding world-age discipline.
+                Base.invokelatest(() -> getfield(m, :__init__)())
                 push!(ran, String(nameof(m)))
             catch e
                 @warn "slate hot-reload: package __init__ threw on re-run" pkg = string(m) exception = e
@@ -2097,7 +2136,7 @@ function _prepare_env!()
     @info "slate prepare: precompile complete" pkgs = tr.done secs = round(Int, time() - tr.t0)
     return nothing
 end
-const _PREP_SKIP = ("KaimonGate", "Revise", "ExpressionExplorer")   # infra deps — never notebook-relevant
+const _PREP_SKIP = _INFRA_DEPS   # infra deps — never notebook-relevant (single source: _INFRA_DEPS)
 # "Available without compiling": a sysimage-baked stdlib (Libdl/LinearAlgebra/…) has NO separate cache, so
 # `Base.isprecompiled` reports false for it — treat in-sysimage packages as ready, else a warm env always
 # looks cold. `in_sysimage` is 1.9+; the guard degrades gracefully if it's ever absent.
@@ -2185,7 +2224,6 @@ function __slate_materialize_datadir(; files = Any[])
         isempty(base) && return (; materialized = 0, error = "no project dir")
         joinpath(base, "data")
     end
-    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
     n = 0
     for f in (files isa AbstractVector ? files : Any[])
         f isa AbstractDict || continue
@@ -2720,7 +2758,7 @@ function start(; host::String = "127.0.0.1", port::Int, stream_port::Int,
     warm_deps && Threads.@spawn try
         t0 = time(); n = 0
         names = [nm for nm in sort!(collect(keys(Pkg.project().dependencies)))
-                 if !(nm in ("KaimonGate", "Revise", "ExpressionExplorer"))]
+                 if !(nm in _INFRA_DEPS)]
         total = length(names)
         for name in names
             _WARM_STATUS[] = "warming $(n)/$(total) · $(name)"   # live status → telemetry → the pool UI

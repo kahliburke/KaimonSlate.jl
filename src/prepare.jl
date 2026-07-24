@@ -60,7 +60,7 @@ function prepare_feed!(tr::PrepareTracker, raw::AbstractString)
             tr.phase = "done"
         elseif startswith(rest, "error")
             tr.phase = "error"; tr.err = true
-            m = findfirst(' ', rest); m === nothing || (tr.note = strip(rest[nextind(rest, 1):end]))
+            m = findfirst(' ', rest); m === nothing || (tr.note = strip(rest[nextind(rest, m):end]))
         end
         return true
     end
