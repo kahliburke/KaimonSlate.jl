@@ -65,6 +65,23 @@ Slate MIME iff a non-`nothing` method exists, so Slate's display capture picks i
 """
 slate_render(::Any) = nothing
 
+"""
+    slate_live_render(x) -> Bool
+
+Whether `x` is a SESSION-BOUND (live) output — one whose rendered content lives in a per-browser
+runtime session (e.g. a WGLMakie figure whose scene + interaction handlers run in a live Bonito
+session), rather than being fully self-contained in the captured HTML. Default `false`.
+
+Slate uses this to know a cell's output must be RE-RENDERED for each browser page that connects (a
+reload, a second tab, a reconnect) instead of replaying the stored fragment — the same way a Bonito
+server serves a fresh session per page load. An extension opts a value in by adding a method:
+
+```julia
+SlateExtensionsBase.slate_live_render(::MyLiveThing) = true
+```
+"""
+slate_live_render(::Any) = false
+
 # `showable` == "a slate_render method returns something of this flavour". Cheap enough: capture calls it
 # once per candidate MIME while choosing the richest representation.
 Base.showable(::SlateComponentMIME, x) = (r = slate_render(x); r !== nothing && !(r isa SlateHtml))
