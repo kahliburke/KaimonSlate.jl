@@ -505,6 +505,15 @@ function create_tools(GateTool::Type)
         (NotebookServer.note_external_tool!(nb, _agent_id(), tool, args, res;
             ok = !startswith(lstrip(res), "⛔")); res)
 
+    # ── Progress + cooperative cancellation for slow tools ────────────────────────────────────────
+    # A site deploy is minutes of network work; without these it's a silent block that can also hit the
+    # request timeout (`progress` defers it). All three key off the gate's task-local request id, so
+    # they're no-ops outside a live tool call (tests, direct calls). Reached via `parentmodule(GateTool)`
+    # — the same indirection `_agent_id` uses, so KaimonSlate still declares no KaimonGate dependency.
+    _say(msg) = (try; parentmodule(GateTool).progress(String(msg)); catch; end; nothing)
+    _cancelled() = (try; parentmodule(GateTool).is_cancelled() === true; catch; false; end)
+    _keep(key, val) = (try; parentmodule(GateTool).stash(String(key), val); catch; end; nothing)
+
     """
         open(path::String; threads::String="", autorun::Bool=true) -> String
 
@@ -1429,20 +1438,85 @@ function create_tools(GateTool::Type)
             "❌ $op $name failed: $(get(res, "message", "?"))"
     end
 
-    """
-        publish(notebook; targets="") -> String
+    # ── Site membership: the model publishing actually runs on ────────────────────────────────────
+    # A notebook is built into a SITE's canonical local copy, and the SITE deploys to its targets.
+    # That membership lives in the site build's manifest (`publish_sites_info`), NOT in the doc-level
+    # `assignedTargets` list — which is only the standalone escape hatch. Resolving publishing off
+    # `assignedTargets` is what made a fully-configured site member look like it had no destinations.
+    _member_sites(nb) = [s for s in get(NotebookServer.publish_sites_info(nb), "sites", Any[])
+                         if get(s, "member", false) === true]
 
-    Publish THIS notebook's document to its configured publish TARGETS — re-pushable live
-    destinations: GitHub Pages, S3/Cloudflare R2, rsync, … — recording each result in the publish
-    ledger (what/when/where). `targets` is a comma-separated list of target names as configured in
-    the Publishing manager (`slate.publish_targets`); empty ⇒ the targets already assigned to this
-    document. Publishing only ever touches OUTPUT (a `gh-pages`-style branch / bucket), never a
-    source repo. ARCHIVES (Zenodo DOIs) are a different verb — permanent and immutable, never part
-    of a site push; mint one deliberately with `slate.archive`.
+    _site_targets(s) = String[String(t) for t in get(s, "targets", String[])]
+    _site_dests(s) = isempty(_site_targets(s)) ? "(local-only)" : join(_site_targets(s), ", ")
+    _site_line(s, mark = "") =
+        "  " * mark * String(get(s, "name", "?")) *
+        (get(s, "isHome", false) === true ? "  ★ front page" : "") *
+        "  → " * _site_dests(s) *
+        (isempty(String(get(s, "url", ""))) ? "" : "  " * String(get(s, "url", "")))
+
+    # Per-target result rows shared by the site publish/sync paths.
+    _result_lines(res) = ["$(r["ok"] ? "✅" : "❌") $(r["target"]) — $(r["status"])" *
+                          (isempty(String(get(r, "url", ""))) ? "" : " → " * String(r["url"])) *
+                          (isempty(String(get(r, "doi", ""))) ? "" : " (DOI $(r["doi"]))")
+                          for r in get(res, "results", Any[])]
+
     """
-    function publish_tool(notebook::String; targets::String = "")::String
+        publish(notebook; site="", targets="") -> String
+
+    Publish THIS notebook. Publishing is SITE-FIRST: the notebook is built into a site's canonical
+    local copy, and the SITE deploys to its destination targets (GitHub Pages, Cloudflare Pages,
+    S3/R2, rsync, …), recording each result in the publish ledger. With no arguments this resolves
+    the site(s) this notebook is a member of — read or change that with `slate.site_membership`.
+    Pass `site="name"` to choose when it belongs to several.
+
+    `targets="a,b"` is the ESCAPE HATCH: publish this document straight to named targets, bypassing
+    sites entirely. That ships the notebook as a STANDALONE page — no site index, nav, or siblings —
+    so use it only for a document that isn't part of a site.
+
+    To deploy a site without rebuilding it from this notebook — and to DRY-RUN first — use
+    `slate.site_publish`. Publishing only ever touches OUTPUT (a `gh-pages`-style branch / bucket),
+    never a source repo. ARCHIVES (Zenodo DOIs) are a different verb — permanent and immutable,
+    never part of a site push; mint one deliberately with `slate.archive`.
+    """
+    function publish_tool(notebook::String; site::String = "", targets::String = "")::String
         nb, err = _nb(notebook); nb === nothing && return err
         names = String[String(strip(t)) for t in split(targets, ',') if !isempty(strip(t))]
+        sname = String(strip(site))
+        # ── Site-first path (explicit `targets` opts out) ─────────────────────────────────────────
+        if isempty(names)
+            sites = try
+                _member_sites(nb)
+            catch e
+                return "⛔ Could not read site membership: " * sprint(showerror, e)
+            end
+            if isempty(sname)
+                length(sites) == 1 && (sname = String(get(sites[1], "name", "")))
+                length(sites) > 1 && return "This notebook belongs to several sites — pass site=\"name\":\n" *
+                                            join([_site_line(s) for s in sites], "\n")
+            elseif !any(s -> String(get(s, "name", "")) == sname, sites)
+                # Naming a site it isn't in is a membership change, not a publish — never implicit.
+                return "⛔ This notebook is not a member of site '$sname'. Add it first:\n" *
+                       "  slate.site_membership(notebook, site=\"$sname\", member=\"true\")"
+            end
+        end
+        if !isempty(sname)
+            res = try
+                NotebookServer.publish_to_site!(nb, sname; hub = _hub())
+            catch e
+                return _surfaced(nb, "publish", Dict{String,Any}("site" => sname),
+                                 "⛔ Publish failed: " * sprint(showerror, e))
+            end
+            msg = if get(res, "localOnly", false) === true
+                "✅ Staged into site '$sname' — it has no configured destinations, so nothing deployed.\n" *
+                "   Preview: $(get(res, "url", ""))  ·  add destinations with " *
+                "slate.sites(op=\"set\", name=\"$sname\", targets=\"…\")"
+            else
+                (get(res, "ok", false) === true ? "Published into site '$sname'" :
+                 "Site '$sname' published with errors") * ":\n" * join(_result_lines(res), "\n")
+            end
+            return _surfaced(nb, "publish", Dict{String,Any}("site" => sname), msg)
+        end
+        # ── Standalone document path (explicit targets, or a doc-level assignment) ────────────────
         note = ""
         if isempty(names)
             info = NotebookServer.publish_doc_info(nb)
@@ -1456,7 +1530,11 @@ function create_tools(GateTool::Type)
                 note = "\n(skipped archive target$(length(skipped) == 1 ? "" : "s") $(join(skipped, ", ")) — a DOI deposit is deliberate; use slate.archive)"
             end
         end
-        isempty(names) && return "No publish targets. Configure one with slate.publish_targets(op=\"add\", …), then pass targets=\"name1,name2\" (or assign them in the Publishing manager)." * note
+        isempty(names) && return "Nothing to publish to: this notebook isn't a member of any site, and its " *
+            "document has no targets assigned.\n" *
+            "  • Site (the normal route): slate.site_membership(notebook) to see the sites, then " *
+            "…(notebook, site=\"…\", member=\"true\") and publish again.\n" *
+            "  • Standalone page: slate.publish(notebook, targets=\"name1,name2\")." * note
         res = try
             NotebookServer.run_publish(nb, names)
         catch e
@@ -1642,6 +1720,158 @@ function create_tools(GateTool::Type)
         end
     end
 
+    """
+        site_membership(notebook; site="", member="", home="") -> String
+
+    Read or change which SITES this notebook belongs to — the model `slate.publish` resolves, and the
+    one the notebook's Publish panel edits. With `site` empty this READS: every site, whether this
+    notebook is a member (✓), whether it's that site's front page (★), and where the site deploys.
+
+    `member="true"|"false"` builds this notebook into the site's local copy, or drops it.
+    `home="true"|"false"` sets/clears it as the site's FRONT PAGE — a site has exactly one, so
+    setting it here REPLACES the current front page. Both are LOCAL: nothing deploys until you
+    `slate.publish` the notebook or `slate.site_publish` the site.
+    """
+    function site_membership_tool(notebook::String; site::String = "", member::String = "",
+                                  home::String = "")::String
+        nb, err = _nb(notebook); nb === nothing && return err
+        render(info) = begin
+            sites = get(info, "sites", Any[])
+            isempty(sites) ? "No sites defined yet — create one with slate.sites(op=\"set\", name=\"…\", targets=\"…\")." :
+                "Sites for '$(get(info, "title", ""))':\n" *
+                join([_site_line(s, get(s, "member", false) === true ? "✓ " : "· ") for s in sites], "\n")
+        end
+        sname = String(strip(site))
+        mem, hm = lowercase(strip(member)), lowercase(strip(home))
+        isempty(sname) && return (isempty(mem) && isempty(hm)) ? render(NotebookServer.publish_sites_info(nb)) :
+            "member=/home= need site=\"name\" — call with no arguments to see the sites."
+        info = try
+            NotebookServer.publish_sites_info(nb)
+        catch e
+            return "⛔ Could not read site membership: " * sprint(showerror, e)
+        end
+        any(s -> String(get(s, "name", "")) == sname, get(info, "sites", Any[])) ||
+            return "⛔ No site '$sname'. Sites:\n" * render(info)
+        (isempty(mem) && isempty(hm)) && return render(info)
+        (isempty(mem) || mem in ("true", "false")) || return "member= must be true or false."
+        (isempty(hm) || hm in ("true", "false")) || return "home= must be true or false."
+        acts = String[]
+        try
+            # Membership first: setting the front page also rebuilds into the site, so joining and
+            # starring in one call lands in the right order.
+            isempty(mem) || (info = NotebookServer.publish_set_membership!(nb, sname, mem == "true");
+                             push!(acts, mem == "true" ? "added to '$sname'" : "removed from '$sname'"))
+            isempty(hm) || (info = NotebookServer.publish_set_home!(nb, sname, hm == "true");
+                            push!(acts, hm == "true" ? "set as '$sname' front page" : "cleared as front page"))
+        catch e
+            return _surfaced(nb, "site_membership", Dict{String,Any}("site" => sname),
+                             "⛔ " * sprint(showerror, e))
+        end
+        msg = "✅ " * join(acts, " · ") * " (local — publish to deploy).\n" * render(info)
+        return _surfaced(nb, "site_membership",
+                         Dict{String,Any}("site" => sname, "member" => member, "home" => home), msg)
+    end
+
+    """
+        site_publish(site; dry_run="true", stage="true") -> String
+
+    Deploy a whole SITE: (re)Stage its canonical local build, then Sync that build to every
+    destination target. This is the site-level verb — it ships EVERY member, where `slate.publish`
+    rebuilds one notebook into the site and then syncs.
+
+    `dry_run` DEFAULTS TO "true" and returns the plan only: each member, what would ship, whether its
+    staged copy is stale against its source, and the destinations. Deploying is public and REPLACES
+    the live site, so read the plan and confirm with the user before re-invoking with
+    `dry_run="false"`.
+
+    `stage="true"` (the default) re-exports every member whose notebook is currently OPEN, so live
+    edits ship; a member whose notebook is closed keeps its last build either way. `stage="false"`
+    deploys the already-staged copy verbatim.
+
+    A real deploy STREAMS PROGRESS (per member staged, per destination started/finished) and is
+    CANCELLABLE — but only up to the moment the first byte ships. Cancelling before or just after
+    staging leaves the live site untouched; once the destinations are being written concurrently it
+    runs to completion, since a half-deployed site is worse than a finished one.
+    """
+    function site_publish_tool(site::String; dry_run::String = "true", stage::String = "true")::String
+        name = String(strip(site))
+        isempty(name) && return "site= is required — slate.sites(op=\"list\") shows them."
+        h = _hub()
+        plan = try
+            NotebookServer.sync_site_plan(name, h)
+        catch e
+            return "⛔ Could not plan the sync: " * sprint(showerror, e)
+        end
+        perr = String(get(plan, "error", ""))
+        isempty(perr) || return "⛔ site '$name': $perr"
+        tgts = String[String(t) for t in get(plan, "targets", String[])]
+        members = get(plan, "members", Any[])
+        # Whether a member's notebook is OPEN matters more than it looks: with stage="true" an open
+        # member is RE-EXPORTED from its live state, so a notebook opened but never run would ship a
+        # blank page over a good one. Surface it per row rather than leaving it in the plan data.
+        rows = ["  " * (get(m, "home", false) === true ? "★ " : "· ") * String(get(m, "title", "?")) *
+                "  [" * String(get(m, "action", "?")) * (get(m, "stale", false) === true ? " · STALE" : "") *
+                (get(m, "open", false) === true ? " · will re-export (open)" : "") * "]\n" *
+                "      " * String(get(m, "reason", "")) for m in members]
+        openct = count(m -> get(m, "open", false) === true, members)
+        head = "Site '$name' → " * (isempty(tgts) ? "(no configured destinations)" : join(tgts, ", ")) * "\n" *
+               (isempty(rows) ? "  (no members)" : join(rows, "\n"))
+        lowercase(strip(dry_run)) == "false" ||
+            return head * "\n\nDRY RUN — nothing deployed." *
+                   (openct == 0 ? "" : "\n⚠ $openct member$(openct == 1 ? " is" : "s are") OPEN and will be " *
+                    "RE-EXPORTED from live state when you stage — make sure each has actually been RUN, or a " *
+                    "blank render ships over a good page. Use stage=\"false\" to deploy the staged copy as-is.") *
+                   "\nConfirm with the user, then re-invoke with dry_run=\"false\" to stage and deploy."
+        isempty(tgts) && return head * "\n\n⛔ Nothing to deploy to — add destinations with " *
+                                "slate.sites(op=\"set\", name=\"$name\", targets=\"…\")."
+        # Cancellation is only honoured at the two points where it's SAFE and meaningful: before
+        # staging, and after staging but before the first byte ships. Once `sync_site!` fans out to the
+        # destinations concurrently, aborting would leave some live and some not — worse than finishing.
+        _cancelled() && return "⛔ Cancelled before staging — nothing was staged or deployed."
+        staged = ""
+        if lowercase(strip(stage)) != "false"
+            _say("Staging '$name' — re-exporting open members…")
+            try
+                NotebookServer.stage_site!(name; hub = h,
+                    on_event = (_i, phase, payload) -> (phase === :status || phase === :log) && _say(string(payload)))
+                staged = "Staged — open members re-exported.\n"
+            catch e
+                return "⛔ Stage failed: " * sprint(showerror, e)
+            end
+        end
+        _cancelled() && return "⛔ Cancelled after staging — the local build is updated, but " *
+                               "NOTHING was deployed. The live site is untouched."
+        _say("Deploying to $(length(tgts)) destination$(length(tgts) == 1 ? "" : "s"): $(join(tgts, ", "))…")
+        # `sync_site!` fans each destination into its own `@async` task, and task-local storage is NOT
+        # inherited by a child task — so the gate request id that `progress`/`stash` key off is absent
+        # there and every per-target line silently vanishes (the main-task lines still appear, which is
+        # what made this look like "progress, then nothing until done"). The callback runs ON the
+        # target's task, so re-seed the id there before reporting.
+        rid = get(task_local_storage(), :gate_request_id, nothing)
+        bind_gate!() = (rid === nothing || task_local_storage(:gate_request_id, rid); nothing)
+        done_ct = Threads.Atomic{Int}(0)
+        res = try
+            NotebookServer.sync_site!(name; hub = h, on_event = (i, phase, payload) -> begin
+                bind_gate!()
+                tn = (1 <= i <= length(tgts)) ? tgts[i] : "target $i"
+                phase === :start && _say("Starting $tn …")
+                if phase === :done
+                    ok = try; payload.ok === true; catch; false; end
+                    st = try; String(payload.status); catch; ""; end
+                    _keep(tn, (; ok = ok, status = st))   # per-target outcome, visible via check_eval
+                    n = Threads.atomic_add!(done_ct, 1) + 1
+                    _say("$(ok ? "✓" : "✗") $tn $(ok ? "complete" : "FAILED")" *
+                         (isempty(st) || st == "ok" ? "" : " — $st") * "  ($n/$(length(tgts)))")
+                end
+            end)
+        catch e
+            return "⛔ Sync failed: " * sprint(showerror, e)
+        end
+        _say("Done — $name deployed to $(join(tgts, ", ")).")
+        return staged * (get(res, "ok", false) === true ? "Synced site '$name'" :
+                         "Site '$name' synced with errors") * ":\n" * join(_result_lines(res), "\n")
+    end
+
     # Auto-start the hub at extension init so the server is always up on its port
     # (browse the index, open notebooks over HTTP) — no longer gated on the first
     # `slate.open` MCP call. Reap any orphaned workers from a prior crashed instance
@@ -1702,6 +1932,8 @@ function create_tools(GateTool::Type)
         GateTool("publish_history", publish_history_tool),
         GateTool("publish_targets", publish_targets_tool),
         GateTool("sites", sites_tool),
+        GateTool("site_membership", site_membership_tool),
+        GateTool("site_publish", site_publish_tool),
     ]
 end
 

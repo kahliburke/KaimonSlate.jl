@@ -143,7 +143,16 @@ front page instantly. Force a backend with `KAIMONSLATE_LEDGER_BACKEND=local|gis
 
 Under [Kaimon](agent.md), the agent can drive publishing through MCP tools:
 
-- **`slate_publish`** — publish a notebook to one or more targets.
+Publishing is **site-first** here exactly as it is in the UI: a notebook is built into a site's
+canonical local copy, and the site deploys to its destinations.
+
+- **`slate_publish`** — publish a notebook into the site it belongs to (`site=` picks one when it
+  belongs to several). `targets=` is the escape hatch for a standalone document that isn't in a site.
+- **`slate_site_membership`** — read which sites a notebook belongs to, join or leave one, and
+  set/clear it as the site's front page.
+- **`slate_site_publish`** — stage and deploy a whole site. Defaults to a **dry run** that returns
+  the plan (every member, what ships, what's stale); pass `dry_run="false"` to actually deploy.
+- **`slate_sites`** — list, create/update, or delete site definitions and their targets.
 - **`slate_publish_targets`** — list, add/update, or delete targets.
 - **`slate_publish_history`** — the publish history / ledger view.
 

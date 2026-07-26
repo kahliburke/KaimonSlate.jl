@@ -213,11 +213,13 @@ notebook can't be rebuilt without its kernel). Deploys NOWHERE — the staged co
 viewable at `/sites/<slug>/`. Sync later just COPIES this artifact to the destinations. Leaves the site
 "unsynced" (the sync stamp is untouched), since nothing was deployed.
 """
-function stage_site!(name::AbstractString; hub = nothing)
+function stage_site!(name::AbstractString; hub = nothing, on_event = nothing)
     dir = _site_dir(String(name))
     (dir === nothing || !isdir(dir)) &&
         error("site '$name' has no local build yet — add a notebook to it first")
-    hub === nothing || _resync_live_members!(dir, String(name), hub)
+    # `_resync_live_members!` already emits a `:status`/`:log` line per member — forward the sink so a
+    # caller (the SSE stream, or a tool reporting gate progress) can name what's being re-exported.
+    hub === nothing || _resync_live_members!(dir, String(name), hub; on_event = on_event)
     refresh_site_chrome!(dir)   # index + inject nav/footer into existing sub-pages (no notebook needed)
     return Dict{String,Any}("ok" => true, "url" => "/sites/" * _slugify(String(name)) * "/", "buildDir" => dir)
 end
@@ -383,9 +385,12 @@ function publish_sites_info(nb::LiveNotebook)
     path = abspath(nb.path)
     sites = Any[]
     for s in values(led.sites)
-        member = any(d -> _doc_entry_is(nb, d), site_docs(s.name))
         fp = site_frontpage(s.name)
         isHome = fp.home && !isempty(fp.homePath) && abspath(fp.homePath) == path
+        # The front page is a MEMBER too — it lives in the manifest's `homeDoc`, which `site_docs`
+        # (docs[] only) never sees. Without this a site's home notebook reported as belonging to
+        # nothing, so publishing couldn't resolve a site for it.
+        member = isHome || any(d -> _doc_entry_is(nb, d), site_docs(s.name))
         push!(sites, Dict{String,Any}("name" => s.name,
             "title" => isempty(strip(s.title)) ? s.name : s.title,
             "targets" => copy(s.targets), "member" => member, "isHome" => isHome,
