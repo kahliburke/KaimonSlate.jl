@@ -475,19 +475,8 @@ function _memo_restore(cellkey::String; unread::Vector{String} = String[],
     return wire
 end
 
-# The leaf name of a call's callee: `set_theme!` → :set_theme!, `CairoMakie.set_theme!` → :set_theme!.
-_call_leaf(f) = f isa Symbol ? f :
-                (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode) ?
-                    f.args[2].value : nothing
-# Collect every theme-setter CALL expression (`_THEME_CALL_NAMES` — see graphics_detect.jl)
-# anywhere in `ex` (they're typically nested inside a plot cell's `let … end`, so a top-level
-# scan misses them).
-function _collect_theme_calls!(acc::Vector{Any}, ex)
-    ex isa Expr || return acc
-    (ex.head === :call && _call_leaf(ex.args[1]) in _THEME_CALL_NAMES) && push!(acc, ex)
-    for a in ex.args; _collect_theme_calls!(acc, a); end
-    return acc
-end
+# `_call_leaf` / `_collect_theme_calls!` (the theme-setter AST scan) come from graphics_detect.jl,
+# included via parsched.jl above — shared with the engine's EVERYWHERE-prime replay.
 
 # Re-execute a restored cell's cheap GLOBAL side effects — its top-level `using`/`import` statements
 # and any theme-setter call (`_THEME_CALL_NAMES`) — so the process state matches what the skipped run

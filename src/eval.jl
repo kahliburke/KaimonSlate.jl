@@ -607,6 +607,29 @@ function _is_pure_using(src::AbstractString)
     return seen
 end
 
+# The SCOPE-ESTABLISHING part of a cell's source: its top-level `using`/`import` statements plus any
+# theme-setter call (`_THEME_CALL_NAMES`). This is what a cell classified EVERYWHERE actually needs to
+# re-establish on another namespace — the text counterpart of the worker's `_replay_scaffold!`, which
+# replays the same two effects after a memo restore. Returns `""` when there is nothing to replay.
+#
+# Replaying the WHOLE source instead is wrong for a MIXED cell — one that opens with `using Plotting`
+# and then plots from an upstream cell's data. Its compute reads names the target namespace doesn't
+# have (they live in a cell that is not itself EVERYWHERE), so the replay throws on a binding the
+# scaffold never needed; and even where it succeeds it re-runs expensive non-effect work per side.
+function _scaffold_replay_source(src::AbstractString)
+    top = try; Meta.parseall(String(src)); catch; return ""; end
+    stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
+    out = String[]
+    for s in stmts
+        (s isa Expr && s.head in (:using, :import)) || continue
+        push!(out, string(s))
+    end
+    for call in _collect_theme_calls!(Any[], top)
+        push!(out, string(call))
+    end
+    return join(out, "\n")
+end
+
 # A total-ish cache key: this cell's source + the sources of its transitive upstream cells + the
 # values of any @bind variables in the read-closure. The worker folds in the Revise'd `src/` digest
 # and the resolved Manifest, completing the key so a src/dep/package change invalidates the entry.
