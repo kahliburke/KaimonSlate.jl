@@ -996,12 +996,18 @@ function create_tools(GateTool::Type)
     """
         api() -> String
 
-    The Kaimon Slate notebook API reference: the Slate-specific helpers injected into every cell —
-    `echart` (custom ECharts DSL), `@bind` widgets, `animate`/`playhead`, `reactive`/`@onclick`/
-    `@onchange` for live updates, `slate_table`, `slate_progress`, and cell tags. READ THIS before
-    writing cells that plot or add interactivity — these names are NOT in package docs, and a
-    `search_docs` for "chart"/"series" returns CairoMakie, which will lead you astray. Call with no
-    `topic` for the full reference, or a topic ("animate", "widgets", "@bind") to drill into one area.
+    The Kaimon Slate notebook API: the Slate-specific helpers injected into every cell — `echart` (a
+    custom ECharts DSL), `@bind` widgets, `animate`/`playhead`, `reactive`/`@onclick` for live
+    updates, `slate_table`, web cells + the JS bridge, `@asset`, and cell tags. CALL THIS BEFORE
+    writing a cell that plots, binds a control, animates, or touches the front end — these names are
+    NOT in package docs, and a `search_docs` for "chart"/"series" returns Makie, which will lead you
+    astray.
+
+    - no `topic` → the INDEX: one line per helper. Cheap — start here.
+    - `topic="echart"` → that helper in full; `topic="echart @bind slate_table"` → all three in ONE call.
+    - `topic="Widgets"` → a whole category; `topic="all"` → every entry.
+    - a concept you can't name ("log axis", "clickable row") routes to the right entry too.
+
     These helpers are also indexed for `search_docs` under module "Slate".
     """
     api(topic::String = "")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
