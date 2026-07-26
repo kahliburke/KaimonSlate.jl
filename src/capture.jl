@@ -726,8 +726,12 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # `_LIVE_OUTPUTS`). Store the SOURCE, not the value: re-`show`ing the SAME `Figure` accumulates WGLMakie
     # screens and the second render's scene won't init (permanent spinner); re-running the source builds a
     # clean fresh figure every time. Clear the slot when the cell errors, is quiet, or stops being live.
-    if err === nothing && value !== nothing && !quiet &&
-       (try Base.invokelatest(SlateExtensionsBase.slate_live_render, value) catch; false end) === true
+    # `live` also RIDES THE WIRE (→ `CellOutput.live`): it is the one authoritative, extension-agnostic
+    # answer to "is this output session-bound?", so no layer downstream has to sniff the rendered HTML for
+    # an extension's marker class to find out.
+    live = err === nothing && value !== nothing && !quiet &&
+           (try Base.invokelatest(SlateExtensionsBase.slate_live_render, value) catch; false end) === true
+    if live
         _LIVE_OUTPUTS[cid] = (source = String(source), filename = String(filename))
     else
         delete!(_LIVE_OUTPUTS, cid)
@@ -736,7 +740,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     return (stdout = stdout_str, mime = chunks, echarts = echarts, tables = tables,
             binds = binds, value_repr = value_repr, exception = exc, backtrace = bt,
             duration_ms = dur_ms, trace = trace, stderr = stderr_str, overflow = overflow,
-            animations = animations, effects = effects, assets = assets)
+            animations = animations, effects = effects, assets = assets, live = live)
 end
 
 # Re-render every retained live output (see `_LIVE_OUTPUTS`) fresh, for a browser that just (re)connected —

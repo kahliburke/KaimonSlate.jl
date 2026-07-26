@@ -233,8 +233,43 @@ clean. Deduped by identity — safe to call every time an extension is enabled.
 """
 on_live_reset(f) = (f in _LIVE_RESETS || push!(_LIVE_RESETS, f); nothing)
 
+# Run every hook in `hooks`, isolating them from each other so one bad extension can't stop the rest — but
+# SURFACING failures. A silently-swallowed lifecycle hook is a debugging trap: the page then misbehaves in
+# a way that looks like a transport or rendering bug, with nothing anywhere saying the reset never ran.
+function _run_hooks(hooks, what::AbstractString)
+    for f in hooks
+        try
+            Base.invokelatest(f)
+        catch e
+            @error "SlateExtensionsBase: $what hook failed" hook = f exception = (e, catch_backtrace())
+        end
+    end
+    return nothing
+end
+
 "Run every [`on_live_reset`](@ref) callback (isolated). Called by the worker before re-rendering live outputs."
-run_live_resets() = (for f in _LIVE_RESETS; try; Base.invokelatest(f); catch; end; end; nothing)
+run_live_resets() = _run_hooks(_LIVE_RESETS, "on_live_reset")
+
+# Callbacks run when the WORKER this extension was set up in has been replaced — a restart, or a rebuild
+# into a fresh namespace. Distinct from `on_live_reset` (a new browser PAGE attached to the same worker):
+# here the page is unchanged and the Julia side underneath it is new.
+const _WORKER_RESETS = Vector{Any}()
+
+"""
+    on_worker_reset(f)
+
+Register a zero-arg callback `f` run when this notebook's worker has been replaced — restarted, or its
+namespace rebuilt. Anything the extension established in the OLD worker is gone: sessions it owned, handlers
+it registered in the namespace, resources tied to that process. Use it to rebuild or drop that state.
+
+This is the Julia half; its browser counterpart is `slateOnWorkerReset` (see assets/js/panels.js), for state
+the extension put in the PAGE on the old worker's behalf — which only the page can discard, since the
+process that owned it is the one that died. Deduped by identity, so re-registering on enable is harmless.
+"""
+on_worker_reset(f) = (f in _WORKER_RESETS || push!(_WORKER_RESETS, f); nothing)
+
+"Run every [`on_worker_reset`](@ref) callback (isolated). Called by Slate when the namespace is re-established."
+run_worker_resets() = _run_hooks(_WORKER_RESETS, "on_worker_reset")
 
 """
     @pkg_asset(path) -> String

@@ -413,6 +413,29 @@ window.onCellStream = function (channel, data) {
   if (fn) { try { fn(data); } catch (e) { console.error('slateOnStream handler failed:', channel, e); } }
 };
 
+// ── Worker-reset notification ────────────────────────────────────────────────
+// The worker underneath this page was replaced (restart / fresh namespace). Anything the page holds ON
+// BEHALF OF that worker is now orphaned — a live renderer's sessions and their stream subscriptions point
+// at channels whose receiver died with the process, so every message the page sends there fails and the
+// renderer sits there waiting. Only the page can drop that state, and only the server knows the
+// generation changed, so it says so (`workerreset:`) and whoever set the state up tears it down here.
+// Handlers run ONCE per reset and are then dropped: they belong to the worker generation that registered
+// them, so a re-registration by the new generation is what re-arms this.
+//
+// GENERATION-GATED. A page that booted against generation N holds nothing from any earlier worker, so a
+// reset for N or lower is not its business — and acting on it is actively destructive: the handlers tear
+// down sessions this page just established (Bonito's `close_session` removes their DOM outright, so the
+// figure vanishes rather than merely stalling). Only a reset NEWER than our boot generation applies.
+window.__slateWorkerResetHandlers = window.__slateWorkerResetHandlers || [];
+window.slateOnWorkerReset = function (fn) { window.__slateWorkerResetHandlers.push(fn); };
+window.onWorkerReset = function (gen) {
+  const boot = (window.__slateState || {}).workerGen;
+  if (typeof boot === 'number' && typeof gen === 'number' && gen <= boot) return;   // predates this page
+  const fns = window.__slateWorkerResetHandlers;
+  window.__slateWorkerResetHandlers = [];
+  fns.forEach(fn => { try { fn(); } catch (e) { console.error('slateOnWorkerReset handler failed:', e); } });
+};
+
 // Instant push: the server streams the version over SSE and bumps it only on
 // external (file) changes, so the browser's own edits never trigger a re-render.
 function connectLive() {
@@ -438,6 +461,7 @@ function connectLive() {
     if (e.data.startsWith('mesh-build:')) { try { window.onMeshBuild && window.onMeshBuild(JSON.parse(e.data.slice(11))); } catch (_) {} return; }   // arming the mesh: per-pair i/n keygen/grant progress → consent popup
     if (e.data.startsWith('bringup:')) { window.onBringup && window.onBringup(e.data.slice(8)); return; }               // worker bring-up: raw instantiate/precompile line → banner build log
     if (e.data.startsWith('prepare:')) { window.onPrepare && window.onPrepare(e.data.slice(8)); return; }               // structured env-prep status → "Preparing packages" banner (phase/k-N/pkg)
+    if (e.data.startsWith('workerreset:')) { window.onWorkerReset && window.onWorkerReset(parseInt(e.data.slice(12), 10)); return; }   // worker replaced → drop page state held for the old one (generation-gated)
     if (e.data.startsWith('scratchclear:')) { window.onScratchClear && window.onScratchClear(); return; }               // scratchpad emptied
     if (e.data.startsWith('scratch:')) { try { window.onScratchCell && window.onScratchCell(JSON.parse(e.data.slice(8))); } catch (_) {} return; }   // a slate.eval scratch cell (running/done)
     if (e.data === 'refresh') { updateStates(await api('GET', '/api/state')); return; }   // (fallback) full pull

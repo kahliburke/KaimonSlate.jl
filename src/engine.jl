@@ -66,6 +66,11 @@ struct CellOutput
                                   # `slate_effect(...)` call; drives everywhere classification + the durable effect store
     assets::Vector{Any}           # `save_asset(…)` payloads (name, mime, bytes); blob'd server-side + inlined/
                                   # published in a static export — the write-side dual of `@asset` (see assets.jl)
+    live::Bool                    # SESSION-BOUND output: the captured HTML is a view onto state that lives in the
+                                  # WORKER (a scene, a socket), not a self-contained artifact, so it only works for
+                                  # the browser session it was rendered for. Set when the value opted in via
+                                  # `SlateExtensionsBase.slate_live_render` (see capture.jl `_LIVE_OUTPUTS`).
+                                  # Extension-agnostic: core never inspects the HTML to decide this.
 end
 # Back-compat constructors (callers that omit trailing fields — trace/stderr through assets — get empty defaults).
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms) =
@@ -83,6 +88,11 @@ CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backt
 # …, effects (no assets) — the wire reconstruction shape before generated assets existed.
 CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects) =
     CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, Any[])
+# …, assets (no `live`) — the shape before session-bound outputs were modelled. Every shorter rung above
+# delegates to THIS one, so a single default keeps the whole ladder working: an output is not live unless
+# the capture explicitly says so.
+CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, assets) =
+    CellOutput(stdout, display, echarts, tables, binds, value_repr, exception, backtrace, duration_ms, trace, stderr, overflow, animations, memo, memo_why, effects, assets, false)
 
 """
 A single report cell. `id` is the persistent identity (survives edits/moves);

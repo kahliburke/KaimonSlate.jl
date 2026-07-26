@@ -666,7 +666,7 @@ function patchCells(cells) {
       const badge = cell.querySelector('.badge'); if (badge) badge.textContent = _conflicted ? 'edited' : nc.state;
       if (!_conflicted) {
         if (nc.kind === 'md') { const md = cell.querySelector('.md'); if (md) { _swapOutput(md, mdHtml(nc)); typeset(md); } }
-        else { const out = cell.querySelector('.output'); if (out) { _swapOutput(out, nc.output); typeset(out); } }
+        else { const out = cell.querySelector('.output'); if (out) { _swapOutput(out, nc.output, nc.live); typeset(out); } }
       }
     }
     if (!_conflicted) { renderCharts(nc); renderTables(nc); syncControlValues({ cells: [nc] }); }
@@ -961,7 +961,15 @@ function setState(id, s) { window.slateStore && window.slateStore.setLiveState(i
 // (notably a base64 <img>, which has no size until it decodes) lays out. Without
 // this the output collapses to ~0 height mid-swap; Safari then clamps scrollTop to
 // the now-shorter page and the figure scrolls out of view (the P2 scroll bug).
-function _swapOutput(out, html) {
+// `live` is the cell's session-boundness marker ('render' | 'placeholder' | '') — see `_live_output_placeholder`.
+function _swapOutput(out, html, live) {
+  // A SESSION-BOUND output the page has already booted outranks the placeholder that stands in for it.
+  // The placeholder is right for a fresh page (the stored HTML belongs to a dead session), but it rides
+  // in every full-state payload — and every mutating API call answers with full state — so without this
+  // the next run of ANY cell blanks a working live output back to "connecting…", permanently: nothing
+  // re-renders it until the next SSE connect. Keep the mounted one (and its `__slateOut`, so the matching
+  // `celldone` re-render stays a no-op). Extension-agnostic: no markup is inspected, only the flag.
+  if (live === 'placeholder' && out.__slateLive) return;
   // A single run swaps the output TWICE — the `celldone:` push (patchCells) AND the run's HTTP-response
   // render (the Preact <Cell> effect) both carry the SAME output. Re-running its <script> twice re-boots a
   // figure needlessly and, for a side-effecting web-cell fragment, fires its effect twice (a double
@@ -969,6 +977,7 @@ function _swapOutput(out, html) {
   // never needs to re-render or re-run. A genuinely new output (or a real change on re-run) still swaps.
   if (out.__slateOut === html) return;
   out.__slateOut = html;
+  out.__slateLive = live === 'render';
   out.style.minHeight = out.offsetHeight + 'px';
   out.innerHTML = html;
   runScripts(out);   // <script> set via innerHTML is inert — re-create so figures boot

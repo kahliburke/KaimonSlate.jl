@@ -371,7 +371,7 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
     // presentation; the reconcile flow re-applies the incoming result if you pick "use the change".
     const _conflicted = window.editors[c.id] && !_eq(window.edText(c.id), c.source);
     const out = el.querySelector('.output');
-    if (!_conflicted && out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
+    if (!_conflicted && out && c.output !== last.current.out) { last.current.out = c.output; window._swapOutput(out, c.output, c.live); window.typesetVisible(out, c.id); window._clampOutputs && window._clampOutputs(out); }
     window._applyErrorLine && window._applyErrorLine(c);   // tint the offending line
     window._applyMissingPkg && window._applyMissingPkg(c);   // "Package X not found" → one-click install banner
     // Only re-apply setOption / refill rows when the chart/table DATA actually changed — reference

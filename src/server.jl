@@ -679,6 +679,18 @@ const _RUNNER_STALE_CONFIRMATIONS = 3                 # consecutive 5s sweeps be
 const _MAIN_GEN = Dict{String,UInt}()
 const _MAIN_GEN_LOCK = ReentrantLock()
 
+# A small MONOTONIC counter of how many times this notebook's worker has been replaced. `_MAIN_GEN` holds an
+# opaque worker key (good for "did it change?", useless for ordering), and the browser needs ordering: a page
+# must react to a worker reset only if it happened AFTER the page loaded. A page that boots fresh against
+# generation N has nothing belonging to any earlier worker, so a `workerreset:` for N (or lower) is not its
+# business — and acting on it would tear down the sessions it just established (Bonito's `close_session` even
+# removes their DOM). The page learns its boot generation from `state_json` (`workerGen`) and compares.
+const _WORKER_GEN = Dict{String,Int}()
+worker_generation(nb::LiveNotebook) = lock(_MAIN_GEN_LOCK) do; get(_WORKER_GEN, nb.id, 0); end
+_bump_worker_generation!(nb::LiveNotebook) = lock(_MAIN_GEN_LOCK) do
+    _WORKER_GEN[nb.id] = get(_WORKER_GEN, nb.id, 0) + 1
+end
+
 # Per-notebook mutex serialising WORKER EVALUATION: the runner's per-cell / per-batch steps take
 # it, and so does any out-of-band eval (slate.eval scratch pokes). Without it a scratch eval can
 # land on the worker CONCURRENTLY with a parallel cell batch and trip a `ConcurrencyViolationError`
@@ -2466,6 +2478,20 @@ function _reestablish_fresh_namespace!(nb::LiveNotebook)
     try; ReportEngine.prepare!(nb.kernel, nb.report); catch; return nothing; end   # up (bumps ns_gen if fresh)
     wk = _worker_key(nb.kernel)
     lock(_MAIN_GEN_LOCK) do; get(_MAIN_GEN, nb.id, UInt(0)); end == wk && return nothing   # reattach → unchanged
+    # NOT NOTIFIED HERE — deliberately. This fires on any `_worker_key` change, which lumps together two
+    # cases that need OPPOSITE handling from an extension holding browser-side state:
+    #   • a namespace REBUILD keeps the same worker PROCESS, so a live renderer's Bonito root (a process
+    #     global) survives. The page must KEEP its sessions; telling it to drop them makes Julia and the
+    #     page disagree, and the next figure attaches to a root the page just threw away — silent stall.
+    #     `_rewire_page_root!` (re-registering the namespace handler) is the correct response, and it is
+    #     what the extension already does from `enable!`.
+    #   • a worker PROCESS replacement genuinely orphans everything the page holds — but then a partial
+    #     teardown cannot work either, because the page's WGLMakie scene-order executor survives and its
+    #     numbering can no longer be matched from Julia (see BonitoSlate connection.jl). A page reload is
+    #     the only coherent response.
+    # So a useful notification has to distinguish PROCESS replacement from namespace rebuild, and the
+    # process case wants "reload", not "clean up". `SlateExtensionsBase.on_worker_reset` /
+    # `slateOnWorkerReset` (panels.js, generation-gated) are in place for it; the trigger is not wired.
     # Genuinely re-execute EVERYWHERE cells' full source on the main kernel — the SAME mechanism
     # `_prepare_region_for_cell!` already uses for region kernels (`_prime_namespace!` is kernel-
     # agnostic: its own idempotency cache is keyed by `(nb.id, _worker_key(k))`, so calling it here
