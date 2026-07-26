@@ -28,6 +28,7 @@ module Tables;    include("test_tables.jl");    end
 module Trace;     include("test_trace.jl");     end
 module Complete;  include("test_complete.jl");  end
 module History;   include("test_history.jl");   end
+module SlateApi;  include("test_slate_api.jl"); end
 module Agentops;  include("test_agentops.jl");  end
 module Repro;     include("test_repro.jl");     end
 module Slides;    include("test_slides.jl");    end
@@ -41,7 +42,7 @@ module Config;    include("test_config.jl");    end
 module WscallBinary; include("test_wscall_binary.jl"); end
 
 const _TESTMODS = (Defname, Prepare, Demux, Parsched, Memostore, Effectstore, Blobchannel, RemotePool, Regions, Parallel, Animation, Echarts, SlateLook, Engine, Eval, Deps,
-                   Web, Bind, Render, Tables, Trace, Complete, History, Agentops, Repro, Slides,
+                   Web, Bind, Render, Tables, Trace, Complete, History, SlateApi, Agentops, Repro, Slides,
                    Frontmatter, Export, Publishing, App, Extensions, Files, Config, WscallBinary)
 
 # ARGS carries the optional ReTest pattern (forwarded by run_tests / Pkg.test); empty → run all.
