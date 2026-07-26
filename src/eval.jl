@@ -219,7 +219,8 @@ function _eval_capture(mod::Module, source::AbstractString, filename::AbstractSt
     assets = hasproperty(r, :assets) ? collect(r.assets) : Any[]
     return CellOutput(r.stdout, chunks, r.echarts, r.tables, binds, r.value_repr, r.exception,
                       r.backtrace, r.duration_ms, collect(r.trace), r.stderr, overflow, animations,
-                      "", "", effects, assets)   # in-process has no memo; effects/assets from their channels
+                      "", "", effects, assets,   # in-process has no memo; effects/assets from their channels
+                      hasproperty(r, :live) && r.live === true)
 end
 
 # ── Kernel: the execution backend ─────────────────────────────────────────────

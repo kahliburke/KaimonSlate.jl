@@ -822,7 +822,8 @@ function _wire_to_output(wire)
                       collect(wire.trace), String(wire.stderr), overflow, animations,
                       hasproperty(wire, :memo) ? String(wire.memo) : "",
                       hasproperty(wire, :memo_why) ? String(wire.memo_why) : "",
-                      effects, assets)
+                      effects, assets,
+                      hasproperty(wire, :live) && wire.live === true)
 end
 
 function eval_capture(k::GateKernel, report::Report, source::AbstractString, filename::AbstractString = "string";
@@ -897,6 +898,14 @@ function get_served_asset(k::GateKernel, report::Report, hash::AbstractString)
 end
 get_served_asset(::Kernel, ::Report, ::AbstractString) = nothing
 
+# Fire extensions' worker-reset hooks IN the worker (SEB `on_worker_reset`) — the Julia half of the
+# notification; the hub separately tells the PAGE (`workerreset:`).
+function notify_worker_reset(k::GateKernel, ::Report)
+    _tool(k, "__slate_worker_reset", Dict{String,Any}(); timeout = 30.0)
+    return nothing
+end
+notify_worker_reset(::Kernel, ::Report) = nothing
+
 # Ask the worker to re-render its retained LIVE (session-bound) outputs — WGLMakie figures — for a browser
 # page that just connected, the way a Bonito server serves a fresh session per page. Returns `[(cid, wire),
 # …]` (empty if there's no live worker or nothing is live); the hub applies each via `server_celldone`. No
@@ -916,7 +925,7 @@ function rerender_live(k::GateKernel, report::Report)
         wire = (stdout = "", mime = [(String(mts[i]), bytes)], echarts = Any[], tables = Any[],
                 binds = NamedTuple[], value_repr = "", exception = nothing, backtrace = nothing,
                 duration_ms = 0.0, trace = Any[], stderr = "", overflow = NamedTuple[],
-                animations = Any[], effects = Any[], assets = Any[])
+                animations = Any[], effects = Any[], assets = Any[], live = true)
         push!(out, (String(cids[i]), wire))
     end
     return out

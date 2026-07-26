@@ -543,6 +543,13 @@ end
 # Snapshot the current render to the sidecar. Debounced (a burst of `celldone:`s during a run
 # coalesces into a couple of writes); pass `force=true` to flush the final state (run complete /
 # close). Best-effort — a failed snapshot must never disturb evaluation.
+#
+# `live_placeholder = true`: this snapshot is replayed into a LATER PROCESS, so a session-bound output
+# in it is never valid — the session it belongs to died with the worker that rendered it. Stored raw, a
+# reopen boots that dead fragment, which then talks to a `__bonito:<old-root>` channel no longer served
+# ("no slate_on handler registered for channel …", plus its handshake calls failing against the still-
+# booting worker) and hangs on a spinner until a second reload. The placeholder replays the LAYOUT
+# without booting anything; the fresh figure arrives via `celldone` once the worker is up.
 function _save_preview!(nb::LiveNotebook; force::Bool = false)
     do_save = lock(_PREVIEW_SAVE_LOCK) do
         now = time()
@@ -552,7 +559,7 @@ function _save_preview!(nb::LiveNotebook; force::Bool = false)
     do_save || return nothing
     try
         cells = lock(nb.lock) do
-            _has_rich_display(nb) ? _render_cells(nb) : nothing
+            _has_rich_display(nb) ? _render_cells(nb; live_placeholder = true) : nothing
         end
         cells === nothing && return nothing   # nothing rich to preview — leave any stale sidecar for now
         f = _preview_file(nb.path)
@@ -706,19 +713,22 @@ function _bib_link_ctx(nb)
 end
 _bib_keys_meta(ctx) = ctx === nothing ? nothing : [Dict("key" => k, "label" => v) for (k, v) in ctx.tips]
 
-# A LIVE (session-bound) figure — a WGLMakie figure whose output HTML carries the BonitoSlate card + its
-# served runtime — must NOT boot from the STORED output on a page (re)load: the stale fragment would queue
-# a scene-init task in WGLMakie's browser-global ordered scheduler and collide with the fresh re-render the
-# browser-connect hook pushes. So when we serve the page state (a reload), we swap a live figure's output
-# for a non-booting placeholder card; the connect-hook then re-renders the real, live figure into it. The
-# `celldone` broadcast path passes `live_placeholder=false`, so a fresh render still shows the full figure.
-function _live_figure_placeholder(html::AbstractString)
-    occursin("bonito-fig-card", html) || return html
-    return string("<div class=\"bonito-fig-wrap\"><div class=\"bonito-fig-card\" ",
+# A SESSION-BOUND (live) output — one whose HTML is a view onto state that lives in the WORKER, e.g. a
+# WGLMakie scene wired to its own socket — must NOT boot from the STORED output on a page (re)load: it was
+# rendered for a browser session that no longer exists, so booting it queues work in the renderer's
+# browser-global scheduler and collides with the fresh re-render the connect hook pushes. So a live
+# output's STORED HTML is replaced by a non-booting placeholder card; the connect hook then re-renders the
+# real one into it (`_schedule_live_rerender!` → `celldone`, which passes `live_placeholder=false`).
+#
+# WHICH outputs are live is NOT decided by inspecting the HTML for a marker class — that couples core to
+# one extension's markup and silently misses every other live renderer. It is `CellOutput.live`, set at
+# capture from the value's `SlateExtensionsBase.slate_live_render` opt-in (see capture.jl `_LIVE_OUTPUTS`).
+_is_live(c::Cell) = c.output !== nothing && c.output.live
+_live_output_placeholder() =
+    string("<div class=\"slate-live-placeholder\" ",
         "style=\"min-width:280px;min-height:180px;display:flex;align-items:center;justify-content:center\">",
-        "<span style=\"color:#8891a5;font-size:0.9em\">⟳ interactive figure — connecting…</span>",
-        "</div></div>")
-end
+        "<span style=\"color:#8891a5;font-size:0.9em\">⟳ interactive output — connecting…</span>",
+        "</div>")
 
 function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{String,Tuple{Cell,BindSpec}}(),
                    hostednames::Dict{String,Vector{String}} = Dict{String,Vector{String}}();
@@ -744,7 +754,13 @@ function cell_json(c::Cell, bindref::Dict{String,Tuple{Cell,BindSpec}} = Dict{St
         "hash"    => SlateHistory._sha(c.source),
         "state"   => lowercase(string(c.state)),
         "output"  => _externalize_blobs(nbid, c.kind == MARKDOWN ? markdown_html(_mdsrc, c.interp) :
-                        (live_placeholder ? _live_figure_placeholder(output_html(c)) : output_html(c))),
+                        (live_placeholder && _is_live(c) ? _live_output_placeholder() : output_html(c))),
+        # How the browser should treat this output's session-boundness (see `_live_output_placeholder`):
+        # "render" = the real, live-for-THIS-session thing; "placeholder" = a stand-in awaiting the connect
+        # hook's re-render; "" = an ordinary self-contained output. The front end needs the distinction
+        # because a full-state payload (which every mutating API call returns) carries the placeholder,
+        # and it must not overwrite a live output the page has already booted.
+        "live"    => c.kind == MARKDOWN || !_is_live(c) ? "" : (live_placeholder ? "placeholder" : "render"),
         "echarts" => c.kind == MARKDOWN ? _md_interp_echarts(c) : _echarts_specs(c),
         "tables" => c.kind == MARKDOWN ? _md_interp_tables(c) : _table_specs(c),
         "animations" => c.kind == MARKDOWN ? Any[] : _animation_specs(c, nbid),
@@ -1108,11 +1124,17 @@ function state_json(nb::LiveNotebook)
     cited = cited_citation_keys(nb.report)   # keys referenced in prose → adaptive references card
     bibctx = _bib_link_ctx(nb)   # live citation links (styled per bibstyle) → the bibliography cell
     figidx = figure_index(nb.report)            # caption numbering + [@fig:] cross-ref labels
-    # `live_placeholder`: a LIVE figure's STORED output is swapped for a non-booting placeholder when we
-    # serve page state (a reload), so a stale WGLMakie fragment never boots + collides with the fresh
-    # re-render the browser-connect hook pushes (see `_live_figure_placeholder`).
+    # `live_placeholder`: a SESSION-BOUND output's STORED HTML is replaced by a non-booting placeholder in
+    # full page state, so a fragment rendered for a dead session never boots and collides with the fresh
+    # re-render the browser-connect hook pushes. A page that has ALREADY booted the live output keeps it —
+    # the payload's per-cell `live` marker tells the front end which of the two it is (see
+    # `_live_output_placeholder`, `_swapOutput`) — so the run/edit/bind replies that also return full state
+    # don't blank a working live output.
     meta["cells"] = _render_cells(nb; bindref = bindref, hostednames = hostednames, md = md,
         nbdir = nbdir, cited = cited, bibctx = bibctx, figidx = figidx, br = br, live_placeholder = true)
+    # Which worker generation this page is booting against — lets the browser ignore a `workerreset:` for a
+    # worker it never had state in (see `_WORKER_GEN`).
+    meta["workerGen"] = worker_generation(nb)
     # In-memory scratchpad cells (slate.eval) — a separate panel, never part of the document flow.
     isempty(nb.scratch) || (meta["scratch"] = [cell_json(c) for c in nb.scratch])
     # Citation keys defined across all :bibliography cells — drives `[@`-autocomplete in markdown.

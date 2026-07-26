@@ -1546,6 +1546,9 @@ function __slate_rerender_live()
     return (; cids = cids, mimetypes = mimetypes, b64s = b64s)
 end
 
+"Run extensions' `on_worker_reset` hooks — this worker replaced the one an extension was set up in."
+__slate_worker_reset() = (SlateExtensionsBase.run_worker_resets(); (; ok = true))
+
 "Completion candidates in the warm namespace → `(; items, from, to)` (see `slate_completions`)."
 __slate_complete(code::String, pos::Int) = slate_completions(_NS[], code, pos)
 
@@ -2314,6 +2317,7 @@ function tools()
         KaimonGate.GateTool("__slate_extension_manifest", __slate_extension_manifest),
         KaimonGate.GateTool("__slate_get_served_asset", __slate_get_served_asset),
         KaimonGate.GateTool("__slate_rerender_live", __slate_rerender_live),
+        KaimonGate.GateTool("__slate_worker_reset", __slate_worker_reset),
         KaimonGate.GateTool("__slate_pkg", __slate_pkg),
         KaimonGate.GateTool("__slate_pkg_parent", __slate_pkg_parent),
         KaimonGate.GateTool("__slate_revise", __slate_revise),
