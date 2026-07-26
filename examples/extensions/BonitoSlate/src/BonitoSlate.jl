@@ -65,11 +65,19 @@ function enable!()
     # SlateAssetServer: inline like NoServer, but serve es6 modules (the Bonito runtime) ONCE per page over
     # Slate at a stable URL instead of re-inlining the ~3.5 MB bundle into every figure (see assetserver.jl).
     Bonito.force_asset_server!(SlateAssetServer)
-    # Start this page's Bonito session tree fresh (drop any prior page-root, clear CURRENT_SESSION) so the
-    # next figure establishes a NEW root — see `_reset_page!` / `use_parent_session` in connection.jl.
-    _reset_page!()
-    # A browser (re)connect must re-render live figures against a FRESH page root — register the reset so
-    # Slate runs it before re-rendering `_LIVE_OUTPUTS` on connect (see SEB `on_live_reset`).
+    # Re-attach the persistent page-root's receiver to THIS namespace. `enable!` re-runs whenever the
+    # namespace is rebuilt ("rebuild in a new namespace", a worker reattach), which wipes the in-namespace
+    # `__slate_handlers` while the process-global root survives — so without this the browser keeps talking
+    # to a channel nobody listens on. Must come after `_SLATE_ON[]` is captured above.
+    _rewire_page_root!()
+    # NOTE: deliberately NOT `_reset_page!()` here. That resets PER-PAGE state (object cache, readiness,
+    # scene-order counter), and `enable!` re-running does NOT mean a new page — it happens on every
+    # namespace rebuild and every re-run of the enabling cell, while the SAME browser page stays attached
+    # with its Bonito caches and its `orderedExecutor` mid-sequence. Resetting then desynchronises us from
+    # that page: the counter restarts at 1, the page is already past it, and the next scene init queues
+    # below `nextExpected` FOREVER — a silent permanent spinner. Only a genuinely fresh page resets, and
+    # that is what this hook is for: Slate runs it on browser connect, before re-rendering `_LIVE_OUTPUTS`.
+    # (Deduped by identity, so re-registering on every `enable!` is harmless.)
     SlateExtensionsBase.on_live_reset(_reset_page!)
     # Theming is deliberately NOT forced here. A figure should follow the notebook's active Slate theme, so
     # the notebook applies the shared look with `use_slate_theme!()` — palette-toned axes on a transparent
