@@ -105,7 +105,9 @@ const NS = KaimonSlate.NotebookServer
         end
 
         @testset "slate API reference + search records (SSOT)" begin
-            full = NS.slate_api_reference()
+            # `slate_api()` is the INDEX (cheap, names every helper); `("all")` is the full reference.
+            # The index/drill-down/lookup contract itself is covered in test_slate_api.jl.
+            full = NS.slate_api_reference("all")
             @test occursin("echart", full) && occursin("@bind", full) && occursin("animate", full)
             @test occursin("playhead", full) && occursin("nocache", full)   # newest helpers present
             @test occursin("@asset", full) && occursin("readfile", full) &&
