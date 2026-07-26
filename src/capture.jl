@@ -524,8 +524,8 @@ end
 # Fire EVERY cell's cleanups (a namespace rebuild / worker reset discards the whole module — release all
 # live per-cell resources it holds first). Order-independent; each is isolated by `_run_cell_cleanups!`.
 function _run_all_cleanups!(mod::Module)
-    isdefined(mod, :__slate_cleanups) || return nothing
-    reg = getfield(mod, :__slate_cleanups)
+    _ns_defined(mod, :__slate_cleanups) || return nothing
+    reg = _ns_read(mod, :__slate_cleanups)
     for cid in collect(keys(reg))
         _run_cell_cleanups!(reg, cid)
     end
@@ -577,7 +577,7 @@ function run_capture(mod::Module, source::AbstractString, filename::AbstractStri
     # (a Bonito `Session`, a subscription) so a re-run doesn't leak them. Cleared in the `finally`.
     cid = replace(filename, r"^cell:" => "")
     task_local_storage(:slate_cell, cid)
-    isdefined(mod, :__slate_cleanups) && _run_cell_cleanups!(getfield(mod, :__slate_cleanups), cid)
+    _ns_defined(mod, :__slate_cleanups) && _run_cell_cleanups!(_ns_read(mod, :__slate_cleanups), cid)
 
     # Cell-effects sink (see `_slate_effect`): declarations a cell / a package it calls makes during eval,
     # attributed to the executing statement. Seeded here, harvested + cleared after the eval — like the

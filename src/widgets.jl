@@ -665,8 +665,11 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # The Slate execution context a fired @onclick/@onchange handler runs under, so it can STREAM
     # (`slate_emit`/`afm_emit`) just like a cell or a `slate_on` handler — same shape as `_build_slate_ctx`.
     # The fire path (`__slate_set_bind` → `__on_fire!`) runs on a server task with no context; this supplies it.
+    # `invokelatest`: `slate_on` was just `Core.eval`'d into `m` above, i.e. bound in a NEWER world than
+    # this running method — reading it directly warns under Julia 1.12's global world-age rules.
     bind_ctx = (; region = nothing, notebook = "", side = "", emit = slate_emit,
-                  regions = Symbol[], effect = _slate_effect, on = getfield(m, :slate_on))
+                  regions = Symbol[], effect = _slate_effect,
+                  on = Base.invokelatest(getfield, m, :slate_on))
     Core.eval(m, :(const __slate_bind_registry = $reg))
     Core.eval(m, :(const __slate_bind = $((name, w) -> _do_bind(reg, reglock, name, w))))
     # Browser value change: coerce + update registry, set the global so readers see it, then
