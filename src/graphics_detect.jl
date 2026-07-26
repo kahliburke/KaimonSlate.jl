@@ -27,10 +27,25 @@ const _GRAPHICS_RE = r"\b(?:Figure|Axis3?|LScene|Scene|PolarAxis|Colorbar|Legend
 _uses_shared_graphics(src::AbstractString) = occursin(_GRAPHICS_RE, src)
 
 # GLOBAL theme mutators only — `with_theme` is scoped to its block and mutates nothing global.
-# Single source of truth for "which calls count as a theme setter" — worker.jl's
-# `_collect_theme_calls!` (memo-restore replay) must recognize the SAME names, or a setter
-# classified EVERYWHERE here can restore "clean" while never actually re-applying the theme.
+# Single source of truth for "which calls count as a theme setter": the lexical detector below and
+# the AST scanner `_collect_theme_calls!` (memo-restore replay, EVERYWHERE-prime replay) must
+# recognize the SAME names, or a setter classified EVERYWHERE here can restore "clean" while never
+# actually re-applying the theme.
 const _THEME_SENTINEL = Symbol("##makie_theme##")
 const _THEME_CALL_NAMES = (:set_theme!, :update_theme!, :use_slate_theme!)
 const _THEME_SET_RE = r"\b(?:set_theme!|update_theme!|use_slate_theme!)\s*\("
 _sets_global_theme(src::AbstractString) = occursin(_THEME_SET_RE, src)
+
+# The leaf name of a call's callee: `set_theme!` → :set_theme!, `CairoMakie.set_theme!` → :set_theme!.
+_call_leaf(f) = f isa Symbol ? f :
+                (f isa Expr && f.head === :. && length(f.args) == 2 && f.args[2] isa QuoteNode) ?
+                    f.args[2].value : nothing
+
+# Collect every theme-setter CALL expression anywhere in `ex` — they're typically nested inside a plot
+# cell's `let … end`, so a top-level scan misses them.
+function _collect_theme_calls!(acc::Vector{Any}, ex)
+    ex isa Expr || return acc
+    (ex.head === :call && _call_leaf(ex.args[1]) in _THEME_CALL_NAMES) && push!(acc, ex)
+    for a in ex.args; _collect_theme_calls!(acc, a); end
+    return acc
+end

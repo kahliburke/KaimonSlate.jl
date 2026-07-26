@@ -337,6 +337,29 @@ end
         @test ReportEngine._is_pure_using("using A, B\nimport C.d\n# comment")
     end
 
+    @testset "scaffold replay source: scope effects only, never the compute" begin
+        # A MIXED cell (imports + theme + data-dependent compute) is classified EVERYWHERE, so it is
+        # replayed onto a fresh/region namespace. Only its SCOPE effects may replay there — replaying
+        # the compute would throw on `traj`, which lives in a cell that isn't itself EVERYWHERE.
+        mixed = """
+        using CairoMakie
+        use_slate_theme!()
+
+        fig = Figure()
+        lines!(Axis(fig[1, 1]), traj[:, 1], traj[:, 3])
+        fig
+        """
+        s = ReportEngine._scaffold_replay_source(mixed)
+        @test occursin("using CairoMakie", s) && occursin("use_slate_theme!()", s) &&
+              !occursin("traj", s) && !occursin("Figure", s)
+        # nested setters are found (a theme call inside a `let`/helper), a plain compute cell yields
+        # nothing to replay, and unparseable source degrades to "" (caller falls back to whole-cell).
+        @test occursin("set_theme!(theme_dark())",
+                       ReportEngine._scaffold_replay_source("let\n  set_theme!(theme_dark())\nend"))
+        @test ReportEngine._scaffold_replay_source("x = 1 + 1") == ""
+        @test ReportEngine._scaffold_replay_source("function f(") == ""
+    end
+
     @testset "@asset file deps: static extraction + memo invalidation" begin
         # `@asset "path"` is a source literal, so the analyzer records it as a file input (cell.inputs)
         # WITHOUT running the cell; the memo key folds the file's content hash, so editing the asset

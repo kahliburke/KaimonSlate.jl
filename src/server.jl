@@ -1272,23 +1272,26 @@ function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
     return nothing
 end
 
-# What to REPLAY to re-establish an EVERYWHERE cell's effect on a region worker. Per-statement replay —
-# just the statements that DECLARED an `:everywhere` effect (from this session's harvest, or the durable
-# store across a reload) — is used ONLY when the cell's EVERYWHERE-ness comes purely from those runtime
-# declarations. A cell that is EVERYWHERE because it's an import scaffold / pure `using` / theme setter
-# needs its WHOLE source (the import itself must run), so it replays whole-cell — as does a declared cell
-# with no recorded statements. This avoids re-running expensive NON-effect statements of a mixed cell on
-# every region worker, while staying correct (the caller falls back to whole-cell if an isolated statement
-# throws for a missing intra-cell dependency).
+# What to REPLAY to re-establish an EVERYWHERE cell's effect on another namespace. Only the cell's
+# EFFECT belongs on the other side, never its compute, so the replay is assembled from two sources:
+#   • the SCAFFOLD — its top-level `using`/`import` statements and theme-setter calls, which is what
+#     makes a cell statically EVERYWHERE in the first place (`_scaffold_replay_source`);
+#   • the statements that DECLARED an `:everywhere` effect at runtime (this session's harvest, or the
+#     durable store across a reload).
+# A pure-`using` cell is all scaffold, so it replays whole. Whole-cell replay is otherwise only the
+# LAST RESORT (nothing to extract) — a MIXED cell that opens with `using Plotting` and then plots from
+# an upstream cell's data must not re-run the plot here: it reads names this namespace doesn't have
+# (they live in a cell that isn't itself EVERYWHERE), so replaying it whole throws on a binding the
+# scaffold never needed. The caller still falls back to whole-cell if the extracted source throws.
 function _everywhere_replay_source(c::Cell)
-    (:everywhere in c.flags) || return c.source
-    (:import_scaffold in c.flags || ReportEngine._is_pure_using(c.source) ||
-        ReportEngine._THEME_SENTINEL in c.writes) && return c.source
+    scaffold = ReportEngine._is_pure_using(c.source) ? c.source :
+               ReportEngine._scaffold_replay_source(c.source)
+    (:everywhere in c.flags) || return isempty(scaffold) ? c.source : scaffold
     recs = (c.output !== nothing && !isempty(c.output.effects)) ? c.output.effects :
            try; EffectStore.load(SlateHome.effects_dir(), string(c.src_hash)); catch; nothing; end
-    (recs === nothing || isempty(recs)) && return c.source
     stmts = String[]; seen = Set{String}()
-    for r in recs
+    isempty(scaffold) || (push!(seen, scaffold); push!(stmts, scaffold))
+    for r in (recs === nothing ? () : recs)
         s = strip(String(something(_effect_field(r, :stmt_src), "")))
         (isempty(s) || s in seen) && continue
         push!(seen, s); push!(stmts, s)
