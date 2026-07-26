@@ -159,12 +159,14 @@ return whether the module *has* such a hook. A module without the method contrib
 throwing hook is isolated (caught) so one bad package can't break the manifest pull for the rest.
 """
 function ensure_module_frontend!(m::Module, slate_on)
-    isdefined(m, :__slate_frontend) || return false
+    Base.invokelatest(isdefined, m, :__slate_frontend) || return false
     key = (objectid(slate_on), m)
     key in _MODULE_FRONTEND_DONE && return true          # already wired for this namespace generation
     push!(_MODULE_FRONTEND_DONE, key)
     try
-        Base.invokelatest(getglobal(m, :__slate_frontend), slate_on)
+        # The READ must itself run at the latest world, not just the call: `m` is loaded after this
+        # method was compiled, so a bare `getglobal` here trips Julia 1.12's binding world-age warning.
+        Base.invokelatest(() -> getglobal(m, :__slate_frontend)(slate_on))
     catch
         # A misbehaving package hook must not poison the whole manifest pull.
     end
