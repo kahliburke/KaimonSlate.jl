@@ -2004,6 +2004,12 @@ function _assemble_site!(dir::AbstractString, nb::LiveNotebook; site_url::Abstra
         manifest["homeDoc"] = Dict{String,Any}(
             "title" => isempty(strip(fm.title)) ? nb.id : strip(fm.title),
             "path" => abspath(nb.path),
+            # Same identity/provenance a `docs[]` entry carries (see `_doc_entry`): the front page is a
+            # MEMBER like any other, so it needs the stable docid `_doc_entry_is` matches on and the
+            # source path Sync rebuilds from. Without `id` the home notebook resolved as a non-member of
+            # its own site, and Stage silently skipped it — so front-page edits never shipped.
+            "id" => notebook_docid(nb).docId,
+            "source" => abspath(nb.path),
             "build" => Dict{String,Any}("bundle" => bundle,
                                         "history" => get(hkw, :history, false) === true,
                                         "theme" => String(get(hkw, :theme, "dark")),
