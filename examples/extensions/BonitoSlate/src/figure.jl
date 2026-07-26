@@ -30,8 +30,14 @@ end
 # the `src` module before the figure's init runs, so `window.Bonito` is always defined first.
 function slate_card_html(fig::Makie.FigureLike)
     try
+        # The root announcement must be built BEFORE the figure renders. Rendering is what creates the
+        # figure's sub-session under the persistent root, so the root's DOM has to precede it — both in
+        # the emitted HTML (the browser must register the root before the sub's init runs) and in time
+        # (the root's queued messages are flushed into the announcement, ahead of the sub's own).
+        # Empty except on the first figure rendered for a freshly-connected page (see `_reset_page!`).
+        announce = root_announce_html()
         frag = sprint((io, x) -> show(io, MIME"text/html"(), x), fig)
-        return _figure_card(_bonito_runtime_script() * frag)
+        return _figure_card(_bonito_runtime_script() * announce * frag)
     catch e
         # Surface a render failure inline rather than let capture swallow it into a `text/plain` repr.
         return string("<pre style=\"color:#f88;white-space:pre-wrap\">BonitoSlate figure render error:\n",

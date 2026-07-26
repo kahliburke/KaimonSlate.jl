@@ -19,10 +19,41 @@ Bonito.render_asset(session::Bonito.Session, ::SlateAssetServer, asset::Bonito.A
     Bonito.render_asset(session, Bonito.NoServer(), asset)
 Bonito.import_in_js(io::IO, session::Bonito.Session, ::SlateAssetServer, asset::Bonito.Asset) =
     Bonito.import_in_js(io, session, Bonito.NoServer(), asset)
-Bonito.inline_code(session::Bonito.Session, ::SlateAssetServer, source::String) =
-    Bonito.inline_code(session, Bonito.NoServer(), source)
 Bonito.setup_asset_server(::SlateAssetServer) = nothing
-Bonito.url(::SlateAssetServer, asset::Bonito.BinaryAsset) = Bonito.url(Bonito.NoServer(), asset)
+
+# Each rendered fragment ships a small `<script type="module">` that calls `Bonito.init_session(…)` —
+# against the GLOBAL `Bonito`, which the runtime module sets as a side effect (`window.Bonito = …`).
+# Nothing in that script IMPORTS the runtime, so the browser has no dependency edge to order them by:
+# with the runtime served at a URL (rather than inlined ahead of the script), a page carrying several
+# fragments races, and the losers die with "Bonito is not defined" — the fragment paints and is then
+# wiped when its init throws. It shows up on RELOAD in particular, when every fragment initialises at
+# once against a cold module cache.
+#
+# Importing the runtime first creates exactly the missing edge, and a URL is only ever evaluated once
+# no matter how many fragments import it. It has to be a DYNAMIC import resolved against the document,
+# though: this script is itself served as a `data:` URL, and a root-relative `/n/<id>/served/<hash>`
+# specifier has no hierarchical base to resolve against there ("Invalid relative url or base scheme
+# isn't hierarchical"). `new URL(path, document.baseURI)` resolves against the PAGE instead, and the
+# top-level `await` keeps the ordering guarantee — the module body suspends until the runtime is live.
+function Bonito.inline_code(session::Bonito.Session, server::SlateAssetServer, source::String)
+    runtime = Bonito.url(server, Bonito.BonitoLib)
+    prelude = string("await import(new URL(", repr(runtime), ", document.baseURI).href);\n")
+    return Bonito.inline_code(session, Bonito.NoServer(), prelude * source)
+end
+
+# A `BinaryAsset` is how Bonito ships BULK DATA to the page (`Bonito.fetch_binary(url)` → ArrayBuffer)
+# — a volume grid, a mesh, a big numeric column. `NoServer` would inline it as a base64 `data:` URL,
+# which inflates the bytes ~33% and, worse, embeds them in the CELL OUTPUT: a few MB of payload makes
+# Slate refuse to render the cell ("output too large") and bloats the saved notebook. So binary
+# assets get the same treatment as es6 modules — served once at a stable content-addressed URL, with
+# the bytes staying in the worker until a browser actually asks for them.
+function Bonito.url(::SlateAssetServer, asset::Bonito.BinaryAsset)
+    if !isempty(_NB_ID[])
+        path = SlateExtensionsBase.provide_served_asset!(asset.data; mime = asset.mime)
+        return string("/n/", _NB_ID[], path)
+    end
+    return Bonito.url(Bonito.NoServer(), asset)   # fallback: inline (no notebook id — e.g. a bare export)
+end
 
 # The one behaviour change: an es6 module is SERVED once (stable URL) instead of inlined per render.
 function Bonito.url(::SlateAssetServer, asset::Bonito.Asset)
