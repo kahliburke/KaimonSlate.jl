@@ -34,7 +34,7 @@ end
 
 # A structural change at index `idx` reorders state, so conservatively restale everything from
 # there on, recompute, and persist. `announce` shows the cell at `idx` (stale) before eval.
-function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false)
+function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false, run::Bool = true)
     # Hold nb.lock around deps + restale + persist: with async eval the runner / set_bind! hold the
     # lock intermittently, so this must serialize against them (else the persist races and is lost,
     # like the edit_cell! bug). Reentrant — the agent structural paths already hold nb.lock.
@@ -44,7 +44,7 @@ function _commit_structure!(nb::LiveNotebook, idx::Int; announce::Bool = false)
             i >= idx && ReportEngine.restale!(c)
         end
         announce && _announce_cell!(nb, idx)
-        _eval!(nb)                       # kick the async runner (non-blocking; safe inside the lock)
+        run && _eval!(nb)                # kick the async runner (non-blocking; safe inside the lock)
         _persist!(nb)
         _autoindex!(nb)                  # added/edited cell may introduce a new `using`
     end
@@ -575,11 +575,14 @@ end
 
 "Add a cell (default code) after `after` (end if empty) WITH `source`, run it,
 return id + result. One file write (build the cell with its source up front) so the
-async file-watcher can't race the intermediate empty-cell state."
+async file-watcher can't race the intermediate empty-cell state.
+`run=false` lands the cell STALE and returns immediately without evaluating — for composing
+several cells before one deliberate `run` (see `agent_edit_cell!`)."
 function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
                          after::AbstractString = "", kind::AbstractString = "code",
                          id::AbstractString = "", tags::AbstractString = "",
-                         caller::AbstractString = "", expected_version::Int = -1)
+                         caller::AbstractString = "", expected_version::Int = -1,
+                         run::Bool = true)
     rej = nothing; errmsg = nothing
     cid = lock(nb.lock) do
         rej = _guard_commit(nb; caller = caller, expected_version = expected_version)
@@ -601,20 +604,32 @@ function agent_add_cell!(nb::LiveNotebook, source::AbstractString;
         insert!(cells, i + 1, cell)
         # announce=true → push the new cell to the browser BEFORE eval, so a long-running
         # added cell is visible (stale) immediately instead of only when its eval finishes.
-        _commit_structure!(nb, i + 1; announce = true)
+        _commit_structure!(nb, i + 1; announce = true, run = run)
         return cell.id
     end
     errmsg === nothing || return "⛔ $errmsg"
     rej === nothing || return rej
+    if !run
+        _renew_floor!(nb, caller); _agent_push!(nb)
+        return "added id=$cid (stale — not run)"
+    end
     _eval!(nb; wait_for = cid)           # wait OUTSIDE the lock — the agent wants the cell's result
     _renew_floor!(nb, caller)
     _agent_push!(nb)
     return "added id=$cid →\n$(_result_of(nb, cid))"
 end
 
-"Replace a cell's source, run it, return its result."
+"""Replace a cell's source, run it, return its result.
+
+`run=false` writes the source and leaves the cell (and its dependents) STALE without evaluating,
+returning as soon as the edit is committed. That is the mode for a BULK refactor — renaming a
+binding across ten cells, repointing cache paths — where running after every edit means N reactive
+cascades (and, for an agent driving this over a transport with an idle timeout, N chances to be cut
+off mid-cascade). Make all the edits with `run=false`, then reconcile once with `agent_run!(nb)`.
+It is also the safe way to edit a notebook whose upstream cells are mid-computation."""
 function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString;
-                          tags::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1)
+                          tags::AbstractString = "", caller::AbstractString = "", expected_version::Int = -1,
+                          run::Bool = true)
     _cell_exists(nb, id) || return "(no cell id=$id)"
     rej = lock(nb.lock) do
         r = _guard_commit(nb; caller = caller, expected_version = expected_version)
@@ -624,10 +639,14 @@ function agent_edit_cell!(nb::LiveNotebook, id::AbstractString, source::Abstract
         # more under its OLD flags (seen live: the tagged run didn't persist). Empty = leave
         # existing tags untouched (so an ordinary source edit never silently wipes tags).
         isempty(strip(String(tags))) || set_cell_tags!(nb, id, tags)
-        edit_cell!(nb, id, source; announce = true)   # show the edited source before its eval finishes
+        edit_cell!(nb, id, source; announce = true, run = run)   # show the edited source before its eval finishes
         return nothing
     end
     rej === nothing || return rej
+    if !run
+        _renew_floor!(nb, caller); _agent_push!(nb)
+        return "edited id=$id (stale — not run)"
+    end
     _eval!(nb; wait_for = id)            # wait OUTSIDE the lock — the agent wants the cell's result
     _renew_floor!(nb, caller)
     _agent_push!(nb)
