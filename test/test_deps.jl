@@ -54,6 +54,27 @@ ReportEngine.module_help(::CountingKernel, ::ReportEngine.Report, ::AbstractStri
         # an explicit tag WINS over an inferred per-side/pure shape
         rt = Cell("rt", CODE, "set_theme!(x)"); push!(rt.flags, :resource); push!(rt.writes, E._THEME_SENTINEL)
         @test ce(rt) == E.RESOURCE
+        # the AUTHOR tag and the RUNTIME declaration are distinct flags, and each reaches EVERYWHERE
+        # on its own — a cell with neither an import nor a recognisable shape.
+        tag = Cell("tg", CODE, "register_op!(:foo)"); push!(tag.flags, :everywhere)
+        @test ce(tag) == E.EVERYWHERE
+        dec = Cell("dc", CODE, "register_op!(:foo)"); push!(dec.flags, :everywhere_declared)
+        @test ce(dec) == E.EVERYWHERE
+    end
+
+    @testset "everywhere: author tag round-trips, runtime declaration never does" begin
+        # The author tag is a real header token; the runtime classification must NOT be serialized
+        # back out as one, or a declaring cell grows a tag its author never wrote.
+        @test :everywhere in ReportEngine._KNOWN_TAGS
+        @test !(:everywhere in ReportEngine._INTERNAL_FLAGS)
+        @test :everywhere_declared in ReportEngine._INTERNAL_FLAGS
+        r = parse_report("#%% code id=k everywhere\nregister_op!(:foo)")
+        @test :everywhere in r.cells[1].flags
+        @test occursin("everywhere", ReportEngine.serialize_report(r))
+        # a runtime-declared cell serializes WITHOUT growing an `everywhere` header token
+        r2 = parse_report("#%% code id=k2\nregister_op!(:foo)")
+        push!(r2.cells[1].flags, :everywhere_declared)
+        @test !occursin("everywhere", ReportEngine.serialize_report(r2))
     end
 
     @testset "anonymous functions never enter writes (synthetic __ExprExpl_anon__ names)" begin

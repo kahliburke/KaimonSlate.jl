@@ -863,6 +863,10 @@ end
 const _REGION_KERNELS = Dict{Tuple{String,String},Any}()   # (nb id, region name) → GateKernel
 const _REGION_SYNCED = Dict{String,Dict{String,String}}()  # nb id → "side:name" → freshness token
 const _REGION_PRIMED = Dict{Tuple{String,UInt},UInt}()     # (nb id, kernel objectid) → signature of primed `using` cells
+# Keys currently being primed. `_prime_namespace!` stages each EVERYWHERE cell's data reads through
+# `_region_presync!`, which primes both sides before its first transfer — so the two call each other.
+# A nested prime for a key already in flight is a no-op: the outer call is establishing that kernel.
+const _REGION_PRIMING = Set{Tuple{String,UInt}}()
 const _REGION_LOCK = ReentrantLock()
 
 # ── Consent-gated region introduction (PEER_TUNNEL_PLAN §5.1) ─────────────────────────────────────
@@ -1034,7 +1038,7 @@ function _apply_cell_effects!(nb::LiveNotebook, c::Cell, out)
     recs = [_effect_record(e) for e in out.effects]
     for r in recs
         if r.kind === :everywhere
-            :everywhere in c.flags || push!(c.flags, :everywhere)
+            :everywhere_declared in c.flags || push!(c.flags, :everywhere_declared)
         elseif r.kind !== nothing
             ReportEngine._rlog("cell effects: cell $(c.id) declared unhandled effect kind ':$(r.kind)' — ignored")
         end
@@ -1058,7 +1062,8 @@ function _reestablish_effects!(report)
         c.kind == CODE || continue
         recs = try; EffectStore.load(root, string(c.src_hash)); catch; nothing; end
         recs === nothing && continue
-        any(r -> r.kind === :everywhere, recs) && (:everywhere in c.flags || push!(c.flags, :everywhere))
+        any(r -> r.kind === :everywhere, recs) &&
+            (:everywhere_declared in c.flags || push!(c.flags, :everywhere_declared))
     end
     return nothing
 end
@@ -1248,25 +1253,46 @@ function _prime_namespace!(nb::LiveNotebook, k, side::AbstractString)
     sig = hash([c.src_hash for c in env])
     key = (nb.id, _worker_key(k))
     lock(_REGION_LOCK) do; get(_REGION_PRIMED, key, UInt(0)); end == sig && return nothing
-    for c in env
-        prime_src = _everywhere_replay_source(c)   # the marked statements when safe, else the whole cell
-        try
-            ReportEngine.eval_capture(k, nb.report, prime_src, "cell:" * c.id * "#prime", nothing)
-        catch e
-            # Per-statement replay can throw if a marked statement referenced a cell-local name defined by
-            # an UNMARKED earlier statement — fall back to the whole cell source (always sufficient).
-            if prime_src != c.source
-                try
-                    ReportEngine.eval_capture(k, nb.report, c.source, "cell:" * c.id * "#prime", nothing)
-                catch e2
-                    ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
-                                       first(sprint(showerror, e2), 160))
-                end
-            else
-                ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
+    # Re-entrancy: the presync below primes both sides before its first transfer, which lands back
+    # here. Bail if this key is already in flight rather than re-running the loop underneath it.
+    lock(_REGION_LOCK) do
+        key in _REGION_PRIMING ? true : (push!(_REGION_PRIMING, key); false)
+    end && return nothing
+    try
+        for c in env
+            # Stage this cell's cross-boundary DATA reads before replaying it. A definition primed here may
+            # reference an upstream global, and presync only ever stages the reads of the cell it is called
+            # FOR — a downstream region cell reads the FUNCTION, not what the function's body reads, so
+            # nothing else would bring those values over. Values written by EVERYWHERE cells are skipped
+            # inside presync (they prime, never ship), so only genuine data crosses. Conservative inference
+            # over-approximates the reads here, which is the safe direction: a surplus value is one
+            # content-addressed transfer that dedups to nothing on the next prime.
+            # Best-effort — a miss surfaces as an UndefVarError when the definition is CALLED, not here.
+            try; _region_presync!(nb, c, k; dst_side = side); catch e
+                ReportEngine._rlog("region: presync for prime of $(c.id) on $(_side_label(nb, side)) failed: " *
                                    first(sprint(showerror, e), 160))
             end
+            prime_src = _everywhere_replay_source(c)   # the marked statements when safe, else the whole cell
+            try
+                ReportEngine.eval_capture(k, nb.report, prime_src, "cell:" * c.id * "#prime", nothing)
+            catch e
+                # Per-statement replay can throw if a marked statement referenced a cell-local name defined by
+                # an UNMARKED earlier statement — fall back to the whole cell source (always sufficient).
+                if prime_src != c.source
+                    try
+                        ReportEngine.eval_capture(k, nb.report, c.source, "cell:" * c.id * "#prime", nothing)
+                    catch e2
+                        ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
+                                           first(sprint(showerror, e2), 160))
+                    end
+                else
+                    ReportEngine._rlog("region: namespace prime of $(c.id) on $(_side_label(nb, side)) failed: " *
+                                       first(sprint(showerror, e), 160))
+                end
+            end
         end
+    finally
+        lock(_REGION_LOCK) do; delete!(_REGION_PRIMING, key); end
     end
     lock(_REGION_LOCK) do; _REGION_PRIMED[key] = sig; end
     return nothing
@@ -1284,9 +1310,13 @@ end
 # (they live in a cell that isn't itself EVERYWHERE), so replaying it whole throws on a binding the
 # scaffold never needed. The caller still falls back to whole-cell if the extracted source throws.
 function _everywhere_replay_source(c::Cell)
+    # The author TAG is an explicit "all of this belongs on every side" — replay the cell whole and
+    # skip the extraction entirely. It exists for the cell that neither the definitional-statement
+    # rule nor a runtime declaration can recognise.
+    :everywhere in c.flags && return c.source
     scaffold = ReportEngine._is_pure_using(c.source) ? c.source :
                ReportEngine._scaffold_replay_source(c.source)
-    (:everywhere in c.flags) || return isempty(scaffold) ? c.source : scaffold
+    (:everywhere_declared in c.flags) || return isempty(scaffold) ? c.source : scaffold
     recs = (c.output !== nothing && !isempty(c.output.effects)) ? c.output.effects :
            try; EffectStore.load(SlateHome.effects_dir(), string(c.src_hash)); catch; nothing; end
     stmts = String[]; seen = Set{String}()
