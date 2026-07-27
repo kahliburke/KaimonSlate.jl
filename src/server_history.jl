@@ -1149,7 +1149,7 @@ end
 
 # Edit a cell's source → reconcile (mark it + dependents stale) → run stale →
 # persist back to the `.jl`.
-function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString; announce::Bool = false, force::Bool = false)
+function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString; announce::Bool = false, force::Bool = false, run::Bool = true)
     # MUST hold nb.lock around the report mutation + persist: with async eval the runner / set_bind!
     # (playhead) hold the lock intermittently, so an unlocked update_source!+_persist! here races them
     # and can lose the edit (it temporarily reverts the source mid-serialize). Reentrant-safe — the
@@ -1197,7 +1197,9 @@ function edit_cell!(nb::LiveNotebook, id::AbstractString, source::AbstractString
         end
         # announce=true → show the edited source (stale) before its eval finishes.
         announce && _announce_cell!(nb, something(findfirst(c -> c.id == id, nb.report.cells), 0))
-        _eval!(nb)                       # non-blocking kick (safe inside the lock)
+        # run=false → commit the edit and leave the cell (and its restaled dependents) sitting STALE.
+        # The kick must be skipped here, not just the caller's wait: it is what starts the cascade.
+        run && _eval!(nb)                # non-blocking kick (safe inside the lock)
         _persist!(nb)
     end
     _autoindex!(nb)                      # a new `using` in this cell → pick up its docs (outside lock)

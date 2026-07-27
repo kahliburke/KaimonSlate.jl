@@ -34,6 +34,28 @@ const NS = KaimonSlate.NotebookServer
             @test occursin("50", NS.agent_run!(nb, cid_d))                 # y*10 → 50
         end
 
+        @testset "run=false defers the eval (bulk-refactor mode)" begin
+            cid_s = match(r"id=(\w+)", NS.agent_add_cell!(nb, "z = 3"))[1]
+            cid_r = match(r"id=(\w+)", NS.agent_add_cell!(nb, "z * 7"))[1]
+            @test occursin("21", NS._result_of(nb, cid_r))
+            # deferred edit: source is committed, nothing runs, the cell reports itself stale
+            r = NS.agent_edit_cell!(nb, cid_s, "z = 4"; run = false)
+            @test occursin("not run", r)
+            sleep(0.2)
+            src_of(id) = nb.report.cells[findfirst(c -> c.id == id, nb.report.cells)].source
+            @test src_of(cid_s) == "z = 4"                                  # the edit landed …
+            @test occursin("21", NS._result_of(nb, cid_r))                  # … but the old result stands
+            # a deferred ADD likewise lands stale, with no result
+            ra = NS.agent_add_cell!(nb, "z * 100"; run = false)
+            cid_a = match(r"id=(\w+)", ra)[1]
+            @test occursin("not run", ra)
+            sleep(0.2)
+            # one deliberate reconcile picks up every deferred edit at once
+            NS.agent_run!(nb)
+            @test occursin("28", NS._result_of(nb, cid_r))                  # z*7  → 28
+            @test occursin("400", NS._result_of(nb, cid_a))                 # z*100 → 400
+        end
+
         @testset "read digest + delete" begin
             dig = NS.notebook_digest(nb)
             @test occursin("id=intro", dig) && occursin("[code,", dig)

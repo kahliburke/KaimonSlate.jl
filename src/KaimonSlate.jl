@@ -1033,16 +1033,19 @@ function create_tools(GateTool::Type)
     and free-form metadata. Add ONE cell at a time and read its result before the next — do not
     compose the whole notebook up front.
 
+    `run=false` lands the cell STALE without evaluating it and returns immediately — for composing
+    several cells (or editing during a long computation) before one deliberate `run(notebook, "")`.
+
     Cells run in a REACTIVE notebook with Slate helpers injected (charts via `echart`, widgets
     via `@bind`, live updates via `reactive`/`@onclick`, tables via `slate_table`) — call
     `slate.api` for the reference before plotting or adding interactivity; their names are not in
     package docs.
     """
-    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "")::String
+    function add_cell(notebook::String, source::String; after::String = "", kind::String = "code", id::String = "", tags::String = "", run::Bool = true)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, caller = _caller())
+        res = agent_add_cell!(nb, source; after = after, kind = kind, id = id, tags = tags, run = run, caller = _caller())
         return _surfaced(nb, "add_cell",
-            Dict{String,Any}("source" => source, "after" => after, "kind" => kind, "id" => id, "tags" => tags), res)
+            Dict{String,Any}("source" => source, "after" => after, "kind" => kind, "id" => id, "tags" => tags, "run" => run), res)
     end
 
     """
@@ -1065,12 +1068,18 @@ function create_tools(GateTool::Type)
     that errored, or to revise one in place. `tags` (optional, comma/space-separated) REPLACES the
     cell's tags — behaviour tags (`hidecode`, `collapsed`, `trace`, `nocache`, …) and free-form
     metadata; omit it to leave the existing tags unchanged.
+
+    `run=false` writes the source and leaves the cell (and its dependents) STALE without running it,
+    returning immediately. Use it for a BULK refactor — renaming a binding across many cells,
+    repointing paths — where running after every edit means one reactive cascade per edit: make all
+    the edits with `run=false`, then reconcile ONCE with `run(notebook, "")`. It is also the safe way
+    to edit a notebook whose cells are mid-computation.
     """
-    function edit_cell(notebook::String, cell::String, source::String; tags::String = "")::String
+    function edit_cell(notebook::String, cell::String, source::String; tags::String = "", run::Bool = true)::String
         nb, err = _nb(notebook); nb === nothing && return err
-        res = agent_edit_cell!(nb, cell, source; tags = tags, caller = _caller())
+        res = agent_edit_cell!(nb, cell, source; tags = tags, run = run, caller = _caller())
         return _surfaced(nb, "edit_cell",
-            Dict{String,Any}("cell" => cell, "source" => source, "tags" => tags), res)
+            Dict{String,Any}("cell" => cell, "source" => source, "tags" => tags, "run" => run), res)
     end
 
     """
