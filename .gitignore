@@ -32,3 +32,7 @@ build/cm6/package-lock.json
 # Isolated per-worktree hub state (dev/hub.jl) and standalone-run state under a notebook folder
 .kaimonslate-dev/
 .kaimonslate/
+
+# Deploy-tool working state left in the repo root by publish-target dry runs
+/.netlify/
+/.wrangler/
