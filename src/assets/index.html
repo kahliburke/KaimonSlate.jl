@@ -222,6 +222,13 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .wdsvg{width:100%;height:64px;display:block;background:#0d1120;border:1px solid #21253a;border-radius:7px;}
 .wdnodata{color:#6a7090;font-size:.75rem;padding:16px 0;text-align:center;background:#0d1120;border:1px solid #21253a;border-radius:7px;}
 .wdaxis{display:flex;justify-content:space-between;color:#565c78;font-size:.66rem;margin-top:2px;font-family:Menlo,monospace;}
+/* What a detached-but-warm worker is still good for — answers "why is this thing still running?". */
+.wdhint{color:#8a90a8;font-size:.74rem;line-height:1.45;background:#0d1120;border:1px solid #21253a;border-radius:7px;padding:7px 10px;margin:-4px 0 14px;}
+/* Destructive action footer (reap) — separated by a rule so it reads as an action, not more telemetry. */
+.wdacts{display:flex;align-items:center;gap:10px;margin-top:14px;padding-top:11px;border-top:1px solid #21253a;}
+.wdactnote{flex:1 1 auto;color:#6a7090;font-size:.73rem;}
+.wdacterr{color:#e57575;}
+.modal .rppreap[disabled],.modal .rppsysbtn[disabled]{opacity:.55;cursor:default;}
 /* activity monitor: only the region NAME opens its config (hover-highlighted); worker rows hover-border for clickability */
 .actgroupname{cursor:pointer;border-radius:5px;padding:1px 5px;margin:0 -3px;transition:background .12s,color .12s;}
 .actgroupname:hover{background:rgba(86,156,214,.14);color:#a9d4ff;}
