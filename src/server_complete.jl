@@ -603,6 +603,22 @@ _pdf_export_opts(qp, nb) = begin
        outputs = get(qp, "outputs", "all"))
 end
 
+# Telemetry history for one of the hub's OWN workers, by port. The ring is keyed by connection name
+# (a notebook's main and region kernels each get their own series), so the port — which is what the
+# monitor UI carries — has to be resolved back to a live kernel first. `[]` if it's gone or never
+# streamed a sample. Mirrors `ReportEngine.worker_stats_history` for the remote case.
+function _local_kernel_history(h::Hub, port::Int)
+    nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+    for nb in nbs, k in _nb_kernels(nb)
+        (k isa ReportEngine.GateKernel && k.port == port && k.conn !== nothing) || continue
+        cn = try; String(k.conn.name); catch; ""; end
+        isempty(cn) && continue
+        st = ReportEngine.kernel_stats(cn)
+        st === nothing || return st.history
+    end
+    return Any[]
+end
+
 function _make_router(h::Hub)
     router = HTTP.Router()
     HTTP.register!(router, "GET", "/", _ -> _html(_index_html()))   # front page + inlined last-known ledger (see _index_html)
@@ -897,6 +913,49 @@ function _make_router(h::Hub)
         isempty(host) && return _json(Dict("host" => "", "workers" => []))
         _json(Dict("host" => host, "workers" => ReportEngine.list_remote_workers(host)))
     end)
+    # The hub's OWN workers — one process per open notebook, plus any region kernel that runs on this
+    # machine. Deliberately the SAME entry shape as /api/remote-workers (port/alive/state/manifest/stats)
+    # so the activity monitor renders local and remote rows through one component; a local worker has no
+    # on-host manifest, so the equivalent fields are synthesized from the kernel. Pure in-memory state —
+    # no ssh, no worker round-trip — so it's safe on the monitor's poll interval.
+    HTTP.register!(router, "GET", "/api/local-workers", _ -> begin
+        nbs = lock(h.lock) do; collect(values(h.notebooks)); end
+        out = Any[]
+        for nb in nbs, k in _nb_kernels(nb)
+            k isa ReportEngine.GateKernel || continue
+            (k.remote || k.target isa ReportEngine.RemoteTarget) && continue   # off-machine: the host roster owns it
+            k.port == 0 && continue                                            # never spawned (dormant notebook)
+            cn = try; k.conn === nothing ? "" : String(k.conn.name); catch; ""; end
+            st = isempty(cn) ? nothing : ReportEngine.kernel_stats(cn)
+            side = _kernel_side_label(nb, k)
+            running = (try; Base.process_running(k.proc); catch; false; end)
+            push!(out, Dict{String,Any}(
+                "port" => k.port,
+                "alive" => running || k.conn !== nothing,
+                "lastActivity" => st === nothing ? 0 : round(Int, st.latest.rcv),
+                "logBytes" => (try; isfile(k.logpath) ? filesize(k.logpath) : 0; catch; 0; end),
+                # A local worker only exists while its notebook is open, so "attached" is the steady state;
+                # a live process with no wire is mid-(re)connect, which reads as idle.
+                "state" => k.conn === nothing ? "idle" : "attached",
+                "stateSince" => 0,
+                "manifest" => JSON.json(Dict("notebook" => basename(nb.path), "nbid" => nb.id,
+                    # No "region" key: a local kernel isn't a region worker, and tagging it would both
+                    # mis-group it in the monitor and offer a region-config link that goes nowhere.
+                    "side" => side, "transport" => "local",
+                    "project" => k.project, "port" => string(k.port), "stream_port" => string(k.stream_port),
+                    "pid" => (try; k.proc === nothing ? "" : string(Base.getpid(k.proc)); catch; ""; end),
+                    "hub" => gethostname(), "path" => abspath(nb.path))),
+                "stats" => st === nothing ? "" : JSON.json(_json_finite(Dict(
+                    "cpu" => st.latest.cpu, "rss" => st.latest.rss, "gc_ms" => st.latest.gc_ms,
+                    "evals" => st.latest.evals, "running" => st.latest.running, "warm" => st.latest.warm,
+                    "memo_bytes" => st.latest.memo, "sys_cpu" => st.latest.sys_cpu, "load1" => st.latest.load1,
+                    "sys_mem_total" => st.latest.sys_mem_total, "sys_mem_free" => st.latest.sys_mem_free,
+                    "ts" => st.latest.ts))),
+            ))
+        end
+        sort!(out; by = d -> d["port"])
+        _json(Dict("host" => "local", "workers" => out))
+    end)
     # Global region registry (named compute defs) + parked wires — the hub's own view, NO ssh. Per-host
     # live rosters come from /api/remote-workers. Feeds the home-page Regions manager + Destinations picker.
     HTTP.register!(router, "GET", "/api/regions", _ -> _json(Dict(
@@ -968,7 +1027,9 @@ function _make_router(h::Hub)
         q = HTTP.queryparams(HTTP.URI(req.target))
         host = strip(String(get(q, "host", ""))); port = tryparse(Int, String(get(q, "port", "")))
         (isempty(host) || port === nothing) && return _json(Dict("ok" => false, "error" => "need host + port"))
-        hist = ReportEngine.worker_stats_history(host, port)
+        # host="local" is the hub's own machine (see /api/local-workers): its telemetry ring is keyed by
+        # connection name, not host:port, so resolve the port back to its kernel's conn first.
+        hist = host == "local" ? _local_kernel_history(h, port) : ReportEngine.worker_stats_history(host, port)
         _json(Dict("ok" => true, "host" => host, "port" => port,
                    "samples" => [Dict("t" => round(s.rcv), "cpu" => s.cpu, "rss" => s.rss, "memo" => s.memo,
                                       "sys_cpu" => s.sys_cpu, "load1" => s.load1) for s in hist]))
