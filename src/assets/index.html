@@ -400,7 +400,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 .pdtab{background:none;border:none;color:#8a90b0;padding:7px 15px;cursor:pointer;font-size:.85rem;border-bottom:2px solid transparent;margin-bottom:-1px;}
 .pdtab:hover{color:#d4d8e8;} .pdtab.on{color:#e6ebf7;border-bottom-color:#569cd6;}
 .pdarr-sec{border:1px solid #2a2e40;border-radius:8px;padding:8px 10px;margin:8px 0;background:#10131f;}
-.pdarr-hd{margin-bottom:5px;}
+.pdarr-sec.secdragging{opacity:.5;border-color:#58a6ff;}
+.pdarr-hd{margin-bottom:5px;display:flex;align-items:center;gap:6px;}
+.pdarr-secgrip{color:#6a7090;cursor:grab;user-select:none;}
+.pdarr-secgrip:active{cursor:grabbing;}
 .pdarr-name{background:#141828;border:1px solid #2a2e40;color:#e6ebf7;border-radius:5px;padding:3px 9px;font-size:.85rem;font-weight:600;}
 .pdarr-list{min-height:26px;display:flex;flex-direction:column;gap:5px;padding:2px;border-radius:6px;}
 .pdarr-list.over{outline:1px dashed #569cd6;outline-offset:2px;}
@@ -455,7 +458,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
 </div></div>
 <div class="modal-bg" id="pdarrangebg"><div class="modal pubdash" style="max-width:660px;max-height:86vh">
   <div class="pdhead"><strong>Arrange documents</strong><span class="pdsub" id="pdarrsub"></span><button class="pdx" onclick="closeArrange()" title="Close">✕</button></div>
-  <div class="pddim" id="pdarrdesc" style="font-size:.76rem;margin-bottom:6px">Drag to reorder within a section, or between sections. Add sections and rename them.</div>
+  <div class="pddim" id="pdarrdesc" style="font-size:.76rem;margin-bottom:6px">Drag a row to reorder it within a section or move it to another; drag a section by its grip to reorder the sections themselves. Add sections and rename them.</div>
   <div class="pdbody" style="flex-direction:column;overflow:auto"><div id="pdarrbody" style="width:100%"></div></div>
   <div class="row"><button onclick="pdAddSection()">+ Section</button><button onclick="closeArrange()">Cancel</button><button class="primary" id="pdarrapply" onclick="applyArrange()">Apply &amp; re-push</button></div>
 </div></div>
@@ -1033,7 +1036,7 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
       : '<div class="pddim" style="margin:2px 0 12px">No front page yet — tag a cell <code>home</code> in a notebook and publish it here.</div>';
     document.getElementById('pdbody').innerHTML='<div class="pdnarrow">'+
       '<div class="pdsec" style="margin-top:0">Front page</div>'+fp+
-      '<div class="pdsec">Documents ('+docs.length+')'+(docs.length?' <span class="pddim" style="text-transform:none;font-weight:400;letter-spacing:0">— drag to reorder, or between sections; rename a section by editing its heading</span>':'')+'</div>'+
+      '<div class="pdsec">Documents ('+docs.length+')'+(docs.length?' <span class="pddim" style="text-transform:none;font-weight:400;letter-spacing:0">— drag a row to reorder or move it between sections; drag a section by its ⠿ grip to reorder the sections; rename one by editing its heading</span>':'')+'</div>'+
       (docs.length?'<div id="pddocsbody"></div>'+
         '<div class="pdrow" style="margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap">'+
           '<button class="pdbtn" onclick="pdAddSection(\'pddocsbody\')">+ Section</button>'+
@@ -1053,7 +1056,10 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var done=pdBusy(btn);
     fetch('/api/publish/site-arrange',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({site:_pdDocs,ordering:ordering})})
       .then(function(r){return r.ok?r.json():r.text().then(function(t){return Promise.reject(t);});})
-      .then(function(){loadPubDash(function(){pdRender();});})   // stay on the docs page, refreshed
+      // Confirm the save and name the NEXT step. Without this the page just re-renders in place —
+      // the arrangement is identical to what the user already dragged, so a successful save is
+      // indistinguishable from a no-op and the pending Sync goes unnoticed.
+      .then(function(){loadPubDash(function(){pdRender();});toast('✓ Order saved — ▶ Sync to deploy it','ok');})
       .catch(function(e){alertDark('Save order failed: '+e);}).finally(done);
   }
   window.pdSaveSiteDocs=pdSaveSiteDocs;
@@ -1580,8 +1586,8 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     var ab=document.getElementById('pdarrapply'); if(ab)ab.textContent=site?'Save order':'Apply & re-push';
     var dsc=document.getElementById('pdarrdesc');
     if(dsc)dsc.textContent=site
-      ? 'Drag to reorder within a section, or between sections. Add and rename sections. Save order stores the arrangement in the local build — Sync afterward to deploy it.'
-      : 'Drag to reorder within a section, or between sections. Add and rename sections. Apply re-pushes just the index to the published repo (the pages themselves aren’t rebuilt).';
+      ? 'Drag a row to reorder it within a section or move it to another; drag a section by its grip to reorder the sections. Add and rename sections. Save order stores the arrangement in the local build — Sync afterward to deploy it.'
+      : 'Drag a row to reorder it within a section or move it to another; drag a section by its grip to reorder the sections. Add and rename sections. Apply re-pushes just the index to the published repo (the pages themselves aren’t rebuilt).';
     document.getElementById('pdarrbody').innerHTML='<div class="pddim">Loading…</div>';
     document.getElementById('pdarrangebg').classList.add('show');
     fetch(url,{cache:'no-store'})
@@ -1592,7 +1598,15 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
   function closeArrange(){document.getElementById('pdarrangebg').classList.remove('show');}
   window.closeArrange=closeArrange;
   function _arrRow(d){return '<div class="pdarr-row" draggable="true" data-slug="'+esc(d.slug)+'"><span class="pdarr-grip">⠿</span><span>'+esc(d.title||d.slug)+'</span> <span class="pddim">'+esc(d.date||'')+'</span></div>';}
-  function _arrSec(name,rows,ungrouped){var hd=ungrouped?'<span class="pddim">Ungrouped</span>':'<input class="pdarr-name" value="'+esc(name)+'"/>';return '<div class="pdarr-sec"><div class="pdarr-hd">'+hd+'</div><div class="pdarr-list">'+(rows||'<div class="pdarr-empty">drop here</div>')+'</div></div>';}
+  // A section block. Named sections carry a grip and reorder by drag — a section's position sets its
+  // docs' `order`, and the index places a section by the LOWEST order it contains, so moving a section
+  // here is what moves it on the published page. The ungrouped bucket has no grip: the index always
+  // renders it first, so letting it be dragged would promise something the page won't honour.
+  function _arrSec(name,rows,ungrouped){
+    var hd=ungrouped?'<span class="pddim">Ungrouped</span>'
+                    :'<span class="pdarr-secgrip" title="drag to reorder this section">⠿</span><input class="pdarr-name" value="'+esc(name)+'"/>';
+    return '<div class="pdarr-sec'+(ungrouped?' pdarr-ungrouped':'')+'"><div class="pdarr-hd">'+hd+'</div>'+
+           '<div class="pdarr-list">'+(rows||'<div class="pdarr-empty">drop here</div>')+'</div></div>';}
   // Render sectioned, drag-orderable rows into `bodyEl` using `rowFn` for each doc. Shared by the
   // modal (repo mode) and the site Documents page (inline, richer rows).
   function renderArrangeInto(bodyEl,docs,rowFn){
@@ -1612,11 +1626,20 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
     });
     return ordering;}
   function arrAfter(list,y){var rows=[].slice.call(list.querySelectorAll('.pdarr-row:not(.dragging)'));var best={o:-Infinity,el:null};rows.forEach(function(c){var b=c.getBoundingClientRect();var o=y-b.top-b.height/2;if(o<0&&o>best.o)best={o:o,el:c};});return best.el;}
+  // The section the dragged one should land before, by pointer position — `arrAfter` over sections.
+  // The ungrouped block is excluded: the index always renders it first, so nothing may precede it.
+  function secAfter(body,y){
+    var secs=[].slice.call(body.querySelectorAll('.pdarr-sec:not(.secdragging):not(.pdarr-ungrouped)'));
+    var best={o:-Infinity,el:null};
+    secs.forEach(function(c){var b=c.getBoundingClientRect();var o=y-b.top-b.height/2;if(o<0&&o>best.o)best={o:o,el:c};});
+    return best.el;}
   function wireArrangeDnD(body){
     body=body||document.getElementById('pdarrbody');
     body.querySelectorAll('.pdarr-row').forEach(function(row){
       if(row._wired)return;row._wired=true;
-      row.addEventListener('dragstart',function(){row.classList.add('dragging');});
+      // Stop the row's dragstart reaching its section — otherwise moving a row would drag the whole
+      // section with it (the row is a descendant of a draggable block).
+      row.addEventListener('dragstart',function(e){row.classList.add('dragging');e.stopPropagation();});
       row.addEventListener('dragend',function(){row.classList.remove('dragging');});
     });
     body.querySelectorAll('.pdarr-list').forEach(function(list){
@@ -1628,10 +1651,33 @@ h1{color:#fff;font-size:1.3rem;} .empty{color:#6a7090;}
         if(after==null)list.appendChild(dragging);else list.insertBefore(dragging,after);
       });
     });
+    // Section reordering. `draggable` is armed by the GRIP rather than set on the block, so the
+    // section's name stays a normally editable text input (a draggable ancestor swallows its
+    // selection), and disarmed on dragend so a later click on the input is an ordinary click.
+    body.querySelectorAll('.pdarr-sec').forEach(function(sec){
+      if(sec._swired)return;sec._swired=true;
+      var grip=sec.querySelector('.pdarr-secgrip');
+      if(!grip)return;                                   // ungrouped: pinned first, never draggable
+      grip.addEventListener('mousedown',function(){sec.setAttribute('draggable','true');});
+      sec.addEventListener('dragstart',function(e){sec.classList.add('secdragging');e.stopPropagation();});
+      sec.addEventListener('dragend',function(){sec.classList.remove('secdragging');sec.removeAttribute('draggable');});
+    });
+    if(!body._swired){body._swired=true;
+      body.addEventListener('dragover',function(e){
+        var dragging=body.querySelector('.pdarr-sec.secdragging');if(!dragging)return;
+        e.preventDefault();
+        var after=secAfter(body,e.clientY);
+        if(after==null)body.appendChild(dragging);else body.insertBefore(dragging,after);
+      });
+    }
   }
   function pdAddSection(bodyId){
     var body=document.getElementById(bodyId||'pdarrbody');var div=document.createElement('div');div.className='pdarr-sec';
-    div.innerHTML='<div class="pdarr-hd"><input class="pdarr-name" value="New section"/></div><div class="pdarr-list"><div class="pdarr-empty">drop here</div></div>';
+    // Same markup as `_arrSec`'s named branch — including the grip, so a section added here is
+    // draggable straight away instead of being stuck at the bottom where it was appended.
+    div.innerHTML='<div class="pdarr-hd"><span class="pdarr-secgrip" title="drag to reorder this section">⠿</span>'+
+                  '<input class="pdarr-name" value="New section"/></div>'+
+                  '<div class="pdarr-list"><div class="pdarr-empty">drop here</div></div>';
     body.appendChild(div);wireArrangeDnD(body);
   }
   window.pdAddSection=pdAddSection;
