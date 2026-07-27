@@ -736,13 +736,18 @@ function _cell_effect(cell)::CellEffect
     cell.kind == CODE || return PURE
     :resource in cell.flags && return RESOURCE
     :volatile in cell.flags && return VOLATILE
-    # `:everywhere` — a RUNTIME-DECLARED everywhere effect (`slate_effect(:everywhere)` harvested from the
-    # run, recorded on the cell by `_apply_cell_effects!`). Generalizes the static `import_scaffold`/theme
-    # cases: a cell that registers process-global state (a custom op, a global config) declares it and is
-    # established on every region worker — no colocated `using` or hardcoded sentinel needed. Conceptually
-    # the notebook/region analogue of `Distributed.@everywhere` (run this on every worker).
+    # Three routes to EVERYWHERE, in increasing explicitness:
+    #  • INFERRED — pure `using`, an import scaffold, a theme setter. The cell's shape says so.
+    #  • DECLARED (`:everywhere_declared`) — a RUNTIME declaration (`slate_effect(:everywhere)` harvested
+    #    from the run by `_apply_cell_effects!`, or restored from the durable EffectStore). For a cell that
+    #    registers process-global state (a custom op, a global config) with no colocated `using` to
+    #    piggyback on — a package's registrar can self-declare at zero cost to the notebook author.
+    #  • TAGGED (`:everywhere`) — the AUTHOR's explicit override, for the cell whose compute genuinely
+    #    belongs on every side and which neither of the above can recognise. It replays WHOLE
+    #    (`_everywhere_replay_source`), because tagging it is a statement that the whole cell is safe.
+    # All three are the notebook/region analogue of `Distributed.@everywhere` (run this on every worker).
     (_is_pure_using(cell.source) || :import_scaffold in cell.flags || :everywhere in cell.flags ||
-        _THEME_SENTINEL in cell.writes) && return EVERYWHERE
+        :everywhere_declared in cell.flags || _THEME_SENTINEL in cell.writes) && return EVERYWHERE
     return PURE
 end
 

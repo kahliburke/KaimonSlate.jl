@@ -360,6 +360,58 @@ end
         @test ReportEngine._scaffold_replay_source("function f(") == ""
     end
 
+    @testset "scaffold replay source: definitions travel, compute does not" begin
+        # A shared-kernel cell — `using` plus the functions region cells call — must prime WHOLE on
+        # every worker, or the region cells hit `UndefVarError` on a function that only ever ran on
+        # main. Definitions are self-sufficient (they establish a name, they don't consume upstream
+        # data), so they replay alongside the imports with no annotation from the author.
+        kernel = """
+        import Downloads
+        using Statistics
+
+        const MON = "https://example.org/sst.nc"
+
+        function fetch_band(x0, x1)
+            Downloads.download(MON * "?\$x0:\$x1")
+        end
+
+        reduce_band(v) = mean(v)
+        """
+        s = ReportEngine._scaffold_replay_source(kernel)
+        @test occursin("import Downloads", s) && occursin("using Statistics", s)
+        @test occursin("MON", s)                      # literal const is a definition
+        @test occursin("fetch_band", s)               # long-form function
+        @test occursin("reduce_band", s)              # short-form function
+
+        # The mixed plot cell from the testset above must STILL drop its compute — that's the case the
+        # scaffold-only rule existed for, and definitions must not reopen it.
+        smix = ReportEngine._scaffold_replay_source("""
+        using CairoMakie
+        fig = Figure()
+        lines!(Axis(fig[1, 1]), traj[:, 1], traj[:, 3])
+        fig
+        """)
+        @test occursin("using CairoMakie", smix) && !occursin("traj", smix) && !occursin("Figure", smix)
+
+        # A `const` bound to an EXPRESSION reads upstream data — compute, not definition — so it stays
+        # behind, while a literal (and a literal range) crosses.
+        @test !occursin("NROWS", ReportEngine._scaffold_replay_source("using A\nconst NROWS = size(data, 1)"))
+        @test occursin("LEVELS", ReportEngine._scaffold_replay_source("using A\nconst LEVELS = 1:17"))
+
+        # Types and macros are definitions too: a value crossing the boundary can't decode without them.
+        sdef = ReportEngine._scaffold_replay_source("""
+        using A
+        struct Slab; bytes::Int; end
+        abstract type Grid end
+        macro ce(x); x; end
+        """)
+        @test occursin("Slab", sdef) && occursin("Grid", sdef) && occursin("ce", sdef)
+
+        # Statement KIND, not inferred reads, is the test — a definition whose BODY references an
+        # upstream global still travels (it defines cleanly; the presync stages the global).
+        @test occursin("scale_it", ReportEngine._scaffold_replay_source("using A\nscale_it(x) = x * SCALE"))
+    end
+
     @testset "@asset file deps: static extraction + memo invalidation" begin
         # `@asset "path"` is a source literal, so the analyzer records it as a file input (cell.inputs)
         # WITHOUT running the cell; the memo key folds the file's content hash, so editing the asset

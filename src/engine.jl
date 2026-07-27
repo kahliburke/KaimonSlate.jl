@@ -246,14 +246,17 @@ function _parse_controls(s::AbstractString)
 end
 
 # Flags Slate manages internally (never written to / read from the header). `:opaque` and
-# `:macrocall` are re-derived every eval by dependency inference; `:everywhere` is a runtime
+# `:macrocall` are re-derived every eval by dependency inference; `:everywhere_declared` is a runtime
 # effect classification re-established each session (from a run or the durable EffectStore), so
-# none of them are author tags and must never be serialized to the header.
-const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant, :import_scaffold, :everywhere])
+# none of them are author tags and must never be serialized to the header. It is deliberately a
+# DIFFERENT symbol from the `everywhere` author tag below: sharing one would round-trip a runtime
+# classification back out as a tag the author never wrote.
+const _INTERNAL_FLAGS = Set{Symbol}([:opaque, :macrocall, :using_redundant, :import_scaffold,
+                                     :everywhere_declared])
 # Header tags Slate gives behaviour to (rendered as checkboxes in the UI tag editor). Any OTHER
 # token is kept verbatim as a free-form tag — inert metadata that still round-trips.
 const _KNOWN_TAGS = (:collapsed, :hidecode, :trace, :nocache, :cache, :resource, :slide, :notes,
-                     :title, :abstract, :bibliography, :caption, :home, :docindex)
+                     :title, :abstract, :bibliography, :caption, :home, :docindex, :everywhere)
 
 "Parse a header line's trailing tokens into (kind, id, controls, tags::Vector{Symbol}). Every token
 that isn't `id=`/`controls=`/`code`/`md` becomes a tag flag (known ones drive behaviour; the rest are

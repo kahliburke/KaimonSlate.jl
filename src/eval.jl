@@ -607,21 +607,57 @@ function _is_pure_using(src::AbstractString)
     return seen
 end
 
-# The SCOPE-ESTABLISHING part of a cell's source: its top-level `using`/`import` statements plus any
-# theme-setter call (`_THEME_CALL_NAMES`). This is what a cell classified EVERYWHERE actually needs to
-# re-establish on another namespace — the text counterpart of the worker's `_replay_scaffold!`, which
-# replays the same two effects after a memo restore. Returns `""` when there is nothing to replay.
+# A top-level statement that DEFINES something rather than computing it: a function (long or short
+# form), a type, a macro, or a `const` bound to a literal. Such a statement is self-sufficient — it
+# establishes a name without consuming another cell's data — so it belongs on every side alongside the
+# imports. A `const` bound to an EXPRESSION does not qualify: `const N = size(data, 1)` reads upstream
+# data and is compute, not definition.
+#
+# A definition may still REFERENCE an upstream global in its body (`f(x) = x * SCALE`). That defines
+# cleanly on the far side (Julia resolves globals at call time) and the region presync stages the
+# cell's data reads alongside it, so the binding is normally there when it runs.
+function _is_definition_stmt(s)
+    s isa Expr || return false
+    s.head in (:function, :macro, :struct, :abstract, :primitive) && return true
+    # short form `f(x) = …` / `f(x) where {T} = …` — an `=` whose LHS is a call signature
+    if s.head === :(=) && length(s.args) >= 1
+        lhs = s.args[1]
+        while lhs isa Expr && lhs.head === :where
+            lhs = lhs.args[1]
+        end
+        return lhs isa Expr && lhs.head === :call
+    end
+    # `const X = <literal>` — a definition only when nothing is computed from upstream data
+    if s.head === :const && length(s.args) == 1 && s.args[1] isa Expr && s.args[1].head === :(=)
+        rhs = s.args[1].args[2]
+        return rhs isa Union{Number,AbstractString,Char,Bool,QuoteNode} ||
+               (rhs isa Expr && rhs.head === :call && rhs.args[1] === :(:) &&
+                all(a -> a isa Number, rhs.args[2:end]))
+    end
+    return false
+end
+
+# The SCOPE-ESTABLISHING part of a cell's source: its top-level `using`/`import` statements, its
+# DEFINITIONS (functions, types, literal consts), plus any theme-setter call (`_THEME_CALL_NAMES`).
+# This is what a cell classified EVERYWHERE actually needs to re-establish on another namespace — the
+# text counterpart of the worker's `_replay_scaffold!`, which replays the same effects after a memo
+# restore. Returns `""` when there is nothing to replay.
 #
 # Replaying the WHOLE source instead is wrong for a MIXED cell — one that opens with `using Plotting`
 # and then plots from an upstream cell's data. Its compute reads names the target namespace doesn't
 # have (they live in a cell that is not itself EVERYWHERE), so the replay throws on a binding the
 # scaffold never needed; and even where it succeeds it re-runs expensive non-effect work per side.
+# Definitions are not that: a `function` statement establishes a name and runs no upstream compute, so
+# a shared-kernel cell written the natural way — `using X` followed by the functions the region cells
+# call — primes correctly with no annotation. Extracting per STATEMENT KIND (syntactic) rather than
+# from inferred reads matters: dependency inference is conservative and counts function-body locals and
+# keyword-argument names as reads, so a reads-based test would reject exactly these cells.
 function _scaffold_replay_source(src::AbstractString)
     top = try; Meta.parseall(String(src)); catch; return ""; end
     stmts = (top isa Expr && top.head === :toplevel) ? top.args : Any[top]
     out = String[]
     for s in stmts
-        (s isa Expr && s.head in (:using, :import)) || continue
+        (s isa Expr && (s.head in (:using, :import) || _is_definition_stmt(s))) || continue
         push!(out, string(s))
     end
     for call in _collect_theme_calls!(Any[], top)

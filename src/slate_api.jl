@@ -589,7 +589,16 @@ const SLATE_API = SlateApiEntry[
           • `slate.region_on(notebook, "name1,name2")` — choose which regions a notebook uses (durable in
             its footer). `slate.regions()` lists the registry + parked wires.
           • Tag a cell `region=<name>` (the 🏷 tag editor's "Run on") to run it there. Keep the main kernel
-            and `@bind` cells local; a region cell should PRODUCE values, not mutate main-kernel state (v1)."""),
+            and `@bind` cells local; a region cell should PRODUCE values, not mutate main-kernel state (v1).
+        A SHARED KERNEL cell — `using X` plus the functions the region cells call — needs no annotation:
+        its imports and DEFINITIONS (functions, types, literal `const`s) are re-established on every
+        worker, while data-dependent compute in the same cell stays behind. Its own upstream data reads
+        are staged across first, so a definition that references an outer global still resolves. Tag a
+        cell `everywhere` to override that and re-run it WHOLE on every worker — for the cell whose
+        compute genuinely belongs on each side (a registration call, a process-global config) rather than
+        a definition. Values that a region cell reads from another side cross as blobs; functions and
+        consts a notebook defines never do (they live in its anonymous module, which the far side can't
+        decode) — those are always re-established by this priming path."""),
 
     # ── Cell tags (header) ─────────────────────────────────────────────────────────────────────────
     SlateApiEntry("cell tags", "Cell tags",
@@ -605,7 +614,8 @@ const SLATE_API = SlateApiEntry[
         file/socket handle: the live handle can't be cached so the cell re-inits every open, but
         unlike `nocache` it does NOT poison downstream — cells reading it stay cacheable, keyed by
         this cell's source; pair with an `@asset` on the backing file if the resource can drift
-        externally). Presentation tags: `slide` (force a
+        externally), `everywhere` (re-run this cell WHOLE on every region worker — see "regions").
+        Presentation tags: `slide` (force a
         new slide), `notes` (speaker notes, presenter-only). Document-metadata ROLE tags: `title`,
         `abstract`, `bibliography` (see "front matter"). Site tags (see "site"): `home` (this notebook is
         the published site's FRONT PAGE), `docindex` (marks where the document listing is injected).
