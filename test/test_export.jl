@@ -29,6 +29,32 @@ _pos(needle, hay) = first(findfirst(needle, hay))
     @test isempty(NS._export_importmap(nothing))           # no imports ⇒ no tag
 end
 
+@testset "offline export inlines every third-party lib" begin
+    # Only SUBRESOURCE references matter: a url inside an inlined script body (a licence header, a
+    # `//# sourceMappingURL`, a string constant) is never fetched by the browser, so a bare "http" count
+    # would be meaningless. Match the attribute/`url()` forms a browser actually resolves.
+    subres(s) = collect(eachmatch(r"(?:src|href)\s*=\s*[\"']https?://|url\(\s*[\"']?https?://", s))
+
+    online = NS._thirdparty_head(false)
+    @test !isempty(subres(online))                          # the default really is CDN-linked
+    @test occursin("echarts", online) && occursin("katex", online)
+
+    # The vendor cache is populated over the network on first use; if that isn't available the helper
+    # degrades to CDN tags by design, so only assert the inlining when it actually resolved.
+    if NS._vendor_file("katex", "katex.min.css") !== nothing
+        offline = NS._thirdparty_head(true)
+        @test isempty(subres(offline))                      # ZERO external subresources — the whole point
+        @test length(offline) > 100_000                     # real library bodies, not empty tags
+        @test occursin("data:font/woff2;base64,", offline)  # KaTeX fonts ride inline, else math renders wrong
+        # Both modes resolve versions from vendor.json, so they can't drift apart.
+        @test occursin("@dagrejs/dagre@3.0.0", NS._vendor_url("dagre", "dagre.min.js"))
+
+        offmap = NS._slate_ui_imports(true)
+        @test length(offmap) == 6
+        @test all(startswith(v, "data:text/javascript;base64,") for v in values(offmap))
+    end
+end
+
 @testset "site export — series grouping" begin
     @testset "_series_groups buckets & ordering" begin
         docs = [_doc("a", "2026-01-01"; series = "Optics"),
