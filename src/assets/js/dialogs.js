@@ -80,6 +80,9 @@ function _htmlBaseParts() {
   if (code !== 'normal') parts.push('code=' + code);
   const wqs = _htmlWidthQS(); if (wqs) parts.push('width=' + wqs);
   const outv = (document.getElementById('exoutputs') || {}).value || 'all'; if (outv !== 'all') parts.push('outputs=' + outv);
+  // Fully offline: inline KaTeX/ECharts/dagre (+ the Preact stack) instead of linking a CDN, so the page
+  // renders with no network at all. Bigger file; required for a locked-down viewer or an archival copy.
+  if ((document.getElementById('htmloffline') || {}).checked) parts.push('offline=1');
   return parts;
 }
 // Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
@@ -525,6 +528,7 @@ function openExport(preset) {
   const hs = document.getElementById('htmlsource'); if (hs) hs.checked = localStorage.getItem('slate_htmlsource') !== '0';
   const hr = document.getElementById('htmlrunnable'); if (hr) hr.checked = localStorage.getItem('slate_htmlrunnable') === '1';
   const hh = document.getElementById('htmlhistory'); if (hh) hh.checked = localStorage.getItem('slate_htmlhistory') === '1';
+  const ho = document.getElementById('htmloffline'); if (ho) ho.checked = localStorage.getItem('slate_htmloffline') === '1';
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   const stt = document.getElementById('sitetitle'); if (stt && !stt.value) stt.value = localStorage.getItem('slate_sitetitle') || '';
@@ -580,6 +584,7 @@ function closeExport(go) {
     const hs = document.getElementById('htmlsource'); localStorage.setItem('slate_htmlsource', hs && hs.checked ? '1' : '0');
     const hr = document.getElementById('htmlrunnable'); if (hr) localStorage.setItem('slate_htmlrunnable', hr.checked ? '1' : '0');
     const hh = document.getElementById('htmlhistory'); if (hh) localStorage.setItem('slate_htmlhistory', hh.checked ? '1' : '0');
+    const ho = document.getElementById('htmloffline'); if (ho) localStorage.setItem('slate_htmloffline', ho.checked ? '1' : '0');
     ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
     return exportHtml(true);
   }

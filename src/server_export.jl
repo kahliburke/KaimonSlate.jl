@@ -2,10 +2,14 @@
 # header: imports/exports, the LiveNotebook struct). Names here resolve in NotebookServer.
 
 # ── Static export (HTML / print-to-PDF) ──────────────────────────────────────
-# A self-contained HTML document of the notebook: markdown rendered, code shown,
-# outputs embedded (images as base64), client-rendered ECharts frozen to their latest
-# snapshot PNG, interactive tables flattened to static HTML. KaTeX from a CDN typesets
-# math. No server, no scripts to boot — openable offline and printable to PDF.
+# A self-contained HTML document of the notebook: markdown rendered, code shown, server-rendered figures
+# embedded as base64. It is static in the sense that NO JULIA RUNS — but it is not a picture of the
+# notebook: ECharts re-render CLIENT-SIDE from their embedded option specs (tooltips, legend toggles,
+# zoom/pan, geo maps and echarts-gl all work), tables hydrate into sortable/filterable/paged views, `@web`
+# cell fragments run their own JS, and `save_asset` data rides along base64-inlined. What CANNOT survive is
+# anything that needs the kernel: `@bind` reactivity and `slateCall` are live-only.
+# KaTeX typesets math. By default the third-party libs come from a CDN; `offline=true` inlines them so the
+# page has zero external subresources (see `_thirdparty_head`). Printable to PDF either way.
 # Theme palettes (`:root` vars) + syntax-highlight colours for the two export themes. `dark` matches
 # the live UI; `light` is publication-style (matches the PDF's light default). The structural CSS below
 # is theme-agnostic (all colours flow through the vars / `.hl-*` rules).
@@ -817,31 +821,133 @@ function _export_importmap(imports)
     return string("<script type=\"importmap\">", JSON.json(m), "</script>")
 end
 
-# Slate's own vendored front-end stack (Preact/htm/signals) → CDN URLs, so an EXPORTED web-cell fragment
-# resolves the SAME bare specifiers it used live (`import { html } from "htm/preact"`, `@preact/signals`).
-# Versions come from vendor.json (a bump flows through), and the URLs are the jsdelivr files the live
-# `/assets/vendor/*` cache is itself populated from — so live and export load byte-identical modules. The
-# whole stack shares one Preact instance because each module imports the others by the SAME bare specifier,
-# re-resolved through this map. (Consistent with the export's existing CDN use of katex/echarts; a fully
-# self-contained/offline export would inline these as data: URLs — a follow-up.)
-function _slate_ui_imports()
-    v = try
-        JSON.parse(read(joinpath(@__DIR__, "assets", "vendor.json"), String))
-    catch
-        return Dict{String,String}()
+# ── Third-party front-end libs in an export: CDN or fully inlined ─────────────────────────────────
+# An exported page needs KaTeX (math), ECharts (live charts), dagre (graph-widget layout) and — when a web
+# cell or component widget is present — Slate's Preact/htm/signals stack. Two modes:
+#
+#   • ONLINE (default) — emit CDN `<script src>`/`<link>` tags and CDN import-map targets. Small page; the
+#     reader needs the network the moment they open it.
+#   • OFFLINE (`offline=true`) — inline the bytes from the version-pinned vendor cache (`_vendor_file`, the
+#     same files the live server serves), so the page carries ZERO `http(s)://` subresources and opens with
+#     no network at all. Costs roughly a megabyte. This is what a locked-down or air-gapped viewer needs —
+#     an exam browser (Safe Exam Browser and friends block outbound requests), a field laptop, an archival
+#     copy that must still render correctly years after a CDN has moved on.
+#
+# Both modes resolve their URLs/versions from vendor.json, so an online export and an offline one load
+# byte-identical libraries and a version bump flows through to every path at once.
+
+# The CDN url a vendored file comes from: `base` with `{version}` substituted. `nothing` when the package
+# isn't pinned. This is the single source of truth for the export's third-party urls — hardcoding them
+# here is what let the export drift to a different major of dagre than the live app was running.
+function _vendor_url(pkg::AbstractString, sub::AbstractString)
+    man = try; JSON.parsefile(_VENDOR_JSON); catch; return nothing; end
+    e = get(man, pkg, nothing)
+    (e isa AbstractDict && haskey(e, "version") && haskey(e, "base")) || return nothing
+    return replace(String(e["base"]), "{version}" => String(e["version"])) * String(sub)
+end
+
+_vendor_text(pkg, sub) = (p = _vendor_file(pkg, sub); p === nothing ? nothing : try; read(p, String); catch; nothing; end)
+_vendor_bytes(pkg, sub) = (p = _vendor_file(pkg, sub); p === nothing ? nothing : try; read(p); catch; nothing; end)
+
+# A vendored module as a `data:` URL for an import map, or `nothing` if it can't be resolved.
+function _vendor_data_url(pkg, sub, mime = "text/javascript")
+    b = _vendor_bytes(pkg, sub)
+    b === nothing ? nothing : string("data:", mime, ";base64,", Base64.base64encode(b))
+end
+
+# `<script>` with the vendored body inlined. Falls back to the CDN tag when the file can't be resolved
+# (cache never warmed AND no network at export time) — an offline export then degrades to the online
+# behaviour for that one lib instead of emitting a page with a silently missing library.
+function _lib_script(pkg, sub, offline::Bool; defer::Bool = false)
+    url = _vendor_url(pkg, sub)
+    if offline
+        js = _vendor_text(pkg, sub)
+        js === nothing || return string("<script>", replace(js, r"</script"i => "<\\/script"), "</script>")
     end
-    ver(p) = String(get(get(v, p, Dict{String,Any}()), "version", ""))
-    P, S, SC, H = ver("preact"), ver("signals"), ver("signals-core"), ver("htm")
-    (isempty(P) || isempty(S) || isempty(SC) || isempty(H)) && return Dict{String,String}()
-    cdn = "https://cdn.jsdelivr.net/npm/"
-    return Dict{String,String}(
-        "preact"               => "$(cdn)preact@$(P)/dist/preact.module.js",
-        "preact/hooks"         => "$(cdn)preact@$(P)/hooks/dist/hooks.module.js",
-        "@preact/signals-core" => "$(cdn)@preact/signals-core@$(SC)/dist/signals-core.module.js",
-        "@preact/signals"      => "$(cdn)@preact/signals@$(S)/dist/signals.module.js",
-        "htm"                  => "$(cdn)htm@$(H)/dist/htm.module.js",
-        "htm/preact"           => "$(cdn)htm@$(H)/preact/index.module.js",
+    url === nothing && return ""
+    return string("<script", defer ? " defer" : "", " src=\"", url, "\"></script>")
+end
+
+# KaTeX's stylesheet points at its fonts with relative `url(fonts/…)`, which is dead in a standalone file.
+# Inline each woff2 as a data: URL and leave the woff/ttf entries that follow it alone: a browser takes the
+# FIRST supported format in a `src:` list and never fetches the rest, and every browser that can run this
+# page supports woff2 — so ~20 font files ride along instead of ~60.
+const _KATEX_FONT_RE = r"url\(fonts/([A-Za-z0-9_.\-]+\.woff2)\)"
+
+function _katex_css_inline()
+    css = _vendor_text("katex", "katex.min.css")
+    css === nothing && return nothing
+    # Warm the whole font set CONCURRENTLY first. KaTeX references ~20 woff2 files and each is a separate
+    # fetch on a cold cache; done one at a time that's a long serial stall on the export. `_vendor_file` is
+    # itself lock-guarded and idempotent, so a parallel warm is safe, and each is bounded by its own
+    # timeout — a CDN that's slow for one font can't hold up the rest.
+    names = unique(m.captures[1] for m in eachmatch(_KATEX_FONT_RE, css))
+    fonts = Dict{String,Union{Nothing,Vector{UInt8}}}()
+    flock = ReentrantLock()
+    @sync for name in names
+        Threads.@spawn begin
+            b = _vendor_bytes("katex", "fonts/" * name)
+            lock(flock) do; fonts[name] = b; end
+        end
+    end
+    return replace(css, _KATEX_FONT_RE => function (m)
+        name = match(_KATEX_FONT_RE, m).captures[1]
+        b = get(fonts, name, nothing)
+        b === nothing ? m : string("url(data:font/woff2;base64,", Base64.base64encode(b), ")")
+    end)
+end
+
+function _katex_css_tag(offline::Bool)
+    if offline
+        css = _katex_css_inline()
+        css === nothing || return string("<style>", css, "</style>")
+    end
+    url = _vendor_url("katex", "katex.min.css")
+    url === nothing ? "" : string("<link rel=\"stylesheet\" href=\"", url, "\"/>")
+end
+
+# The full third-party `<head>` block for an export, in whichever mode.
+function _thirdparty_head(offline::Bool)
+    return string(
+        _katex_css_tag(offline),
+        _lib_script("katex", "katex.min.js", offline; defer = true),
+        _lib_script("katex", "contrib/auto-render.min.js", offline; defer = true),
+        # ECharts renders CLIENT-SIDE from the specs embedded below (real charts with data), instead of
+        # freezing to a server snapshot that headless exports can't capture.
+        _lib_script("echarts", "echarts.min.js", offline),
+        # Graph layout: a self-contained client widget mounted in a cell (the neuro/DAG canvas) carries its
+        # own JS + initial payload inline and boots itself, but it needs `dagre` for layout — which the live
+        # app loads globally and a standalone page otherwise lacks, so the widget bails (blank canvas). Load
+        # it here (sync, before the body widget scripts run) so such widgets FUNCTION in the export.
+        _lib_script("dagre", "dagre.min.js", offline),
     )
+end
+
+# Slate's own vendored front-end stack (Preact/htm/signals) → import-map targets, so an EXPORTED web-cell
+# fragment resolves the SAME bare specifiers it used live (`import { html } from "htm/preact"`,
+# `@preact/signals`). Versions come from vendor.json (a bump flows through), and the CDN urls are the very
+# files the live `/assets/vendor/*` cache is populated from — so live and export load byte-identical
+# modules. The whole stack shares one Preact instance because each module imports the others by the SAME
+# bare specifier, re-resolved through this map. Under `offline`, each target is the module inlined as a
+# `data:` URL instead (bare specifiers inside those modules still resolve — an import map applies to
+# data: modules too); any single module that can't be resolved keeps its CDN url.
+function _slate_ui_imports(offline::Bool = false)
+    subs = Dict{String,Tuple{String,String}}(
+        "preact"               => ("preact", "dist/preact.module.js"),
+        "preact/hooks"         => ("preact", "hooks/dist/hooks.module.js"),
+        "@preact/signals-core" => ("signals-core", "dist/signals-core.module.js"),
+        "@preact/signals"      => ("signals", "dist/signals.module.js"),
+        "htm"                  => ("htm", "dist/htm.module.js"),
+        "htm/preact"           => ("htm", "preact/index.module.js"),
+    )
+    out = Dict{String,String}()
+    for (spec, (pkg, sub)) in subs
+        target = offline ? _vendor_data_url(pkg, sub) : nothing
+        target === nothing && (target = _vendor_url(pkg, sub))
+        target === nothing && return Dict{String,String}()   # unpinned stack ⇒ emit no map at all
+        out[spec] = target
+    end
+    return out
 end
 
 # The Slate widget SDK for an export: `@slate/widget` → the SDK module inlined as a data: URL, so a
@@ -859,11 +965,11 @@ end
 # The export's full importmap: the Slate UI stack (Preact/htm/signals) + the widget SDK are included when
 # a web cell OR an ESM (component) front-end widget is present — they're what import those specifiers —
 # MERGED UNDER the notebook's `@use` declarations (a `@use` wins on a key clash).
-function _export_importmap_for(nb::LiveNotebook)
+function _export_importmap_for(nb::LiveNotebook, offline::Bool = false)
     uses = get(nb.report.meta, "imports", nothing)
     usemap = uses === nothing ? Dict{String,String}() : Dict{String,String}(String(k) => String(v) for (k, v) in uses)
     esm = _has_esm_frontend(nb)
-    uimap = (esm || any(c -> c.kind == ReportEngine.WEB, nb.report.cells)) ? _slate_ui_imports() : Dict{String,String}()
+    uimap = (esm || any(c -> c.kind == ReportEngine.WEB, nb.report.cells)) ? _slate_ui_imports(offline) : Dict{String,String}()
     sdk = esm ? _slate_widget_sdk_import() : Dict{String,String}()
     merged = merge(uimap, sdk, usemap)
     return _export_importmap(isempty(merged) ? nothing : merged)
@@ -876,7 +982,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      og_url::AbstractString = "", og_type::AbstractString = "article",
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
                      memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL,
-                     inline_assets::Bool = true, width::Integer = 900,
+                     inline_assets::Bool = true, width::Integer = 900, offline::Bool = false,
                      credit::Bool = true, site_home::AbstractString = "", site_home_label::AbstractString = "")
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     # One Slate palette drives the page chrome, code AND the client-rendered ECharts (they read its CSS
@@ -931,20 +1037,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # The page's import map → so an exported page's front-end JS resolves the same bare
               # specifiers it used live: the notebook's `@use` modules PLUS Slate's Preact/htm/signals
               # stack when a web cell uses it. Emitted in <head> before any body module runs.
-              _export_importmap_for(nb),
+              _export_importmap_for(nb, offline),
               _og_tags(; title = fm0.title, desc = rawdesc, image = og_image, url = og_url, type = og_type),
-              "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\"/>",
-              "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>",
-              "<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js\"></script>",
-              # ECharts renders CLIENT-SIDE from the embedded specs below (real charts with data), instead
-              # of freezing to a server snapshot that headless exports can't capture.
-              "<script src=\"https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js\"></script>",
-              # Same rationale for graph layout: a self-contained client widget mounted in a cell (the
-              # neuro/DAG canvas) carries its own JS + initial payload inline and boots itself, but it needs
-              # `dagre` for layout — which the live app loads globally and a standalone page otherwise lacks,
-              # so the widget bails (blank canvas). Load it here (sync, before the body widget scripts run)
-              # so such widgets FUNCTION in the export instead of being frozen to a snapshot.
-              "<script src=\"https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js\"></script>",
+              # KaTeX + ECharts + dagre: CDN tags, or the bytes inlined from the vendor cache under
+              # `offline` (a page that must open with no network at all). See `_thirdparty_head`.
+              _thirdparty_head(offline),
               "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
               _frontend_export_head(nb), "<article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end

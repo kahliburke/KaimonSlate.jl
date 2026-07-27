@@ -113,7 +113,12 @@ function _vendor_file(pkg::AbstractString, sub::AbstractString)
         mkpath(dirname(dest))
         tmp = dest * ".part"
         try
-            r = HTTP.get(base * sub; redirect = true, retry = false, status_exception = true)
+            # BOUNDED: a request that never returns would otherwise wedge its caller forever — and the
+            # caller can be the notebook server answering a page request, or an export warming a few dozen
+            # font files in a row. A slow/blocked CDN must degrade to "unresolved" (the caller then falls
+            # back to a CDN url), never to a hang.
+            r = HTTP.get(base * sub; redirect = true, retry = false, status_exception = true,
+                         connect_timeout = 10, request_timeout = 60)
             write(tmp, r.body); mv(tmp, dest; force = true); dest
         catch
             rm(tmp; force = true); nothing
