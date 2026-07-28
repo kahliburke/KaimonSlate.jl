@@ -3,6 +3,9 @@
 using ReTest
 using KaimonSlate
 import Base64
+using CodecZlib: GzipDecompressor            # verify the packed-asset round-trip
+using Random: Xoshiro                        # deterministic incompressible bytes
+const ReportEngine = KaimonSlate.ReportEngine
 const NS = KaimonSlate.NotebookServer
 
 # A minimal manifest doc entry.
@@ -53,6 +56,70 @@ end
         @test length(offmap) == 6
         @test all(startswith(v, "data:text/javascript;base64,") for v in values(offmap))
     end
+end
+
+@testset "packed data assets — narrowed + gzipped for a single file" begin
+    # A `@replay` table is the one payload whose size scales with what the author computed, so the
+    # inlined copy is narrowed and compressed. Both are ARTIFACT decisions: the live notebook keeps the
+    # real array, and re-exporting can revisit them without re-running a cell.
+    n = 4000
+    vals = Float64[2 + sin(i / 40) for i in 1:n]           # smooth ⇒ genuinely compressible
+    raw = Vector{UInt8}(reinterpret(UInt8, vals))
+    spec = Dict{String,Any}("dtype" => "f64", "shape" => [n], "order" => "col")
+
+    b, dt, enc = NS._pack_export_asset(spec, raw)
+    @test dt == "f32"                                       # f64 halves; a plot cannot show the rest
+    @test enc == "gzip"
+    @test length(b) < length(raw) ÷ 2                       # narrowing alone already halves it
+    # Round-trips to the same numbers a Float32Array would read.
+    back = reinterpret(Float32, transcode(GzipDecompressor, b))
+    @test length(back) == n
+    @test all(isapprox.(back, Float32.(vals); rtol = 1e-6))
+
+    # Ordering matters: narrowing FIRST leaves fewer distinct bytes, so it compresses better than
+    # gzipping the f64 buffer would.
+    gz_only, _, _ = NS._pack_export_asset(spec, raw; narrow = false)
+    @test length(b) < length(gz_only)
+
+    # Never pay for compression that doesn't win: tiny buffers skip it, and incompressible bytes are
+    # left alone rather than shipped larger through base64.
+    _, _, e_small = NS._pack_export_asset(Dict{String,Any}(), rand(UInt8, 64))
+    @test e_small === nothing
+    noise = rand(Xoshiro(1), UInt8, 200_000)
+    _, _, e_noise = NS._pack_export_asset(Dict{String,Any}(), noise)
+    @test e_noise === nothing
+
+    # A non-float asset is left at its own dtype — only f64 has precision to give away.
+    _, dt_i, _ = NS._pack_export_asset(Dict{String,Any}("dtype" => "i32"), rand(UInt8, 8192))
+    @test dt_i === nothing
+
+    # Both reductions are switchable, because they trade different things. Compression costs REACH — a
+    # page inflates with DecompressionStream, so an old locked-down viewer (an exam machine) needs it
+    # off. Narrowing costs precision only, and every browser reads a Float32Array.
+    b_off, dt_off, enc_off = NS._pack_export_asset(spec, raw; compress = false)
+    @test enc_off === nothing && dt_off == "f32"
+    @test length(b_off) == length(raw) ÷ 2                  # narrowed, not compressed
+    _, dt_raw, enc_raw = NS._pack_export_asset(spec, raw; compress = false, narrow = false)
+    @test dt_raw === nothing && enc_raw === nothing         # untouched — exactly the bytes given
+
+    # The page must be told it has to inflate, and must say so plainly if it cannot.
+    @test occursin("_slateInflate", NS._EXPORT_ASSET_JS)
+    @test occursin("DecompressionStream", NS._EXPORT_ASSET_JS)
+    @test occursin("a.enc===\"gzip\"", NS._EXPORT_ASSET_JS)
+end
+
+@testset "asset stem keeps non-ASCII names distinct" begin
+    # Julia names are routinely Greek. Blanket substitution collapsed `σ_replay` and `θ_replay` to the
+    # same unreadable `__replay`; the content hash kept them correct but impossible to tell apart.
+    @test ReportEngine._asset_base("plain_name") == "plain_name"      # untouched when already safe
+    s, t = ReportEngine._asset_base("σ_replay"), ReportEngine._asset_base("θ_replay")
+    @test s != t                                                     # the whole point
+    # The readable half survives (the Greek letter itself cannot), and a digest of the ORIGINAL name is
+    # appended so two names that sanitize alike stay tellable apart.
+    @test startswith(s, "__replay-") && startswith(t, "__replay-")
+    @test occursin(r"-[0-9a-z]+$", s)
+    @test ReportEngine._asset_base("σ_replay") == s                   # stable across calls
+    @test ReportEngine._asset_base("") == "asset"
 end
 
 @testset "site export — series grouping" begin

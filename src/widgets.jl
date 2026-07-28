@@ -18,8 +18,11 @@
 # both namespaces: the engine via KaimonSlate's Project.toml dep, the standalone worker via the
 # slate-owned worker_infra env on LOAD_PATH.
 import Markdown # stdlib — `@md` renders a standalone-run markdown cell (see `_populate_notebook_ns!`)
+import Base64   # stdlib — a replay sweep hands its packed bytes back to the export base64'd
 using SlateExtensionsBase: SlateExtensionsBase, Widget, Choice, Selection, indices, WebPage,
-                           to_widget, register_kind!, coerce_bind, reconcile_bind, wrap_value
+                           to_widget, register_kind!, coerce_bind, reconcile_bind, wrap_value,
+                           # `@replay`: a control's finite domain, and data computed across it
+                           bind_domain, ReplayArray, replay_stack
 
 # The SlateExtensionsBase extension manifest for THIS process — the front-end scripts (and, in time,
 # other package registrations) that the loaded packages declared, for the hub to mirror into the page.
@@ -553,6 +556,159 @@ function _do_set_bind(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLoc
     end
 end
 
+# ── `@replay`: marking an expression as answerable without a kernel ───────────
+# Live, moving a `@bind` re-runs the reader cell in Julia. A static export has no kernel, so the control
+# renders but nothing reacts. `@replay` closes that gap WITHOUT asking the author to write JavaScript.
+#
+# What the macro fundamentally IS: a declaration that this expression, over this control's domain, is
+# eligible to be answered client-side. Precomputing every value is the strategy available TODAY — the
+# only one that needs no new compiler and has a boundary that can be stated in a sentence (finite domain,
+# numeric result). It is not the only strategy the marker admits. A centred moving average over a slider
+# is exactly the shape a Julia→JS transpiler, or a compiled WASM kernel, could evaluate directly in the
+# browser — turning a shipped table into a shipped function, and lifting the finite-domain restriction
+# entirely.
+#
+# That is why the marker is worth more than its current implementation. Trying to make ALL Julia run in a
+# browser is an unbounded problem; marking the small, well-behaved regions where it WOULD be tractable is
+# not. Everything downstream — the sweep, the packing, the routing, the export's resolution controls —
+# hangs off the mark, not off precomputation, so a future backend can be swapped in behind it without
+# touching a notebook that already uses it.
+#
+# Today, then: evaluate the marked expression once per value the control can take, pack the results, and
+# return the slice for the CURRENT value — so live behaviour is exactly plain Julia.
+#
+# The domain comes from the CONTROL, never from the author. Restating it is the one thing guaranteed to
+# rot: change `Slider(1:2:15)` to `Slider(1:1:15)` and a hand-written domain silently disagrees.
+#
+# A value outside the domain is a WARNING, not an error. This runs during live editing — precisely when
+# a slider's range is being changed — and breaking the cell there would be hostile; the live result is
+# still correct, only the shipped coverage is stale.
+function _do_replay(reg::Dict{Symbol,Tuple{Widget,Any}}, reglock::ReentrantLock,
+                    sweeps::Dict{String,Any}, name::Symbol, f)
+    entry = lock(reglock) do; get(reg, name, nothing); end
+    entry === nothing && error("@replay: `" * String(name) * "` is not a @bind control in this notebook " *
+                               "(declare it with `@bind " * String(name) * " Slider(…)` first)")
+    w, cur = entry
+    dom = bind_domain(w)
+    # Checked HERE, cheaply, even though nothing is swept yet: an author who used an unbounded control
+    # should learn while writing the cell, not from an export that quietly shipped an inert knob.
+    dom === nothing && error("@replay: `" * String(name) * "` is a `" * String(w.kind) * "` control, " *
+                             "whose domain is not finite — there is no fixed set of values to compute " *
+                             "ahead of time. Use a Slider, Select, Radio, Checkbox or Toggle.")
+    # LIVE THIS IS A PASS-THROUGH. Only the current value is computed, so the cell costs exactly what the
+    # bare expression costs — a hundred-position control does not re-sweep every time the author edits
+    # something. What it leaves behind is METADATA: the closure and the control, registered under an id
+    # the export can find. The sweep belongs to the export, which is where the artifact is decided, where
+    # the time can be shown, and where an author can trade resolution against size.
+    #
+    # Keyed by cell + control so a re-run REPLACES its own entry rather than accumulating, and a deleted
+    # or edited cell's stale sweep does not ride along into an export.
+    cell = get(task_local_storage(), :slate_cell, "")
+    id = string(cell, ":", name)
+    dom_any = Any[d for d in dom]
+    sweeps[id] = (; name = String(name), f = f, domain = dom_any, cell = String(cell),
+                    kind = String(w.kind))
+    i = findfirst(isequal(cur), dom)
+    if i === nothing
+        # The control sits outside what its widget now reports (its range was edited between runs). The
+        # live value is still exactly right — warn about EXPORT COVERAGE, and never break the cell, since
+        # this happens precisely while someone is adjusting a slider's range.
+        @warn "@replay: `$(name)` is currently $(cur), which is not in its control's domain — the live " *
+              "value is correct, but an export would have no data for this position" domain = dom
+    end
+    return ReplayArray(collect(f(cur)), id, String(name), i === nothing ? 0 : i, dom_any)
+end
+
+# Run the registered sweeps and pack each into an asset. Called at EXPORT time (never during an ordinary
+# run), so this is the one place the full cost is paid — and the only place with the standing to report
+# it. `only` narrows to specific ids; `stride` ships every n-th position of a control's domain, the
+# resolution/size trade an export offers. `progress(id, i, n)` is invoked per value so a UI can show
+# which variable is computing and how far along it is.
+#
+# Returns `id => (asset, domain, slice, bytes, seconds)`: everything the page needs to resolve a route,
+# plus the numbers an export summary reports.
+# What each mark would cost, for an export deciding whether (and at what resolution) to pay it.
+#
+# The value count is free — it is the control's domain. The SIZE is not knowable without computing
+# something, so this evaluates exactly ONE slice per mark and reports its footprint. That is the same
+# single evaluation the cell already performs on every run, so opening an export dialog costs about what
+# touching the cell costs; and an estimate built from a real slice beats a guess, which for a decision
+# about whether to ship megabytes is the difference between useful and misleading.
+#
+# Nothing here throws: a mark whose expression fails simply reports no estimate rather than blocking the
+# dialog — the export will surface the real error if the author goes ahead.
+function _replay_plan(sweeps::Dict{String,Any})
+    out = Dict{String,Any}()
+    for (id, s) in sweeps
+        n = length(s.domain)
+        rec = Dict{String,Any}("control" => s.name, "cell" => s.cell, "values" => n,
+                               # Which marks a resolution setting actually affects: only a slider is
+                               # coarsened; a categorical control keeps every option.
+                               "kind" => s.kind, "strideable" => lowercase(s.kind) == "slider")
+        try
+            t0 = time()
+            one = s.f(first(s.domain))
+            rec["seconds_per_value"] = time() - t0
+            A = replay_stack([one])
+            rec["bytes_per_value"] = length(A) * sizeof(eltype(A))
+            rec["slice"] = collect(Int, size(A)[1:end-1])
+        catch
+            # No estimate — the dialog shows the count alone rather than a number it cannot stand behind.
+        end
+        out[id] = rec
+    end
+    return out
+end
+
+# `strides` is per-mark (id → n), not one global setting: a notebook mixes a 4-option Select with a
+# 500-position slider, and the useful decision is almost always about ONE of them. A missing id means
+# stride 1.
+function _run_replay_sweeps(sweeps::Dict{String,Any}; only = nothing,
+                            strides::AbstractDict = Dict{String,Int}(), stride::Int = 1,
+                            progress = (id, i, n) -> nothing)
+    out = Dict{String,Any}()
+    for (id, s) in sweeps
+        (only === nothing || id in only) || continue
+        # `stride` is the export's resolution control: ship every n-th position and let the page offer
+        # only those. It applies ONLY to a slider, whose domain is an ordered sweep of one quantity where
+        # dropping intermediate positions costs resolution and nothing else. A Select, Radio or Checkbox
+        # is CATEGORICAL — every value is a distinct thing the reader can ask for — so striding it would
+        # silently delete choices rather than coarsen a scale. The shipped `domain` is whatever survives,
+        # so the page never offers a position it has no data for.
+        strideable = lowercase(get(s, :kind, "")) == "slider"
+        st = max(1, Int(get(strides, id, stride)))
+        dom = (st > 1 && strideable) ? s.domain[1:st:end] : s.domain
+        n = length(dom)
+        t0 = time()
+        slices = Vector{Any}(undef, n)
+        for (i, v) in enumerate(dom)
+            slices[i] = s.f(v)
+            progress(id, i, n)
+        end
+        A = replay_stack(slices)
+        # Bytes are handed BACK rather than pushed through `save_asset`. That writes into a task-local
+        # sink seeded by a running cell, and an export-time sweep has no cell running — the record would
+        # be dropped and the page would resolve nothing. Returning them lets the export register the
+        # asset itself, which is also where it decides how to represent it (narrow / compress).
+        out[id] = Dict{String,Any}(
+            "name" => s.name * "_replay", "control" => s.name, "cell" => s.cell,
+            "domain" => dom, "slice" => collect(Int, size(A)[1:end-1]),
+            "dtype" => _replay_dtype(eltype(A)),
+            "shape" => collect(Int, size(A)), "order" => "col",
+            "bytes" => length(A) * sizeof(eltype(A)), "seconds" => time() - t0,
+            "b64" => Base64.base64encode(reinterpret(UInt8, vec(A))))
+    end
+    return out
+end
+
+# The compact dtype tag the page maps to a TypedArray — the same vocabulary `save_asset` uses.
+_replay_dtype(::Type{Float32}) = "f32"
+_replay_dtype(::Type{Float64}) = "f64"
+_replay_dtype(::Type{Int32})   = "i32"
+_replay_dtype(::Type{Int16})   = "i16"
+_replay_dtype(::Type{UInt8})   = "u8"
+_replay_dtype(::Type)          = "f64"
+
 # `WebPage` (compose a self-contained HTML page from CSS/HTML/JS, rendering to ONE `text/html`
 # output that works live and in a static export) is defined in SlateExtensionsBase and imported
 # above — so an extension package can build one from its own module. It's injected into the notebook
@@ -688,6 +844,31 @@ function _populate_notebook_ns!(m::Module; echart, EChart, slate_table, SlateTab
     # bind cell shows no output (the assignment value isn't displayed).
     Core.eval(m, :(macro bind(name, widget)
         esc(Expr(:block, Expr(:(=), name, Expr(:call, :__slate_bind, QuoteNode(name), widget)), nothing))
+    end))
+    # `@replay ctl expr` — compute `expr` for every value `ctl` can take, ship the results, return the
+    # slice for the current one. The body becomes a one-argument closure whose PARAMETER is the control's
+    # own name, so the expression is untouched: `movavg(infl, w)` reads the `w` being swept, shadowing the
+    # notebook global for the duration. The domain is read from the control, so there is nothing to keep
+    # in sync (see `_do_replay`).
+    # Registered sweeps, keyed `<cell>:<control>`. Lives for the notebook's lifetime because the EXPORT
+    # reads it long after the cells ran; a re-run replaces its own entries in place.
+    replay_sweeps = Dict{String,Any}()
+    Core.eval(m, :(const __slate_replay_sweeps = $replay_sweeps))
+    Core.eval(m, :(const __slate_replay = $((name, f) -> _do_replay(reg, reglock, replay_sweeps, name, f))))
+    # The export's entry point: run the registered sweeps and pack them. Deliberately NOT called by any
+    # ordinary run — the whole point of the split is that authoring never pays for it.
+    Core.eval(m, :(const __slate_run_replays = $((; only = nothing, stride = 1,
+                                                    strides = Dict{String,Int}(),
+                                                    progress = (id, i, n) -> nothing) ->
+        _run_replay_sweeps(replay_sweeps; only = only, stride = stride, strides = strides,
+                           progress = progress))))
+    # What an export needs BEFORE committing to a sweep: which controls are replayable, how many values
+    # each would compute, and where they live — so a size/time estimate can be shown, and skipped or
+    # strided, without running anything.
+    Core.eval(m, :(const __slate_replay_plan = $(() -> _replay_plan(replay_sweeps))))
+    Core.eval(m, :(macro replay(ctl, body)
+        ctl isa Symbol || error("@replay expects a control name first: `@replay w expr`")
+        esc(Expr(:call, :__slate_replay, QuoteNode(ctl), Expr(:->, ctl, body)))
     end))
     # `@trace begin … end` — rewrite the block to record each assignment into `__slate_trace_sink`
     # while the cell STILL RETURNS ITS REAL LAST VALUE (so the output is normal; the trace shows in

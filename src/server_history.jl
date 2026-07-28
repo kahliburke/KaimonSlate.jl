@@ -165,6 +165,15 @@ const _CONFIG_UI = (
      choices = String[], global_default = nothing, restart = false),
     (key = "series", group = "Publishing", label = "Series", type = :string, default = "",
      choices = String[], global_default = nothing, restart = false),
+    # `@replay` export resolution as `<mark id>:<stride>` pairs — normally set from the export dialog's
+    # replay step, not typed here. Registered because this registry is also the persistence whitelist,
+    # and it earns its place in the panel anyway: it is the one view of what a document has decided to
+    # coarsen, and the place to clear that decision without opening the export dialog.
+    # READ-ONLY here: it is decided in the export dialog's replay step, against measured sizes, which is
+    # the only place the choice can be made meaningfully. Shown so a notebook's state is legible and can
+    # be cleared, not so it can be typed into.
+    (key = "replaystrides", group = "Publishing", label = "Replay resolution", type = :string, default = "",
+     choices = String[], global_default = nothing, restart = false, readonly = true),
 )
 
 _config_item(key) = (i = findfirst(x -> x.key == key, _CONFIG_UI); i === nothing ? nothing : _CONFIG_UI[i])
@@ -179,6 +188,9 @@ function notebook_config_payload(nb::LiveNotebook)
         overridden = haskey(meta, it.key)
         Dict{String,Any}("key" => it.key, "group" => it.group, "label" => it.label,
                          "type" => String(it.type), "choices" => it.choices,
+                         # Machine-managed settings render as readable text, not an input: their real
+                         # editor is elsewhere (see the `replaystrides` entry). Absent ⇒ editable.
+                         "readonly" => get(it, :readonly, false),
                          "overridden" => overridden,
                          "value" => overridden ? meta[it.key] : (gd === nothing ? it.default : gd),
                          "default" => it.default, "global" => gd)

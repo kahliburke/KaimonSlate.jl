@@ -253,7 +253,36 @@ const SLATE_API = SlateApiEntry[
         so a string-valued custom widget needs no server-side support at all. A package can also
         register a real per-kind coercion through the same seam the built-ins use — see
         SlateExtensionsBase. Otherwise it behaves exactly like any `@bind` control."""),
-    SlateApiEntry("playhead", "Widgets",
+    SlateApiEntry("@replay", "Widgets",
+    "Mark an expression as answerable WITHOUT a kernel, so its control keeps working in a static export.",
+    ["offline", "export", "standalone", "bind", "precompute", "no kernel", "interactive"],
+    "@replay control expr",
+    """Mark `expr` as computable across `control`'s whole domain, so the control still works in a
+    **standalone export**, where there is no Julia to recompute anything.
+
+    ```julia
+    @bind w Slider(1:2:15)
+    Plot(scatter(x = xs, y = @replay(w, movavg(infl, w))))
+    ```
+
+    LIVE this is a pass-through: only the control's current value is computed, so the cell costs exactly
+    what the bare expression costs. The macro's job is to leave behind a MARK. At EXPORT time Slate
+    evaluates the expression once per value the control can take, packs the results as one binary array,
+    and ships it — moving the control then indexes shipped data instead of calling Julia.
+
+    You never restate the domain: it is read from the control, so it cannot drift. You never name a trace
+    or a field either — the value is an ordinary array, and the renderer finds it wherever you put it.
+
+    REQUIREMENTS: the control must have a finite domain (`Slider`, `Select`, `Radio`, `Checkbox`,
+    `Toggle` — not a text or open number field), and `expr` must return a numeric array of the same shape
+    for every value. Both are checked as you write the cell, not at export.
+
+    A `@replay` cell is never restored from the durable cache — the mark is established by RUNNING, so a
+    restored cell would export a control with no data behind it.
+
+    The export dialog shows what each mark will cost and offers a **resolution** (ship every n-th slider
+    position). See also `@bind`, `save_asset`."""),
+SlateApiEntry("playhead", "Widgets",
         "A DRIVEN control: an animation player pushes its current frame index here.",
         ["frame", "scrub", "player", "time"], "playhead(anim; label) -> driven control",
         """A DRIVEN control: an animation player pushes its current 1-based frame index here (no input

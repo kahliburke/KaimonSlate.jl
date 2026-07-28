@@ -2003,3 +2003,30 @@ body.is-presenter > .hydbanner, body.is-presenter > #selcount { display: none !i
 /* Reference numbers in the bibliography card, matching the in-text [N]. */
 .bibcard-num { flex: none; color: var(--dim); font-variant-numeric: tabular-nums; font-size: .82rem; min-width: 2.2em; }
 .bibcard-keys li.cited .bibcard-num { color: var(--text); }
+
+/* ── Export step 2: `@replay` resolution (export-replay.js Preact island) ──────────────────────────
+   One row per mark: what it is, what it will cost, and how much of it to carry. The cost column is
+   measured (the plan evaluates one real value per mark), so these are facts about this notebook. */
+.exrp { min-width: 560px; max-width: 760px; }
+.exrp-sub { color: var(--dim); font-weight: 400; }
+.exrp-intro { font-size: .84rem; color: var(--dim); margin: 4px 0 12px; line-height: 1.45; }
+.exrp-list { display: flex; flex-direction: column; gap: 2px; }
+.exrp-row { display: grid; grid-template-columns: 1fr auto auto; gap: 14px; align-items: center;
+            padding: 7px 8px; border-radius: 5px; font-size: .86rem; }
+.exrp-row:nth-child(odd) { background: var(--bg2); }
+.exrp-name b { color: var(--text); }
+.exrp-cell, .exrp-kind { color: var(--dim); margin-left: 7px; font-size: .92em; }
+.exrp-kind { opacity: .65; }
+.exrp-cost { color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums;
+              display: flex; gap: 8px; align-items: baseline; }
+.exrp-cost b { color: var(--text); }
+.exrp-noest { color: var(--dim); opacity: .7; font-style: italic; }
+.exrp-ctl { display: flex; align-items: center; gap: 9px; }
+.exrp-ctl input[type=range] { width: 108px; accent-color: var(--accent); cursor: pointer; }
+.exrp-ctl input[type=number] { width: 4.6em; }
+.exrp-every { color: var(--dim); min-width: 6.5em; font-variant-numeric: tabular-nums; }
+/* A categorical control can't be strided — every option is a distinct thing the reader can ask for. */
+.exrp-all { color: var(--dim); opacity: .6; font-size: .92em; }
+.exrp-total { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
+              font-size: .85rem; color: var(--dim); font-variant-numeric: tabular-nums; }
+.exrp-total b { color: var(--text); }

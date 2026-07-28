@@ -161,13 +161,115 @@ end
 # data url — strip it, so `.js` spells as `text/javascript;charset=utf-8`.
 const _EXT_ASSET_URL_RE = r"/ext-assets/[^\"'`\s\\)]+"
 
-_inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString) =
+_inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString; compress::Bool = false) =
     replace(String(js), _EXT_ASSET_URL_RE => function (u)
         f = _ext_asset_file(nb, u)
         f === nothing && return replace(u, "/ext-assets/" => "./ext-assets/"; count = 1)
+        bytes = read(f)
+        # A vendored front-end LIBRARY is the largest thing in a self-contained page — plotly.js alone is
+        # 4.3 MB, which base64 inflates to 5.8. Gzipping first turns that into roughly 1.6 MB, far more
+        # than any saving available on the data side. The consumer must know to inflate, so the mime says
+        # so; a loader that does not understand `application/gzip` will fail loudly rather than execute
+        # compressed bytes as source.
+        if compress && length(bytes) >= _ASSET_GZIP_MIN
+            z = try; transcode(CodecZlib.GzipCompressor, bytes); catch; nothing; end
+            if z !== nothing && length(z) < length(bytes)
+                return string("data:application/gzip;base64,", Base64.base64encode(z))
+            end
+        end
         return string("data:", replace(_site_ctype(f), " " => ""), ";base64,",
-                      Base64.base64encode(read(f)))
+                      Base64.base64encode(bytes))
     end)
+
+# ── `@replay` sweeps at export time ──────────────────────────────────────────────────────────────────
+# `@replay` is a pass-through while a notebook is being edited: it computes the control's current value
+# and registers the closure, nothing more. THIS is where the marked expressions are actually evaluated
+# across their domains — once, when an artifact is being built, so authoring never pays for it and the
+# whole cost is attributable to the export that asked for it.
+#
+# Returns (assets, table): `assets` are `(spec, bytes)` pairs in the same shape `_page_save_assets`
+# produces, so they flow through the existing narrow/compress/inline path unchanged; `table` is what the
+# page resolves a figure's route id against. Empty for an in-process kernel or a notebook with no marks —
+# a sweep is never a precondition for exporting.
+function _replay_sweep_assets(nb::LiveNotebook; stride::Integer = 1, strides = nothing)
+    nb.kernel isa ReportEngine.GateKernel || return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}())
+    got = try; ReportEngine.run_replays(nb.kernel; stride = stride, strides = strides); catch; nothing; end
+    (got isa AbstractDict) || return (Tuple{Dict{String,Any},Vector{UInt8}}[], Dict{String,Any}())
+    _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
+    assets = Tuple{Dict{String,Any},Vector{UInt8}}[]
+    table = Dict{String,Any}()
+    for (id, r) in got
+        r isa AbstractDict || continue
+        b64 = String(_g(r, "b64", "")); isempty(b64) && continue
+        bytes = try; Base64.base64decode(b64); catch; continue; end
+        dtype = String(_g(r, "dtype", "f64"))
+        name = String(_g(r, "name", "replay"))
+        # `_asset_base` lives in ReportEngine (capture.jl) — same sanitiser `save_asset` uses, so a swept
+        # asset's path reads like any other and non-ASCII control names stay distinct.
+        path = string("data/", ReportEngine._asset_base(name), "-",
+                      string(hash(bytes) % UInt32; base = 16, pad = 8), ".", dtype, ".bin")
+        push!(assets, (Dict{String,Any}("path" => path, "name" => name,
+                                        "mime" => "application/octet-stream",
+                                        "dtype" => dtype, "shape" => collect(Int, _g(r, "shape", Int[])),
+                                        "order" => String(_g(r, "order", "col"))), bytes))
+        table[String(id)] = Dict{String,Any}(
+            "asset" => path, "control" => String(_g(r, "control", "")),
+            "domain" => _g(r, "domain", Any[]), "slice" => collect(Int, _g(r, "slice", Int[])),
+            # Carried for the export summary: what this mark cost to compute and what it adds to the file.
+            "bytes" => Int(_g(r, "bytes", 0)), "seconds" => Float64(_g(r, "seconds", 0.0)))
+    end
+    return (assets, table)
+end
+
+# ── `@bind` controls in a static export ──────────────────────────────────────────────────────────────
+# The live page builds its controls in JS from the bind spec; a frozen page has no such step, so until
+# now an exported `@bind` simply vanished — the reader saw the figure at whatever value the author last
+# left it on, with no hint a control ever existed. This emits the real markup so a control can still be
+# driven by whatever shipped data is attached to it (see the widget-side replay wiring).
+#
+# Rendered DISABLED. A control that moves but changes nothing is worse than no control at all: it reads
+# as a broken page rather than a static one. The client ENABLES the ones it can actually drive, which
+# also keeps this function honest — the export never has to know what data rode along.
+_ctl_num(p, k, dflt) = (v = get(p, k, nothing); v isa Real ? string(v) : dflt)
+
+function _export_control_html(b)
+    name = String(b.name)
+    kind = lowercase(String(b.widget))
+    p = b.params
+    label = _esc(String(get(p, "label", name)))
+    val = b.value
+    attrs = string(" data-name=\"", _esc(name), "\" data-widget=\"", _esc(kind), "\" disabled",
+                   " title=\"This control needs data shipped with the page to do anything.\"")
+    body = if kind == "slider"
+        string("<input type=\"range\" min=\"", _ctl_num(p, "min", "0"), "\" max=\"", _ctl_num(p, "max", "100"),
+               "\" step=\"", _ctl_num(p, "step", "1"), "\" value=\"", _esc(string(val)), "\"", attrs, "/>",
+               "<output class=\"exp-ctl-val\">", _esc(string(val)), "</output>")
+    elseif kind in ("select", "radio")
+        opts = get(p, "options", nothing)
+        opts isa AbstractVector || return ""
+        io = IOBuffer()
+        print(io, "<select", attrs, ">")
+        for o in opts
+            v = o isa AbstractDict ? get(o, "value", o) : o
+            l = o isa AbstractDict ? String(get(o, "label", string(v))) : string(v)
+            print(io, "<option value=\"", _esc(string(v)), "\"",
+                  isequal(v, val) ? " selected" : "", ">", _esc(l), "</option>")
+        end
+        print(io, "</select>")
+        String(take!(io))
+    elseif kind in ("checkbox", "toggle")
+        string("<input type=\"checkbox\"", val === true ? " checked" : "", attrs, "/>")
+    else
+        # Unbounded or free-form (text, number, date, colour…). There is no finite set of answers to ship,
+        # so show the value the page was built at rather than a control that cannot work. Same honesty as
+        # the PDF's frozen parameter strip.
+        string("<span class=\"exp-ctl-frozen\">", _esc(string(val)), "</span>")
+    end
+    return string("<label class=\"exp-ctl\"><span class=\"exp-ctl-lbl\">", label, "</span>", body, "</label>")
+end
+
+_export_controls_html(c) = isempty(c.binds) ? "" :
+    string("<div class=\"exp-ctls\">", join(_export_control_html(b) for b in c.binds), "</div>")
 
 # ── Author-embedded media (drag/drop / paste into a Markdown or web cell) ────────────────────────────
 # A cell can reference media two ways: an inline `data:<mime>;base64,…` URL (bytes live in the source),
@@ -409,12 +511,22 @@ end
 const _EXPORT_ASSET_JS = raw"""
 window.Slate=window.Slate||{};window.__slateAssets=window.__slateAssets||{};
 function _slateTyped(d,b){return d==="f32"?new Float32Array(b):d==="f64"?new Float64Array(b):d==="i32"?new Int32Array(b):d==="i16"?new Int16Array(b):new Uint8Array(b);}
+/* A packed asset is gzipped before base64 when that wins (see `_pack_export_asset`): base64 costs a
+   flat 4/3, so compressing first is strictly better than shipping the raw buffer. Inflated with the
+   platform's own DecompressionStream — no library rides along for it. That API is the one modern thing
+   this page depends on (Chrome 80+, Safari 16.4+, Firefox 113+); if it is missing we say so plainly
+   rather than hand back bytes that would silently decode as garbage. */
+function _slateInflate(u){
+if(typeof DecompressionStream==="undefined")
+return Promise.reject(new Error("Slate.asset: this page stores data gzipped, and this browser has no DecompressionStream to inflate it"));
+return new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();}
 function _slateNdarray(a,buf){var data=_slateTyped(a.dtype,buf),rows=(a.shape&&a.shape[0])||data.length;
 return {data:data,dtype:a.dtype,shape:a.shape||[data.length],order:a.order||"col",rows:rows,
 col:function(k){return this.data.subarray(k*this.rows,(k+1)*this.rows);},at:function(i,j){return this.data[j*this.rows+i];}};}
 Slate.asset=function(path){var a=window.__slateAssets[path];
 if(!a)return Promise.reject(new Error("Slate.asset: unknown asset "+path));
-var get;if(a.data!==undefined){var b=atob(a.data),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);get=Promise.resolve(u.buffer);}
+var get;if(a.data!==undefined){var b=atob(a.data),n=b.length,u=new Uint8Array(n);for(var i=0;i<n;i++)u[i]=b.charCodeAt(i);
+get=a.enc==="gzip"?_slateInflate(u):Promise.resolve(u.buffer);}
 else{get=fetch(a.url).then(function(r){return r.arrayBuffer();});}
 return get.then(function(buf){if(a.dtype)return _slateNdarray(a,buf);var m=a.mime||"";
 if(m.indexOf("json")>=0)return JSON.parse(new TextDecoder().decode(buf));
@@ -441,7 +553,7 @@ try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠
 # (component) widgets are emitted as `<script type="module">`; they resolve the widget SDK + Preact/htm
 # via the export's import map (see `_export_importmap_for`). A pure single-file standalone that can't
 # resolve those simply doesn't mount the widget — it never breaks the rest of the page.
-function _frontend_export_head(nb, inline::Bool = false)
+function _frontend_export_head(nb, inline::Bool = false, compress::Bool = false)
     fe = _frontend_scripts(nb)
     isempty(fe) && return ""
     # Repoint the live `/ext-assets/<pkg>/…` route (served by the hub) — a frozen export has no server, so a
@@ -453,16 +565,37 @@ function _frontend_export_head(nb, inline::Bool = false)
     # — a page-relative `ext-assets/…` would break the very multi-file modules this route exists to serve.
     # `./` is a valid relative specifier for `import()` and equivalent to the bare form for
     # `fetch`/`<script src>`, so it's correct for every consumer.
-    rw(js) = inline ? _inline_ext_asset_urls(nb, js) :
+    rw(js) = inline ? _inline_ext_asset_urls(nb, js; compress = compress) :
                       replace(js, "/ext-assets/" => "./ext-assets/")
     # Break any literal `</script` in the JS so it can't terminate the tag early (the live path uses
     # textContent/Blob and is immune); the sequence is inert JS once the parser is past the string boundary.
     safe(js) = replace(rw(js), r"</script"i => "<\\/script")
     parts = String[]
     if any(e -> !e.esm, fe)
+        # The registration globals a classic widget script expects, PLUS the mount step. Registering a
+        # kind only records an implementation; something has to walk the page's component descriptors and
+        # actually call `wire`. Live that is `wireOutputComponent` in view.js, which a frozen page does not
+        # ship — so without this a `slate_render` component registers correctly and then renders nothing at
+        # all, silently, for every extension. Mounting runs on BOTH edges (a kind registering, and the
+        # document finishing parse) because either can happen first: this block sits at body top, so the
+        # descriptors below it do not exist yet, while a late-registering kind arrives after they do.
         push!(parts, raw"""<script>window.slateWidgets=window.slateWidgets||{};
-window.slateRegisterWidget=window.slateRegisterWidget||function(k,i){window.slateWidgets[k]=i||{};};
-window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||function(){};</script>""")
+window.__slateMountComponents=function(){
+  document.querySelectorAll('script.slatecomponent-desc').forEach(function(s){
+    if(s._slateMounted)return;
+    var d;try{d=JSON.parse(s.textContent||'{}');}catch(e){return;}
+    var impl=window.slateWidgets[d&&d.component];
+    if(!impl||!impl.wire)return;                       /* kind not registered yet — retried on register */
+    var el=s.parentElement&&s.parentElement.querySelector('.slatecomponent');
+    if(!el)return;
+    s._slateMounted=true;
+    try{impl.wire(el,{params:(d.props||{}),value:null});}catch(e){console.error('slate: component mount failed',e);}
+  });
+};
+window.slateRegisterWidget=window.slateRegisterWidget||function(k,i){window.slateWidgets[k]=i||{};try{window.__slateMountComponents();}catch(_){}};
+window.slateRegisterEditorExtension=window.slateRegisterEditorExtension||function(){};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',window.__slateMountComponents);
+else window.__slateMountComponents();</script>""")
     end
     for e in fe
         if !isempty(e.kind)
@@ -594,6 +727,17 @@ a.cite{color:var(--accent);text-decoration:none;}a.cite:hover{text-decoration:un
 .exp-out pre{margin:0;white-space:pre-wrap;} .exp-out .dispwrap,.disp.img{padding:10px 14px;}
 .disp.img img{max-width:100%;height:auto;border-radius:4px;display:block;}
 .disp.latex{padding:6px 14px;overflow-x:auto;} .katex{font-size:1.1em;}
+/* `@bind` controls in a frozen page. Disabled until the client finds shipped data it can drive them
+   with, so the dimmed state is the DEFAULT and an enabled control is the exception — a reader can tell
+   at a glance which knobs still do something. */
+.exp-ctls{display:flex;flex-wrap:wrap;gap:18px;align-items:center;padding:8px 14px;font-size:.86rem;}
+.exp-ctl{display:flex;align-items:center;gap:9px;color:var(--dim);}
+.exp-ctl-lbl{white-space:nowrap;}
+.exp-ctl input[type=range]{width:210px;accent-color:var(--accent);cursor:pointer;}
+.exp-ctl input:disabled,.exp-ctl select:disabled{opacity:.45;cursor:not-allowed;}
+.exp-ctl-val{color:var(--text);font-variant-numeric:tabular-nums;min-width:2.5em;}
+.exp-ctl-frozen{color:var(--text);font-variant-numeric:tabular-nums;}
+@media print{ .exp-ctls{opacity:.7;} }
 @media print{ body{-webkit-print-color-adjust:exact;print-color-adjust:exact;} .exp-code{break-inside:avoid;} }
 """
 end
@@ -919,6 +1063,52 @@ function _katex_css_inline()
     end)
 end
 
+# ── Packing a data asset into a single-file export ───────────────────────────────────────────────────
+# A packed numeric asset (`save_asset` of an array — a `@replay` table is the big one) is the only thing
+# in an export whose size scales with what the author computed rather than with the page. It is also the
+# most compressible: it is one dtype, laid out regularly, usually a smooth signal.
+#
+# Two reductions, both belonging HERE rather than where the data was produced. The live notebook has the
+# real array and should draw it at full precision; only the frozen ARTIFACT trades accuracy for size, and
+# doing it at export means the choice can change per export without re-running a cell or invalidating a
+# memo entry.
+#
+#   • f64 → f32   — halves it. These arrays exist to be DRAWN; Float32 keeps ~7 significant digits, well
+#                   past what a few thousand pixels or a hover readout can show.
+#   • gzip        — typically another 2–4× on smooth numeric data, and it must come AFTER the narrowing
+#                   (fewer distinct bytes compress better). Base64 then adds its unavoidable 4/3.
+#
+# `enc` tells the page it must inflate before reading; `Slate.asset` branches on it. Skipped when it does
+# not pay — tiny buffers, or already-compressed bytes — so a page never inflates for nothing.
+const _ASSET_GZIP_MIN = 4096   # below this the gzip header + base64 rounding erase the gain
+
+_f64_to_f32_bytes(b::Vector{UInt8}) =
+    Vector{UInt8}(reinterpret(UInt8, Float32.(reinterpret(Float64, b))))
+
+# Returns (bytes, dtype, enc). `dtype`/`enc` are `nothing` when unchanged/absent.
+function _pack_export_asset(spec::AbstractDict, bytes::Vector{UInt8}; narrow::Bool = true,
+                            compress::Bool = true)
+    dt = get(spec, "dtype", nothing)
+    dt = dt === nothing ? nothing : String(dt)
+    out = bytes
+    newdt = nothing
+    if narrow && dt == "f64" && length(out) % 8 == 0
+        out = _f64_to_f32_bytes(out)
+        newdt = "f32"
+    end
+    enc = nothing
+    if compress && length(out) >= _ASSET_GZIP_MIN
+        z = try; transcode(CodecZlib.GzipCompressor, out); catch; nothing; end
+        # Only keep it if it actually won — an incompressible buffer would otherwise pay the base64 tax
+        # on MORE bytes than it started with.
+        if z !== nothing && length(z) < length(out)
+            out = Vector{UInt8}(z)
+            enc = "gzip"
+        end
+    end
+    return (out, newdt, enc)
+end
+
 function _katex_css_tag(offline::Bool)
     if offline
         css = _katex_css_inline()
@@ -929,20 +1119,39 @@ function _katex_css_tag(offline::Bool)
 end
 
 # The full third-party `<head>` block for an export, in whichever mode.
-function _thirdparty_head(offline::Bool)
+function _thirdparty_head(offline::Bool; needs_echarts::Bool = true, needs_dagre::Bool = true)
     return string(
         _katex_css_tag(offline),
         _lib_script("katex", "katex.min.js", offline; defer = true),
         _lib_script("katex", "contrib/auto-render.min.js", offline; defer = true),
         # ECharts renders CLIENT-SIDE from the specs embedded below (real charts with data), instead of
         # freezing to a server snapshot that headless exports can't capture.
-        _lib_script("echarts", "echarts.min.js", offline),
+        needs_echarts ? _lib_script("echarts", "echarts.min.js", offline) : "",
         # Graph layout: a self-contained client widget mounted in a cell (the neuro/DAG canvas) carries its
         # own JS + initial payload inline and boots itself, but it needs `dagre` for layout — which the live
         # app loads globally and a standalone page otherwise lacks, so the widget bails (blank canvas). Load
         # it here (sync, before the body widget scripts run) so such widgets FUNCTION in the export.
-        _lib_script("dagre", "dagre.min.js", offline),
+        needs_dagre ? _lib_script("dagre", "dagre.min.js", offline) : "",
     )
+end
+
+# Which vendored libraries this page actually needs.
+#
+# Online these are `<script src>` tags and an unused one costs a tag; OFFLINE each is INLINED, so shipping
+# one nothing uses is a megabyte of dead weight in a file whose whole purpose is being small enough to
+# hand out. A Plotly-only notebook was carrying the entire ECharts bundle for zero charts.
+#
+# Detection is exact rather than heuristic, because a false negative is a broken page: ECharts is needed
+# iff a cell emits an echart spec (`_echarts_specs`) or an interactive table (the enhancer draws sparkline
+# columns through it); dagre iff something on the page actually references it — a package-vendored widget
+# script or a web cell. KaTeX is always included: math appears in ordinary prose, detecting it means
+# parsing markdown for delimiters, and at ~0.3 MB it is not what makes these files big.
+function _page_libs(nb::LiveNotebook)
+    ec = any(c -> c.kind == CODE && (!isempty(_echarts_specs(c)) || !isempty(_table_specs(c))),
+             nb.report.cells)
+    dg = any(e -> occursin("dagre", e.js), _frontend_scripts(nb)) ||
+         any(c -> occursin("dagre", c.source), nb.report.cells)
+    return (echarts = ec, dagre = dg)
 end
 
 # Slate's own vendored front-end stack (Preact/htm/signals) → import-map targets, so an EXPORTED web-cell
@@ -1005,7 +1214,25 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                      runnable::Bool = false, embed_bundle::Bool = false, history::Bool = false,
                      memo_budget::Integer = typemax(Int), preview_budget::Integer = _PREVIEW_MAX_TOTAL,
                      inline_assets::Bool = true, width::Integer = 900, offline::Bool = false,
+                     # How an INLINED data asset is represented. Both apply ONLY to the single-file path
+                     # — a published site writes its assets as plain sibling files, readable by anything.
+                     # `compress_data` is the one with a compatibility cost: inflating uses the platform's
+                     # DecompressionStream (Chrome 80+, Safari 16.4+, Firefox 113+), so a page destined
+                     # for an old locked-down browser turns it off and pays the size instead.
+                     compress_data::Bool = true, narrow_data::Bool = true,
+                     # Ship every n-th position of each `@replay` control's domain. The resolution/size
+                     # trade: a 100-position slider at `stride = 4` computes and carries a quarter as
+                     # much, and the page snaps to what it has rather than offering positions with no
+                     # data behind them.
+                     replay_stride::Integer = 1, replay_strides = nothing,
+                     # A dict to fill with where the page's bytes went, or `nothing` to not bother. An
+                     # export is one number the author sees (a file size) made of parts they can each do
+                     # something about — swap a vendored library, coarsen a replay, drop the runnable
+                     # bundle — and without this attribution the only available reaction to a large file
+                     # is to shrug at it. Measured from the real blocks, never estimated.
+                     stats::Union{Nothing,AbstractDict} = nothing,
                      credit::Bool = true, site_home::AbstractString = "", site_home_label::AbstractString = "")
+    _t_start = time()
     show_source = include_source && lowercase(String(code)) != "hidden"   # `code=hidden` ⇒ outputs only
     # One Slate palette drives the page chrome, code AND the client-rendered ECharts (they read its CSS
     # vars) — As-is uses the notebook's live palette (charttheme), Light/Dark force one. A themed OVERRIDE
@@ -1033,7 +1260,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
         # Slate shim + asset registry, emitted at the TOP of <body> so a `@web` cell's inline <script>
         # finds `Slate.runFragment`/`asset`/`assetUrl` (+ a populated `__slateAssets`) already defined
         # when it runs during body parse — otherwise the widget dies on "Slate is not defined".
-        _asset_head = let sa = _page_save_assets(nb), wm = _web_asset_modules(nb),
+        # `@replay` marks are evaluated across their domains HERE and nowhere else. Their packed arrays
+        # join the ordinary asset stream, so they narrow/compress/inline exactly like any other data.
+        replay_assets, replay_table = _replay_sweep_assets(nb; stride = replay_stride,
+                                                           strides = replay_strides)
+        _asset_head = let sa = vcat(_page_save_assets(nb), replay_assets), wm = _web_asset_modules(nb),
                           has_web = any(c -> occursin("@web", c.source) || occursin("Slate.runFragment", c.source), nb.report.cells)
             if !(has_web || !isempty(sa) || !isempty(wm))
                 ""
@@ -1041,7 +1272,18 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 ents = String[]
                 for (spec, bytes) in sa
                     e = copy(spec)
-                    inline_assets ? (e["data"] = Base64.base64encode(bytes)) : (e["url"] = spec["path"])
+                    if inline_assets
+                        # Only the inlined path is packed: a served asset already rides HTTP's own
+                        # compression, and a published sibling stays a plain file anyone can read.
+                        b, dt, enc = _pack_export_asset(spec, bytes;
+                                                        narrow = narrow_data, compress = compress_data)
+                        dt === nothing || (e["dtype"] = dt)
+                        enc === nothing || (e["enc"] = enc)
+                        e["bytes"] = length(b)
+                        e["data"] = Base64.base64encode(b)
+                    else
+                        e["url"] = spec["path"]
+                    end
                     push!(ents, string(JSON.json(spec["path"]), ":", JSON.json(e)))
                 end
                 for (rel, bytes) in wm
@@ -1051,6 +1293,11 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 end
                 string("<script>", _EXPORT_ASSET_JS,
                        isempty(ents) ? "" : string("Object.assign(window.__slateAssets,{", join(ents, ","), "});"),
+                       # A figure's route names a SWEEP, not an asset — what shipped, and at what
+                       # resolution, is this export's decision. Published here so the page can resolve
+                       # one against the other; a route with no entry leaves its control disabled.
+                       isempty(replay_table) ? "" :
+                           string("window.__slateReplays=", JSON.json(replay_table), ";"),
                        "</script>")
             end
         end
@@ -1063,9 +1310,13 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               _og_tags(; title = fm0.title, desc = rawdesc, image = og_image, url = og_url, type = og_type),
               # KaTeX + ECharts + dagre: CDN tags, or the bytes inlined from the vendor cache under
               # `offline` (a page that must open with no network at all). See `_thirdparty_head`.
-              _thirdparty_head(offline),
+              # Only what this page actually uses — offline these are INLINED, so an unused library is a
+              # megabyte of dead weight rather than an unused tag.
+              (let libs = _page_libs(nb)
+                   _thirdparty_head(offline; needs_echarts = libs.echarts, needs_dagre = libs.dagre)
+               end),
               "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
-              _frontend_export_head(nb, inline_assets), "<article class=\"export\">")
+              _frontend_export_head(nb, inline_assets, compress_data), "<article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
         # (name => local file, read into the page). Otherwise (published page) the map rides as a
@@ -1124,6 +1375,8 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                 # their widget, not a code editor, in the browser, so the export matches what's on screen.
                 (show_source && !(:hidecode in c.flags) && isempty(c.binds) && !_is_web_cell(c) && !isempty(strip(c.source))) &&
                     print(io, "<pre class=\"exp-src\"><code>", _highlight_julia(c.source), "</code></pre>")
+                # A `@bind` cell renders its CONTROL, matching what the live page shows in place of source.
+                print(io, _export_controls_html(c))
                 if _outputs_any(outputs)
                     # `figures`: only rich display (images/html/latex) — drop scalar text / stdout / errors.
                     o = c.output

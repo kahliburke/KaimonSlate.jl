@@ -48,7 +48,32 @@ function _cfgSource(it) {
   return { cls: 'default', txt: 'default' };
 }
 
+// A machine-managed setting: shown so the notebook's state is legible and clearable, but not typed into
+// — its real editor is elsewhere (replay resolution is decided in the export dialog, against measured
+// sizes). Rendered as readable text rather than the raw stored string, which is a wire format and reads
+// like line noise in a settings panel.
+function _cfgReadonly(it, eff) {
+  const txt = _cfgFormat(it, eff);
+  return `<span class="cfgro" title="${_cfgEsc(String(eff || ''))}">${_cfgEsc(txt)}</span>`;
+}
+// Stored as `<cell>:<control>:<n>` pairs (percent-encoded, since a control may be non-ASCII). Nobody
+// should have to read that: show which control was coarsened and by how much.
+function _cfgFormat(it, eff) {
+  if (it.key !== 'replaystrides') return String(eff == null ? '' : eff);
+  const s = String(eff || '');
+  if (!s) return 'full resolution';
+  const parts = s.split(',').filter(Boolean).map(p => {
+    const i = p.lastIndexOf(':');
+    if (i <= 0) return null;
+    const id = decodeURIComponent(p.slice(0, i));          // `<cell>:<control>` — split on the LAST colon
+    const ctl = id.slice(id.lastIndexOf(':') + 1) || id;
+    return `${ctl}: every ${p.slice(i + 1)}th`;
+  }).filter(Boolean);
+  return parts.length ? parts.join(' · ') : 'full resolution';
+}
+
 function _cfgControl(it, eff) {
+  if (it.readonly) return _cfgReadonly(it, eff);
   if (it.type === 'bool')
     return `<input type="checkbox" ${(eff === true || eff === 'true') ? 'checked' : ''} onchange="cfgSet('${it.key}', this.checked)"/>`;
   if (it.type === 'enum')

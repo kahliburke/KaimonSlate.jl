@@ -1337,6 +1337,19 @@ function _make_router(h::Hub)
                            # CDN — for a viewer that blocks fetched scripts, has no network, or an archival
                            # copy that must outlive the CDN.
                            offline = get(qp, "offline", "0") == "1",
+                           # `compress=0` ships inlined data assets uncompressed. Inflating needs the
+                           # platform's DecompressionStream (Chrome 80+, Safari 16.4+, Firefox 113+), so
+                           # a page bound for an OLD locked-down browser — an exam machine — trades the
+                           # size back for reach. Narrowing f64→f32 carries no such cost and stays on.
+                           compress_data = get(qp, "compress", "1") != "0",
+                           narrow_data = get(qp, "narrow", "1") != "0",
+                           # `replay=n` ships every n-th position of each control's domain — the
+                           # resolution/size trade, which divides the sweep's WORK as well as its bytes.
+                           replay_stride = something(tryparse(Int, get(qp, "replay", "1")), 1),
+                           # `replays=<id>:<n>,<id>:<n>` — per-mark resolution. A notebook mixes a
+                           # 4-option Select with a 500-position slider, and the useful decision is
+                           # almost always about ONE of them, so this overrides the blanket `replay=`.
+                           replay_strides = _parse_replay_strides(get(qp, "replays", "")),
                            memo_budget = budget, preview_budget = pbudget, width = pw)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
         if get(qp, "dl", "0") == "1"
@@ -1344,6 +1357,33 @@ function _make_router(h::Hub)
             push!(headers, "Content-Disposition" => "attachment; filename=\"$fn\"")
         end
         HTTP.Response(200, headers, html)
+    end))
+    # `<id>:<n>,<id>:<n>` → id => n. A mark id contains a colon (`<cell>:<control>`), so the SPLIT IS ON
+    # THE LAST one — splitting on the first would cut the id in half and silently apply the stride to
+    # nothing. Malformed pairs are skipped rather than failing the export; the worst case is a mark
+    # exported at full resolution, which is correct, just larger.
+    function _parse_replay_strides(s::AbstractString)
+        out = Dict{String,Int}()
+        for part in split(String(s), ','; keepempty = false)
+            i = findlast(':', part)
+            i === nothing && continue
+            id = String(strip(part[1:prevind(part, i)]))
+            n = tryparse(Int, strip(part[nextind(part, i):end]))
+            (isempty(id) || n === nothing || n < 1) && continue
+            out[id] = n
+        end
+        return isempty(out) ? nothing : out
+    end
+
+    # What this notebook's `@replay` marks WOULD cost, without computing any of them: id => {control,
+    # cell, values}. The macro is a pass-through during a run, so the sweep happens only at export —
+    # meaning an author would otherwise commit to it blind. This is what the export dialog reads to show
+    # which controls need computing and how many values each holds, and to offer a resolution, before
+    # anything is paid for. Cheap: it reads a registry, it does not evaluate.
+    HTTP.register!(router, "GET", "/api/{id}/replay-plan", req -> _withnb(h, req, nb -> begin
+        plan = nb.kernel isa ReportEngine.GateKernel ?
+               (try; ReportEngine.replay_plan(nb.kernel); catch; nothing; end) : nothing
+        _json(Dict{String,Any}("replays" => plan === nothing ? Dict{String,Any}() : plan))
     end))
     # Secret GitHub gist of the HTML export (via the `gh` CLI). Same page options as export.html
     # (theme/charttheme/override/code/outputs/width/source); returns {ok,url,preview,error} as JSON.
