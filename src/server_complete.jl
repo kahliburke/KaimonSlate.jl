@@ -1334,8 +1334,8 @@ function _make_router(h::Hub)
                            outputs = get(qp, "outputs", "all"), runnable = _run, embed_bundle = _run,
                            history = get(qp, "history", "0") == "1",   # source-only by default (public page)
                            # `offline=1` inlines KaTeX/ECharts/dagre + the Preact stack instead of linking a
-                           # CDN, so the page opens with no network at all (an exam browser, an air-gapped
-                           # machine, an archival copy that must outlive the CDN).
+                           # CDN — for a viewer that blocks fetched scripts, has no network, or an archival
+                           # copy that must outlive the CDN.
                            offline = get(qp, "offline", "0") == "1",
                            memo_budget = budget, preview_budget = pbudget, width = pw)
         headers = Pair{String,String}["Content-Type" => "text/html; charset=utf-8"]
