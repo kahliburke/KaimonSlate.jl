@@ -58,6 +58,17 @@ function injected_names()
                   if !startswith(String(n), "__") && !(n in skip) && !startswith(String(n), "#")]
 end
 
+# Stands in for `KaimonGate.GateTool` so `create_tools` can be built without Kaimon loaded. The
+# handlers reach the gate through `parentmodule(GateTool)`, so the caller/agent accessors live here.
+module StubGate
+struct GateTool
+    name::String
+    handler::Function
+end
+current_caller() = nothing
+current_agent_id() = nothing
+end
+
 @testset "slate api registry" begin
     @testset "no undocumented cell helper (drift guard)" begin
         inj = injected_names()
@@ -166,6 +177,30 @@ end
         @test all(e -> occursin(e.name, cs), NS.SLATE_API)
         @test occursin("slate_api(", cs)                                   # the trigger to drill in
         @test !occursin("echart(:line, x, y; title=", cs)                  # no writable-from signatures
+    end
+
+    @testset "tool handlers pass their optional args (gate ABI)" begin
+        # Every optional GateTool param must be a KEYWORD arg. A positional can only be omitted
+        # from the END, so a tool with two optional positionals cannot be called with just the
+        # second one — and the gate's dispatcher used to reflect `first(methods(handler))`, which
+        # for an optional positional can be the zero-arity method, dropping the argument SILENTLY
+        # while the schema still advertised it (`slate.api(topic=…)` returned the index for every
+        # topic that way). This asserts the shape that has neither problem.
+        tools = KaimonSlate.create_tools(StubGate.GateTool)
+        @test length(tools) > 20                                        # guard the guard
+        optional_positional = String[]
+        for t in tools
+            arities = unique(Int(m.nargs) for m in methods(t.handler))
+            length(arities) > 1 && push!(optional_positional, t.name)
+        end
+        @test isempty(optional_positional) ||
+              error("slate tools with an OPTIONAL POSITIONAL arg — it can only be omitted from " *
+                    "the END, so make it a keyword arg: " * join(sort(optional_positional), ", "))
+
+        # …and the end-to-end behaviour that shape protects: a topic must reach the registry.
+        api = only(t for t in tools if t.name == "api").handler
+        @test occursin("### echart", api(topic = "echart"))
+        @test occursin("— index", api())
     end
 
     @testset "search records carry summary + keywords" begin
