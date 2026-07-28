@@ -1019,7 +1019,12 @@ function create_tools(GateTool::Type)
 
     These helpers are also indexed for `search_docs` under module "Slate".
     """
-    api(topic::String = "")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
+    # `topic` is a kwarg because optional GateTool params always are: a positional can only be
+    # omitted from the END, so the moment a second one is added the caller loses the ability to
+    # pass just the later one. (It was an optional POSITIONAL, which the gate's dispatcher then
+    # dropped silently — every call returned the index. Fixed in KaimonGate's `_dispatch_tool_call`,
+    # but the convention stands on its own.)
+    api(; topic::String = "")::String = NotebookServer.slate_api_reference(topic)   # SSOT (also feeds the prompt)
 
     """
         add_cell(notebook, source, after, kind) -> String
