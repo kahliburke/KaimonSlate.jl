@@ -526,13 +526,17 @@ const _CFG_MARK_OPEN = "# ╔═╡ Slate.config"
 # target — authored intent that travels with the file (see the git-noise/sidecar discussion).
 const _CONFIG_KEYS = ("parallel", "threads", "hotreload", "macroexpand", "agentmodel", "runon",
                       "regions",
+                      # `@replay` export resolution, as `<mark id>:<stride>` pairs. Authored intent —
+                      # how much detail this document's controls need to carry — so it travels with the
+                      # `.jl` rather than living in one person's browser.
+                      "replaystrides",
                       "slidelevel", "slidetransition", "slidetheme", "slideratio", "bibstyle",
                       "publishrepo", "publishslug", "series", "docid")
 const _CONFIG_TYPES = Dict("parallel" => :bool, "threads" => :string, "hotreload" => :bool,
                            # `macroexpand` = macro-aware dependency analysis (expand unknown macros in
                            # the kernel to recover their true reads/writes). Off = conservative static
                            # analysis only, for the rare macro with expansion-time side effects.
-                           "macroexpand" => :bool,
+                           "macroexpand" => :bool, "replaystrides" => :string,
                            "agentmodel" => :string,
                            # `runon` = this notebook's DURABLE run-location override ("host[,transport]"):
                            # a machine-specific ssh alias the author chose to bake in (the *session* and

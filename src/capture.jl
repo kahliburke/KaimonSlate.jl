@@ -434,8 +434,18 @@ _asset_dtype(::Type{Int16})   = "i16"
 _asset_dtype(::Type{UInt8})   = "u8"
 _asset_dtype(::Type)          = nothing
 
-_asset_base(name::AbstractString) = replace(isempty(first(splitext(String(name)))) ? "asset" : first(splitext(String(name))),
-                                            r"[^A-Za-z0-9._-]" => "_")
+# A path-safe stem for an asset name. Julia names are routinely non-ASCII (`σ`, `θ`, `Δt`), and blanket
+# substitution collapses them: `σ_replay` and `θ_replay` both become `__replay`. The content hash in the
+# filename keeps those DISTINCT and correct, but the readable half becomes useless exactly when someone
+# is trying to work out which asset is which. Keep the ASCII that survives, and when anything was
+# replaced, append a short digest of the ORIGINAL name so the stem stays unique and stable per name.
+function _asset_base(name::AbstractString)
+    stem = first(splitext(String(name)))
+    isempty(stem) && return "asset"
+    safe = replace(stem, r"[^A-Za-z0-9._-]" => "_")
+    safe == stem && return safe
+    return string(safe, "-", string(hash(stem) % UInt16; base = 36))
+end
 _asset_hash(x) = string(hash(x) % UInt32; base = 16, pad = 8)   # short id → cache-bust + dedup
 
 function _asset_push!(rec)

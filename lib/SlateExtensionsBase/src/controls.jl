@@ -256,6 +256,120 @@ end
 "Registered control kinds (built-ins once core is wired on, plus any extension kinds)."
 widget_kinds() = sort!(collect(keys(_KINDS)))
 
+# ── Replayable data ───────────────────────────────────────────────────────────
+# A static export has no kernel, so a `@bind` cannot recompute anything: the control renders but nothing
+# reacts. The way out is to compute what each of its values produces BEFORE the file is written and ship
+# that as DATA. These two pieces are the contract for it, and they live here — in the SDK — so a renderer
+# package can consume them without depending on KaimonSlate, exactly like `Widget` itself.
+
+"""
+    bind_domain(w::Widget) -> Vector | Nothing
+
+Every value `w` can take, in the order the control presents them, or `nothing` when the domain is not
+finite (free text, an open number field, a date — nothing to enumerate).
+
+This is the single source of truth for a control's domain: an author never restates it, so it cannot
+drift from the control it belongs to.
+"""
+function bind_domain(w::Widget)
+    p = w.params
+    k = lowercase(String(w.kind))
+    if k in ("checkbox", "toggle")
+        return Any[false, true]
+    elseif k in ("select", "radio")
+        opts = get(p, "options", nothing)
+        opts isa AbstractVector || return nothing
+        return Any[o isa AbstractDict ? get(o, "value", o) : o for o in opts]
+    elseif k == "slider"
+        num(key) = (v = get(p, key, nothing); v isa Real ? Float64(v) : nothing)
+        lo, hi = num("min"), num("max")
+        (lo === nothing || hi === nothing || hi < lo) && return nothing
+        st = num("step"); st = (st === nothing || st == 0) ? 1.0 : abs(st)
+        # The epsilon keeps the endpoint: a span that is an exact multiple of the step (1:2:15) otherwise
+        # loses its last value to floating-point drift on the division.
+        vals = Any[lo + i * st for i in 0:floor(Int, (hi - lo) / st + 1e-9)]
+        # An integer slider must present integers — the value a reader's control reports is `8`, and `8.0`
+        # would not match it.
+        return all(isinteger, vals) ? Any[Int(v) for v in vals] : vals
+    end
+    # number / text / textarea / date / time / color / file — unbounded. Multi-selects are finite in
+    # principle but their domain is the POWER SET of the options, which is not something to enumerate.
+    return nothing
+end
+
+"""
+    ReplayArray{T,N}
+
+An array that also records where it came from: data computed for every value of a control, plus which
+value produced the slice being held.
+
+Any rank travels — a `Vector` per control value (one series), a `Matrix` (a heatmap, a surface, an
+image), or higher. The slices are stacked along a new trailing dimension, so in column-major order the
+slice for one control value is a contiguous run and a page can take it as a view rather than a gather.
+
+It behaves exactly like the array it wraps — indexing, broadcasting and serialization are the underlying
+data — so ordinary Julia code, and a plotting package's trace constructors, need no awareness of it. A
+renderer looks for it while walking a figure and emits the routing that lets a frozen page re-index the
+shipped data when the control moves. That is what spares an author from naming a trace or a field: they
+put the value where it belongs and the walk works out the rest.
+
+LIVE, this holds only the value the control is currently set to — computing the rest would be pure waste,
+since the kernel can recompute on demand and a hundred-position control would otherwise re-sweep on every
+edit. It carries an `id` instead: the export resolves that against the sweep it runs, so the shipped asset
+is decided where the artifact is, not where the author is typing.
+"""
+struct ReplayArray{T,N} <: AbstractArray{T,N}
+    data::Array{T,N}      # the value for the control's CURRENT setting — exactly what plain Julia gives
+    id::String            # identifies the registered sweep; the export fills in an asset against it
+    control::String       # the bound variable whose position selects a slice
+    index::Int            # 1-based position of the current value within `domain`
+    domain::Vector{Any}   # the control's values, so the page maps a position to a slice
+end
+Base.size(r::ReplayArray) = size(r.data)
+Base.getindex(r::ReplayArray, i::Int) = r.data[i]
+Base.getindex(r::ReplayArray{T,N}, I::Vararg{Int,N}) where {T,N} = r.data[I...]
+Base.IndexStyle(::Type{<:ReplayArray}) = IndexLinear()
+
+const ReplayVector{T} = ReplayArray{T,1}
+const ReplayMatrix{T} = ReplayArray{T,2}
+
+"""
+    replay_stack(slices) -> Array
+
+Stack one slice per control value along a NEW trailing dimension, checking that they can travel as packed
+numeric data. Every slice must have the same shape — they become one array, and a page reads a slice by
+offset — so a ragged result is refused here rather than silently producing a misaligned page.
+
+Widens an integer element type to `Float64` unless it is one the packer handles natively: `Int` (i.e.
+`Int64`) is the common Julia case and is NOT packable, so it would otherwise fall through to JSON and
+quietly ship the slow representation.
+"""
+function replay_stack(slices::AbstractVector)
+    isempty(slices) && error("replay: no values to stack (the control's domain is empty)")
+    all(s -> s isa AbstractArray, slices) ||
+        error("replay: expected an array for each value of the control; got a `" *
+              string(typeof(first(slices))) * "`. Only numeric arrays can be replayed client-side.")
+    shp = size(first(slices))
+    all(s -> size(s) == shp, slices) ||
+        error("replay: the values produce differently-shaped results " *
+              string(unique(size.(slices))) * ". They stack into one array, so every value of the " *
+              "control must yield the same shape.")
+    T = promote_type(map(eltype, slices)...)
+    T <: Real || error("replay: produces `" * string(T) * "`, which is not numeric data a plot can be " *
+                       "fed client-side")
+    # Keep the computed precision here. Narrowing is an ARTIFACT decision — it belongs to the export,
+    # which owns how the page represents this data and can revisit it per export without re-running a
+    # cell. Doing it here would also degrade the LIVE figure, which has the real data to hand and no
+    # reason to draw a reduced copy. `Int` (Int64) is the exception: the asset writer cannot pack it, so
+    # it would silently fall through to JSON — widen it to Float64 rather than ship that.
+    E = T in (Float32, Float64, Int32, Int16, UInt8) ? T : Float64
+    out = Array{E}(undef, shp..., length(slices))
+    for (i, s) in enumerate(slices)
+        selectdim(out, ndims(out), i) .= s
+    end
+    return out
+end
+
 _kind(kind::AbstractString) = get(_KINDS, String(kind), nothing)
 
 """

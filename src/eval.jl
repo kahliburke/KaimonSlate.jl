@@ -558,6 +558,13 @@ function _memoizable(cell::Cell)
     cell.kind == CODE || return false
     # `:opaque` (unresolved `using` / macro barrier) and `:nocache` (explicit opt-out) are memo-specific.
     (:opaque in cell.flags || :nocache in cell.flags) && return false
+    # A `@replay` cell registers its sweep BY RUNNING — the mark hands the export a closure, and a
+    # closure cannot ride in a memo entry. A restore skips the body, so a cached cell would come back
+    # with its figure intact and its sweep silently unregistered, and the export would ship a control
+    # with no data behind it. That is the exact failure this whole design exists to prevent, so such a
+    # cell always re-runs. The cost is nil by construction: `@replay` is a pass-through during a run
+    # (only the control's current value is computed), which is what makes re-running it cheap.
+    occursin(r"@replay\b", cell.source) && return false
     # Process-state and non-deterministic cells are never cached — read off the SAME `_cell_effect`
     # classifier the REGION layer uses to decide re-run-vs-transfer, so the two determinations can't
     # drift (the theme regression). RESOURCE — a live DB/socket/file handle that can't/shouldn't be

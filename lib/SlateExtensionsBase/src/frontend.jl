@@ -396,6 +396,81 @@ macro pkg_dir(path)
 end
 
 """
+    js_bundle(key, entry; deps, dir, minify=true) -> String | Nothing
+
+Build a JavaScript bundle from an ES-module `entry` and npm `deps`, returning the built file's path — or
+`nothing` when it can't be built, so a caller always has to have a fallback.
+
+The point is TREE-SHAKING. A vendored front-end library is the largest thing in a self-contained export,
+and the published "dist" builds are deliberately everything-inclusive: plotly.js ships 3D, geo, mapbox
+and finance whether a notebook draws a scatter plot or not. An extension that knows which parts it
+actually needs can say so, and get a bundle containing only those:
+
+```julia
+js_bundle("plotly-\$(join(sort(traces), '-'))", \"\"\"
+             import Plotly from 'plotly.js/lib/core';
+             import scatter from 'plotly.js/lib/scatter';
+             Plotly.register([scatter]);
+             window.Plotly = Plotly;
+         \"\"\";
+         deps = Dict("plotly.js" => "2.35.2"), dir = my_cache_dir())
+```
+
+Nothing about this is specific to any library: the caller supplies the entry module and the packages it
+imports, and gets back whatever the bundler produces.
+
+Requires `node` and `npx` on PATH; the bundler is esbuild, fetched by `npx` on first use. **Every failure
+returns `nothing`** — no node, no network, a bad entry, a bundler error. Building a smaller asset is an
+optimisation, and an export must never fail because an optimisation was unavailable; the caller falls
+back to whatever it vendors normally.
+
+Cached under `dir` keyed by a hash of `key`, the entry source and the deps, so a rebuild happens only
+when one of those actually changes. `key` is a readable prefix on the filename, nothing more.
+"""
+function js_bundle(key::AbstractString, entry::AbstractString;
+                   deps::AbstractDict = Dict{String,String}(), dir::AbstractString,
+                   minify::Bool = true)
+    # `--platform=browser` picks browser-conditional exports; `global` still has to be shimmed, because
+    # npm packages that also target Node reference it directly and it does not exist in a browser.
+    # Without it a bundle throws `global is not defined` on its first line, and every consumer reports a
+    # missing API rather than the real cause.
+    args = ["entry.js", "--bundle", "--format=iife", "--platform=browser",
+            "--define:global=globalThis", "--outfile=bundle.js"]
+    minify && push!(args, "--minify")
+    # The build FLAGS are part of the identity. Hashing only the sources means a changed flag silently
+    # reuses the previous artifact — the build looks like it took effect and did not.
+    stamp = string(hash((String(entry), sort!(["$k@$v" for (k, v) in deps]), args)); base = 16)
+    out = joinpath(String(dir), string(_bundle_stem(key), "-", stamp, ".js"))
+    isfile(out) && filesize(out) > 0 && return out
+    (Sys.which("node") === nothing || Sys.which("npx") === nothing) && return nothing
+    work = mktempdir()
+    try
+        write(joinpath(work, "entry.js"), String(entry))
+        if !isempty(deps)
+            specs = ["$k@$v" for (k, v) in deps]
+            # `--no-save --no-audit --no-fund`: a throwaway tree, so npm's bookkeeping is pure latency.
+            run(pipeline(Cmd(`npm install --no-save --no-audit --no-fund --loglevel=error $specs`;
+                             dir = work); stdout = devnull, stderr = devnull))
+        end
+        run(pipeline(Cmd(`npx --yes esbuild $args`; dir = work); stdout = devnull, stderr = devnull))
+        built = joinpath(work, "bundle.js")
+        (isfile(built) && filesize(built) > 0) || return nothing
+        mkpath(String(dir))
+        # Move via a temp name in the DESTINATION so a concurrent build can't publish a partial file.
+        tmp = out * ".part"
+        cp(built, tmp; force = true)
+        mv(tmp, out; force = true)
+        return out
+    catch
+        return nothing
+    finally
+        rm(work; recursive = true, force = true)
+    end
+end
+
+_bundle_stem(k) = replace(String(k), r"[^A-Za-z0-9._-]" => "_")
+
+"""
     asset_dirs() -> Dict{String,String}
 
 Every package-vendored asset directory declared by the loaded packages (`pkg => absolute dir`) — a copy,

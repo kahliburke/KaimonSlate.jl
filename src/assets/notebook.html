@@ -401,6 +401,12 @@
   </div>
   <div class="row"><button class="primary" onclick="closePublishing()">Done</button></div>
 </div></div>
+<!-- Replay detail — a SECOND step, shown only when the notebook has `@replay` marks, after the ordinary
+     export options are settled. It gets its own screen because the decision is a different kind: the
+     first screen is about how the page is rendered, this one is about work that has to be COMPUTED and
+     data that will be carried, per variable. Folding it into the first screen would bury it, and a
+     notebook without marks should never see it at all. -->
+<div class="modal-bg" id="exreplaybg"></div>
 <div class="modal-bg" id="exportbg"><div class="modal setmodal">
   <div class="msg"><strong id="exhdr">Export</strong> <span id="exsub" style="color:var(--dim);font-weight:400">— render or package this notebook</span></div>
   <div class="setrow" id="exfmtrow"><label>Format</label>
@@ -482,6 +488,9 @@
   <div class="setrow exrow fmt-html"><label title="Inline KaTeX, ECharts and the widget stack into the page instead of linking a CDN, so it renders with no network at all. Adds roughly a megabyte. Needed for a viewer that blocks fetched scripts, a machine with no network, or an archival copy that must outlive the CDN.">Offline</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmloffline"> Inline all third-party libraries (no network needed; ~1&nbsp;MB larger)</label></div>
+  <div class="setrow exrow fmt-html"><label title="Gzip the inlined libraries and data arrays. Typically halves the file or better. The page inflates them with the browser's DecompressionStream; uncheck for older browsers. Numeric arrays are narrowed to 32-bit either way.">Data</label>
+    <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
+    <input type="checkbox" id="htmlcompress" checked> Compress inlined data and libraries (needs Chrome 80+, Safari 16.4+, Firefox 113+)</label></div>
   <div class="setrow exrow fmt-html"><label title="Embed the reproducible bundle + a launch script inside the .html so a reader can run it live on their machine (much larger file)">Runnable</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmlrunnable" onchange="_exSyncRows()"> Embed a runnable bundle + “Run live” button (larger)</label></div>
@@ -599,5 +608,8 @@
 <!-- Preact app (ESM module). Strangler-fig: coexists with the classic scripts above
      and takes over the UI island by island until the vanilla code is retired. -->
 <script type="module" src="/assets/js/app.js"></script>
+<!-- Export step 2 (`@replay` resolution): a Preact island owning #exreplaybg. Shown only when the
+     notebook has marks; the vanilla export flow hands over via window.openReplayStep. -->
+<script type="module" src="/assets/js/export-replay.js"></script>
 </body>
 </html>

@@ -1282,6 +1282,28 @@ function memo_snapshot(k::GateKernel, cells::AbstractDict)
     return _tool(k, "__slate_memo_snapshot", Dict{String,Any}("cells" => cells); timeout = 120.0)
 end
 
+# What the `@replay` marks in this notebook WOULD cost, without computing any of it: id → {control, cell,
+# values}. Cheap enough to call whenever an export dialog opens. See worker.jl `__slate_replay_plan`.
+function replay_plan(k::GateKernel)
+    k.conn === nothing && return nothing
+    return _tool(k, "__slate_replay_plan", Dict{String,Any}(); timeout = 30.0)
+end
+
+# Run this notebook's `@replay` sweeps and return id → {name, control, cell, domain, slice, dtype, shape,
+# order, bytes, seconds, b64}. `stride` ships every n-th position of each control's domain — the export's
+# resolution/size trade. This is the expensive call in an export (it is the ONLY place a sweep happens),
+# so the timeout is generous: a slow expression over a large domain is exactly the case the export UI
+# exists to make visible. See worker.jl `__slate_replays`.
+function run_replays(k::GateKernel; stride::Integer = 1, strides = nothing, only = nothing)
+    k.conn === nothing && return nothing
+    args = Dict{String,Any}("stride" => Int(stride))
+    only === nothing || (args["only"] = collect(String, only))
+    # Per-mark resolution (id → n) overrides the blanket `stride`; a notebook usually wants to coarsen
+    # ONE expensive control, not all of them.
+    strides === nothing || (args["strides"] = Dict{String,Any}(String(k2) => Int(v) for (k2, v) in strides))
+    return _tool(k, "__slate_replays", args; timeout = 1800.0)
+end
+
 # Reset the worker namespace and mark every cell stale (mirrors `reset_module!`).
 function reset!(k::GateKernel, report::Report)
     k.conn === nothing || (try; _tool(k, "__slate_reset", Dict{String,Any}()); catch; end)

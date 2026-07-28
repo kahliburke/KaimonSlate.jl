@@ -83,8 +83,28 @@ function _htmlBaseParts() {
   // Fully offline: inline KaTeX/ECharts/dagre (+ the Preact stack) instead of linking a CDN, so the page
   // renders with no network at all. Bigger file; required for a locked-down viewer or an archival copy.
   if ((document.getElementById('htmloffline') || {}).checked) parts.push('offline=1');
+  // Inlined data arrays are gzipped by default (typically halves them). Inflating needs the browser's
+  // DecompressionStream — Chrome 80+, Safari 16.4+, Firefox 113+ — so a page bound for an OLD
+  // locked-down viewer turns it off and pays the size instead. Only sent when UNchecked, since on is the
+  // default server-side.
+  const hc = document.getElementById('htmlcompress');
+  if (hc && !hc.checked) parts.push('compress=0');
+  // Resolution: ship every n-th position of each `@replay` control's domain. The strongest size lever
+  // there is — it divides both the computation and the shipped bytes — so it sits with the other export
+  // decisions rather than being baked into the notebook.
+  const rq = window.__replayStrideQS ? window.__replayStrideQS() : '';
+  if (rq) parts.push('replays=' + rq);
   return parts;
 }
+// ── `@replay` export step ─────────────────────────────────────────────────────
+// The resolution dialog is a Preact island (export-replay.js) owning #exreplaybg — each row carries real
+// state (a power-of-two slider and an exact field that must agree with each other and with the running
+// totals), which is what signals are for. This side only hands over and reads back the chosen strides.
+function _maybeReplayStep() {
+  if (window.openReplayStep) return window.openReplayStep();
+  return exportHtml(true);                       // island not loaded → export unchanged
+}
+
 // Self-contained HTML page (figures embedded, math via KaTeX). `dl=false` opens it in a tab.
 function exportHtml(dl) {
   const parts = _htmlBaseParts();
@@ -529,6 +549,7 @@ function openExport(preset) {
   const hr = document.getElementById('htmlrunnable'); if (hr) hr.checked = localStorage.getItem('slate_htmlrunnable') === '1';
   const hh = document.getElementById('htmlhistory'); if (hh) hh.checked = localStorage.getItem('slate_htmlhistory') === '1';
   const ho = document.getElementById('htmloffline'); if (ho) ho.checked = localStorage.getItem('slate_htmloffline') === '1';
+  const hc = document.getElementById('htmlcompress'); if (hc) hc.checked = localStorage.getItem('slate_htmlcompress') !== '0';   // on unless turned off
   const ms = document.getElementById('mdsource'); if (ms) ms.checked = localStorage.getItem('slate_mdsource') !== '0';
   const rm = document.getElementById('mdreadme'); if (rm) rm.checked = localStorage.getItem('slate_mdreadme') === '1';
   const stt = document.getElementById('sitetitle'); if (stt && !stt.value) stt.value = localStorage.getItem('slate_sitetitle') || '';
@@ -585,8 +606,12 @@ function closeExport(go) {
     const hr = document.getElementById('htmlrunnable'); if (hr) localStorage.setItem('slate_htmlrunnable', hr.checked ? '1' : '0');
     const hh = document.getElementById('htmlhistory'); if (hh) localStorage.setItem('slate_htmlhistory', hh.checked ? '1' : '0');
     const ho = document.getElementById('htmloffline'); if (ho) localStorage.setItem('slate_htmloffline', ho.checked ? '1' : '0');
+    const hc = document.getElementById('htmlcompress'); if (hc) localStorage.setItem('slate_htmlcompress', hc.checked ? '1' : '0');
     ['htmltheme', 'htmlcode'].forEach(id => { const el = document.getElementById(id); if (el) localStorage.setItem('slate_' + id, el.value); });
-    return exportHtml(true);
+    // A notebook with `@replay` marks gets a SECOND step before anything is produced: those controls
+    // cost real computation and carry real bytes, and this is the only moment that decision can be made.
+    // Nothing is exported until it is settled. A notebook without marks goes straight out, unchanged.
+    return _maybeReplayStep();
   }
   if (fmt === 'markdown') {
     const ms = document.getElementById('mdsource'); localStorage.setItem('slate_mdsource', ms && ms.checked ? '1' : '0');

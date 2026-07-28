@@ -353,6 +353,37 @@ _g(d, k, dv) = haskey(d, k) ? d[k] : get(d, Symbol(k), dv)
 
 # import. NOTE: `cells` MUST be a keyword arg (raw-Dict fast-path
 # caveat — see __slate_macroexpand); nested dicts may arrive symbol-keyed, hence `_g` dual-lookup.
+# EXPORT-time `@replay` support. `@replay` is a PASS-THROUGH during an ordinary run — it computes only
+# the control's current value and registers the closure — so these are the only paths that pay for a
+# sweep, and they run when an export is being built, never while someone is editing.
+#
+# `plan` answers "what would this cost?" without computing anything: which controls are replayable, how
+# many values each holds, which cell it came from. `run` does the work and hands the packed bytes back
+# base64'd (the export registers the asset itself — a sweep has no running cell, so `save_asset`'s
+# task-local sink would silently drop it).
+function __slate_replay_plan()
+    m = _NS[]
+    isdefined(m, :__slate_replay_plan) || return Dict{String,Any}()
+    return try; Base.invokelatest(Base.invokelatest(getfield, m, :__slate_replay_plan)); catch; Dict{String,Any}(); end
+end
+
+function __slate_replays(; stride::Int = 1, only = nothing, strides = nothing)
+    m = _NS[]
+    isdefined(m, :__slate_run_replays) || return Dict{String,Any}()
+    f = Base.invokelatest(getfield, m, :__slate_run_replays)
+    only2 = only isa AbstractVector ? Set(String(x) for x in only) : nothing
+    # Per-mark resolution. Arrives as a plain dict over the gate (possibly symbol-keyed on the raw-dict
+    # fast path), so normalise both halves before it reaches the sweep.
+    sd = Dict{String,Int}()
+    if strides isa AbstractDict
+        for (k, v) in strides
+            n = try; Int(v); catch; 1; end
+            sd[String(k)] = max(1, n)
+        end
+    end
+    return Base.invokelatest(f; stride = max(1, Int(stride)), only = only2, strides = sd)
+end
+
 function __slate_memo_snapshot(; cells::Dict = Dict{String,Any}())
     out = Dict{String,Any}()
     _MEMO_OK || return out
@@ -2275,6 +2306,10 @@ function tools()
         KaimonGate.GateTool("__slate_adopt", __slate_adopt),
         KaimonGate.GateTool("__slate_memo_trace", __slate_memo_trace),
     KaimonGate.GateTool("__slate_memo_snapshot", __slate_memo_snapshot),
+        # `@replay`: what the marks would cost, and running them. Export-only — an ordinary run touches
+        # neither, because the macro is a pass-through while a notebook is being edited.
+        KaimonGate.GateTool("__slate_replay_plan", __slate_replay_plan),
+        KaimonGate.GateTool("__slate_replays", __slate_replays),
         KaimonGate.GateTool("__slate_memo_pin", __slate_memo_pin),
         KaimonGate.GateTool("__slate_blob_of", __slate_blob_of),
         KaimonGate.GateTool("__slate_bind_blob", __slate_bind_blob),
