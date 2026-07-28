@@ -349,6 +349,21 @@ end
     @test occursin("import(\"./ext-assets/GlobeSlate/globe-lib/globe-lib.js\")", fhead)   # ./-relative specifier
     @test !occursin("import(\"ext-assets/GlobeSlate/globe-lib/globe-lib.js\")", fhead)    # never a bare specifier
 
+    # STANDALONE: that same vendored url must be INLINED as a `data:` url instead — a single-file export has
+    # no sibling to fetch and no server to ask, so without this an extension's front-end library silently
+    # fails to load in exactly the export that has to carry everything (a viewer with no network, or one
+    # that blocks fetched scripts). The site path keeps the sibling. Mirrors `_rewrite_ext_asset_urls!`.
+    snb = _gl_nb()
+    NS._register_frontend!(snb, "boot", "fetch(\"/ext-assets/GlobeSlate/echarts-gl.min.js\");", false, "")
+    sstand = NS._frontend_export_head(snb, true)
+    @test occursin("data:application/javascript;charset=utf-8;base64,", sstand)  # mime carries no raw space
+    @test !occursin("ext-assets/GlobeSlate/echarts-gl.min.js", sstand)           # no path reference survives
+    @test occursin("./ext-assets/GlobeSlate/echarts-gl.min.js", NS._frontend_export_head(snb, false))
+
+    # A vendored url that resolves to NO file falls back to the sibling form even standalone: one widget
+    # holding a dead relative link is a better failure than a script that lost its dependency silently.
+    @test occursin("./ext-assets/GlobeSlate/globe-lib/globe-lib.js", NS._frontend_export_head(fenb, true))
+
     # A vendored-asset url in a NON-`requireScripts` spec field — a globe `baseTexture` (a binary image) —
     # must be repointed too: site → the page-local sibling; standalone → a `data:<mime>;base64,…` url of the
     # BYTES (mime by extension), so a self-contained page carries the binary. The general rewrite that

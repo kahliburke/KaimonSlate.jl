@@ -150,6 +150,25 @@ function _rewrite_ext_asset_urls!(spec, nb::LiveNotebook; inline::Bool)
     return walk!(spec)
 end
 
+# The same repointing for a package's front-end SCRIPT SOURCE (the SlateExtensionsBase manifest), where a
+# `/ext-assets/<pkg>/…` url is a string literal inside JS rather than a value in a spec. A STANDALONE page
+# has no sibling to resolve and no server, so the bytes ride inline as a `data:` url — without this an
+# extension can vendor a front-end library into a multi-file site but not into a single file, which is the
+# one export that must carry everything (a viewer with no network, or one that blocks fetched scripts). A published site keeps the
+# relative sibling form. A url that resolves to no vendored file falls back to that sibling form too: one
+# widget holding a dead relative link is a better failure than a page whose script lost its dependency
+# silently. `_site_ctype` carries `; charset=…` for text types, and that space is invalid unencoded in a
+# data url — strip it, so `.js` spells as `text/javascript;charset=utf-8`.
+const _EXT_ASSET_URL_RE = r"/ext-assets/[^\"'`\s\\)]+"
+
+_inline_ext_asset_urls(nb::LiveNotebook, js::AbstractString) =
+    replace(String(js), _EXT_ASSET_URL_RE => function (u)
+        f = _ext_asset_file(nb, u)
+        f === nothing && return replace(u, "/ext-assets/" => "./ext-assets/"; count = 1)
+        return string("data:", replace(_site_ctype(f), " " => ""), ";base64,",
+                      Base64.base64encode(read(f)))
+    end)
+
 # ── Author-embedded media (drag/drop / paste into a Markdown or web cell) ────────────────────────────
 # A cell can reference media two ways: an inline `data:<mime>;base64,…` URL (bytes live in the source),
 # or the live asset route `/n/<id>/asset/<rel>` (bytes are a file under the notebook's project dir).
@@ -422,17 +441,20 @@ try{var b=document.createElement("pre");b.className="web-err";b.textContent="⚠
 # (component) widgets are emitted as `<script type="module">`; they resolve the widget SDK + Preact/htm
 # via the export's import map (see `_export_importmap_for`). A pure single-file standalone that can't
 # resolve those simply doesn't mount the widget — it never breaks the rest of the page.
-function _frontend_export_head(nb)
+function _frontend_export_head(nb, inline::Bool = false)
     fe = _frontend_scripts(nb)
     isempty(fe) && return ""
-    # Rewrite the live `/ext-assets/<pkg>/…` route (served by the hub) to the page-local `./ext-assets/<pkg>/…`
-    # sibling written by `_package_asset_files` — a frozen export has no server, so a package-vendored asset a
-    # script `fetch`es / `<script src=>`s / dynamic-`import()`s must resolve as a plain sibling. The `./` is
-    # load-bearing: an ES `import()` specifier without a leading `/`, `./`, or scheme is a BARE specifier and
-    # throws unless an import map defines it — a page-relative `ext-assets/…` would break the very multi-file
-    # modules this route exists to serve. `./` is a valid relative specifier for `import()` and equivalent to
-    # the bare form for `fetch`/`<script src>`, so it's correct for every consumer.
-    rw(js) = replace(js, "/ext-assets/" => "./ext-assets/")
+    # Repoint the live `/ext-assets/<pkg>/…` route (served by the hub) — a frozen export has no server, so a
+    # package-vendored asset a script `fetch`es / `<script src=>`s / dynamic-`import()`s must resolve some
+    # other way. STANDALONE (`inline`) inlines the bytes as a `data:` url so the single file carries them;
+    # a published SITE points at the page-local `./ext-assets/<pkg>/…` sibling written by
+    # `_package_asset_files`. In the sibling form the `./` is load-bearing: an ES `import()` specifier
+    # without a leading `/`, `./`, or scheme is a BARE specifier and throws unless an import map defines it
+    # — a page-relative `ext-assets/…` would break the very multi-file modules this route exists to serve.
+    # `./` is a valid relative specifier for `import()` and equivalent to the bare form for
+    # `fetch`/`<script src>`, so it's correct for every consumer.
+    rw(js) = inline ? _inline_ext_asset_urls(nb, js) :
+                      replace(js, "/ext-assets/" => "./ext-assets/")
     # Break any literal `</script` in the JS so it can't terminate the tag early (the live path uses
     # textContent/Blob and is immune); the sequence is inert JS once the parser is past the string boundary.
     safe(js) = replace(rw(js), r"</script"i => "<\\/script")
@@ -1043,7 +1065,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
               # `offline` (a page that must open with no network at all). See `_thirdparty_head`.
               _thirdparty_head(offline),
               "<style>", _export_css(palette, code, width), "</style></head><body>", _asset_head,
-              _frontend_export_head(nb), "<article class=\"export\">")
+              _frontend_export_head(nb, inline_assets), "<article class=\"export\">")
         charts = Tuple{String,String}[]   # (dom id, option JSON) collected across cells → rendered at the end
         # Geo-map GeoJSON referenced by the charts. `inline_assets` (standalone) ⇒ inline each map here
         # (name => local file, read into the page). Otherwise (published page) the map rides as a
