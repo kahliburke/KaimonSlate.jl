@@ -829,9 +829,9 @@ end
 #     reader needs the network the moment they open it.
 #   • OFFLINE (`offline=true`) — inline the bytes from the version-pinned vendor cache (`_vendor_file`, the
 #     same files the live server serves), so the page carries ZERO `http(s)://` subresources and opens with
-#     no network at all. Costs roughly a megabyte. This is what a locked-down or air-gapped viewer needs —
-#     an exam browser (Safe Exam Browser and friends block outbound requests), a field laptop, an archival
-#     copy that must still render correctly years after a CDN has moved on.
+#     no network at all. Costs roughly a megabyte. This is what a viewer that blocks third-party script
+#     fetches needs — a locked-down browser profile, a field laptop, an archival copy that must still
+#     render correctly years after a CDN has moved on.
 #
 # Both modes resolve their URLs/versions from vendor.json, so an online export and an offline one load
 # byte-identical libraries and a version bump flows through to every path at once.

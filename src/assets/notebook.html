@@ -479,7 +479,7 @@
   <div class="setrow exrow fmt-html"><label>Source</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmlsource" checked> Include cell source (uncheck for outputs only)</label></div>
-  <div class="setrow exrow fmt-html"><label title="Inline KaTeX, ECharts and the widget stack into the page instead of linking a CDN, so it renders with no network at all. Adds roughly a megabyte. Needed for a locked-down viewer (an exam browser), an air-gapped machine, or an archival copy that must outlive the CDN.">Offline</label>
+  <div class="setrow exrow fmt-html"><label title="Inline KaTeX, ECharts and the widget stack into the page instead of linking a CDN, so it renders with no network at all. Adds roughly a megabyte. Needed for a viewer that blocks fetched scripts, a machine with no network, or an archival copy that must outlive the CDN.">Offline</label>
     <label style="font-weight:400;font-size:0.9em;color:var(--dim);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="htmloffline"> Inline all third-party libraries (no network needed; ~1&nbsp;MB larger)</label></div>
   <div class="setrow exrow fmt-html"><label title="Embed the reproducible bundle + a launch script inside the .html so a reader can run it live on their machine (much larger file)">Runnable</label>
