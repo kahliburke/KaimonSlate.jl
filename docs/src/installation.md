@@ -8,6 +8,10 @@ package management, a tailable log) and the **AI agent** can drive the notebook 
 Either way, you drive it with the **`slate` app** — a small launcher, installed with Julia's app
 system, that starts (or attaches to) the notebook hub and shows a status TUI.
 
+`slate` is a **command you run in your terminal**, not Julia code: installing the app writes an
+executable launcher into Julia's app bin directory (`~/.julia/bin` by default), which you'll want on
+your `PATH`. Step 3 below covers that.
+
 ## Requirements
 
 - **Julia 1.12 or newer** — the `slate` app uses Julia's app system.
@@ -44,16 +48,57 @@ pkg> instantiate
 pkg> activate                 # back to your default environment
 ```
 
-The launcher lands in Julia's app bin — if `slate` isn't found, add that directory (printed by
-`app dev`) to your `PATH`. (Once KaimonSlate is registered in General, `pkg> app add KaimonSlate` will
-be the one-liner.)
+(Once KaimonSlate is registered in General, `pkg> app add KaimonSlate` will be the one-liner.)
 
-### 3. Run `slate`
+### 3. Put `slate` on your `PATH`
+
+Julia's app system doesn't install a Julia function — it writes an **executable launcher** (a shell
+script on macOS/Linux, a `slate.bat` on Windows) into Julia's app bin directory, which is `bin/`
+under your first depot:
+
+| | |
+|---|---|
+| macOS / Linux | `~/.julia/bin/slate` |
+| Windows | `%USERPROFILE%\.julia\bin\slate.bat` |
+
+That directory is **not** on your `PATH` by default, and `app dev` prints a reminder to add it. Do
+that once in your shell profile:
+
+```sh
+# ~/.zshrc, ~/.bashrc, …
+export PATH="$HOME/.julia/bin:$PATH"
+```
+
+Then open a new terminal and check the shell resolves it:
+
+```sh
+which slate           # → /Users/you/.julia/bin/slate
+```
+
+Until it's on your `PATH` you can still run it by full path — `~/.julia/bin/slate` — which is a
+handy way to confirm the install worked.
+
+### 4. Run `slate`
+
+`slate` is a **terminal command**, not a Julia function — run it at your shell prompt, not in the
+Julia REPL:
 
 ```sh
 slate                 # start (or attach to) the hub + status TUI
 slate my_analysis.jl  # also open that notebook in the browser (created if missing)
 ```
+
+!!! warning "`slate` at the `julia>` prompt won't work"
+    Typing `slate` in the Julia REPL raises `UndefVarError: slate not defined` — the REPL is looking
+    for a Julia binding, and the app is a program on your `PATH`. Run it from your shell, or shell
+    out from the REPL with `;`:
+
+    ```julia-repl
+    julia> ;slate my_analysis.jl
+    ```
+
+    To drive the hub *from* Julia instead, use the library API — `serve_notebook("nb.jl")`; see
+    **Embedding (programmatic)** below.
 
 The **first time** you run it with Kaimon installed, `slate` offers to register itself as a
 Kaimon extension:
@@ -73,7 +118,7 @@ again **attaches** to that hub as a live status viewer.
     `KaimonSlate.register_extension()` registers manually, and `slate` never overwrites a
     registration you removed.
 
-### 4. Open the browser
+### 5. Open the browser
 
 `slate` opens your notebook automatically. Otherwise browse the hub index at
 **`http://127.0.0.1:8765`** (set `KAIMONSLATE_PORT` to move it) — it lists open notebooks and

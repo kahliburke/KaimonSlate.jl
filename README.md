@@ -94,9 +94,8 @@ KaimonSlate isn't registered yet, so during the pre-release install it as a **de
 pkg> app dev https://github.com/kahliburke/KaimonSlate.jl
 ```
 
-This clones the repo to `~/.julia/dev/KaimonSlate` and puts a `slate` launcher on your `PATH`. Then
-instantiate that dev clone once — `Pkg.Apps` doesn't do it for you — so its dependencies (including the
-bundled `SlateExtensionsBase`) are installed:
+This clones the repo to `~/.julia/dev/KaimonSlate`. Then instantiate that dev clone once — `Pkg.Apps`
+doesn't do it for you — so its dependencies (including the bundled `SlateExtensionsBase`) are installed:
 
 ```julia-repl
 pkg> activate ~/.julia/dev/KaimonSlate
@@ -106,12 +105,23 @@ pkg> activate                 # back to your default environment
 
 (Once KaimonSlate is registered, `pkg> app add KaimonSlate` will be the one-liner.)
 
-This puts a `slate` launcher on your `PATH`:
+Installing the app writes a **`slate` executable** — a shell script, or `slate.bat` on Windows — into
+Julia's app bin directory, `~/.julia/bin`. That directory isn't on your `PATH` by default (`app dev`
+prints a reminder), so add it once:
+
+```sh
+export PATH="$HOME/.julia/bin:$PATH"     # in ~/.zshrc, ~/.bashrc, …
+```
+
+Now run `slate` **at your shell prompt** — it's a terminal command, not a Julia function:
 
 ```sh
 slate                 # start or attach to the hub, with a status TUI
 slate my_analysis.jl  # open a notebook in the browser (created if missing)
 ```
+
+(At the `julia>` prompt it would just be an undefined variable; shell out with `;slate my_analysis.jl`
+if you're already in the REPL.)
 
 <div align="center">
 <img src="https://github.com/kahliburke/KaimonSlate.jl/releases/download/docs-assets/slate-tui.gif" alt="The slate status TUI" width="560"/>
