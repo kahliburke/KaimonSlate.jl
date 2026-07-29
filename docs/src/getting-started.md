@@ -14,6 +14,11 @@ slate                 # start the hub + status TUI, and open the front page
 slate intro.jl        # …or jump straight into a notebook (created if new)
 ```
 
+Those go in your **terminal**, not the Julia REPL — installing the app puts a `slate` executable in
+Julia's app bin (`~/.julia/bin`; `slate.bat` on Windows), which you add to your `PATH` once. If your
+shell reports `command not found`, that `PATH` step is what's missing; see
+[Installation](installation.md).
+
 `slate` starts (or attaches to) the notebook hub and shows a status TUI in your terminal. Under
 **Kaimon** it attaches to Kaimon's hub, so the **💬 agent** is available; standalone
 (`slate --own`) it owns the hub itself.

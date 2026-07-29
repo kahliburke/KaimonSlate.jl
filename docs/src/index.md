@@ -74,9 +74,12 @@ Then instantiate the dev clone once (`pkg> activate ~/.julia/dev/KaimonSlate; in
 bundled `SlateExtensionsBase` resolves — see [Installation](installation.md) for the full steps. (Once
 KaimonSlate is registered, `pkg> app add KaimonSlate` will be the one-liner.)
 
-Run it:
+That installs a **`slate` executable** in Julia's app bin (`~/.julia/bin`, or `slate.bat` on Windows);
+add that directory to your `PATH` and run it **from your shell**, not from the Julia REPL:
 
 ```sh
+export PATH="$HOME/.julia/bin:$PATH"     # once, in your shell profile
+
 slate my_analysis.jl          # start the hub, open the notebook, show a status TUI
 ```
 
