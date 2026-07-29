@@ -27,13 +27,24 @@ _export_code_size(code) = get(Dict("normal" => ".82rem", "small" => ".76rem", "s
 # `_slateEchartsThemeFrom`/`_slateAxisTheme` (the export can't load core.js), so an exported chart
 # reads like the notebook instead of ECharts' generic 'dark'/default. Registered as 'slate' below.
 const _EXPORT_ECHARTS_THEME_JS = raw"""
+/* Tooltip numbers, rounded — the mirror of core.js `_slateNum`/`_slateValueFormatter`. A Float64
+   straight out of Julia hovers as `14.11601595225456`, which is noise rather than precision; six
+   significant figures is what a reader can use. It rides in the THEME because it is a default an
+   author's own `tooltip.valueFormatter` overrides, and because a function cannot cross as JSON. */
+function _slateNum(v){if(typeof v!=='number'||!isFinite(v))return v;
+if(Number.isInteger(v)&&Math.abs(v)<1e15)return String(v);
+var a=Math.abs(v);
+if(a<1e-4||a>=1e15)return v.toExponential(3);
+return String(parseFloat(v.toPrecision(6)));}
+/* A datum is a scalar on a value axis, or a tuple: [x,y] for a line, [x,y,v] for a heatmap. */
+function _slateValueFormatter(v){return Array.isArray(v)?v.map(_slateNum).join(', '):_slateNum(v);}
 function _slateExportTheme(){var cs=getComputedStyle(document.documentElement);
 var V=function(n,d){var v=cs.getPropertyValue(n).trim();return v||d;};
 var text=V('--text','#d4d8e8'),dim=V('--dim','#6a7090'),border=V('--border','#2a2e40'),bg2=V('--bg2','#141828');
 var cycle=[['--accent','#569cd6'],['--green','#56d364'],['--orange','#ce9178'],['--purple','#c586c0'],['--teal','#4ec9b0'],['--gold','#ffd700'],['--red','#e57575']].map(function(p){return V(p[0],p[1]);});
 var vir=['#440154','#472d7b','#3b528b','#2c728e','#21918c','#28ae80','#5ec962','#addc30','#fde725'];
 var ax={axisLine:{lineStyle:{color:border}},axisTick:{lineStyle:{color:border}},axisLabel:{color:dim,fontSize:14},nameTextStyle:{color:text,fontSize:15},splitLine:{lineStyle:{color:border,opacity:0.4}},splitArea:{areaStyle:{color:['transparent','transparent']}}};
-return {color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:'inherit',fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text}},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};}
+return {color:cycle,backgroundColor:'transparent',textStyle:{color:text,fontFamily:'inherit',fontSize:14},title:{left:'center',textStyle:{color:text,fontSize:19,fontWeight:'bold'},subtextStyle:{color:dim,fontSize:12}},legend:{textStyle:{color:dim,fontSize:14}},categoryAxis:ax,valueAxis:ax,logAxis:ax,timeAxis:ax,line:{symbolSize:5},graph:{color:cycle},tooltip:{backgroundColor:bg2,borderColor:border,textStyle:{color:text},valueFormatter:_slateValueFormatter},visualMap:{textStyle:{color:dim},inRange:{color:vir}},timeline:{lineStyle:{color:dim},label:{color:dim}},calendar:{splitLine:{lineStyle:{color:border}},itemStyle:{borderColor:border}}};}
 """
 
 # ── Page assets in a static export ────────────────────────────────────────────────────────────
@@ -536,6 +547,55 @@ var kind=a.dtype?"ndarray":m.indexOf("json")>=0?"json":m.indexOf("text/")===0?"t
 return {path:path,kind:kind,mime:a.mime,dtype:a.dtype||null,shape:a.shape||null,order:a.order||null};};
 Slate.assetPaths=function(){return Object.keys(window.__slateAssets);};
 Slate.isLive=function(){return false;};
+/* `@replay`: a control driving shipped data, with no kernel. The static mirror of core.js's
+   `Slate.replay` — everything about a replayed control EXCEPT the one call that puts a slice on
+   screen, which is the only renderer-specific part and is passed in. This is the copy that actually
+   does the work: live, `isLive()` is true and the whole thing stays out of the kernel's way.
+   Any renderer inlined into an export (SlatePlotly's widget, the chart runtime below) uses it. */
+Slate.replay={
+control:function(name){var hosts=document.querySelectorAll("[data-name]");
+for(var i=0;i<hosts.length;i++){var h=hosts[i];
+if(h.getAttribute("data-name")!==String(name))continue;
+var inp=(h.matches&&h.matches("input,select"))?h:h.querySelector("input,select");
+if(inp)return inp;}
+return null;},
+/* Matched NUMERICALLY where both sides are numbers — a DOM control reports "8" as a string and Julia
+   may have written 8.0, so comparing text would miss. String equality for categorical domains. */
+index:function(domain,raw){var n=Number(raw);
+if(!isNaN(n)){for(var i=0;i<domain.length;i++)if(Number(domain[i])===n)return i;}
+for(var j=0;j<domain.length;j++)if(String(domain[j])===String(raw))return j;
+return -1;},
+/* Slices stack along the LAST dimension and the buffer is column-major, so one control value is a
+   contiguous run — a view, never a gather. A 2-D slice becomes rows: (r,c) sits at c*rows+r, so this
+   transposes on the way out rather than shipping a second, row-major copy. */
+slice:function(packed,sweep,i){var shp=(sweep.slice&&sweep.slice.length)?sweep.slice:[packed.data.length];
+var n=shp.reduce(function(a,b){return a*b;},1);var flat=packed.data.subarray(i*n,(i+1)*n);
+if(shp.length<=1)return Array.from(flat);
+if(shp.length===2){var rows=shp[0],cols=shp[1],out=new Array(rows);
+for(var y=0;y<rows;y++){var row=new Array(cols);
+for(var x=0;x<cols;x++)row[x]=flat[x*rows+y];out[y]=row;}
+return out;}
+return Array.from(flat);},
+/* `marks` each carry at least {id, control}; `apply(slice, mark)` is the renderer's one step. */
+wire:function(marks,apply){if(Slate.isLive())return;
+(marks||[]).forEach(function(m){
+/* A mark names a SWEEP, not an asset: what shipped — and at what resolution — is the export's
+   decision, published in this table. A mark with no entry never wires, so a figure whose sweep was
+   skipped leaves its control visibly disabled instead of failing at the first drag. */
+var sweep=(window.__slateReplays||{})[m.id];if(!sweep)return;
+var input=Slate.replay.control(m.control);if(!input)return;
+var loaded=Slate.asset(sweep.asset);
+var readout=input.parentElement&&input.parentElement.querySelector(".exp-ctl-val");
+var run=function(){var i=Slate.replay.index(sweep.domain||[],input.value);if(i<0)return;
+if(readout)readout.textContent=input.value;
+loaded.then(function(packed){apply(Slate.replay.slice(packed,sweep,i),m);})
+.catch(function(e){console.error("replay failed",e);});};
+input.addEventListener("input",run);input.addEventListener("change",run);
+/* Every exported control renders DISABLED, because one that moves without changing anything reads as
+   a broken page. Enabling here — and only here — means a control is live exactly when data for it
+   actually rode along, with no coordination between the two sides. */
+loaded.then(function(){input.disabled=false;input.removeAttribute("title");}).catch(function(){});});}
+};
 Slate.assetUrl=function(path){var a=window.__slateAssets[path];if(!a)return path;
 if(a.data!==undefined)return "data:"+(a.mime||"application/octet-stream")+";base64,"+a.data;return a.url||path;};
 
@@ -1498,8 +1558,41 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   "if(_slateMaps[r.name]){try{echarts.registerMap(r.name,_slateMaps[r.name]);}catch(e){}return Promise.resolve();}",
                   "if(!r.url)return Promise.resolve();",
                   "return fetch(r.url).then(function(x){return x.json();}).then(function(j){echarts.registerMap(r.name,j);}).catch(function(){});}));}",
-                  # `registerMap`/`__size`/`requireScripts` are Slate extensions, not ECharts options — strip before setOption.
-                  "function _slateSansMaps(o){if(!o||(!o.registerMap&&!o.__size&&!o.requireScripts))return o;var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;return c;}",
+                  # `registerMap`/`__size`/`requireScripts`, and a series' `__replay` mark, are Slate extensions
+                  # rather than ECharts options — strip them before setOption.
+                  "function _slateSansMaps(o){if(!o)return o;",
+                  "var mk=Array.isArray(o.series)&&o.series.some(function(x){return x&&x.__replay;});",
+                  "if(!o.registerMap&&!o.__size&&!o.requireScripts&&!mk)return o;",
+                  "var c=Object.assign({},o);delete c.registerMap;delete c.__size;delete c.requireScripts;",
+                  "if(mk)c.series=o.series.map(function(x){if(!x||!x.__replay)return x;var y=Object.assign({},x);delete y.__replay;return y;});",
+                  "return c;}",
+                  # ── `@replay` in an ECharts figure ───────────────────────────────────────────────────────
+                  # `Slate.replay.wire` (emitted with the asset shim above) owns everything except the call
+                  # that puts a slice on screen. What is left is the only ECharts-specific part: the DSL ZIPS,
+                  # so a line is `[[x,y],…]` and a heatmap `[[x,y,v],…]`, and the mark (echarts_dsl.jl
+                  # `_mark_replay!`) names which COMPONENT of each drawn entry the shipped array feeds.
+                  # Rewriting that one slot in the entries ALREADY DRAWN reuses their coordinates, so the zip
+                  # layout is expressed once, in Julia, and never restated here.
+                  "function _slateReplayEntries(cur,m,sl){if(m.comp===null||m.comp===undefined)return sl;",
+                  # A heatmap triple carries its own [xIndex,yIndex], so index the slice by those rather than
+                  # by position — correct however the entries happen to be ordered.
+                  "if(m.rank===2)return cur.map(function(p){var q=p.slice();q[m.comp]=sl[p[1]][p[0]];return q;});",
+                  "return cur.map(function(p,i){var q=p.slice();q[m.comp]=sl[i];return q;});}",
+                  "function _slateWireReplay(ch,opt){var marks=[];",
+                  "((opt&&opt.series)||[]).forEach(function(s,i){if(s&&s.__replay)",
+                  "marks.push(Object.assign({series:i,base:s.data||[]},s.__replay));});",
+                  "if(!marks.length)return;",
+                  "Slate.replay.wire(marks,function(sl,m){",
+                  # series merge by INDEX, so naming only the changed one leaves the reader's zoom and legend
+                  # state untouched through every step of a drag.
+                  "var arr=[];for(var k=0;k<m.series;k++)arr.push({});",
+                  "arr.push({data:_slateReplayEntries(m.base,m,sl)});var patch={series:arr};",
+                  # A heatmap's colour scale was fitted to whichever slice drew first; leaving it pinned would
+                  # clip every other one. Refit to what is actually on screen.
+                  "if(m.rank===2&&opt.visualMap){var lo=Infinity,hi=-Infinity;",
+                  "sl.forEach(function(r){r.forEach(function(v){if(v<lo)lo=v;if(v>hi)hi=v;});});",
+                  "if(isFinite(lo)&&isFinite(hi))patch.visualMap={min:lo,max:hi};}",
+                  "ch.setOption(patch);});}",
                   # Load a chart's `requireScripts` (echarts-gl etc.) before render — ONE <script> per url
                   # (shared promise), ordered so a lib sees its deps; a failed load resolves so it can't wedge.
                   "var _slateScripts={};function _slateLoadScript(u){if(_slateScripts[u])return _slateScripts[u];",
@@ -1514,7 +1607,7 @@ function export_html(nb::LiveNotebook; include_source::Bool = true,
                   # A GL lib (requireScripts) must load BEFORE echarts.init — an instance created before
                   # echarts-gl registers its 3D views renders a GL series blank. So init INSIDE the .then.
                   "Promise.all([_slateEnsureMaps(reqs),_slateEnsureScripts(opt&&opt.requireScripts)]).then(function(){",
-                  "var ch=echarts.init(el,'slate');ch.setOption(_slateSansMaps(opt));",
+                  "var ch=echarts.init(el,'slate');ch.setOption(_slateSansMaps(opt));_slateWireReplay(ch,opt);",
                   "window.addEventListener('resize',function(){ch.resize();});});});}",
                   "if(window.echarts)_slateRenderCharts();else window.addEventListener('load',_slateRenderCharts);")
         end
