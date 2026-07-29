@@ -536,6 +536,13 @@ body.wrap-output .output pre { white-space:pre-wrap; word-break:break-word; }
 .dispwrap { padding:10px 12px; border-top:1px solid var(--border); }
 .echarts:not(:empty) { padding:8px 6px; border-top:1px solid var(--border); }
 .echart { height:340px; width:100%; }
+/* Chart scroll-zoom gate (settings.js): the wheel only zooms a chart that is ACTIVE — clicked into, so
+   it holds focus. That state has to be VISIBLE, or a chart that won't zoom just reads as broken. A ring
+   rather than a border, so lighting up never reflows the plot inside. Matches every gated container:
+   core's ECharts hosts and anything an extension marked `data-slate-zoomable`. */
+.echart, .ichart, [data-slate-zoomable] { border-radius:6px; outline:none; }
+.echart:focus-within, .ichart:focus-within, [data-slate-zoomable]:focus-within {
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
 /* Animation player (animate(frames; …) → WebGL2 canvas + transport bar) */
 .anim:not(:empty) { padding:8px 10px; border-top:1px solid var(--border); }
 .animplayer { margin-bottom:10px; }

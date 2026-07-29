@@ -75,7 +75,13 @@ end
 # The centered dark card. Structure only — the styling lives in `assets/figure.css` (registered on the
 # page from `__init__`, and carried into a static export). The card's `.bonito-fig-card:focus-within`
 # rule lights its border when the (focusable, `tabindex=0`) WGLMakie canvas has focus.
+#
+# `data-slate-zoomable` opts the card into Slate's chart scroll-zoom gate (core `settings.js`), whose
+# whole contract is that attribute: the wheel reaches the figure only once the reader has clicked into
+# it, scaled by their "Chart scroll-zoom" setting, instead of hijacking the page as they scroll past.
+# The value names WGLMakie's zoom surface — the canvas is what Makie listens on, not this card.
 function _figure_card(inner::AbstractString)
-    return string("<div class=\"bonito-fig-wrap\"><div class=\"bonito-fig-card\" tabindex=\"-1\">",
+    return string("<div class=\"bonito-fig-wrap\">",
+                  "<div class=\"bonito-fig-card\" tabindex=\"-1\" data-slate-zoomable=\"canvas\">",
                   inner, "</div></div>")
 end

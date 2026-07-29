@@ -119,9 +119,22 @@ function _ensureMaps(spec) {
     return _mapRegistry[r.name];
   }));
 }
+// Strip the keys that ride ALONG on a spec but are not ECharts options — sizing, script prereqs, map
+// registrations, and the per-series `@replay` mark. ECharts carries an unknown key into its option
+// model rather than rejecting it, so they come off at the one place every setOption goes through.
 function _sansMaps(s) {
-  if (!s || (!s.registerMap && !s.__size && !s.requireScripts)) return s;
-  const c = Object.assign({}, s); delete c.registerMap; delete c.__size; delete c.requireScripts; return c;
+  if (!s) return s;
+  const marked = Array.isArray(s.series) && s.series.some(x => x && x.__replay);
+  if (!s.registerMap && !s.__size && !s.requireScripts && !marked) return s;
+  const c = Object.assign({}, s);
+  delete c.registerMap; delete c.__size; delete c.requireScripts;
+  // Shallow-copy only the series that carry a mark — the DATA arrays are shared, not cloned, so this
+  // stays cheap on a spec holding a few thousand points.
+  if (marked) c.series = s.series.map(x => {
+    if (!x || !x.__replay) return x;
+    const y = Object.assign({}, x); delete y.__replay; return y;
+  });
+  return c;
 }
 
 // Package-vendored front-end libraries (SlateExtensionsBase `provide_assets!`): a spec may carry
@@ -221,6 +234,100 @@ window.Slate.assetPaths = function () {
 // export / published page. Server-backed widgets branch on this to pick a live vs offline data path.
 // Mirrored (as a constant `false`) in the static-export Slate shim, so it's always defined.
 window.Slate.isLive = function () { return /^\/n\/[^\/]+/.test(location.pathname); };
+
+// ── `@replay`: a control driving shipped data, with no kernel ────────────────────────────────────
+// Everything about a replayed control EXCEPT the one call that puts a slice on screen. That last step
+// is the only part that is renderer-specific (`Plotly.restyle` for SlatePlotly, `setOption` for an
+// echart), so it is passed in and nothing else is duplicated per renderer.
+//
+// Mirrored in server_export.jl for the same reason `Slate.asset`/`Slate.isLive` are: a static page
+// cannot load core.js. One contract in a live notebook, a standalone file, and a hosted site.
+//
+// LIVE this does nothing at all — moving a `@bind` re-runs the cell in Julia and a fresh figure
+// arrives, so taking over would fight the kernel and serve stale columns. It engages only where there
+// is no kernel to ask, which is exactly what `isLive()` reports.
+window.Slate.replay = {
+  // The control that owns a bound variable. Slate marks a rendered control with `data-name`; the
+  // actual input may be that node or sit inside it.
+  //
+  // Scanned rather than `querySelector`'d on the name, for two reasons. A bound name is arbitrary
+  // Julia — `σ` is already in use — and building a selector out of it means escaping it correctly.
+  // More importantly ONE name can mark several nodes (a live cell shows three for a single slider,
+  // and only the middle one holds the input), so first-match would return a host with no control and
+  // the wiring would fail silently. Take the first host that actually yields an input.
+  control: function (name) {
+    const hosts = document.querySelectorAll('[data-name]');
+    for (let i = 0; i < hosts.length; i++) {
+      const h = hosts[i];
+      if (h.getAttribute('data-name') !== String(name)) continue;
+      const inp = (h.matches && h.matches('input,select')) ? h : h.querySelector('input,select');
+      if (inp) return inp;
+    }
+    return null;
+  },
+  // Which column a control's current value selects. Matched NUMERICALLY where both sides are numbers —
+  // a DOM control reports "8" as a string and Julia may have written 8.0, so comparing text would miss.
+  // Falls back to string equality for categorical domains.
+  index: function (domain, raw) {
+    const n = Number(raw);
+    if (!Number.isNaN(n)) { for (let i = 0; i < domain.length; i++) if (Number(domain[i]) === n) return i; }
+    for (let j = 0; j < domain.length; j++) if (String(domain[j]) === String(raw)) return j;
+    return -1;
+  },
+  // Slices are stacked along the LAST dimension and the buffer is column-major, so the slice for one
+  // control value is a contiguous run — a view, never a gather, however large the data.
+  //
+  // A 1-D slice (a series) goes straight through. A 2-D slice (a heatmap `z`) has to become rows, and
+  // column-major means element (r,c) sits at c*rows + r — so this transposes on the way out rather
+  // than shipping a second, row-major copy.
+  slice: function (packed, sweep, i) {
+    const shp = (sweep.slice && sweep.slice.length) ? sweep.slice : [packed.data.length];
+    const n = shp.reduce((a, b) => a * b, 1);
+    const flat = packed.data.subarray(i * n, (i + 1) * n);
+    if (shp.length <= 1) return Array.from(flat);
+    if (shp.length === 2) {
+      const rows = shp[0], cols = shp[1], out = new Array(rows);
+      for (let y = 0; y < rows; y++) {
+        const row = new Array(cols);
+        for (let x = 0; x < cols; x++) row[x] = flat[x * rows + y];
+        out[y] = row;
+      }
+      return out;
+    }
+    return Array.from(flat);        // rank ≥ 3 has no direct chart field; hand back the flat run
+  },
+  // `marks` each carry at least `{id, control}`; `apply(slice, mark)` is the renderer's one step.
+  wire: function (marks, apply) {
+    if (window.Slate.isLive()) return;
+    (marks || []).forEach(function (m) {
+      // A mark names a SWEEP, not an asset: what shipped — and at what resolution — is the export's
+      // decision, published in this table. A mark with no entry simply never wires, so a figure whose
+      // sweep was skipped leaves its control visibly disabled instead of failing at the first drag.
+      const sweep = (window.__slateReplays || {})[m.id];
+      if (!sweep) return;
+      const input = window.Slate.replay.control(m.control);
+      if (!input) return;
+      const loaded = window.Slate.asset(sweep.asset);
+      const readout = input.parentElement && input.parentElement.querySelector('.exp-ctl-val');
+      const run = function () {
+        const i = window.Slate.replay.index(sweep.domain || [], input.value);
+        if (i < 0) return;
+        if (readout) readout.textContent = input.value;
+        loaded.then(packed => apply(window.Slate.replay.slice(packed, sweep, i), m))
+              .catch(e => console.error('replay failed', e));
+      };
+      // `input` fires continuously while a slider is dragged; the data is already in memory, so
+      // redrawing per event is cheap and gives the same feel as the live kernel path at its best.
+      input.addEventListener('input', run);
+      input.addEventListener('change', run);
+      // The export renders every control DISABLED, because one that moves without changing anything
+      // reads as a broken page. Enabling here — and only here — means a control is live exactly when
+      // data for it actually rode along, with no coordination between the two sides.
+      loaded.then(function () { input.disabled = false; input.removeAttribute('title'); })
+            .catch(function () { /* data missing → the control stays inert, which is the truth */ });
+    });
+  }
+};
 // Resolve an `@asset` FILE (e.g. a web-cell JS module) to a loadable URL: live → the notebook's served
 // `/n/<id>/asset/<path>` route; a static export overrides this to a data:/sibling URL from the inlined
 // registry, so `import(Slate.assetUrl("webassets/foo.js"))` works both live and offline.
@@ -284,6 +391,23 @@ function _slateAxisTheme(line, label, name) {
 // heatmap reads identically whether it's an interactive ECharts figure or a rendered Makie one.
 const _SLATE_VIRIDIS = ['#440154', '#472d7b', '#3b528b', '#2c728e', '#21918c',
   '#28ae80', '#5ec962', '#addc30', '#fde725'];
+// Tooltip numbers, rounded. A Float64 straight out of Julia hovers as `14.11601595225456`, which is
+// noise rather than precision — six significant figures is what a reader can actually use. It lives
+// in the THEME rather than in the DSL because it is a DEFAULT: an author who sets their own
+// `tooltip.valueFormatter` still overrides it, and it applies to every chart without being restated.
+// (It cannot be set from Julia at all — `valueFormatter` is a function, and the option crosses as JSON.)
+function _slateNum(v) {
+  if (typeof v !== 'number' || !isFinite(v)) return v;
+  if (Number.isInteger(v) && Math.abs(v) < 1e15) return String(v);
+  const a = Math.abs(v);
+  // Outside the range where fixed notation stays readable, exponential says more in less space.
+  if (a < 1e-4 || a >= 1e15) return v.toExponential(3);
+  // `parseFloat` drops the trailing zeros `toPrecision` pads with — 2.5 should not read as "2.50000".
+  return String(parseFloat(v.toPrecision(6)));
+}
+// A datum is a scalar on a value axis, or a tuple: `[x, y]` for a line, `[x, y, v]` for a heatmap.
+const _slateValueFormatter = v => Array.isArray(v) ? v.map(_slateNum).join(', ') : _slateNum(v);
+
 // Build the Slate ECharts theme from a var-getter `V(name, default)` — decoupled from WHERE the
 // palette comes from, so the live theme (computed styles) and an export render in an arbitrary
 // named palette (its stylesheet rule) share one builder.
@@ -306,7 +430,8 @@ function _slateEchartsThemeFrom(V, fam) {
     legend: { textStyle: { color: dim, fontSize: 14 } },
     categoryAxis: ax, valueAxis: ax, logAxis: ax, timeAxis: ax,
     line: { symbolSize: 5 }, graph: { color: cycle },
-    tooltip: { backgroundColor: bg2, borderColor: border, textStyle: { color: text } },
+    tooltip: { backgroundColor: bg2, borderColor: border, textStyle: { color: text },
+               valueFormatter: _slateValueFormatter },
     visualMap: { textStyle: { color: dim }, inRange: { color: _SLATE_VIRIDIS } },
     timeline: { lineStyle: { color: dim }, label: { color: dim } },
     calendar: { splitLine: { lineStyle: { color: border } }, itemStyle: { borderColor: border } },
@@ -349,62 +474,92 @@ function _ensureSlateTheme() {
 window._onSlateThemeChange = () => {
   try {
     _slateThemeReady = false; _ensureSlateTheme();
-    Object.values(window.charts || {}).forEach(list => (list || []).forEach(i => { try { i.dispose(); } catch (_) {} }));
-    window.charts = {};
-    document.querySelectorAll('.echart, .ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
+    // Inline `{{ echart }}` instances are still owned here, so they are disposed and re-rendered
+    // directly. A code cell's charts are owned by the Preact host (`chartRuntime.onGen` below), which
+    // re-creates them by bumping a generation the component's effect depends on — disposing them from
+    // underneath it would leave the component holding a dead instance.
+    document.querySelectorAll('.ichart').forEach(e => { if (e._inst) { try { e._inst.dispose(); } catch (_) {} e._inst = null; } });
+    window.chartRuntime.gen++;
+    if (window.chartRuntime.onGen) window.chartRuntime.onGen();
     ((window.__slateState || {}).cells || []).forEach(c => { try { renderCharts(c); } catch (_) {} });
   } catch (_) {}
 };
 
-// Render/refresh a cell's ECharts. Instances persist across reactive updates, so
-// data changes animate in place (setOption) instead of swapping an image.
+// ── The imperative half of a code cell's charts ──────────────────────────────────────────────────
+// Preact owns the container and the LIFECYCLE (see `EChartHost` in notebook.js); everything that
+// actually touches ECharts stays here, where the rest of the chart knowledge already lives. The
+// boundary is deliberate and one-way: Preact never renders INSIDE a `.echart` div — zrender owns that
+// subtree — and this never creates or removes one.
+//
+// It replaces a hand-rolled reconciler: the old code filtered instances whose DOM had detached,
+// swept orphaned children, then matched child count to spec count with two while-loops — all of it
+// defending against the Preact re-render happening above it. Keyed children make that whole class of
+// bug unrepresentable.
+window.chartRuntime = {
+  gen: 0,             // bumped on a theme switch; the component re-inits against it
+  onGen: null,        // set by the Preact layer to a signal bump
+  // A package-vendored lib (echarts-gl via `requireScripts`) must load BEFORE `echarts.init`: an
+  // instance created before echarts-gl registers its 3D views paints blank and throws on resize.
+  scripts(spec) { return spec && spec.requireScripts ? _ensureScripts(spec) : Promise.resolve(); },
+  init(el) { _ensureSlateTheme(); const inst = echarts.init(el, 'slate'); el.__inst = inst; return inst; },
+  apply(el, inst, spec) {
+    _applySize(el, inst, spec);
+    return _ensurePrereqs(spec)
+      .then(() => _geoSafeSetOption(inst, spec))
+      .then(() => _wireEchartReplay(inst, spec));
+  },
+  dispose(el, inst) { try { inst.dispose(); } catch (_) {} if (el) el.__inst = null; },
+  // `window.charts` is read all over (slides fitting, the SVG snapshot, inspect, the resize listener),
+  // so it stays the public registry — rebuilt DENSE from DOM order rather than index-assigned, which
+  // keeps it hole-free for the `.forEach`/`.flat()` consumers however mounts interleave.
+  sync(cellId, host) {
+    const list = Array.from(host.querySelectorAll(':scope > .echart')).map(d => d.__inst).filter(Boolean);
+    if (list.length) window.charts[cellId] = list; else delete window.charts[cellId];
+    return list;
+  },
+  settled(cellId, insts, spec0) {
+    if (insts.length) _snapCell(cellId, insts, _sansMaps(spec0));
+    _healSizesSoon(insts);
+  }
+};
+
+// Register a cell's assets and refresh any INLINE `{{ echart(…) }}` charts in a markdown cell.
+//
+// A code cell's charts are NOT handled here any more — `EChartHost` (notebook.js) owns those, so that
+// creating and destroying a chart div is Preact's keyed diff rather than a reconciler hand-written to
+// survive one. What is left is the inline case, where the placeholder is authored inside rendered
+// markdown and has no component around it.
 function renderCharts(c) {
   _registerAssets(c);                               // publish this cell's save_asset blobs → Slate.asset
   const specs = c.echarts || [];
-  // A package-vendored lib (echarts-gl via `requireScripts`) must load BEFORE `echarts.init`: an
-  // ECharts instance created before echarts-gl registers its 3D views can't render a GL series — it
-  // paints blank and throws on the next resize. So when any spec needs a lib, defer the ENTIRE render
-  // (init included) until it's loaded; a cell with no `requireScripts` renders synchronously as before.
-  if (specs.some(s => s && s.requireScripts))
-    return void Promise.all(specs.map(_ensureScripts)).then(() => _renderChartsBody(c, specs));
-  _renderChartsBody(c, specs);
-}
-function _renderChartsBody(c, specs) {
+  // A code cell's chart DIVS belong to Preact (`EChartHost` in notebook.js) — but this function is
+  // also called from the IMPERATIVE patch path (view.js `patchCells`), which updates a cell without
+  // rendering the Preact tree at all. That is the path a slider drag takes: without this, a chart only
+  // caught up on release, when the next full render happened to land.
+  //
+  // Re-applying the option to instances that ALREADY exist is safe from either side, because it
+  // creates and destroys nothing — the ownership split is unchanged. A change in the NUMBER of charts
+  // is still Preact's to make, and arrives with the render that follows.
   const host = document.querySelector('#cell-' + c.id + ' .echarts');
-  if (host) {                                   // code-cell echarts host
-    if (!charts[c.id]) charts[c.id] = [];
-    // A Preact re-render OCCASIONALLY recreates the cell subtree (it usually preserves it):
-    // the host div comes back empty while the persisted instances still point at DETACHED
-    // divs — setOption then paints an off-document canvas (blank output, no error). Drop
-    // any instance whose DOM is no longer inside THIS host, and any host child that lost
-    // its instance, before reconciling counts.
-    const insts = charts[c.id] = charts[c.id].filter(inst => {
-      const dom = inst.getDom && inst.getDom();
-      if (dom && host.contains(dom)) return true;
-      try { inst.dispose(); } catch (_) {}
-      return false;
+  if (host) {
+    Array.from(host.querySelectorAll(':scope > .echart')).forEach((el, i) => {
+      if (el.__inst && specs[i]) window.chartRuntime.apply(el, el.__inst, specs[i]);
     });
-    Array.from(host.children).forEach(ch => {
-      if (!insts.some(inst => inst.getDom() === ch)) host.removeChild(ch);
-    });
-    while (host.children.length < specs.length) {
-      const d = document.createElement('div'); d.className = 'echart'; host.appendChild(d);
-      _ensureSlateTheme(); insts.push(echarts.init(d, 'slate'));
-    }
-    while (host.children.length > specs.length) { host.removeChild(host.lastChild); const inst = insts.pop(); if (inst) try { inst.dispose(); } catch (_) {} }
-    specs.forEach((s, i) => _applySize(host.children[i], insts[i], s));
-    Promise.all(specs.map((s, i) => _ensurePrereqs(s).then(() => _geoSafeSetOption(insts[i], s))))
-      .then(() => { if (insts.length) _snapCell(c.id, insts, _sansMaps(specs[0])); });
-    _healSizesSoon(insts);
   }
-  // Inline `{{ echart(…) }}` placeholders in a markdown cell.
   document.querySelectorAll('#cell-' + c.id + ' .ichart').forEach(el => {
     const spec = specs[+el.dataset.i]; if (!spec) return;
-    if (!el._inst) { _ensureSlateTheme(); el._inst = echarts.init(el, 'slate'); }
-    _applySize(el, el._inst, spec);
-    _ensurePrereqs(spec).then(() => _geoSafeSetOption(el._inst, spec));
+    // The GL-lib deferral that applied to the whole cell now applies per placeholder — same rule,
+    // narrower scope: init only after `requireScripts` has loaded.
+    window.chartRuntime.scripts(spec).then(() => {
+      if (!el._inst) { _ensureSlateTheme(); el._inst = echarts.init(el, 'slate'); }
+      _applySize(el, el._inst, spec);
+      return _ensurePrereqs(spec)
+        .then(() => _geoSafeSetOption(el._inst, spec))
+        .then(() => _wireEchartReplay(el._inst, spec));
+    });
   });
 }
+
 // setOption that can't leave a DEAD geo bind. If a spec needs a registered map but a setOption ever
 // ran before registration (fetch in flight, or a transient fetch failure), ECharts silently binds the
 // series to a broken geo — the map later merges in but the points keep a full-canvas layout ("zoom
@@ -424,6 +579,46 @@ function _geoSafeSetOption(inst, s) {
       inst.resize();
   } catch (e) {}
 }
+// ── `@replay` in an ECharts figure ──────────────────────────────────────────────────────────────
+// `Slate.replay.wire` owns everything except the call that puts a slice on screen. What is left here
+// is the only ECharts-specific part: the DSL ZIPS, so a line series is `[[x,y],…]` and a heatmap is
+// `[[x,y,v],…]`, and the mark (echarts_dsl.jl `_mark_replay!`) names which COMPONENT of each drawn
+// entry the shipped array feeds. Rewriting that one slot in the entries ALREADY DRAWN reuses their
+// coordinates, so the zip layout is expressed once, in Julia, and never restated here.
+//
+// A rank-2 slice arrives as ROWS, and a heatmap triple carries its own `[xIndex, yIndex]`, so it is
+// indexed by those rather than by position — correct however the entries end up ordered.
+function _replayEntries(cur, m, slice) {
+  if (m.comp === null || m.comp === undefined) return slice;
+  if (m.rank === 2) return cur.map(p => { const q = p.slice(); q[m.comp] = slice[p[1]][p[0]]; return q; });
+  return cur.map((p, i) => { const q = p.slice(); q[m.comp] = slice[i]; return q; });
+}
+
+function _wireEchartReplay(inst, spec) {
+  if (!inst || inst.__replayWired) return;         // renders repeat; listeners must not accumulate
+  const marks = ((spec && spec.series) || [])
+    .map((s, i) => (s && s.__replay) ? Object.assign({ series: i, base: s.data || [] }, s.__replay) : null)
+    .filter(Boolean);
+  if (!marks.length) return;
+  inst.__replayWired = true;
+  window.Slate.replay.wire(marks, function (slice, m) {
+    // series merge by INDEX, so naming only the changed one leaves the reader's zoom, roam and legend
+    // state untouched through every step of a drag. A full replace would not.
+    const arr = [];
+    for (let k = 0; k < m.series; k++) arr.push({});
+    arr.push({ data: _replayEntries(m.base, m, slice) });
+    const patch = { series: arr };
+    // A heatmap's colour scale was fitted to whichever slice drew first; leaving it pinned would clip
+    // every other one. Refit it to what is actually on screen.
+    if (m.rank === 2 && spec.visualMap) {
+      let lo = Infinity, hi = -Infinity;
+      slice.forEach(row => row.forEach(v => { if (v < lo) lo = v; if (v > hi) hi = v; }));
+      if (isFinite(lo) && isFinite(hi)) patch.visualMap = { min: lo, max: hi };
+    }
+    inst.setOption(patch);
+  });
+}
+
 window.addEventListener('resize', () => Object.values(charts).flat().forEach(c => c.resize()));
 // Late size heal: a chart initialized before its div finished layout has a 0×0 canvas, and
 // the synchronous heal inside _geoSafeSetOption can't see the final size yet (clientWidth

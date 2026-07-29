@@ -55,29 +55,95 @@ function applyPageMax() { document.body.style.setProperty('--page-max', _pageMax
 applyPageMax();   // apply the saved column width at load
 
 // ── Chart scroll-zoom gate ──────────────────────────────────────────────────────
-// An interactive chart (a WGLMakie figure card today; ECharts to follow) zooms on the mouse/trackpad
-// wheel, which hijacks page scrolling — scroll down, your pointer crosses a chart, and suddenly you're
-// zooming instead of scrolling. So we only let the wheel reach a chart when it's ACTIVE (has focus — click
-// into it; the card's :focus-within border lights up), and we scale the wheel delta by the "Chart
-// scroll-zoom" setting (0 = never zoom on scroll → the wheel always scrolls the page). ONE delegated
-// capturing listener covers every chart, present or future.
+// An interactive chart zooms on the mouse/trackpad wheel, which hijacks page scrolling — scroll down,
+// your pointer crosses a chart, and suddenly you're zooming instead of scrolling. Worse than the hijack
+// is the FIGHT: nothing stops the page scrolling while the chart zooms, so the plot slides under a
+// cursor the zoom is anchored to, and one continuous trackpad flick reads as the view jittering in and
+// out rather than as a zoom at all. So we only let the wheel reach a chart when it's ACTIVE (has focus —
+// click into it; its border lights up), and we scale the wheel delta by the "Chart scroll-zoom" setting
+// (0 = never zoom on scroll → the wheel always scrolls the page). ONE delegated capturing listener
+// covers every chart, present or future — including one drawn by a package that knows nothing about
+// this file.
 const _ZOOM_DEFAULT = 28;   // percent — a gentle default tuned for the Mac trackpad
 function scrollZoomFactor() { const n = parseInt(localStorage.getItem('slateScrollZoom'), 10); return (Number.isFinite(n) && n >= 0 ? n : _ZOOM_DEFAULT) / 100; }
 window.scrollZoomFactor = scrollZoomFactor;
 
-const _ZOOMABLE = '.bonito-fig-card';   // TODO: add the ECharts container selector to extend the gate to charts
+// What counts as a chart. Core's own ECharts hosts are named here because core creates them; everything
+// else opts in by carrying `data-slate-zoomable`, which is the entire contract an extension has to meet
+// — no registration call, so no load-order race and nothing to re-run in a static export.
+const _ZOOMABLE = '.echart, .ichart, [data-slate-zoomable]';
+
+// Where the wheel must actually LAND. A charting library listens on its own inner surface, not on the
+// container we matched: ECharts on the canvas zrender owns, Plotly on the `.nsewdrag` rect covering the
+// axes. A container names its surface in the attribute's value; failing that the first canvas/svg, and
+// failing that the container itself, which is right for anything listening at its own root.
+function zoomTarget(card, e) {
+  const sel = card.getAttribute && card.getAttribute('data-slate-zoomable');
+  if (sel) {
+    // The surface UNDER THE CURSOR beats the first one in the container: a figure with subplots has one
+    // drag surface per panel, and zooming whichever happens to come first in the DOM is not what the
+    // reader pointed at. Falling back to the first still covers a wheel over a title or legend.
+    const under = e.target && e.target.closest ? e.target.closest(sel) : null;
+    if (under && card.contains(under)) return under;
+    const first = card.querySelector(sel);
+    if (first) return first;
+  }
+  return card.querySelector('canvas, svg') || card;
+}
+
+// A chart must be able to HOLD focus for `:focus-within` to mean anything, and clicking one has to give
+// it that focus. Neither is safe to leave to the container: Plotly's drag layer calls preventDefault on
+// mousedown, which suppresses the browser's own click-to-focus, and a bare <div> host isn't focusable to
+// begin with. Doing it here means opting into the gate stays a one-attribute job.
+document.addEventListener('pointerdown', function (e) {
+  const card = e.target && e.target.closest ? e.target.closest(_ZOOMABLE) : null;
+  if (!card || card.contains(document.activeElement)) return;
+  if (!card.hasAttribute('tabindex')) card.tabIndex = -1;
+  card.focus({ preventScroll: true });        // activating a chart must never scroll the page to it
+}, true);
+
+// A trackpad emits wheel events far faster than any of these libraries can redraw — a single flick is a
+// long burst, and forwarding it one-for-one asks for a full relayout per event. So deltas ACCUMULATE and
+// are dispatched once per animation frame. Zoom is multiplicative in the delta, so one event carrying the
+// frame's summed delta lands in the same place the burst would have; what's dropped is only the redraws
+// nobody could see. `deltaMode` and the target are part of the pending batch's identity — a burst that
+// switches either is flushed first rather than summed across incompatible units or surfaces.
+let _wheelPending = null, _wheelRaf = 0;
+function _flushWheel() {
+  _wheelRaf = 0;
+  const p = _wheelPending;
+  if (!p) return;
+  _wheelPending = null;
+  const ev = new WheelEvent('wheel', { deltaX: p.dx, deltaY: p.dy, deltaMode: p.mode,
+                                       clientX: p.x, clientY: p.y,
+                                       // Carried through because libraries read them: a trackpad pinch
+                                       // arrives as a ctrl-wheel, and shift-wheel pans rather than zooms.
+                                       ctrlKey: p.ctrl, shiftKey: p.shift,
+                                       altKey: p.alt, metaKey: p.meta,
+                                       bubbles: true, cancelable: true });
+  ev.__slateZoom = true;
+  p.target.dispatchEvent(ev);
+}
+
 document.addEventListener('wheel', function (e) {
   if (e.__slateZoom) return;                                             // our own re-dispatched (scaled) event
   const card = e.target && e.target.closest ? e.target.closest(_ZOOMABLE) : null;
   if (!card) return;                                                     // not over a chart — leave it alone
   const f = scrollZoomFactor();
   if (f <= 0 || !card.matches(':focus-within')) { e.stopPropagation(); return; }  // off / inactive → page scrolls
-  const target = card.querySelector('canvas') || card;                  // the chart's zoom surface
+  // preventDefault is what stops the page scrolling UNDERNEATH the zoom — without it the two move
+  // together and the anchor point drifts every event, which is the jitter this gate exists to kill.
   e.stopPropagation(); e.preventDefault();
-  const ev = new WheelEvent('wheel', { deltaX: e.deltaX * f, deltaY: e.deltaY * f, deltaMode: e.deltaMode,
-                                       clientX: e.clientX, clientY: e.clientY, bubbles: true, cancelable: true });
-  ev.__slateZoom = true;
-  target.dispatchEvent(ev);
+  const target = zoomTarget(card, e);
+  if (_wheelPending && (_wheelPending.target !== target || _wheelPending.mode !== e.deltaMode)) _flushWheel();
+  // The cursor and modifiers take the LATEST value: the zoom anchors where the pointer is now, not where
+  // the burst started.
+  _wheelPending = { target: target, mode: e.deltaMode,
+                    dx: (_wheelPending ? _wheelPending.dx : 0) + e.deltaX * f,
+                    dy: (_wheelPending ? _wheelPending.dy : 0) + e.deltaY * f,
+                    x: e.clientX, y: e.clientY,
+                    ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey };
+  if (!_wheelRaf) _wheelRaf = requestAnimationFrame(_flushWheel);
 }, { capture: true, passive: false });
 
 // ── Settings modal ────────────────────────────────────────────────────────────

@@ -38,6 +38,31 @@ _iscat(x) = !isempty(x) && all(e -> e isa AbstractString || e isa Symbol, x)
 _str(s) = s isa Symbol ? String(s) : s
 _cataxis(xs) = Dict{String,Any}("type" => "category", "data" => collect(xs))
 
+# ── `@replay` provenance ──────────────────────────────────────────────────────────────────────────
+# A `ReplayArray` behaves exactly like the array it wraps, which is what lets an author drop one
+# wherever the value belongs and have every downstream call work unchanged. Here that becomes a
+# problem: this DSL ZIPS. `(x, y)` becomes `[[x,y],…]` and a heatmap matrix becomes `[[x,y,v],…]`, so
+# the wrapper is consumed element by element and the finished option cannot be told from a literal one.
+# (Plotly keeps `y` as a trace FIELD, which is why SlatePlotly can find its marks by walking the built
+# figure. Here the walk has to happen before the zip, which means here.)
+#
+# So the mark is recorded ON THE SERIES as it is built, naming which COMPONENT of each drawn entry the
+# replayed array supplies. A page then rewrites just that component, reusing the coordinates already
+# sitting in the drawn data — so the zip layout is expressed once, in this file, and never restated in
+# JavaScript. `comp === nothing` means the array IS the data and is replaced wholesale.
+#
+# Duck-typed on the type name: `ReplayArray` belongs to the controls layer and the chart DSL has no
+# business depending on it merely to notice one.
+_replay_of(x) = (x isa AbstractArray && nameof(typeof(x)) === :ReplayArray) ? x : nothing
+
+function _mark_replay!(opt, arr, comp)
+    r = _replay_of(arr)
+    r === nothing && return opt
+    opt["__replay"] = Dict{String,Any}("id" => String(r.id), "control" => String(r.control),
+                                       "index" => r.index - 1, "comp" => comp, "rank" => ndims(r))
+    return opt
+end
+
 # Pair x and y into ECharts `[x,y]` points, with a clear error on a length mismatch instead of a
 # deep `eachindex(x,y)` DimensionMismatch from inside the DSL.
 function _xy(kind, x, y)
@@ -72,6 +97,9 @@ function _heatmap!(opt, layout, args)
     isempty(z) && throw(ArgumentError("echart(:heatmap, …): empty matrix"))
     nr, nc = size(z)
     opt["data"] = [[j - 1, i - 1, z[i, j]] for i in 1:nr for j in 1:nc]
+    # Slot 2 of each `[xIndex, yIndex, value]` triple, from a rank-2 slice. The page indexes that slice
+    # by the triple's OWN coordinates, so this stays correct however the entries end up ordered.
+    _mark_replay!(opt, z, 2)
     lo, hi = extrema(z)
     layout["xAxis"] = _cataxis(xs)
     layout["yAxis"] = _cataxis(ys)
@@ -176,12 +204,17 @@ function series(kind::Symbol, args...; name = nothing, kwargs...)
         x, y = args
         if _iscat(x)
             layout["xAxis"] = _cataxis(x); opt["data"] = collect(y)
+            _mark_replay!(opt, y, nothing)          # data IS the series — replaced wholesale
         else
             opt["data"] = _xy(k, x, y)
+            # y is slot 1 of each `[x,y]` pair, x is slot 0. Only one of the two can be the mark; y
+            # first, since a replayed independent variable is the far rarer intent.
+            _replay_of(y) === nothing ? _mark_replay!(opt, x, 0) : _mark_replay!(opt, y, 1)
         end
     elseif k == "scatter" && length(args) == 2
         x, y = args
         opt["data"] = _xy(:scatter, x, y)
+        _replay_of(y) === nothing ? _mark_replay!(opt, x, 0) : _mark_replay!(opt, y, 1)
     elseif k == "pie" && length(args) == 2
         labels, vals = args
         length(labels) == length(vals) ||
@@ -255,6 +288,12 @@ end
 # Series kinds that carry no cartesian x/y axis (they bring their own coordinate system).
 const _EC_NOAXIS = Set(["pie", "radar", "gauge", "funnel", "sunburst", "tree", "treemap", "sankey", "graph", "map"])
 
+# Cartesian kinds whose datum stands ALONE rather than being one sample of a series along x — so the
+# tooltip should report the point under the cursor, not everything sharing its x. (Scatter is left on
+# `axis` deliberately: several scatter series sampled at the same x read well compared side by side,
+# which is the case a heatmap never has.)
+const _EC_ITEMTIP = Set(["heatmap"])
+
 # Assemble the full option from series + layout. Each series' implied components are merged
 # first (first wins per key), then cartesian kinds get default value axes if none was implied;
 # unknown kwargs (grid/dataZoom/toolbox/color/animation/…) pass through raw and override.
@@ -281,8 +320,14 @@ function _echart_build(slist; title = nothing, legend = nothing, tooltip = true,
         haskey(opt, "xAxis") || (opt["xAxis"] = Dict{String,Any}("type" => "value"))
         haskey(opt, "yAxis") || (opt["yAxis"] = Dict{String,Any}("type" => "value"))
     end
+    # Tooltip trigger is a SEPARATE question from whether the chart has axes, and conflating the two
+    # made a heatmap unusable: `axis` collects every series at the hovered x, which is right for lines
+    # and bars sampled along a shared axis, and wrong for a heatmap, where the datum IS the cell under
+    # the cursor — hovering one reported the whole column, sixty numbers deep. So kinds whose data is a
+    # field of independent points ask for `item` even though they do have axes.
+    itemtip = !isempty(slist) && all(s -> _nocart(s) || s.kind in _EC_ITEMTIP, slist)
     if tooltip === true
-        opt["tooltip"] = Dict{String,Any}("trigger" => noaxis ? "item" : "axis")
+        opt["tooltip"] = Dict{String,Any}("trigger" => itemtip ? "item" : "axis")
     elseif tooltip !== false
         opt["tooltip"] = _ec(tooltip)
     end

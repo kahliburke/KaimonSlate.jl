@@ -9,7 +9,7 @@
 // diffs the keyed <Cell>/<Editor> children so editors are preserved across re-renders.
 import { html, render } from 'htm/preact';
 import { useRef, useEffect } from 'preact/hooks';
-import { effect } from '@preact/signals';
+import { effect, signal } from '@preact/signals';
 import { cells as cellsSignal, selected as selectedSignal, selectedSet as selectedSetSignal, liveStates as liveSignal, focus as focusSignal } from './store.js';
 
 const raw = s => ({ __html: s || '' });
@@ -249,6 +249,79 @@ function WebEditor({ cell }) {
   return html`<div ref=${ref} class="srchost webhost"></div>`;
 }
 
+// ── Charts: Preact owns the container, ECharts owns what is inside it ────────────────────────────
+// A chart host is a KEYED list of `.echart` divs, so creating and destroying one is Preact's diff
+// rather than a reconciler hand-written to survive Preact (which is what core.js used to carry: a
+// filter for instances whose DOM had detached, an orphan sweep, and two while-loops matching child
+// count to spec count).
+//
+// The boundary is one-way and deliberate: Preact never renders INSIDE a `.echart` div — zrender owns
+// that subtree, and a re-render would fight it — and every call that touches ECharts goes through
+// `window.chartRuntime` (core.js), which never creates or removes a div.
+//
+// Sizing stays imperative rather than a `style` prop: present mode measures and overwrites those
+// inline sizes (slides.js `_fitCharts`), and a style prop would undo its work on the next render.
+const chartGen = signal(0);
+if (window.chartRuntime) window.chartRuntime.onGen = () => { chartGen.value++; };   // theme switch → re-init
+
+function EChart({ spec, index, readies }) {
+  const ref = useRef(null);
+  const ready = useRef(null);
+  const gen = chartGen.value;              // read during render so a palette switch re-runs the effect
+  useEffect(() => {
+    const el = ref.current;
+    let live = true;
+    ready.current = window.chartRuntime.scripts(spec).then(() => {
+      if (!live || !el) return null;
+      const inst = window.chartRuntime.init(el);
+      return window.chartRuntime.apply(el, inst, spec).then(() => inst);
+    });
+    readies.current[index] = ready.current;
+    return () => {
+      live = false;
+      const inst = el && el.__inst;
+      if (inst) window.chartRuntime.dispose(el, inst);
+    };
+  }, [gen]);
+  // A data change re-applies the option IN PLACE so ECharts animates instead of redrawing. Chained
+  // onto the init promise, so an update landing before the instance exists still arrives.
+  useEffect(() => {
+    const p = ready.current;
+    if (!p) return;
+    p.then(() => {
+      const el = ref.current, inst = el && el.__inst;
+      if (inst) window.chartRuntime.apply(el, inst, spec);
+    });
+  }, [spec]);
+  return html`<div class="echart" ref=${ref}></div>`;
+}
+
+function EChartHost({ cell }) {
+  const ref = useRef(null);
+  const readies = useRef([]);
+  const specs = cell.echarts || [];
+  // Once the children have settled, republish the dense `window.charts` registry (slides fitting, the
+  // SVG snapshot and inspect all read it) and take the cell snapshot ONCE for the whole cell. Waiting
+  // on the children's init promises matters: snapshotting before setOption resolves captures a blank
+  // canvas. Keyed on the spec array, which is a fresh object only when the DATA actually changed.
+  useEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    let live = true;
+    Promise.all(readies.current.slice(0, specs.length)).then(() => {
+      if (!live) return;
+      const insts = window.chartRuntime.sync(cell.id, host);
+      if (insts.length) window.chartRuntime.settled(cell.id, insts, specs[0]);
+    });
+    return () => { live = false; };
+  }, [specs, chartGen.value]);
+  // The cell itself going away takes its registry entry with it.
+  useEffect(() => () => { delete window.charts[cell.id]; }, []);
+  return html`<div class="echarts" ref=${ref}>${
+    specs.map((s, i) => html`<${EChart} key=${i} spec=${s} index=${i} readies=${readies} />`)
+  }</div>`;
+}
+
 function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   const c = cell;
   const ref = useRef(null);
@@ -413,13 +486,13 @@ function Cell({ cell, selectedId, selSet, live, focusId, collapsed }) {
   } else if (c.kind === 'web') {
     // Web cell: the 3-pane HTML/CSS/JS editor, then the same output/controls hosts a code cell uses
     // (the rendered WebPage swaps into `.output`).
-    body = html`<${WebEditor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><div class="echarts"></div><div class="anim"></div>`;
+    body = html`<${WebEditor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><${EChartHost} cell=${c} /><div class="anim"></div>`;
   } else if (isBind) {
     // A bind/MIXED cell: its own @bind rows, the surfaced-control strip (so controls surfaced
     // here — including its own @bind — actually render), then the toggle source editor + output.
-    body = html`<div class="binds"></div><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div>${srcedit}<div class="output"></div><div class="tables"></div><div class="echarts"></div><div class="anim"></div>`;
+    body = html`<div class="binds"></div><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div>${srcedit}<div class="output"></div><div class="tables"></div><${EChartHost} cell=${c} /><div class="anim"></div>`;
   } else {
-    body = html`<${Editor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><div class="echarts"></div><div class="anim"></div>`;
+    body = html`<${Editor} cell=${c} /><div class="controls${(c.controls || []).length ? '' : ' empty'}" data-cell=${c.id}></div><div class="output"></div><div class="tables"></div><${EChartHost} cell=${c} /><div class="anim"></div>`;
   }
   return html`<div ref=${ref} id=${'cell-' + c.id} data-cid=${c.id} class=${cls}>${header}${body}</div>`;
 }
