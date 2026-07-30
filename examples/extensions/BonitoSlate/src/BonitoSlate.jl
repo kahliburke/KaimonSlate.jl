@@ -32,6 +32,7 @@ using SlateExtensionsBase
 
 include("connection.jl")
 include("assetserver.jl")
+include("app.jl")
 include("figure.jl")
 
 """

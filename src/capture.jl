@@ -760,9 +760,23 @@ end
 # collect its wire. Returns `[(cid, wire), …]` (empty if nothing is live). Best-effort per cell.
 function rerender_live_outputs(mod::Module)
     try; Base.invokelatest(SlateExtensionsBase.run_live_resets); catch; end
+    # A re-render must carry the SAME Slate execution context a normal cell eval gets. `run_capture` FIRES the
+    # previous run's `slate_on_cleanup` callbacks regardless (it reads `__slate_cleanups` off the namespace),
+    # but REGISTERING new ones goes through the context — so without it every live resource an extension
+    # allocates during a connect re-render is orphaned: one leaked Bonito session, inbox task and subscription
+    # per live cell per page load, growing without bound across reloads.
+    #
+    # The notebook/region metadata is not recoverable here and is not needed: `_build_slate_ctx` resolves
+    # `emit`/`on`/`off`/`cleanup` from the namespace, and `__slate_call` passes empty strings for the same
+    # reason.
+    ctx = _build_slate_ctx(mod, "", "", String[])
     outs = Tuple{String,Vector{Tuple{String,Vector{UInt8}}}}[]
     for (cid, spec) in collect(_LIVE_OUTPUTS)
-        w = try; run_capture(mod, spec.source, spec.filename; capture = DemuxCapture()) catch; nothing end
+        w = try
+            run_capture(mod, spec.source, spec.filename; capture = DemuxCapture(), slate_ctx = ctx)
+        catch
+            nothing
+        end
         (w !== nothing && !isempty(w.mime)) || continue
         push!(outs, (String(cid), collect(Tuple{String,Vector{UInt8}}, w.mime)))
     end
