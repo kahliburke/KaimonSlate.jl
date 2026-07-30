@@ -9,35 +9,19 @@
 
 _is_wgl_backend() = (b = Makie.current_backend(); b isa Module && nameof(b) === :WGLMakie)
 
-# A `<script src="/n/<id>/served/<hash>" type="module">` that loads the Bonito runtime (Bonito.js
-# self-assigns `window.Bonito`). Served once, deduped by URL — safe to include in every figure card so the
-# runtime is present regardless of which session is the page root. Empty before `enable!()` sets `_NB_ID`.
-function _bonito_runtime_script()
-    isempty(_NB_ID[]) && return ""
-    url = try
-        Bonito.url(SlateAssetServer(), Bonito.BonitoLib)
-    catch
-        return ""
-    end
-    return string("<script src=\"", url, "\" type=\"module\"></script>")
-end
-
-# The renderer: the figure fragment (scene + live wiring), wrapped in the card, with the Bonito RUNTIME
-# script prepended. Bonito only emits its runtime `<script>` for the page-ROOT session, so a figure that
-# renders as a SUB (any figure after the first, or a re-render while a root persists) carries no runtime
-# loader — and its stored output then fails to boot on reload. We load the runtime from its stable served
-# URL in EVERY card instead: the browser dedups by URL (one load per page) and Slate's `runScripts` awaits
-# the `src` module before the figure's init runs, so `window.Bonito` is always defined first.
+# The renderer: the figure fragment (scene + live wiring), wrapped in the card. Everything shared with any
+# other Bonito output — the runtime loader, the root announcement, the render lock, session bookkeeping —
+# lives in `bonito_output_html` (app.jl), since a figure is one kind of Bonito output rather than a separate
+# mechanism. This function's own job is only the card.
 function slate_card_html(fig::Makie.FigureLike)
     try
-        # The root announcement must be built BEFORE the figure renders. Rendering is what creates the
-        # figure's sub-session under the persistent root, so the root's DOM has to precede it — both in
-        # the emitted HTML (the browser must register the root before the sub's init runs) and in time
-        # (the root's queued messages are flushed into the announcement, ahead of the sub's own).
-        # Empty except on the first figure rendered for a freshly-connected page (see `_reset_page!`).
-        announce = root_announce_html()
-        frag = sprint((io, x) -> show(io, MIME"text/html"(), x), fig)
-        return _figure_card(_bonito_runtime_script() * announce * frag)
+        # `bonito_output_html` (app.jl) owns the shared contract for every Bonito output: the runtime loader,
+        # the page-root announcement ordered ahead of the fragment, the render lock, and registering the
+        # sub-session this render creates so it is released when the cell re-evaluates. A figure is just one
+        # kind of Bonito output, so it differs from an app only in being wrapped in the card below.
+        return _figure_card(bonito_output_html() do
+            sprint((io, x) -> show(io, MIME"text/html"(), x), fig)
+        end)
     catch e
         # Surface a render failure inline rather than let capture swallow it into a `text/plain` repr.
         return string("<pre style=\"color:#f88;white-space:pre-wrap\">BonitoSlate figure render error:\n",
