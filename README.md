@@ -86,27 +86,19 @@ Every run is recorded. The timeline steps back through a notebook's earlier stat
 
 The `slate` app is the usual entry point. **Requires Julia 1.12+.**
 
-KaimonSlate isn't registered yet, so during the pre-release install it as a **developed app** — a plain
-`app add <url>` can't resolve the bundled `SlateExtensionsBase` until registration. From the Pkg REPL
-(press `]`):
+KaimonSlate is published through its own package registry. Add that once, then install the app — from
+the Pkg REPL (press `]`):
 
 ```julia-repl
-pkg> app dev https://github.com/kahliburke/KaimonSlate.jl
+pkg> registry add https://github.com/kahliburke/SlateRegistry
+pkg> app add KaimonSlate
 ```
 
-This clones the repo to `~/.julia/dev/KaimonSlate`. Then instantiate that dev clone once — `Pkg.Apps`
-doesn't do it for you — so its dependencies (including the bundled `SlateExtensionsBase`) are installed:
-
-```julia-repl
-pkg> activate ~/.julia/dev/KaimonSlate
-pkg> instantiate
-pkg> activate                 # back to your default environment
-```
-
-(Once KaimonSlate is registered, `pkg> app add KaimonSlate` will be the one-liner.)
+The registry is public, so no credentials are needed. Adding it is a one-time step per machine; after
+that, KaimonSlate and its extension packages install like any other Julia package.
 
 Installing the app writes a **`slate` executable** — a shell script, or `slate.bat` on Windows — into
-Julia's app bin directory, `~/.julia/bin`. That directory isn't on your `PATH` by default (`app dev`
+Julia's app bin directory, `~/.julia/bin`. That directory isn't on your `PATH` by default (`app add`
 prints a reminder), so add it once:
 
 ```sh
