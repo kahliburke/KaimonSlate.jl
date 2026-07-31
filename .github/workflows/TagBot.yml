@@ -1,0 +1,37 @@
+name: TagBot
+on:
+  issue_comment:
+    types:
+      - created
+  workflow_dispatch:
+    inputs:
+      lookback:
+        default: "3"
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  statuses: read
+jobs:
+  # The repo registers TWO packages: KaimonSlate at the root and the SlateExtensionsBase SDK
+  # under lib/. TagBot handles one package per job, so each gets its own `subdir` — without the
+  # second job, an SEB release would never be tagged.
+  KaimonSlate:
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'JuliaTagBot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: JuliaRegistries/TagBot@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ssh: ${{ secrets.DOCUMENTER_KEY }}
+          lookback: ${{ github.event.inputs.lookback }}
+  SlateExtensionsBase:
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'JuliaTagBot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: JuliaRegistries/TagBot@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ssh: ${{ secrets.DOCUMENTER_KEY }}
+          lookback: ${{ github.event.inputs.lookback }}
+          subdir: lib/SlateExtensionsBase
