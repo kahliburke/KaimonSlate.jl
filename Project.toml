@@ -1,6 +1,6 @@
 name = "KaimonSlate"
 uuid = "f7b954f5-0334-4562-ac21-b005218ce1da"
-version = "0.1.0"
+version = "0.9.0"
 authors = ["Kahli Burke <kahli@kahliburke.com>"]
 
 [deps]
@@ -31,9 +31,6 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Tachikoma = "468859d6-42d8-48b7-8ad9-1d312e0e3b0a"
 Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
 Typst_jll = "eb4b1da6-20f6-5c66-9826-fdb8ad410d0e"
-
-[sources]
-SlateExtensionsBase = {path = "lib/SlateExtensionsBase"}
 
 [compat]
 Base64 = "1.11.0"
