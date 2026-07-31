@@ -37,15 +37,25 @@ jobs:
       - name: Load Julia packages from cache
         id: julia-cache
         uses: julia-actions/cache@v2
-      - name: Refresh registry
-        # julia-actions/cache can restore a ~/.julia/registries snapshot that predates a
-        # just-published dependency (e.g. a fresh Tachikoma release), making resolve fail
-        # until the cache expires. Force the registry current.
-        run: julia -e 'using Pkg; Pkg.Registry.update()'
+      - name: Add registries
+        # SlateExtensionsBase is registered in SlateRegistry, not General. Pkg needs the package
+        # to be registered *somewhere* even when it resolves from a path, so without this the
+        # develop step below fails with "expected package SlateExtensionsBase to be registered".
+        #
+        # The update also guards against julia-actions/cache restoring a registry snapshot that
+        # predates a just-published dependency, which makes resolve fail until the cache expires.
+        run: |
+          julia -e '
+            using Pkg
+            regs = [r.name for r in Pkg.Registry.reachable_registries()]
+            # Adding a registry by URL into a cold depot does NOT pull in General, so name it too.
+            "General" in regs || Pkg.Registry.add("General")
+            "SlateRegistry" in regs ||
+                Pkg.Registry.add(RegistrySpec(url = "https://github.com/kahliburke/SlateRegistry.git"))
+            Pkg.Registry.update()'
       - name: Use the in-repo SlateExtensionsBase
-        # SEB is a registered package (SlateRegistry), which runners don't have. lib/ holds the
-        # same package at this commit — develop it so the suite tests this checkout's SDK rather
-        # than a published version, and no registry credentials are needed.
+        # lib/ holds the SDK at this commit — develop it so the suite tests this checkout's
+        # source rather than whatever version the registry currently serves.
         run: julia -e 'using Pkg; Pkg.develop(path="lib/SlateExtensionsBase")'
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
