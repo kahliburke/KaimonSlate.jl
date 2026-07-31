@@ -42,6 +42,11 @@ jobs:
         # just-published dependency (e.g. a fresh Tachikoma release), making resolve fail
         # until the cache expires. Force the registry current.
         run: julia -e 'using Pkg; Pkg.Registry.update()'
+      - name: Use the in-repo SlateExtensionsBase
+        # SEB is a registered package (SlateRegistry), which runners don't have. lib/ holds the
+        # same package at this commit — develop it so the suite tests this checkout's SDK rather
+        # than a published version, and no registry credentials are needed.
+        run: julia -e 'using Pkg; Pkg.develop(path="lib/SlateExtensionsBase")'
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - name: Save Julia depot cache on cancel or failure
