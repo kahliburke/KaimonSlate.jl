@@ -29,26 +29,36 @@ Ollama if you want the agent. This gives KaimonSlate its gate workers and the ag
 
 ### 2. Install the `slate` app
 
-From the Pkg REPL (press `]`), install KaimonSlate as an **app** — this puts a `slate` launcher on
-your `PATH`. During the pre-release, install it as a **developed app**: a plain `app add <url>` can't
-yet resolve the bundled `SlateExtensionsBase` (it's shipped in the repo's `lib/`, not a registry — that
-arrives with registration).
+KaimonSlate and its extension packages are published through **SlateRegistry**. Add it once per
+machine, then install KaimonSlate as an **app** — this puts a `slate` launcher on your `PATH`. From
+the Pkg REPL (press `]`):
 
 ```julia-repl
-pkg> app dev https://github.com/kahliburke/KaimonSlate.jl
+pkg> registry add https://github.com/kahliburke/SlateRegistry
+pkg> app add KaimonSlate
 ```
 
-This clones the repo to `~/.julia/dev/KaimonSlate`. `Pkg.Apps` doesn't instantiate the dev'd project,
-so do it once yourself — this resolves `SlateExtensionsBase` (dev'd in place from the clone's `lib/`)
-and the rest of the dependencies:
+The registry is public, so this needs no credentials. It sits alongside General rather than replacing
+it: Pkg searches every installed registry, so ordinary packages continue to resolve as usual and only
+the Slate packages come from here.
+
+Registries are cached locally, so a newly published version isn't visible until you refresh:
 
 ```julia-repl
-pkg> activate ~/.julia/dev/KaimonSlate
-pkg> instantiate
-pkg> activate                 # back to your default environment
+pkg> registry update
+pkg> app update KaimonSlate
 ```
 
-(Once KaimonSlate is registered in General, `pkg> app add KaimonSlate` will be the one-liner.)
+Note the `app` prefix: an installed app lives in its own environment, so a plain `update KaimonSlate`
+acts on whatever environment is active and won't find it.
+
+If a package or version "does not exist" and you believe it should, `registry update` first — a stale
+registry is the most common cause.
+
+!!! note "Upgrading from a pre-release install"
+    Earlier instructions used `app dev` plus a manual `instantiate` of `~/.julia/dev/KaimonSlate`.
+    That still works but pins you to whatever is in that clone. To switch, run `pkg> app rm
+    KaimonSlate`, add the registry, then `pkg> app add KaimonSlate`. The old clone can be deleted.
 
 ### 3. Put `slate` on your `PATH`
 
@@ -61,7 +71,7 @@ under your first depot:
 | macOS / Linux | `~/.julia/bin/slate` |
 | Windows | `%USERPROFILE%\.julia\bin\slate.bat` |
 
-That directory is **not** on your `PATH` by default, and `app dev` prints a reminder to add it. Do
+That directory is **not** on your `PATH` by default, and `app add` prints a reminder to add it. Do
 that once in your shell profile:
 
 ```sh
