@@ -34,7 +34,7 @@ Typst_jll = "eb4b1da6-20f6-5c66-9826-fdb8ad410d0e"
 
 [compat]
 Aqua = "0.8"
-JET = "0.9"
+JET = "0.9, 0.10, 0.11, 0.12"
 Base64 = "1.11.0"
 CodecZlib = "0.7.8"
 CodecZstd = "0.8"
