@@ -33,6 +33,8 @@ Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
 Typst_jll = "eb4b1da6-20f6-5c66-9826-fdb8ad410d0e"
 
 [compat]
+Aqua = "0.8"
+JET = "0.9"
 Base64 = "1.11.0"
 CodecZlib = "0.7.8"
 CodecZstd = "0.8"
@@ -65,10 +67,12 @@ julia = "1.12"
 [apps.slate]
 
 [extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReTest = "e0db7c4e-2690-44b9-bad6-7687da720f89"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 ZMQ = "c2297ded-f4af-51ae-bb23-16f91089e4e1"
 
 [targets]
-test = ["Random", "ReTest", "Test", "ZMQ"]
+test = ["Aqua", "JET", "Random", "ReTest", "Test", "ZMQ"]
